@@ -1,0 +1,40 @@
+{
+  "name": "@ai-video/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:sidecar": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm build && node scripts/build-sidecar.mjs",
+    "validate:m4-sidecar": "node scripts/validate-m4-sidecar.mjs",
+    "dev": "tsx watch src/index.ts --http 43120",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-video/contracts": "workspace:*",
+    "@ai-video/context": "workspace:*",
+    "@ai-video/domain": "workspace:*",
+    "@ai-video/generation-adapters": "workspace:*",
+    "@ai-video/llm": "workspace:*",
+    "@ai-video/persistence": "workspace:*",
+    "better-sqlite3": "^12.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.1.0",
+    "@yao-pkg/pkg": "^6.6.0",
+    "esbuild": "^0.25.8",
+    "prebuild-install": "^7.1.3",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "pkg": {
+    "assets": [
+      "../../node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    ]
+  }
+}

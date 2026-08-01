@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Validate TypeScript workspace
+        run: |
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm build
+      - name: Build standalone worker
+        run: pnpm worker:sidecar
+      - name: Check Tauri host
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Build NSIS bundle
+        run: pnpm tauri:build
+      - name: Validate clean NSIS install lifecycle
+        shell: powershell
+        run: |
+          .\scripts\validate-nsis-install.ps1 `
+            -InstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\AI Video Workspace_0.1.0_x64-setup.exe"

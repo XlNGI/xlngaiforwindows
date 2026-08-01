@@ -1,0 +1,30 @@
+{
+  "name": "ai-video-production-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build && pnpm --filter @ai-video/desktop build",
+    "dev": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm --parallel --filter @ai-video/worker --filter @ai-video/desktop dev",
+    "dev:worker": "pnpm --filter @ai-video/worker dev",
+    "dev:desktop": "pnpm --filter @ai-video/desktop tauri:dev",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm -r --if-present test",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "worker:sidecar": "pnpm --filter @ai-video/worker build:sidecar",
+    "tauri:build": "pnpm --filter @ai-video/desktop tauri:build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "eslint": "^9.32.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.3.0",
+    "prettier": "^3.6.2",
+    "typescript-eslint": "^8.38.0"
+  }
+}

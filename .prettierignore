@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+apps/worker/dist-sidecar/
+apps/desktop/src-tauri/gen/
+coverage/
+docs/
+pnpm-lock.yaml

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AI Video Workspace",
+  "version": "0.1.0",
+  "identifier": "com.aivideo.workspace",
+  "build": {
+    "beforeDevCommand": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build && pnpm --filter @ai-video/desktop dev:ui",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build:sidecar && pnpm --filter @ai-video/desktop build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AI 影像工作台",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/ai-video-worker"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

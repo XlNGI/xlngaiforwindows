@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+*.md text eol=lf whitespace=-trailing-space
+*.png binary
+*.ico binary
+*.icns binary
+*.exe binary

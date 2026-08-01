@@ -1,0 +1,770 @@
+use std::{
+    io::{BufRead, BufReader, Read, Write},
+    path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
+};
+
+#[cfg(any(not(debug_assertions), test))]
+use std::path::Path;
+
+use serde::Serialize;
+use windows_sys::Win32::{
+    Foundation::{GetLastError, ERROR_NOT_FOUND},
+    Networking::WinHttp::{
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
+        WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    },
+    Security::Credentials::{
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_MAX_CREDENTIAL_BLOB_SIZE,
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    },
+};
+
+const CREDENTIAL_SERVICE: &str = "com.ai-video.workspace";
+const SUPPORTED_CREDENTIAL_PROVIDERS: &[&str] = &["vidu"];
+const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const STDERR_TAIL_LIMIT: usize = 16 * 1024;
+const PROVIDER_BODY_LIMIT: usize = 2 * 1024 * 1024;
+#[cfg(any(not(debug_assertions), test))]
+const BUNDLED_WORKER_FILENAME: &str = "ai-video-worker.exe";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProviderTarget {
+    credential_provider: &'static str,
+    host: &'static str,
+    path: &'static str,
+    model: &'static str,
+    allowed_fields: &'static [&'static str],
+}
+
+const IMAGE_FIELDS: &[&str] = &["prompt", "aspect_ratio", "resolution", "seed"];
+const REFERENCE_IMAGE_FIELDS: &[&str] = &["images", "prompt", "aspect_ratio", "resolution", "seed"];
+const Q3_VIDEO_FIELDS: &[&str] = &[
+    "images",
+    "prompt",
+    "duration",
+    "resolution",
+    "audio",
+    "seed",
+    "off_peak",
+];
+const V2_VIDEO_FIELDS: &[&str] = &[
+    "images",
+    "prompt",
+    "duration",
+    "resolution",
+    "movement_amplitude",
+    "seed",
+];
+
+fn provider_target(adapter_key: &str) -> Result<ProviderTarget, String> {
+    let target = match adapter_key {
+        "TEXT_TO_IMAGE:vidu:viduq2:v2" => ProviderTarget {
+            credential_provider: "vidu",
+            host: "api.vidu.com",
+            path: "/ent/v2/reference2image",
+            model: "viduq2",
+            allowed_fields: IMAGE_FIELDS,
+        },
+        "REFERENCE_TO_IMAGE:vidu:viduq2:v2" => ProviderTarget {
+            credential_provider: "vidu",
+            host: "api.vidu.com",
+            path: "/ent/v2/reference2image",
+            model: "viduq2",
+            allowed_fields: REFERENCE_IMAGE_FIELDS,
+        },
+        "REFERENCE_TO_IMAGE:vidu:viduq1:v2" => ProviderTarget {
+            credential_provider: "vidu",
+            host: "api.vidu.com",
+            path: "/ent/v2/reference2image",
+            model: "viduq1",
+            allowed_fields: REFERENCE_IMAGE_FIELDS,
+        },
+        "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => ProviderTarget {
+            credential_provider: "vidu",
+            host: "api.vidu.com",
+            path: "/ent/v2/img2video",
+            model: "viduq3-pro",
+            allowed_fields: Q3_VIDEO_FIELDS,
+        },
+        "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => ProviderTarget {
+            credential_provider: "vidu",
+            host: "api.vidu.com",
+            path: "/ent/v2/img2video",
+            model: "vidu2.0",
+            allowed_fields: V2_VIDEO_FIELDS,
+        },
+        _ => return Err("Adapter is not allowed to use a native provider credential".to_string()),
+    };
+    Ok(target)
+}
+
+fn provider_payload(target: ProviderTarget, payload: serde_json::Value) -> Result<Vec<u8>, String> {
+    let mut object = payload
+        .as_object()
+        .cloned()
+        .ok_or("Provider payload must be a JSON object")?;
+    if object
+        .keys()
+        .any(|key| !target.allowed_fields.contains(&key.as_str()))
+    {
+        return Err("Provider payload contains a field not allowed by the adapter".to_string());
+    }
+    if object.values().any(|value| {
+        !(value.is_string()
+            || value.is_number()
+            || value.is_boolean()
+            || value
+                .as_array()
+                .is_some_and(|items| items.iter().all(serde_json::Value::is_string)))
+    }) {
+        return Err("Provider payload contains an unsupported value type".to_string());
+    }
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(target.model.to_string()),
+    );
+    let encoded = serde_json::to_vec(&object)
+        .map_err(|error| format!("Unable to serialize provider payload: {error}"))?;
+    if encoded.len() > PROVIDER_BODY_LIMIT {
+        return Err("Provider payload exceeds the native transport limit".to_string());
+    }
+    Ok(encoded)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialStatus {
+    provider: String,
+    configured: bool,
+}
+
+fn validate_credential_provider(provider: &str) -> Result<(), String> {
+    if SUPPORTED_CREDENTIAL_PROVIDERS.contains(&provider) {
+        Ok(())
+    } else {
+        Err("Unsupported credential provider".to_string())
+    }
+}
+
+fn credential_target(provider: &str) -> Result<Vec<u16>, String> {
+    validate_credential_provider(provider)?;
+    Ok(format!("{CREDENTIAL_SERVICE}:{provider}\0")
+        .encode_utf16()
+        .collect())
+}
+
+#[tauri::command]
+fn credential_status(provider: String) -> Result<CredentialStatus, String> {
+    let target = credential_target(&provider)?;
+    let mut credential = std::ptr::null_mut::<CREDENTIALW>();
+    let configured = unsafe {
+        if CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) != 0 {
+            CredFree(credential.cast());
+            true
+        } else if GetLastError() == ERROR_NOT_FOUND {
+            false
+        } else {
+            return Err("Unable to read Windows secure credential status".to_string());
+        }
+    };
+    Ok(CredentialStatus {
+        provider,
+        configured,
+    })
+}
+
+#[tauri::command]
+fn credential_set(provider: String, secret: String) -> Result<CredentialStatus, String> {
+    let value = secret.trim();
+    if value.is_empty()
+        || value.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE as usize
+        || !value.is_ascii()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err("Credential length is outside the Windows secure storage limit".to_string());
+    }
+    let mut target = credential_target(&provider)?;
+    let mut username: Vec<u16> = provider.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut credential_blob = value.as_bytes().to_vec();
+    let credential = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target.as_mut_ptr(),
+        CredentialBlobSize: credential_blob.len() as u32,
+        CredentialBlob: credential_blob.as_mut_ptr(),
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        UserName: username.as_mut_ptr(),
+        ..Default::default()
+    };
+    let written = unsafe { CredWriteW(&credential, 0) } != 0;
+    credential_blob.fill(0);
+    if !written {
+        return Err("Unable to write Windows secure credential".to_string());
+    }
+    Ok(CredentialStatus {
+        provider,
+        configured: true,
+    })
+}
+
+struct CredentialSecret(Vec<u8>);
+
+impl CredentialSecret {
+    fn as_str(&self) -> Result<&str, String> {
+        std::str::from_utf8(&self.0).map_err(|_| "Stored credential is not valid UTF-8".to_string())
+    }
+}
+
+impl Drop for CredentialSecret {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+fn credential_read(provider: &str) -> Result<CredentialSecret, String> {
+    let target = credential_target(provider)?;
+    let mut credential = std::ptr::null_mut::<CREDENTIALW>();
+    let read = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } != 0;
+    if !read {
+        return if unsafe { GetLastError() } == ERROR_NOT_FOUND {
+            Err("Provider credential is not configured".to_string())
+        } else {
+            Err("Unable to read Windows secure credential".to_string())
+        };
+    }
+    let value = unsafe { &*credential };
+    if value.CredentialBlob.is_null() || value.CredentialBlobSize == 0 {
+        unsafe { CredFree(credential.cast()) };
+        return Err("Stored provider credential is empty".to_string());
+    }
+    let secret = unsafe {
+        std::slice::from_raw_parts(value.CredentialBlob, value.CredentialBlobSize as usize).to_vec()
+    };
+    unsafe { CredFree(credential.cast()) };
+    Ok(CredentialSecret(secret))
+}
+
+struct WinHttpHandle(*mut core::ffi::c_void);
+
+impl WinHttpHandle {
+    fn new(handle: *mut core::ffi::c_void, operation: &str) -> Result<Self, String> {
+        if handle.is_null() {
+            Err(winhttp_error(operation))
+        } else {
+            Ok(Self(handle))
+        }
+    }
+}
+
+impl Drop for WinHttpHandle {
+    fn drop(&mut self) {
+        unsafe {
+            WinHttpCloseHandle(self.0);
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderHttpResponse {
+    status: u32,
+    body: serde_json::Value,
+}
+
+#[tauri::command]
+async fn provider_submit(
+    adapter_key: String,
+    payload: serde_json::Value,
+) -> Result<ProviderHttpResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || provider_submit_blocking(&adapter_key, payload))
+        .await
+        .map_err(|error| format!("Native provider task failed: {error}"))?
+}
+
+fn provider_submit_blocking(
+    adapter_key: &str,
+    payload: serde_json::Value,
+) -> Result<ProviderHttpResponse, String> {
+    let target = provider_target(adapter_key)?;
+    let body = provider_payload(target, payload)?;
+    let secret = credential_read(target.credential_provider)?;
+    post_provider_json(target, &secret, &body)
+}
+
+fn post_provider_json(
+    target: ProviderTarget,
+    secret: &CredentialSecret,
+    body: &[u8],
+) -> Result<ProviderHttpResponse, String> {
+    let agent = wide("AI Video Workspace/0.1");
+    let host = wide(target.host);
+    let verb = wide("POST");
+    let path = wide(target.path);
+    let session = WinHttpHandle::new(
+        unsafe {
+            WinHttpOpen(
+                agent.as_ptr(),
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
+        },
+        "Unable to initialize provider transport",
+    )?;
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) } == 0 {
+        return Err(winhttp_error("Unable to configure provider timeouts"));
+    }
+    let connection = WinHttpHandle::new(
+        unsafe { WinHttpConnect(session.0, host.as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0) },
+        "Unable to connect provider transport",
+    )?;
+    let request = WinHttpHandle::new(
+        unsafe {
+            WinHttpOpenRequest(
+                connection.0,
+                verb.as_ptr(),
+                path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            )
+        },
+        "Unable to create provider request",
+    )?;
+    let disabled_features = WINHTTP_DISABLE_REDIRECTS;
+    if unsafe {
+        WinHttpSetOption(
+            request.0,
+            WINHTTP_OPTION_DISABLE_FEATURE,
+            (&disabled_features as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    } == 0
+    {
+        return Err(winhttp_error("Unable to disable provider redirects"));
+    }
+
+    let mut headers: Vec<u16> = "Content-Type: application/json\r\nAuthorization: Token "
+        .encode_utf16()
+        .collect();
+    headers.extend(secret.as_str()?.encode_utf16());
+    headers.extend("\r\n".encode_utf16());
+    let sent = unsafe {
+        WinHttpSendRequest(
+            request.0,
+            headers.as_ptr(),
+            headers.len() as u32,
+            body.as_ptr().cast(),
+            body.len() as u32,
+            body.len() as u32,
+            0,
+        )
+    };
+    headers.fill(0);
+    if sent == 0 {
+        return Err(winhttp_error("Provider request could not be sent"));
+    }
+    if unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) } == 0 {
+        return Err(winhttp_error("Provider response could not be received"));
+    }
+
+    let mut status = 0_u32;
+    let mut status_size = std::mem::size_of::<u32>() as u32;
+    let mut header_index = 0_u32;
+    if unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            std::ptr::null(),
+            (&mut status as *mut u32).cast(),
+            &mut status_size,
+            &mut header_index,
+        )
+    } == 0
+    {
+        return Err(winhttp_error("Provider status could not be read"));
+    }
+
+    let mut response = Vec::new();
+    loop {
+        let mut chunk = [0_u8; 8192];
+        let mut read = 0_u32;
+        if unsafe {
+            WinHttpReadData(
+                request.0,
+                chunk.as_mut_ptr().cast(),
+                chunk.len() as u32,
+                &mut read,
+            )
+        } == 0
+        {
+            return Err(winhttp_error("Provider response body could not be read"));
+        }
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..read as usize]);
+        if response.len() > PROVIDER_BODY_LIMIT {
+            return Err("Provider response exceeds the native transport limit".to_string());
+        }
+    }
+    let parsed = if response.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&response)
+            .map_err(|_| "Provider returned a non-JSON response".to_string())?
+    };
+    Ok(ProviderHttpResponse {
+        status,
+        body: parsed,
+    })
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn winhttp_error(operation: &str) -> String {
+    format!("{operation} (Windows error {})", unsafe { GetLastError() })
+}
+
+#[tauri::command]
+fn credential_delete(provider: String) -> Result<CredentialStatus, String> {
+    let target = credential_target(&provider)?;
+    let deleted = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0;
+    let missing = !deleted && unsafe { GetLastError() } == ERROR_NOT_FOUND;
+    if !deleted && !missing {
+        return Err("Unable to delete Windows secure credential".to_string());
+    }
+    Ok(CredentialStatus {
+        provider,
+        configured: false,
+    })
+}
+
+struct WorkerProcess {
+    child: Child,
+    stdin: ChildStdin,
+    responses: Receiver<Result<String, String>>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+}
+
+impl WorkerProcess {
+    fn spawn() -> Result<Self, String> {
+        Self::spawn_command(worker_command()?)
+    }
+
+    fn spawn_command(mut command: Command) -> Result<Self, String> {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Failed to start worker: {error}"))?;
+        let stdin = child.stdin.take().ok_or("Worker stdin is unavailable")?;
+        let stdout = child.stdout.take().ok_or("Worker stdout is unavailable")?;
+        let stderr = child.stderr.take().ok_or("Worker stderr is unavailable")?;
+        let (response_tx, responses) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = response_tx
+                            .send(Err("Worker exited before returning a response".to_string()));
+                        break;
+                    }
+                    Ok(_) => {
+                        if response_tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = response_tx
+                            .send(Err(format!("Failed to read worker response: {error}")));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buffer = Arc::clone(&stderr_tail);
+        thread::spawn(move || {
+            let mut stderr = stderr;
+            let mut chunk = [0_u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        if let Ok(mut tail) = stderr_buffer.lock() {
+                            tail.extend_from_slice(&chunk[..length]);
+                            if tail.len() > STDERR_TAIL_LIMIT {
+                                let excess = tail.len() - STDERR_TAIL_LIMIT;
+                                tail.drain(..excess);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            stdin,
+            responses,
+            stderr_tail,
+        })
+    }
+
+    fn request(&mut self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.request_with_timeout(request, WORKER_REQUEST_TIMEOUT)
+    }
+
+    fn request_with_timeout(
+        &mut self,
+        request: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let payload = serde_json::to_string(request)
+            .map_err(|error| format!("Failed to serialize worker request: {error}"))?;
+        writeln!(self.stdin, "{payload}")
+            .and_then(|_| self.stdin.flush())
+            .map_err(|error| format!("Failed to write worker request: {error}"))?;
+
+        let line = match self.responses.recv_timeout(timeout) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => return Err(self.with_diagnostics(error)),
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "Worker request timed out after {} ms; the Worker will be restarted",
+                    timeout.as_millis()
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(self.with_diagnostics("Worker response channel closed".to_string()));
+            }
+        };
+        serde_json::from_str(&line)
+            .map_err(|error| format!("Worker returned invalid JSON: {error}"))
+    }
+
+    fn with_diagnostics(&self, message: String) -> String {
+        let diagnostics = self
+            .stderr_tail
+            .lock()
+            .map(|tail| String::from_utf8_lossy(&tail).trim().to_string())
+            .unwrap_or_default();
+        if diagnostics.is_empty() {
+            message
+        } else {
+            format!("{message}: {diagnostics}")
+        }
+    }
+}
+
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(debug_assertions)]
+fn worker_command() -> Result<Command, String> {
+    let worker_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../worker")
+        .canonicalize()
+        .map_err(|_| {
+            "Worker is not built. Run `pnpm --filter @ai-video/worker build`.".to_string()
+        })?;
+    let mut command = Command::new("node");
+    command.current_dir(worker_directory).arg("dist/index.js");
+    Ok(command)
+}
+
+#[cfg(not(debug_assertions))]
+fn worker_command() -> Result<Command, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Cannot locate desktop executable: {error}"))?;
+    let application_dir = executable
+        .parent()
+        .ok_or("Cannot locate application directory")?;
+    let worker = bundled_worker_path(application_dir);
+    Ok(Command::new(worker))
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn bundled_worker_path(application_dir: &Path) -> PathBuf {
+    application_dir.join(BUNDLED_WORKER_FILENAME)
+}
+
+struct WorkerState(Mutex<Option<WorkerProcess>>);
+
+#[tauri::command]
+fn worker_request(
+    request: serde_json::Value,
+    state: tauri::State<'_, WorkerState>,
+) -> Result<serde_json::Value, String> {
+    let mut guard = state.0.lock().map_err(|_| "Worker lock is poisoned")?;
+    if guard.is_none() {
+        *guard = Some(WorkerProcess::spawn()?);
+    }
+
+    let result = guard
+        .as_mut()
+        .ok_or("Worker failed to start")?
+        .request(&request);
+
+    if result.is_err() {
+        *guard = None;
+    }
+    result
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .manage(WorkerState(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![
+            worker_request,
+            credential_status,
+            credential_set,
+            credential_delete,
+            provider_submit
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running AI Video Workspace");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bundled_worker_path, provider_payload, provider_target, validate_credential_provider,
+        WorkerProcess, BUNDLED_WORKER_FILENAME,
+    };
+    use serde_json::json;
+    use std::{path::Path, process::Command, time::Duration};
+
+    #[test]
+    fn release_worker_filename_matches_tauri_external_binary() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid Tauri config");
+        let configured = config["bundle"]["externalBin"][0]
+            .as_str()
+            .expect("one external binary");
+        let configured_name = Path::new(configured)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("external binary filename");
+
+        assert_eq!(BUNDLED_WORKER_FILENAME, format!("{configured_name}.exe"));
+        assert_eq!(
+            bundled_worker_path(Path::new(r"C:\Program Files\AI Video Workspace")),
+            Path::new(r"C:\Program Files\AI Video Workspace\ai-video-worker.exe")
+        );
+    }
+
+    #[test]
+    fn worker_supports_health_and_sqlite_round_trips() {
+        let mut worker = WorkerProcess::spawn().expect("worker should start");
+
+        let health = worker
+            .request(&json!({
+                "id": "rust-health",
+                "protocolVersion": 1,
+                "method": "health",
+                "params": {}
+            }))
+            .expect("health response should be valid");
+        assert_eq!(health["ok"], true);
+        assert_eq!(health["result"]["protocolVersion"], 1);
+
+        let sqlite = worker
+            .request(&json!({
+                "id": "rust-sqlite",
+                "protocolVersion": 1,
+                "method": "sqlite.probe",
+                "params": {}
+            }))
+            .expect("SQLite response should be valid");
+        assert_eq!(sqlite["ok"], true);
+        assert_eq!(sqlite["result"]["writeVerified"], true);
+    }
+
+    #[test]
+    fn credential_provider_allowlist_rejects_unknown_targets() {
+        assert!(validate_credential_provider("vidu").is_ok());
+        assert!(validate_credential_provider("../../project.sqlite").is_err());
+    }
+
+    #[test]
+    fn provider_bridge_is_bound_to_an_exact_adapter_and_injects_its_model() {
+        let target = provider_target("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2")
+            .expect("known adapter should resolve");
+        assert_eq!(target.host, "api.vidu.com");
+        assert_eq!(target.path, "/ent/v2/img2video");
+        let body = provider_payload(
+            target,
+            json!({"images": ["https://example.com/start.png"], "duration": 5}),
+        )
+        .expect("adapter payload should serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(parsed["model"], "viduq3-pro");
+        assert!(provider_target("IMAGE_TO_VIDEO:evil:viduq3-pro:v2").is_err());
+    }
+
+    #[test]
+    fn provider_bridge_rejects_credential_and_endpoint_fields() {
+        let target =
+            provider_target("TEXT_TO_IMAGE:vidu:viduq2:v2").expect("known adapter should resolve");
+        assert!(provider_payload(target, json!({"prompt": "frame", "apiKey": "secret"})).is_err());
+        assert!(provider_payload(
+            target,
+            json!({"prompt": "frame", "endpoint": "https://attacker.invalid"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn worker_stderr_is_drained_while_waiting_for_stdout() {
+        let mut command = Command::new("node");
+        command.args([
+            "-e",
+            "process.stdin.once('data',()=>{process.stderr.write('x'.repeat(1024*1024),()=>process.stdout.write('{\"ok\":true}\\n'))})",
+        ]);
+        let mut worker = WorkerProcess::spawn_command(command).expect("fixture should start");
+
+        let result = worker
+            .request_with_timeout(&json!({"id": "stderr"}), Duration::from_secs(5))
+            .expect("stderr output must not block the response");
+
+        assert_eq!(result["ok"], true);
+    }
+
+    #[test]
+    fn worker_request_timeout_is_bounded() {
+        let mut command = Command::new("node");
+        command.args(["-e", "process.stdin.resume(); setInterval(()=>{}, 1000)"]);
+        let mut worker = WorkerProcess::spawn_command(command).expect("fixture should start");
+
+        let error = worker
+            .request_with_timeout(&json!({"id": "timeout"}), Duration::from_millis(50))
+            .expect_err("fixture must time out");
+
+        assert!(error.contains("timed out after 50 ms"));
+        assert!(error.contains("restarted"));
+    }
+}
