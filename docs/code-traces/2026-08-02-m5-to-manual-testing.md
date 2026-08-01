@@ -3,7 +3,7 @@
 - Started: 2026-08-02T02:08:29+08:00
 - Repository: `D:\SB\xlngaiforwindows`
 - Base revision: `main` at `856e30c`
-- Status: in progress
+- Status: stopped
 
 ## Objective
 
@@ -54,3 +54,9 @@
 - Commands: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` -> exit `0` after the UI adjustment.
 - Decision: code and hosted release gates are `PASS`; real Vidu success, real credential read, and human UI acceptance remain `HOLD`.
 - Next: stop implementation at the documented manual-testing entry; do not start M6 until manual results are recorded.
+
+### 2026-08-02T02:59:00+08:00 - Stopped at manual-testing entry
+- Evidence: final commit `3ced94a` hosted Windows run `30713323059` completed with `success`; all local quality gates and final UI asset-management changes are verified.
+- Action: stopped implementation at the M5 manual-test handoff as requested.
+- Decision: M5 code/hosted gates are `PASS`; release and stage sign-off remain `HOLD` until a human performs real Vidu success, credential, asset persistence, failure, and restart checks.
+- Next: execute the checklist in `docs/M5-IMAGE-GENERATION.md`; record human outcomes before considering M6.
