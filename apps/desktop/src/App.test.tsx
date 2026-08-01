@@ -132,7 +132,7 @@ describe('App', () => {
           createdAt: 'now',
           updatedAt: 'now',
           mode: 'read-write',
-          schemaVersion: 3,
+          schemaVersion: 4,
         });
       }
       if (method === 'project.recent' || method === 'document.list') return Promise.resolve([]);

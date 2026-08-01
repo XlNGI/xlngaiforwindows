@@ -396,6 +396,73 @@ export interface GenerationDraftSaveParams extends GenerationDraftGetParams {
   parameters: AdapterParameters;
 }
 
+export type ImageGenerationJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface AssetInfo {
+  id: string;
+  projectId: string;
+  kind: string;
+  relativePath: string;
+  contentHash: string;
+  sizeBytes: number;
+  sourceUrl?: string;
+  createdAt: string;
+}
+
+export interface ImageGenerationResultInfo {
+  id: string;
+  jobId: string;
+  asset?: AssetInfo;
+  providerUrl?: string;
+  createdAt: string;
+}
+
+export interface ImageGenerationJobInfo {
+  id: string;
+  shotId?: string;
+  adapterKey: string;
+  status: ImageGenerationJobStatus;
+  request: AdapterParameters;
+  results: ImageGenerationResultInfo[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ImageGenerationPrepareParams {
+  shotId?: string;
+  adapterKey: string;
+  parameters: AdapterParameters;
+}
+
+export interface ImageGenerationCompleteParams {
+  jobId: string;
+  providerStatus: number;
+  providerBody: unknown;
+  assetKind?: 'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
+}
+
+export interface ImageGenerationCancelParams {
+  jobId: string;
+}
+
+export interface ImageGenerationGetParams {
+  jobId: string;
+}
+
+export interface AssetListParams {
+  kind?: string;
+}
+
+export interface AssetRenameParams {
+  assetId: string;
+  name: string;
+}
+
+export interface AssetDeleteParams {
+  assetId: string;
+}
+
 export interface WorkerMethodMap {
   health: { params: Record<string, never>; result: HealthResult };
   'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
@@ -441,6 +508,25 @@ export interface WorkerMethodMap {
     params: GenerationDraftSaveParams;
     result: GenerationDraftInfo;
   };
+  'image.generate.prepare': {
+    params: ImageGenerationPrepareParams;
+    result: ImageGenerationJobInfo;
+  };
+  'image.generate.complete': {
+    params: ImageGenerationCompleteParams;
+    result: ImageGenerationJobInfo;
+  };
+  'image.generate.cancel': {
+    params: ImageGenerationCancelParams;
+    result: ImageGenerationJobInfo;
+  };
+  'image.generate.get': {
+    params: ImageGenerationGetParams;
+    result: ImageGenerationJobInfo;
+  };
+  'asset.list': { params: AssetListParams; result: AssetInfo[] };
+  'asset.rename': { params: AssetRenameParams; result: AssetInfo };
+  'asset.delete': { params: AssetDeleteParams; result: { deleted: true } };
 }
 
 export type WorkerMethod = keyof WorkerMethodMap;

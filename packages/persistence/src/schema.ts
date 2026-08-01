@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -164,4 +164,8 @@ export const MIGRATION_V3 = `
 ALTER TABLE chat_messages ADD COLUMN reply_to_message_id TEXT REFERENCES chat_messages(id) ON DELETE SET NULL;
 
 CREATE INDEX idx_chat_messages_reply ON chat_messages(reply_to_message_id);
+`;
+
+export const MIGRATION_V4 = `
+CREATE INDEX idx_generation_results_job ON generation_results(job_id, created_at);
 `;

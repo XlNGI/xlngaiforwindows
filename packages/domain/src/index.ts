@@ -120,6 +120,14 @@ export interface AssetRecord {
   createdAt: string;
 }
 
+export interface GenerationResultRecord {
+  id: string;
+  jobId: string;
+  assetId?: string;
+  providerUrl?: string;
+  createdAt: string;
+}
+
 export interface GenerationDraftRecord {
   id: string;
   shotId: string;
@@ -202,6 +210,7 @@ export interface AssetRepository {
   save(record: AssetRecord): void;
   get(id: string): AssetRecord | undefined;
   listByProject(projectId: string): AssetRecord[];
+  delete(id: string): void;
 }
 
 export interface GenerationDraftRepository {
@@ -213,4 +222,9 @@ export interface JobRepository {
   save(record: JobRecord): void;
   get(id: string): JobRecord | undefined;
   listByProject(projectId: string): JobRecord[];
+}
+
+export interface GenerationResultRepository {
+  save(record: GenerationResultRecord): void;
+  listByJob(jobId: string): GenerationResultRecord[];
 }

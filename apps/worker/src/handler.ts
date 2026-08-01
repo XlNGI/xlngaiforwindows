@@ -13,6 +13,9 @@ import {
   type HealthResult,
   type GenerationDraftGetParams,
   type GenerationDraftSaveParams,
+  type ImageGenerationPrepareParams,
+  type ImageGenerationCompleteParams,
+  type AssetRenameParams,
   type ProjectCreateParams,
   type ProjectExportParams,
   type ProjectOpenParams,
@@ -37,6 +40,7 @@ import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
 import { GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
+import { ImageGenerationService } from './image-generation-service.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -78,6 +82,13 @@ const methods = new Set<WorkerMethod>([
   'adapter.validate',
   'generation.draft.get',
   'generation.draft.save',
+  'image.generate.prepare',
+  'image.generate.complete',
+  'image.generate.cancel',
+  'image.generate.get',
+  'asset.list',
+  'asset.rename',
+  'asset.delete',
 ]);
 const isPackaged = 'pkg' in process;
 // A literal require lets pkg discover and extract the native addon from the executable.
@@ -88,6 +99,7 @@ const packagedSqliteBinding = isPackaged
 const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding });
 const contentService = new ContentService(projectService);
 const adapterService = new AdapterService(projectService);
+const imageGenerationService = new ImageGenerationService(projectService);
 const contextService = new ContextService(projectService);
 const llmProvider = new OpenAIResponsesProvider({
   apiKey: process.env.OPENAI_API_KEY,
@@ -367,6 +379,31 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         break;
       case 'generation.draft.save':
         result = adapterService.saveDraft(params as unknown as GenerationDraftSaveParams);
+        break;
+      case 'image.generate.prepare':
+        result = imageGenerationService.prepare(params as unknown as ImageGenerationPrepareParams);
+        break;
+      case 'image.generate.complete':
+        result = await imageGenerationService.complete(
+          params as unknown as ImageGenerationCompleteParams,
+        );
+        break;
+      case 'image.generate.cancel':
+        result = imageGenerationService.cancel(requireString(params, 'jobId'));
+        break;
+      case 'image.generate.get':
+        result = imageGenerationService.get(requireString(params, 'jobId'));
+        break;
+      case 'asset.list':
+        result = imageGenerationService.listAssets({
+          kind: typeof params.kind === 'string' ? params.kind : undefined,
+        });
+        break;
+      case 'asset.rename':
+        result = imageGenerationService.renameAsset(params as unknown as AssetRenameParams);
+        break;
+      case 'asset.delete':
+        result = imageGenerationService.deleteAsset(requireString(params, 'assetId'));
         break;
       default:
         return errorResponse(request.id, {

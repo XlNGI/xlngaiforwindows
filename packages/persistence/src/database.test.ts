@@ -27,8 +27,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(3);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 3 });
+    expect(migrateDatabase(database)).toBe(4);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 4 });
     database.close();
   });
 
@@ -79,7 +79,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(3);
+    expect(migrateDatabase(database)).toBe(4);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -106,7 +106,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(3);
+    expect(migrateDatabase(database)).toBe(4);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')

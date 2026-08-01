@@ -2,7 +2,13 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import type { IntegrityReport } from '@ai-video/domain';
-import { CURRENT_SCHEMA_VERSION, MIGRATION_V1, MIGRATION_V2, MIGRATION_V3 } from './schema.js';
+import {
+  CURRENT_SCHEMA_VERSION,
+  MIGRATION_V1,
+  MIGRATION_V2,
+  MIGRATION_V3,
+  MIGRATION_V4,
+} from './schema.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -81,6 +87,14 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(3, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 3) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V4);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(4, now);
     })();
   }
   return getSchemaVersion(database);

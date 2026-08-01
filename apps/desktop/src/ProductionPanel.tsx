@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CircleAlert, CircleCheck, KeyRound, Plus, Save, Trash2 } from 'lucide-react';
+import {
+  CircleAlert,
+  CircleCheck,
+  KeyRound,
+  Plus,
+  Save,
+  Trash2,
+  WandSparkles,
+  Square,
+} from 'lucide-react';
 import type {
   AdapterCatalogResult,
   AdapterDescriptor,
@@ -17,6 +26,7 @@ import {
   type CredentialStatus,
 } from './credential-client';
 import { callWorker } from './worker-client';
+import { submitProviderRequest } from './provider-client';
 
 interface ProductionPanelProps {
   shotId?: string;
@@ -60,6 +70,8 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
   const [credentialSecret, setCredentialSecret] = useState('');
   const [credentialMessage, setCredentialMessage] = useState('');
   const [credentialBusy, setCredentialBusy] = useState(false);
+  const [generationJobId, setGenerationJobId] = useState<string>();
+  const [generationStatus, setGenerationStatus] = useState('');
 
   useEffect(() => {
     void callWorker('adapter.catalog', {})
@@ -211,6 +223,55 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
     }
   };
 
+  const generateImage = async () => {
+    if (!adapter || !writable) return;
+    setBusy(true);
+    setGenerationStatus('');
+    try {
+      const validation = await callWorker('adapter.validate', {
+        adapterKey: adapter.key,
+        parameters,
+      });
+      setErrors(validation.errors);
+      if (!validation.valid) {
+        setGenerationStatus('请先修正参数。');
+        return;
+      }
+      const job = await callWorker('image.generate.prepare', {
+        shotId,
+        adapterKey: adapter.key,
+        parameters,
+      });
+      setGenerationJobId(job.id);
+      setGenerationStatus('正在请求 Provider...');
+      const response = await submitProviderRequest(adapter.key, parameters);
+      const completed = await callWorker('image.generate.complete', {
+        jobId: job.id,
+        providerStatus: response.status,
+        providerBody: response.body,
+      });
+      setGenerationStatus(
+        completed.status === 'succeeded'
+          ? '图片已保存到资产库。'
+          : (completed.error ?? '生成失败。'),
+      );
+    } catch (reason) {
+      setGenerationStatus(reason instanceof Error ? reason.message : '图片生成失败。');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelImage = async () => {
+    if (!generationJobId) return;
+    try {
+      await callWorker('image.generate.cancel', { jobId: generationJobId });
+      setGenerationStatus('已取消图片生成。');
+    } catch (reason) {
+      setGenerationStatus(reason instanceof Error ? reason.message : '取消失败。');
+    }
+  };
+
   const removeCredential = async () => {
     if (!adapter || !window.confirm('删除此供应商的本机凭据？')) return;
     setCredentialBusy(true);
@@ -345,6 +406,26 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
                     {message}
                   </span>
                 )}
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => void generateImage()}
+                  disabled={!writable || busy || !adapter}
+                >
+                  <WandSparkles size={14} />
+                  生成图片
+                </button>
+                {generationJobId && busy && (
+                  <button
+                    className="icon-button danger"
+                    type="button"
+                    title="取消生成"
+                    onClick={() => void cancelImage()}
+                  >
+                    <Square size={13} />
+                  </button>
+                )}
+                {generationStatus && <span className="credential-message">{generationStatus}</span>}
               </div>
 
               <details className="credential-section">

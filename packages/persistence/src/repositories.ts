@@ -15,6 +15,8 @@ import type {
   DocumentVersionRecord,
   GenerationDraftRecord,
   GenerationDraftRepository,
+  GenerationResultRecord,
+  GenerationResultRepository,
   JobRecord,
   JobRepository,
   MemoryRecord,
@@ -636,6 +638,10 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         .all(projectId) as AssetRow[]
     ).map(mapAsset);
   }
+
+  delete(id: string): void {
+    this.database.prepare('DELETE FROM assets WHERE id = ?').run(id);
+  }
 }
 
 interface AssetRow {
@@ -746,6 +752,54 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
   }
 }
 
+class SqliteGenerationResultRepository
+  extends ProjectScopedRepository
+  implements GenerationResultRepository
+{
+  save(record: GenerationResultRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO generation_results (id, job_id, asset_id, provider_url, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET asset_id = excluded.asset_id,
+           provider_url = excluded.provider_url`,
+      )
+      .run(
+        record.id,
+        record.jobId,
+        record.assetId ?? null,
+        record.providerUrl ?? null,
+        record.createdAt,
+      );
+  }
+
+  listByJob(jobId: string): GenerationResultRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM generation_results WHERE job_id = ? ORDER BY created_at, id')
+        .all(jobId) as GenerationResultRow[]
+    ).map(mapGenerationResult);
+  }
+}
+
+interface GenerationResultRow {
+  id: string;
+  job_id: string;
+  asset_id: string | null;
+  provider_url: string | null;
+  created_at: string;
+}
+
+function mapGenerationResult(row: GenerationResultRow): GenerationResultRecord {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    assetId: row.asset_id ?? undefined,
+    providerUrl: row.provider_url ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
 interface JobRow {
   id: string;
   project_id: string;
@@ -787,6 +841,7 @@ export function createRepositories(database: Database.Database): {
   assets: AssetRepository;
   generationDrafts: GenerationDraftRepository;
   jobs: JobRepository;
+  generationResults: GenerationResultRepository;
 } {
   return {
     projects: new SqliteProjectRepository(database),
@@ -801,5 +856,6 @@ export function createRepositories(database: Database.Database): {
     assets: new SqliteAssetRepository(database),
     generationDrafts: new SqliteGenerationDraftRepository(database),
     jobs: new SqliteJobRepository(database),
+    generationResults: new SqliteGenerationResultRepository(database),
   };
 }
