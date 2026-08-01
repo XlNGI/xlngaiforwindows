@@ -3,7 +3,7 @@
 版本：0.7  
 日期：2026-08-01
 
-当前基线：M0–M4 已完成本轮高风险修复、自动化复验和 Release 同目录启动冒烟，M5 尚未开始。项目锁竞争、损坏恢复连接、LLM/Sidecar 超时、stderr 排空、中文 token 预算、原生凭据桥、完整 adapter key、流增量批量持久化和桌面异步竞态已有回归测试。最终里程碑签收保持 `HOLD`，等待 NSIS 干净 Windows、真实 OpenAI 和真实 Vidu 验证；这些验证不得由 Mock 结果替代。
+当前基线：M0–M4 已完成本轮高风险修复、自动化复验、Release 同目录启动冒烟和 GitHub Windows runner 干净 NSIS 安装生命周期验证，M5 尚未开始。项目锁竞争、损坏恢复连接、LLM/Sidecar 超时、stderr 排空、中文 token 预算、原生凭据桥、完整 adapter key、流增量批量持久化和桌面异步竞态已有回归测试。最终发布签收保持 `HOLD`，等待真实 OpenAI 和真实 Vidu 成功请求；这些验证不得由 Mock 结果替代。
 
 ## 1. 实施原则
 

@@ -106,9 +106,9 @@ created -> streaming -> complete
 - `pnpm tauri:build`：通过，生成 20,201,254 字节的 x64 NSIS 安装包；SHA-256 为 `2461E07956CA1328DC5DA1DD02C065CA2A4B8FB4A319DECFA2CF4D9CADE9F3AA`。
 - Release 同目录冒烟：通过；桌面程序实际拉起安装后名称 `ai-video-worker.exe`，并在启动 health/SQLite 检查期间保持 Worker 存活。
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
-- 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机使用当前 NSIS 包完整执行通过，远程 runner 首次执行曾因固定用户目录假设失败，已修复并等待重跑。
+- 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，GitHub Windows runner run `30710775740` 的全部 15 步骤通过（包括该安装生命周期步骤）。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
-- 未验证：NSIS 干净 Windows runner、真实 OpenAI 模型请求、带真实凭据的 Vidu 成功请求。当前环境未配置 Provider 凭据，且 OpenAI 443 连接超时。
+- 未验证：真实 OpenAI 模型请求、带真实凭据的 Vidu 成功请求。当前环境未配置 Provider 凭据，且 OpenAI 443 连接超时。
 
 因此已知代码级 `P1/P2` 为零；最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
 
