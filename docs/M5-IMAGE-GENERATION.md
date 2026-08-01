@@ -23,7 +23,7 @@ Schema v4 为 `generation_results(job_id, created_at)` 增加索引。请求快�
 
 - Worker 图片服务：Base64 成功落盘、非法响应回滚、HTTP 403 失败映射。
 - Worker 全量测试：34 tests passed。
-- Desktop 全量测试：6 tests passed。
+- Desktop 全量测试：6 tests passed；生成成功后可选择角色、场景、首帧、尾帧或普通图片，并在面板内重命名/删除资产。
 - Persistence 全量测试：7 tests passed，Schema v4 迁移通过。
 
 ## 人工测试入口

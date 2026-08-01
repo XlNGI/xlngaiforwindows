@@ -47,3 +47,10 @@
 - Action: formatted the four new TypeScript files and fixed lint-only unused imports/assertions; updated migration expectations to Schema v4.
 - Decision: local code gate is `PASS`; native Rust/Cargo and NSIS remain hosted-only checks in this environment.
 - Next: commit and push the M5 implementation, then await the hosted Windows result.
+
+### 2026-08-02T02:47:00+08:00 - Hosted Windows gate passed and manual handoff prepared
+- Evidence: GitHub-hosted Windows run `30712459268` completed with `success`; TypeScript workspace, sidecar build, `cargo check`, NSIS bundle, and clean install lifecycle all passed.
+- Action: added controlled asset-kind selection plus post-success asset refresh and in-panel rename/delete controls; preserved existing desktop initialization contract after the first test run exposed unsupported eager `asset.list` calls.
+- Commands: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` -> exit `0` after the UI adjustment.
+- Decision: code and hosted release gates are `PASS`; real Vidu success, real credential read, and human UI acceptance remain `HOLD`.
+- Next: stop implementation at the documented manual-testing entry; do not start M6 until manual results are recorded.

@@ -16,6 +16,7 @@ import type {
   AdapterParameters,
   AdapterUiField,
   AdapterValidationError,
+  AssetInfo,
   GenerationCapability,
 } from '@ai-video/contracts';
 import {
@@ -72,6 +73,10 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
   const [credentialBusy, setCredentialBusy] = useState(false);
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
+  const [assetKind, setAssetKind] = useState<
+    'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image'
+  >('generated-image');
+  const [assets, setAssets] = useState<AssetInfo[]>([]);
 
   useEffect(() => {
     void callWorker('adapter.catalog', {})
@@ -249,16 +254,40 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
         jobId: job.id,
         providerStatus: response.status,
         providerBody: response.body,
+        assetKind,
       });
       setGenerationStatus(
         completed.status === 'succeeded'
           ? '图片已保存到资产库。'
           : (completed.error ?? '生成失败。'),
       );
+      if (completed.status === 'succeeded') setAssets(await callWorker('asset.list', {}));
     } catch (reason) {
       setGenerationStatus(reason instanceof Error ? reason.message : '图片生成失败。');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const renameAsset = async (asset: AssetInfo) => {
+    const currentName = asset.relativePath.split(/[\\/]/).pop() ?? 'image.png';
+    const name = window.prompt('璇疯緭鍏ユ柊鏂囦欢鍚嶏紝闇€淇濈暀鎵╁睍鍚嶏細', currentName);
+    if (!name) return;
+    try {
+      const renamed = await callWorker('asset.rename', { assetId: asset.id, name });
+      setAssets((current) => current.map((item) => (item.id === renamed.id ? renamed : item)));
+    } catch (reason) {
+      setGenerationStatus(reason instanceof Error ? reason.message : 'Asset rename failed.');
+    }
+  };
+
+  const removeAsset = async (asset: AssetInfo) => {
+    if (!window.confirm('纭畾鍒犻櫎姝ゅ浘鐗囪祫浜э紵')) return;
+    try {
+      await callWorker('asset.delete', { assetId: asset.id });
+      setAssets((current) => current.filter((item) => item.id !== asset.id));
+    } catch (reason) {
+      setGenerationStatus(reason instanceof Error ? reason.message : 'Asset delete failed.');
     }
   };
 
@@ -425,8 +454,50 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
                     <Square size={13} />
                   </button>
                 )}
+                <label className="asset-kind-field">
+                  淇濆瓨涓?
+                  <select
+                    value={assetKind}
+                    onChange={(event) => setAssetKind(event.target.value as typeof assetKind)}
+                    disabled={busy}
+                  >
+                    <option value="generated-image">鏅€氳祫浜?</option>
+                    <option value="character">瑙掕壊</option>
+                    <option value="scene">鍦烘櫙</option>
+                    <option value="first-frame">棣栧抚</option>
+                    <option value="last-frame">灏惧抚</option>
+                  </select>
+                </label>
                 {generationStatus && <span className="credential-message">{generationStatus}</span>}
               </div>
+              {assets.length > 0 && (
+                <div className="asset-list" aria-label="璧勪骇鍒楄〃">
+                  {assets.map((asset) => (
+                    <div className="asset-row" key={asset.id}>
+                      <span title={asset.sourceUrl}>{asset.relativePath}</span>
+                      <small>
+                        {asset.kind} 路 {(asset.sizeBytes / 1024).toFixed(1)} KiB
+                      </small>
+                      <button
+                        className="icon-button subtle"
+                        type="button"
+                        title="閲嶅懡鍚嶈祫浜?"
+                        onClick={() => void renameAsset(asset)}
+                      >
+                        <Save size={13} />
+                      </button>
+                      <button
+                        className="icon-button danger"
+                        type="button"
+                        title="鍒犻櫎璧勪骇"
+                        onClick={() => void removeAsset(asset)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <details className="credential-section">
                 <summary>
