@@ -3,7 +3,7 @@
 - Started: 2026-08-02T02:08:29+08:00
 - Repository: `D:\SB\xlngaiforwindows`
 - Base revision: `main` at `856e30c`
-- Status: in progress
+- Status: stopped
 
 ## Objective
 
@@ -118,3 +118,12 @@
 - Files: `.github/workflows/ci.yml`.
 - Decision: run `30719653108` is not accepted as quality-gate evidence despite its green badge. A new hosted run with fail-fast steps must pass before recording `PASS`.
 - Next: commit and push the CI correction, then monitor the replacement run to completion.
+
+### 2026-08-02T06:05:00+08:00 - Fail-fast hosted CI passed; automation stopped at external boundary
+
+- Evidence: GitHub Windows run `30720119063` completed with `Success` for commit `8831c2b`; the `validate` job completed successfully in 11m 7s, total duration was 11m 10s, and the public annotation region was empty.
+- Evidence: independent workflow steps passed formatting, TypeScript build, Lint, typecheck, 74 tests, standalone Sidecar, Cargo/Tauri, NSIS packaging, and the clean install/start/SQLite/close/uninstall lifecycle.
+- Action: accepted the hosted gate after confirming earlier command failures can no longer be masked by a later success.
+- Decision: all safe and automatable M5 code, UI failure/restart, persistence, native, package, install, and hosted gates are `PASS`. Real Vidu success, real OpenAI success, Windows credential entry/use, and human visual/interaction acceptance remain explicitly `HOLD`/unverified because no credential or quota authorization was provided.
+- Decision: do not begin M6 and do not sign M5 as fully accepted until the human checklist in `docs/M5-IMAGE-GENERATION.md` records those outcomes.
+- Next: a human supplies authorized test credentials and performs the remaining real Provider and visual acceptance checklist; record results before changing this trace from `stopped`.
