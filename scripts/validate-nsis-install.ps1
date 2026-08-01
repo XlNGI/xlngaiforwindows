@@ -1,13 +1,17 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [string]$InstallerPath
+  [string]$InstallerPath,
+
+  [string]$InstallDirectory = (Join-Path `
+    $(if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }) `
+    ('ai-video-nsis-install-' + [guid]::NewGuid().ToString('N')))
 )
 
 $ErrorActionPreference = 'Stop'
 
 $resolvedInstaller = (Resolve-Path -LiteralPath $InstallerPath).Path
-$installDirectory = Join-Path $env:LOCALAPPDATA 'AI Video Workspace'
+$installDirectory = [IO.Path]::GetFullPath($InstallDirectory)
 $desktopExecutable = Join-Path $installDirectory 'ai-video-desktop.exe'
 $workerExecutable = Join-Path $installDirectory 'ai-video-worker.exe'
 $uninstaller = Join-Path $installDirectory 'uninstall.exe'
@@ -20,9 +24,10 @@ if (Test-Path -LiteralPath $installDirectory) {
 }
 
 try {
+  Write-Host "Installing NSIS bundle into $installDirectory"
   $install = Start-Process `
     -FilePath $resolvedInstaller `
-    -ArgumentList '/S' `
+    -ArgumentList @('/S', "/D=$installDirectory") `
     -WindowStyle Hidden `
     -Wait `
     -PassThru
@@ -141,5 +146,15 @@ finally {
       -WindowStyle Hidden `
       -Wait `
       -ErrorAction SilentlyContinue
+  }
+  if (
+    $installDirectory -and
+    $installDirectory.StartsWith(
+      (Join-Path $(if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }) 'ai-video-nsis-install-'),
+      [StringComparison]::OrdinalIgnoreCase
+    ) -and
+    (Test-Path -LiteralPath $installDirectory)
+  ) {
+    Remove-Item -LiteralPath $installDirectory -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
