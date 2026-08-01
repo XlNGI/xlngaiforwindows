@@ -8,11 +8,11 @@ jobs:
   validate:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.9.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
@@ -20,13 +20,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Validate TypeScript workspace
-        run: |
-          pnpm format:check
-          pnpm lint
-          pnpm typecheck
-          pnpm test
-          pnpm build
+      - name: Check formatting
+        run: pnpm format:check
+      - name: Build TypeScript workspace
+        run: pnpm build
+      - name: Lint TypeScript workspace
+        run: pnpm lint
+      - name: Typecheck TypeScript workspace
+        run: pnpm typecheck
+      - name: Test TypeScript workspace
+        run: pnpm test
       - name: Build standalone worker
         run: pnpm worker:sidecar
       - name: Check Tauri host

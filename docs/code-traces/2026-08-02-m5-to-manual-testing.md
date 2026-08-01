@@ -110,3 +110,11 @@
 - Evidence: the final installer again passed clean install, startup/SQLite survival, graceful close, Worker cleanup, silent uninstall, and installed-binary removal.
 - Decision: all locally executable code, state-machine, native, package, and clean-install gates are `PASS`. Hosted CI remains pending; real Vidu/OpenAI success and human visual acceptance remain `HOLD`.
 - Next: commit and push the reviewed revision, then wait for GitHub-hosted Windows CI.
+
+### 2026-08-02T05:52:00+08:00 - Hosted success rejected because CI masked an earlier failure
+
+- Evidence: GitHub run `30719653108` displayed `Success` for commit `580b603`, but its public summary retained ten TypeScript/Lint error annotations from the clean checkout. The workflow executed five native commands inside one PowerShell step, so the last successful command could mask an earlier non-zero exit code.
+- Action: split format, build, lint, typecheck, and test into independent Actions steps. Build now precedes typed Lint so workspace declaration outputs exist in a clean checkout. Upgraded checkout, Node setup, and pnpm setup actions to their verified v6 tags to remove the Node 20 action-runtime warning.
+- Files: `.github/workflows/ci.yml`.
+- Decision: run `30719653108` is not accepted as quality-gate evidence despite its green badge. A new hosted run with fail-fast steps must pass before recording `PASS`.
+- Next: commit and push the CI correction, then monitor the replacement run to completion.
