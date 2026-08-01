@@ -442,6 +442,10 @@ export interface ImageGenerationCompleteParams {
   assetKind?: 'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
 }
 
+export interface ImageGenerationFailParams {
+  jobId: string;
+}
+
 export interface ImageGenerationCancelParams {
   jobId: string;
 }
@@ -514,6 +518,10 @@ export interface WorkerMethodMap {
   };
   'image.generate.complete': {
     params: ImageGenerationCompleteParams;
+    result: ImageGenerationJobInfo;
+  };
+  'image.generate.fail': {
+    params: ImageGenerationFailParams;
     result: ImageGenerationJobInfo;
   };
   'image.generate.cancel': {

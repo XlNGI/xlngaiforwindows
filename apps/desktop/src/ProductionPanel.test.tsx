@@ -2,9 +2,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AdapterCatalogResult, AdapterDescriptor } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
+import { submitProviderRequest } from './provider-client';
 import { callWorker } from './worker-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
+vi.mock('./provider-client', () => ({ submitProviderRequest: vi.fn() }));
 vi.mock('./credential-client', () => ({
   canUseSecureCredentials: () => false,
   getCredentialStatus: vi.fn(),
@@ -95,6 +97,8 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(await screen.findByText(/草稿已保存/)).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '普通素材' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '角色' })).toBeInTheDocument();
   });
 
   it('does not persist a draft when adapter validation fails', async () => {
@@ -145,5 +149,80 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(model).toHaveValue(v3.key);
+  });
+
+  it('loads persisted assets when a project opens', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list') {
+        return Promise.resolve([
+          {
+            id: 'asset',
+            projectId: 'project',
+            kind: 'generated-image',
+            relativePath: 'assets/images/persisted.png',
+            contentHash: 'hash',
+            sizeBytes: 8192,
+            createdAt: '2026-08-02T00:00:00.000Z',
+          },
+        ]);
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable />);
+
+    expect(await screen.findByText('assets/images/persisted.png')).toBeInTheDocument();
+    expect(callWorker).toHaveBeenCalledWith('asset.list', {});
+    expect(screen.getByTitle('重命名素材')).toBeInTheDocument();
+    expect(screen.getByTitle('删除素材')).toBeInTheDocument();
+  });
+
+  it('terminalizes a prepared job when the native provider transport fails', async () => {
+    vi.mocked(submitProviderRequest).mockRejectedValueOnce(new Error('安全传输不可用'));
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'running',
+          request: (params as { parameters: Record<string, unknown> }).parameters,
+          results: [],
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:00.000Z',
+        });
+      }
+      if (method === 'image.generate.fail') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'failed',
+          request: { prompt: '电影画面', resolution: '1080p' },
+          results: [],
+          error: 'Provider transport failed before completion.',
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:01.000Z',
+        });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(<ProductionPanel shotId="shot" writable />);
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
+      target: { value: '电影画面' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+
+    expect(await screen.findByText('安全传输不可用')).toBeInTheDocument();
+    expect(callWorker).toHaveBeenCalledWith('image.generate.fail', { jobId: 'job' });
+    expect(screen.queryByTitle('取消生成')).not.toBeInTheDocument();
   });
 });

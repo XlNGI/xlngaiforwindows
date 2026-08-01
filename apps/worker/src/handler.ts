@@ -84,6 +84,7 @@ const methods = new Set<WorkerMethod>([
   'generation.draft.save',
   'image.generate.prepare',
   'image.generate.complete',
+  'image.generate.fail',
   'image.generate.cancel',
   'image.generate.get',
   'asset.list',
@@ -242,19 +243,24 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
           rootPath: requireString(params, 'rootPath'),
         };
         await generationService.cancelAll();
+        imageGenerationService.cancelAll();
         result = projectService.create(typedParams.rootPath, typedParams.name);
         generationService.recoverInterrupted();
+        imageGenerationService.recoverInterrupted();
         break;
       }
       case 'project.open': {
         const typedParams: ProjectOpenParams = { rootPath: requireString(params, 'rootPath') };
         await generationService.cancelAll();
+        imageGenerationService.cancelAll();
         result = projectService.open(typedParams.rootPath);
         generationService.recoverInterrupted();
+        imageGenerationService.recoverInterrupted();
         break;
       }
       case 'project.close':
         await generationService.cancelAll();
+        imageGenerationService.cancelAll();
         projectService.close();
         result = { closed: true };
         break;
@@ -285,8 +291,10 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
           destinationRoot: requireString(params, 'destinationRoot'),
         };
         await generationService.cancelAll();
+        imageGenerationService.cancelAll();
         result = projectService.restore(typedParams.backupPath, typedParams.destinationRoot);
         generationService.recoverInterrupted();
+        imageGenerationService.recoverInterrupted();
         break;
       }
       case 'document.list':
@@ -387,6 +395,9 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         result = await imageGenerationService.complete(
           params as unknown as ImageGenerationCompleteParams,
         );
+        break;
+      case 'image.generate.fail':
+        result = imageGenerationService.failTransport(requireString(params, 'jobId'));
         break;
       case 'image.generate.cancel':
         result = imageGenerationService.cancel(requireString(params, 'jobId'));

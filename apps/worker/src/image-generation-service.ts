@@ -63,7 +63,10 @@ export class ImageGenerationService {
   }
 
   async complete(params: ImageGenerationCompleteParams): Promise<ImageGenerationJobInfo> {
+    const projectSession = this.projects.current();
+    if (!projectSession) throw new Error('No project is open.');
     const job = this.projects.access(false, (database, project) => {
+      if (project !== projectSession) throw new Error('Project session changed during generation.');
       const repositories = createRepositories(database);
       const found = repositories.jobs.get(params.jobId);
       if (!found || found.projectId !== project.id)
@@ -78,20 +81,37 @@ export class ImageGenerationService {
     try {
       image = await downloadImage(extractImageSource(params.providerBody));
     } catch (error) {
+      if (this.projects.current() !== projectSession)
+        throw new Error('Project session changed during generation.');
       return this.fail(job.id, error instanceof Error ? error.message : 'Image download failed.');
     }
+
+    if (this.projects.current() !== projectSession)
+      throw new Error('Project session changed during generation.');
+    const activeJob = this.projects.access(false, (database, project) => {
+      if (project !== projectSession) throw new Error('Project session changed during generation.');
+      const repositories = createRepositories(database);
+      const current = repositories.jobs.get(job.id);
+      if (!current || current.projectId !== project.id)
+        throw new Error('Generation job was not found.');
+      return current;
+    });
+    if (activeJob.status !== 'running') return this.get(activeJob.id);
+
     const extension = extensionFor(image.contentType, image.sourceUrl);
     const assetId = randomUUID();
     const relativePath = join('assets', 'images', `${assetId}${extension}`);
-    const finalPath = resolveProjectRelativePath(this.projects.current()!.rootPath, relativePath);
+    const finalPath = resolveProjectRelativePath(projectSession.rootPath, relativePath);
     const temporaryPath = `${finalPath}.${process.pid}.tmp`;
-    mkdirSync(join(this.projects.current()!.rootPath, 'assets', 'images'), { recursive: true });
+    mkdirSync(join(projectSession.rootPath, 'assets', 'images'), { recursive: true });
     try {
       writeFileSync(temporaryPath, image.bytes, { flag: 'wx' });
       renameSync(temporaryPath, finalPath);
       const hash = createHash('sha256').update(image.bytes).digest('hex');
       const size = statSync(finalPath).size;
       return this.projects.access(true, (database, project) => {
+        if (project !== projectSession)
+          throw new Error('Project session changed during generation.');
         const repositories = createRepositories(database);
         const current = repositories.jobs.get(job.id);
         if (!current || current.projectId !== project.id)
@@ -144,8 +164,24 @@ export class ImageGenerationService {
         project.updatedAt = now;
         return this.toInfo(cancelled, [], repositories.generationResults.listByJob(job.id));
       }
-      return this.toInfo(job, [], repositories.generationResults.listByJob(job.id));
+      return this.toInfo(
+        job,
+        repositories.assets.listByProject(project.id),
+        repositories.generationResults.listByJob(job.id),
+      );
     });
+  }
+
+  failTransport(jobId: string): ImageGenerationJobInfo {
+    return this.fail(jobId, 'Provider transport failed before completion.');
+  }
+
+  cancelAll(): number {
+    return this.finishActiveJobs('cancelled');
+  }
+
+  recoverInterrupted(): number {
+    return this.finishActiveJobs('failed', 'Generation was interrupted before completion.');
   }
 
   get(jobId: string): ImageGenerationJobInfo {
@@ -211,6 +247,13 @@ export class ImageGenerationService {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
       if (!job || job.projectId !== project.id) throw new Error('Generation job was not found.');
+      if (job.status !== 'running' && job.status !== 'pending') {
+        return this.toInfo(
+          job,
+          repositories.assets.listByProject(project.id),
+          repositories.generationResults.listByJob(job.id),
+        );
+      }
       const now = new Date().toISOString();
       const failed = {
         ...job,
@@ -222,6 +265,32 @@ export class ImageGenerationService {
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.toInfo(failed, [], repositories.generationResults.listByJob(job.id));
+    });
+  }
+
+  private finishActiveJobs(status: 'failed' | 'cancelled', message?: string): number {
+    const current = this.projects.current();
+    if (!current || current.mode !== 'read-write') return 0;
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const active = repositories.jobs
+        .listByProject(project.id)
+        .filter((job) => job.status === 'running' || job.status === 'pending');
+      if (active.length === 0) return 0;
+      const now = new Date().toISOString();
+      database.transaction(() => {
+        for (const job of active) {
+          repositories.jobs.save({
+            ...job,
+            status,
+            errorJson: message ? JSON.stringify({ message }) : undefined,
+            updatedAt: now,
+          });
+        }
+        repositories.projects.touch(now);
+      })();
+      project.updatedAt = now;
+      return active.length;
     });
   }
 

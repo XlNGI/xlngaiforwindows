@@ -30,6 +30,7 @@ import { callWorker } from './worker-client';
 import { submitProviderRequest } from './provider-client';
 
 interface ProductionPanelProps {
+  projectId?: string;
   shotId?: string;
   writable: boolean;
 }
@@ -56,7 +57,7 @@ function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
   });
 }
 
-export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
+export function ProductionPanel({ projectId, shotId, writable }: ProductionPanelProps) {
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [capability, setCapability] = useState<GenerationCapability>();
   const [provider, setProvider] = useState('');
@@ -147,6 +148,23 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
       );
   }, [adapter?.credentialProvider]);
 
+  useEffect(() => {
+    let active = true;
+    setAssets([]);
+    if (!projectId) return () => undefined;
+    void callWorker('asset.list', {})
+      .then((items) => {
+        if (active) setAssets(items);
+      })
+      .catch((reason) => {
+        if (active)
+          setGenerationStatus(reason instanceof Error ? reason.message : '素材列表读取失败。');
+      });
+    return () => {
+      active = false;
+    };
+  }, [projectId]);
+
   const capabilityAdapters = useMemo(
     () => catalog?.adapters.filter((item) => item.capability === capability) ?? [],
     [catalog, capability],
@@ -184,6 +202,7 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
     });
     setErrors((current) => current.filter((error) => normalizeErrorPath(error.path) !== key));
     setMessage('');
+    setGenerationStatus('');
   };
 
   const saveDraft = async () => {
@@ -230,6 +249,7 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
 
   const generateImage = async () => {
     if (!adapter || !writable) return;
+    let preparedJobId: string | undefined;
     setBusy(true);
     setGenerationStatus('');
     try {
@@ -247,6 +267,7 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
         adapterKey: adapter.key,
         parameters,
       });
+      preparedJobId = job.id;
       setGenerationJobId(job.id);
       setGenerationStatus('正在请求 Provider...');
       const response = await submitProviderRequest(adapter.key, parameters);
@@ -259,35 +280,45 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
       setGenerationStatus(
         completed.status === 'succeeded'
           ? '图片已保存到资产库。'
-          : (completed.error ?? '生成失败。'),
+          : completed.status === 'cancelled'
+            ? '已取消图片生成。'
+            : (completed.error ?? '生成失败。'),
       );
       if (completed.status === 'succeeded') setAssets(await callWorker('asset.list', {}));
     } catch (reason) {
+      if (preparedJobId) {
+        try {
+          await callWorker('image.generate.fail', { jobId: preparedJobId });
+        } catch {
+          // Project close/restart recovery owns terminalization when the Worker is unavailable.
+        }
+      }
       setGenerationStatus(reason instanceof Error ? reason.message : '图片生成失败。');
     } finally {
+      setGenerationJobId(undefined);
       setBusy(false);
     }
   };
 
   const renameAsset = async (asset: AssetInfo) => {
     const currentName = asset.relativePath.split(/[\\/]/).pop() ?? 'image.png';
-    const name = window.prompt('璇疯緭鍏ユ柊鏂囦欢鍚嶏紝闇€淇濈暀鎵╁睍鍚嶏細', currentName);
+    const name = window.prompt('请输入新文件名，并保留扩展名：', currentName);
     if (!name) return;
     try {
       const renamed = await callWorker('asset.rename', { assetId: asset.id, name });
       setAssets((current) => current.map((item) => (item.id === renamed.id ? renamed : item)));
     } catch (reason) {
-      setGenerationStatus(reason instanceof Error ? reason.message : 'Asset rename failed.');
+      setGenerationStatus(reason instanceof Error ? reason.message : '素材重命名失败。');
     }
   };
 
   const removeAsset = async (asset: AssetInfo) => {
-    if (!window.confirm('纭畾鍒犻櫎姝ゅ浘鐗囪祫浜э紵')) return;
+    if (!window.confirm('确定删除此图片素材？')) return;
     try {
       await callWorker('asset.delete', { assetId: asset.id });
       setAssets((current) => current.filter((item) => item.id !== asset.id));
     } catch (reason) {
-      setGenerationStatus(reason instanceof Error ? reason.message : 'Asset delete failed.');
+      setGenerationStatus(reason instanceof Error ? reason.message : '素材删除失败。');
     }
   };
 
@@ -455,33 +486,33 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
                   </button>
                 )}
                 <label className="asset-kind-field">
-                  淇濆瓨涓?
+                  保存为
                   <select
                     value={assetKind}
                     onChange={(event) => setAssetKind(event.target.value as typeof assetKind)}
                     disabled={busy}
                   >
-                    <option value="generated-image">鏅€氳祫浜?</option>
-                    <option value="character">瑙掕壊</option>
-                    <option value="scene">鍦烘櫙</option>
-                    <option value="first-frame">棣栧抚</option>
-                    <option value="last-frame">灏惧抚</option>
+                    <option value="generated-image">普通素材</option>
+                    <option value="character">角色</option>
+                    <option value="scene">场景</option>
+                    <option value="first-frame">首帧</option>
+                    <option value="last-frame">尾帧</option>
                   </select>
                 </label>
                 {generationStatus && <span className="credential-message">{generationStatus}</span>}
               </div>
               {assets.length > 0 && (
-                <div className="asset-list" aria-label="璧勪骇鍒楄〃">
+                <div className="asset-list" aria-label="素材列表">
                   {assets.map((asset) => (
                     <div className="asset-row" key={asset.id}>
                       <span title={asset.sourceUrl}>{asset.relativePath}</span>
                       <small>
-                        {asset.kind} 路 {(asset.sizeBytes / 1024).toFixed(1)} KiB
+                        {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
                       </small>
                       <button
                         className="icon-button subtle"
                         type="button"
-                        title="閲嶅懡鍚嶈祫浜?"
+                        title="重命名素材"
                         onClick={() => void renameAsset(asset)}
                       >
                         <Save size={13} />
@@ -489,7 +520,7 @@ export function ProductionPanel({ shotId, writable }: ProductionPanelProps) {
                       <button
                         className="icon-button danger"
                         type="button"
-                        title="鍒犻櫎璧勪骇"
+                        title="删除素材"
                         onClick={() => void removeAsset(asset)}
                       >
                         <Trash2 size={13} />

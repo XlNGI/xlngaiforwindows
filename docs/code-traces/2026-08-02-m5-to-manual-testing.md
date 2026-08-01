@@ -3,7 +3,7 @@
 - Started: 2026-08-02T02:08:29+08:00
 - Repository: `D:\SB\xlngaiforwindows`
 - Base revision: `main` at `856e30c`
-- Status: stopped
+- Status: in progress
 
 ## Objective
 
@@ -60,3 +60,53 @@
 - Action: stopped implementation at the M5 manual-test handoff as requested.
 - Decision: M5 code/hosted gates are `PASS`; release and stage sign-off remain `HOLD` until a human performs real Vidu success, credential, asset persistence, failure, and restart checks.
 - Next: execute the checklist in `docs/M5-IMAGE-GENERATION.md`; record human outcomes before considering M6.
+
+### 2026-08-02T03:12:00+08:00 - Automated manual-test continuation started
+- Evidence: user explicitly requested automatic completion of subsequent operations after the manual-test handoff.
+- Action: reopened this trace and began Windows desktop UI automation for the M5 acceptance checklist.
+- Decision: automate installation/startup/UI/failure/restart paths; never fabricate a real successful Vidu request or expose credentials. Any paid/credentialed success remains `HOLD` when no credential is configured.
+- Next: locate the final executable, launch it, and execute the safe M5 UI checks.
+
+### 2026-08-02T05:18:00+08:00 - Safe UI acceptance exposed an orphaned image job
+
+- Evidence: the browser-driven desktop UI created `D:\SB\xlngaiforwindows-m5-ui-test`, one scene, one shot, and a valid Vidu draft. Empty prompt submission was rejected, the valid `9:16`/`2K` draft survived project close/reopen, and the non-Tauri page refused Provider submission through the documented secure-transport boundary.
+- Evidence: read-only SQLite inspection returned `integrity_check=ok`, no foreign-key violations, `generation_results=0`, and `assets=0`, but the prepared job remained `running` after the secure transport threw.
+- Action: changed the M5 acceptance result to `FAIL` because an asynchronous task did not reach a terminal state.
+- Decision: do not sign M5 or continue to M6 until transport failure, project close/switch, Worker restart, and cancellation-during-download are terminal and regression-tested.
+- Next: add an explicit transport-failure transition, close/switch cancellation, restart recovery, and project-session checks.
+
+### 2026-08-02T05:26:00+08:00 - Image job terminalization fixed and retested
+
+- Evidence: added `image.generate.fail`; project close/switch now terminalizes active image jobs as `cancelled`; writable project reopen repairs interrupted jobs as `failed`; completion rechecks the exact project session and current job state after image download.
+- Action: fixed all M5 asset-management mojibake discovered during UI inspection and cleared stale generation errors when parameters change.
+- Files: `packages/contracts/src/index.ts`, `apps/worker/src/image-generation-service.ts`, `apps/worker/src/handler.ts`, `apps/desktop/src/ProductionPanel.tsx`, their focused tests, and `docs/M5-IMAGE-GENERATION.md`.
+- Commands: Worker image-service tests -> exit `0` (7 tests); Worker full tests -> exit `0` (38 tests); Desktop production-panel tests -> exit `0` (4 tests); Worker/Desktop typecheck -> exit `0`.
+- Evidence: after a real Worker restart and a second safe UI failure, SQLite contained two `failed` jobs (`interrupted` recovery and `transport failed`), zero results, zero assets, `integrity_check=ok`, and no foreign-key violations. The draft still contained the original prompt, `9:16`, and `2K` values.
+- Decision: the discovered state-machine `P1` and UI encoding defect are fixed. Real Vidu success and Windows Credential Manager use remain `HOLD`; the browser failure test is not represented as native Provider success.
+- Next: run full local gates, commit and push, wait for hosted Windows CI, then record the remaining manual/credentialed boundary.
+
+### 2026-08-02T05:31:00+08:00 - Full local release gates passed
+
+- Evidence: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and `git diff --check` exited `0`; the first full run passed 13 test files and 73 tests.
+- Evidence: Worker Sidecar build and M4 lifecycle validation passed with five adapters, exact v2 resolution, invalid-combination rejection, credential exclusion, and draft round-trip.
+- Evidence: `cargo fmt --check`, `cargo check --offline`, and `cargo test --offline` passed through the installed Rust toolchain; seven Rust tests passed.
+- Evidence: `pnpm tauri:build` produced the 20,210,990-byte x64 NSIS bundle with SHA-256 `1D64DA3EC984F7458383370A3B76CFA83FB6D8F9805BB96EEEF4BD13B75B51EA`.
+- Evidence: `scripts/validate-nsis-install.ps1` passed silent clean install, desktop/Worker startup and SQLite survival, graceful desktop close, Worker cleanup, silent uninstall, and installed-binary removal.
+- Decision: local code, native, package, and install gates are `PASS`; hosted Windows CI is required for the final code revision. Real credentialed Provider success and human visual acceptance remain `HOLD`.
+- Next: perform final diff/security review, commit and push, then wait for the hosted workflow result.
+
+### 2026-08-02T05:34:00+08:00 - Final diff review closed the asset-reload gap
+
+- Evidence: persisted assets were only refreshed after a successful generation in the current React session; reopening a project left the production-panel list empty even though SQLite and files were intact.
+- Action: keyed asset loading by persistent project ID, cleared stale project assets during switches, and preserved the explicit cancelled status after a Provider request returns. Added a desktop regression test for reopening a project with an existing asset.
+- Files: `apps/desktop/src/App.tsx`, `apps/desktop/src/ProductionPanel.tsx`, `apps/desktop/src/ProductionPanel.test.tsx`.
+- Decision: the M5 reopen-and-confirm workflow is now represented in the UI and automated tests. Re-run all gates because the final release inputs changed.
+- Next: repeat local tests/build/package checks, then commit and push.
+
+### 2026-08-02T05:39:00+08:00 - Final local gates passed after asset reload
+
+- Evidence: final `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and `git diff --check` runs passed; 13 test files and 74 tests passed, including eight Desktop tests and 38 Worker tests.
+- Evidence: final `pnpm tauri:build` rebuilt the Sidecar and produced a 20,212,345-byte x64 NSIS installer with SHA-256 `12B64D57F78C9C7FF02D5754F8C9913954C2FEF8ED2C5975EF89183531C50829`.
+- Evidence: the final installer again passed clean install, startup/SQLite survival, graceful close, Worker cleanup, silent uninstall, and installed-binary removal.
+- Decision: all locally executable code, state-machine, native, package, and clean-install gates are `PASS`. Hosted CI remains pending; real Vidu/OpenAI success and human visual acceptance remain `HOLD`.
+- Next: commit and push the reviewed revision, then wait for GitHub-hosted Windows CI.

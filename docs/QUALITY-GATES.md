@@ -99,14 +99,15 @@ created -> streaming -> complete
 
 2026-08-02 自动化与外部条件复验：
 
-- `pnpm test`：13 个测试文件、65 个测试通过。
+- `pnpm test`：13 个测试文件、74 个测试通过。
 - `pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`：通过。
 - `pnpm worker:sidecar` 与 M4 Sidecar 生命周期验证：通过。
 - `cargo fmt --check`、`cargo check --offline`、`cargo test --offline`：通过，7 个 Rust 测试通过。
-- `pnpm tauri:build`：通过，生成 20,201,254 字节的 x64 NSIS 安装包；SHA-256 为 `2461E07956CA1328DC5DA1DD02C065CA2A4B8FB4A319DECFA2CF4D9CADE9F3AA`。
+- `pnpm tauri:build`：通过，生成 20,212,345 字节的 x64 NSIS 安装包；SHA-256 为 `12B64D57F78C9C7FF02D5754F8C9913954C2FEF8ED2C5975EF89183531C50829`。
 - Release 同目录冒烟：通过；桌面程序实际拉起安装后名称 `ai-video-worker.exe`，并在启动 health/SQLite 检查期间保持 Worker 存活。
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
 - 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，GitHub Windows runner run `30710775740` 的全部 15 步骤通过（包括该安装生命周期步骤）。
+- M5 生图失败路径：安全传输失败显式落为 `failed`，关闭/切换落为 `cancelled`，Worker 重启将遗留活动任务恢复为 `failed`；下载结束后复验项目会话和任务状态。自动化 UI/SQLite 复测未发现 `running` 遗留、结果记录或素材半成品。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
 - 未验证：真实 OpenAI 模型请求、带真实凭据的 Vidu 成功请求。当前环境未配置 Provider 凭据，且 OpenAI 443 连接超时。
 

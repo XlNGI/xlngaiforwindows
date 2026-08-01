@@ -910,7 +910,7 @@ export function App() {
         )}
       </main>
 
-      <ProductionPanel shotId={shot?.id} writable={writable} />
+      <ProductionPanel projectId={project?.id} shotId={shot?.id} writable={writable} />
 
       <aside className="chat-panel panel-border">
         <div className="panel-heading">

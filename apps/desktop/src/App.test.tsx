@@ -135,7 +135,8 @@ describe('App', () => {
           schemaVersion: 4,
         });
       }
-      if (method === 'project.recent' || method === 'document.list') return Promise.resolve([]);
+      if (method === 'project.recent' || method === 'document.list' || method === 'asset.list')
+        return Promise.resolve([]);
       if (method === 'scene.list') {
         return Promise.resolve([
           {
