@@ -37,7 +37,7 @@ const descriptor: AdapterDescriptor = {
   provider: 'vidu',
   providerLabel: 'Vidu',
   model: 'viduq2',
-  modelLabel: 'Vidu Q2 Image',
+  modelLabel: 'Vidu Q2',
   apiVersion: 'v2',
   schemaVersion: 1,
   endpoint: 'https://api.vidu.com/ent/v2/reference2image',
@@ -330,6 +330,12 @@ describe('ProductionPanel', () => {
     render(<ProductionPanel shotId="shot" writable />);
     const model = await screen.findByLabelText('模型');
 
+    expect(Array.from((model as HTMLSelectElement).options).map((option) => option.text)).toEqual([
+      'Vidu Q2',
+      'Vidu Q2',
+    ]);
+    expect(await screen.findByText('Vidu · API v2')).toBeInTheDocument();
+
     fireEvent.change(model, { target: { value: v3.key } });
 
     await waitFor(() =>
@@ -341,6 +347,7 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(model).toHaveValue(v3.key);
+    expect(await screen.findByText('Vidu · API v3')).toBeInTheDocument();
   });
 
   it('loads persisted assets when a project opens', async () => {

@@ -51,3 +51,24 @@ Expose text-to-video, image-to-video, reference-to-video, and start/end-frame-to
 - Environment: release prebuild initially encountered the same development-Worker `EBUSY`; after stopping the verified development process tree it completed. The Tauri development app, Worker, and Vite server were then restarted successfully.
 - Decision: all required local automated and release gates are `PASS`; Hosted Windows remains pending.
 - Next: commit and push the reviewed changes, wait for Hosted Windows, and stop at the manual Provider validation boundary.
+
+### 2026-08-02T20:13:30+08:00 - Q3-Drama contract and model naming verified
+
+- Evidence: the supplied Vidu announcement names the product `Vidu Q3-Drama`; its linked request documentation defines model ID `viduq3-drama` on `POST /ent/v2/reference2video` with 1–7 images, 2–15 seconds, 720p/1080p, 9:16 or 16:9, and audio output support.
+- Evidence: `v2` is the API path/version segment and is already stored separately as `apiVersion`; the Desktop model selector currently appends it to `modelLabel`, while the adapter metadata also displays it separately.
+- Action: updated the M4/M6 contracts before implementation to require exact official model labels, separate API-version display, and the Q3-Drama parameter boundary.
+- Files: `docs/M4-ADAPTERS-PARAMETERS.md`, `docs/M6-VIDEO-POLLING.md`
+- Decision: add `viduq3-drama` as a new `REFERENCE_TO_VIDEO` adapter and keep `apiVersion: v2` in its full adapter key and metadata, not in the displayed model name.
+- Next: update the Registry, native Provider allowlist, Desktop selector, and focused tests.
+
+### 2026-08-02T20:33:21+08:00 - Q3-Drama integration and release gates passed
+
+- Action: added the `REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2` adapter, exact official product labels, separate API-version display, native fixed-route/model injection, explicit sidecar coverage, and the missing generation-adapters build step in `dev:desktop` startup.
+- Evidence: build and typecheck passed; all 17 TypeScript test files and 120 tests passed; lint, format check, Rust format check, and all 12 Rust tests passed.
+- Evidence: the rebuilt packaged sidecar returned eight current adapters, resolved the exact Q3-Drama key and label, accepted its valid 8-second/1080p request, and rejected a 16-second request.
+- Evidence: Tauri release build produced an x64 NSIS installer at 20,259,723 bytes with SHA-256 `5AA3128D74AC3BC7BFEC6358D10168AF9F045BAED319BE7A5548FA453F43C329`; isolated install, Worker startup, graceful close, Worker exit, uninstall, and binary cleanup all passed.
+- Evidence: the restarted desktop is responsive with Worker PID 16288 and Vite listening at `http://127.0.0.1:1420`; the Tauri WebView displays the model product name separately from `API v2`.
+- Environment: the first sidecar rebuild was blocked by `EBUSY` while the development Worker held `better_sqlite3.node`; the verified development process tree was stopped, the sidecar and release gates then passed, and the development app was restarted.
+- Files: `packages/generation-adapters/src/index.ts`, `apps/desktop/src/ProductionPanel.tsx`, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/worker/scripts/validate-m4-sidecar.mjs`
+- Decision: optional audio-reference files from the supplied API document remain outside this change because the current local-input and persistence-redaction boundary is image-specific; Q3-Drama itself is usable with one to seven image references and all verified core generation fields.
+- Next: commit and push the local changes, wait for Hosted Windows, and stop before any real credentialed Provider request.

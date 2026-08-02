@@ -78,6 +78,43 @@ try {
     }),
     'adapter.resolve',
   );
+  const dramaAdapter = requireOk(
+    await request('adapter.resolve', {
+      capability: 'REFERENCE_TO_VIDEO',
+      provider: 'vidu',
+      model: 'viduq3-drama',
+      apiVersion: 'v2',
+    }),
+    'adapter.resolve Q3-Drama',
+  );
+  if (dramaAdapter.modelLabel !== 'Vidu Q3-Drama') {
+    throw new Error('Q3-Drama model label does not match the official product name');
+  }
+  const dramaParameters = {
+    images: ['https://example.com/reference.png'],
+    prompt: 'Dialogue scene',
+    duration: 8,
+    aspect_ratio: '16:9',
+    resolution: '1080p',
+    audio: true,
+  };
+  const dramaValid = requireOk(
+    await request('adapter.validate', {
+      adapterKey: dramaAdapter.key,
+      parameters: dramaParameters,
+    }),
+    'adapter.validate Q3-Drama',
+  );
+  const dramaInvalid = requireOk(
+    await request('adapter.validate', {
+      adapterKey: dramaAdapter.key,
+      parameters: { ...dramaParameters, duration: 16 },
+    }),
+    'adapter.validate Q3-Drama duration',
+  );
+  if (!dramaValid.valid || dramaInvalid.valid) {
+    throw new Error('Q3-Drama parameter limits are not enforced');
+  }
   const combination = requireOk(
     await request('adapter.validate', {
       adapterKey: 'IMAGE_TO_VIDEO:vidu:vidu2.0:v2',
@@ -137,6 +174,8 @@ try {
         projectRoot,
         adapterCount: catalog.adapters.length,
         resolvedAdapter: adapter.key,
+        resolvedDramaAdapter: dramaAdapter.key,
+        q3DramaLimitsVerified: true,
         invalidCombinationRejected: true,
         credentialExcludedFromDatabase: true,
         draftRoundTrip: true,

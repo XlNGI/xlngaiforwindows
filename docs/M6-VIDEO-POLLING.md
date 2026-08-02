@@ -1,11 +1,11 @@
 # M6 生视频与本地轮询设计
 
-版本：2  
+版本：3  
 日期：2026-08-02
 
 ## 1. 范围与非目标
 
-M6 在不配置公网 `callback_url` 的条件下，支持 Vidu `/ent/v2/text2video` 文生视频、`/ent/v2/img2video` 图生视频、`/ent/v2/reference2video` 参考生视频（1–7 张参考图）和 `/ent/v2/start-end2video` 首尾帧生视频（严格按首帧、尾帧顺序传入 2 张图）的提交、本地轮询、重启恢复、暂停、继续、取消、结果下载、资产登记及任务中心展示。四种视频能力在生产方式中独立显示。图片参数同时支持公开 URL 和从本机选择的 PNG/JPEG/WebP 文件；本机文件仅在当前界面会话中转换为 Provider 官方支持的 Data URL。
+M6 在不配置公网 `callback_url` 的条件下，支持 Vidu `/ent/v2/text2video` 文生视频、`/ent/v2/img2video` 图生视频、`/ent/v2/reference2video` 参考生视频（1–7 张参考图）和 `/ent/v2/start-end2video` 首尾帧生视频（严格按首帧、尾帧顺序传入 2 张图）的提交、本地轮询、重启恢复、暂停、继续、取消、结果下载、资产登记及任务中心展示。参考生视频目录包含通用 `viduq3` 和面向精品剧生产的 `viduq3-drama`；后者严格限制为 2–15 秒、720p/1080p、9:16/16:9。四种视频能力在生产方式中独立显示。图片参数同时支持公开 URL 和从本机选择的 PNG/JPEG/WebP 文件；本机文件仅在当前界面会话中转换为 Provider 官方支持的 Data URL。
 
 M6 不实现 M7 的发布迁移、诊断导出或自动更新；不自动调用真实 Provider；不把 API 密钥、完整签名 URL 或完整 Provider 响应写入项目数据库和日志。
 

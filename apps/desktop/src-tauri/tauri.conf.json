@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.aivideo.workspace",
   "build": {
-    "beforeDevCommand": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build && pnpm --filter @ai-video/desktop dev:ui",
+    "beforeDevCommand": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build && pnpm --filter @ai-video/desktop dev:ui",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build:sidecar && pnpm --filter @ai-video/desktop build",
     "frontendDist": "../dist"

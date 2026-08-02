@@ -9,6 +9,16 @@ describe('adapter registry', () => {
     for (const adapter of catalog.adapters) {
       expect(resolveAdapter(adapter)).toMatchObject({ key: adapter.key });
     }
+    expect(catalog.adapters.map(({ model, modelLabel }) => ({ model, modelLabel }))).toEqual(
+      expect.arrayContaining([
+        { model: 'viduq1', modelLabel: 'Vidu Q1' },
+        { model: 'viduq2', modelLabel: 'Vidu Q2' },
+        { model: 'viduq3', modelLabel: 'Vidu Q3' },
+        { model: 'viduq3-pro', modelLabel: 'Vidu Q3 Pro' },
+        { model: 'viduq3-drama', modelLabel: 'Vidu Q3-Drama' },
+        { model: 'vidu2.0', modelLabel: 'Vidu 2.0' },
+      ]),
+    );
   });
 
   it('rejects unsupported selections instead of falling back to another model', () => {
@@ -124,6 +134,28 @@ describe('adapter registry', () => {
         callback_url: 'https://attacker.invalid/callback',
       }),
     ).toMatchObject({ valid: false });
+  });
+
+  it('enforces the official Vidu Q3-Drama reference-video limits', () => {
+    const key = 'REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2';
+    const base = {
+      images: ['https://example.com/reference.png'],
+      prompt: '古装人物在宫殿中自然对话',
+      duration: 8,
+      aspect_ratio: '16:9',
+      resolution: '1080p',
+      audio: true,
+    };
+    expect(validateAdapterParameters(key, base)).toMatchObject({ valid: true });
+    expect(validateAdapterParameters(key, { ...base, duration: 16 })).toMatchObject({
+      valid: false,
+    });
+    expect(validateAdapterParameters(key, { ...base, aspect_ratio: '1:1' })).toMatchObject({
+      valid: false,
+    });
+    expect(validateAdapterParameters(key, { ...base, resolution: '540p' })).toMatchObject({
+      valid: false,
+    });
   });
 
   it('requires exactly two ordered images for start-end video', () => {

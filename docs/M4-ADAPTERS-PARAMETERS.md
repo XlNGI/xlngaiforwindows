@@ -1,7 +1,7 @@
 # M4 适配器与动态参数
 
-版本：3  
-日期：2026-08-01
+版本：4  
+日期：2026-08-02
 
 状态：M4 代码、自动化修复门禁、Release 同目录启动冒烟和 Vidu 官方失败响应 `PASS`；项目最终发布签收 `HOLD`。带真实凭据的 Vidu 成功调用属于 M5/M6 验收，不作为进入 M5 的循环前置条件。
 
@@ -9,7 +9,7 @@
 
 M4 建立“生产方式 + 供应商 + 模型 + API 版本”到唯一适配器、参数 JSON Schema 和 UI Schema 的映射。当前阶段只保存经过校验的参数草稿，不提交真实生图或视频任务，不读取会话内容，也不允许 LLM 填写生产参数。
 
-首批 Registry 来自 2026-08-01 核对的 Vidu 官方 [Model Map](https://platform.vidu.com/docs/model-map)、[Reference to Image](https://platform.vidu.com/docs/reference-to-image) 和 [Image to Video](https://platform.vidu.com/docs/image-to-video)：
+Registry 来自 Vidu 官方 [Model Map](https://platform.vidu.com/docs/model-map)、[Reference to Image](https://platform.vidu.com/docs/reference-to-image)、[Image to Video](https://platform.vidu.com/docs/image-to-video)，以及 2026-08-02 核对的 [Q3-Drama 发布说明](https://shengshu.feishu.cn/wiki/UFg3wlDdziaQ7ZkHafgcaCU5ntc) 和其链接的 [参考生 API（Q3）](https://shengshu.feishu.cn/wiki/URYzwxfMWizDM7kRlCwcRI3Ynzf)：
 
 | 能力 | 模型 | 关键约束 |
 |---|---|---|
@@ -18,6 +18,7 @@ M4 建立“生产方式 + 供应商 + 模型 + API 版本”到唯一适配器�
 | `REFERENCE_TO_IMAGE` | `viduq1` | 1–7 张参考图，仅 1080p |
 | `TEXT_TO_VIDEO` | `viduq3-pro` | 无输入图片，1–16 秒，540p/720p/1080p |
 | `REFERENCE_TO_VIDEO` | `viduq3` | 1–7 张参考图，3–16 秒，540p/720p/1080p |
+| `REFERENCE_TO_VIDEO` | `viduq3-drama` | 1–7 张参考图，2–15 秒，720p/1080p，仅 9:16/16:9，支持音画直出 |
 | `START_END_TO_VIDEO` | `viduq3-pro` | 严格 2 张首尾帧，1–16 秒，540p/720p/1080p |
 | `IMAGE_TO_VIDEO` | `vidu2.0` | 1 张起始帧；4 秒支持 360p/720p/1080p，8 秒仅支持 720p |
 
@@ -26,6 +27,7 @@ M4 建立“生产方式 + 供应商 + 模型 + API 版本”到唯一适配器�
 ## 2. 不变量
 
 - 适配器键固定为 `capability:provider:model:apiVersion`，Registry 内必须唯一。
+- `modelLabel` 使用官方产品名；模型选择器不得把 `apiVersion` 拼进模型名。API 版本在适配器元信息中单独展示，并继续由完整 `adapterKey` 锁定。
 - 已持久化任务使用过的旧视频适配器键只保留为兼容查找项，不再出现在新任务目录中；重启恢复不得因能力拆分而丢失旧任务。
 - 解析结果必须恰好为一个；零个或多个匹配都视为错误。
 - 参数对象必须通过适配器 JSON Schema，`additionalProperties` 固定为 `false`。
@@ -94,7 +96,7 @@ React（adapterKey + 已校验参数）
 - Worker 集成测试覆盖按镜头保存与读取、非法参数拒绝，以及敏感测试值不进入项目 SQLite。
 - React 测试覆盖 Schema 字段渲染、专业参数区、完整 adapter key/API Version 锁定、保存前校验和非法参数不保存。
 - Rust 测试覆盖凭据供应商白名单、adapter 到 Vidu 主机/路径的固定映射、服务端模型注入，以及凭据/endpoint 字段拒绝；真实凭据写入只在用户显式操作时执行，不在自动化测试中污染系统凭据。
-- Sidecar 生命周期测试覆盖 5 个适配器解析、非法组合拒绝、草稿往返和数据库凭据排除。
+- Sidecar 生命周期测试覆盖当前适配器目录解析、非法组合拒绝、草稿往返和数据库凭据排除。
 - 2026-08-02 向固定 Vidu 官方端点发送无效测试令牌，得到 HTTP `403` 官方失败响应；未创建任务或消耗额度。
 
 带真实凭据的 Vidu 成功请求属于 M5/M6，本轮未执行；M4 已验证安全桥的路由与拒绝规则，并取得无效测试令牌对应的官方 HTTP `403` 失败响应。

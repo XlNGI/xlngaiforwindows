@@ -858,7 +858,7 @@ export function ProductionPanel({
             >
               {modelOptions.map((item) => (
                 <option key={item.key} value={item.key}>
-                  {item.modelLabel} · {item.apiVersion}
+                  {item.modelLabel}
                 </option>
               ))}
             </select>

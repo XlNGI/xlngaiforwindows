@@ -136,6 +136,13 @@ fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderT
             model: "viduq3",
             allowed_fields: REFERENCE_VIDEO_FIELDS,
         },
+        "REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2" => ProviderTarget {
+            credential_provider,
+            host,
+            path: "/ent/v2/reference2video",
+            model: "viduq3-drama",
+            allowed_fields: REFERENCE_VIDEO_FIELDS,
+        },
         "START_END_TO_VIDEO:vidu:viduq3-pro:v2" | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => {
             ProviderTarget {
                 credential_provider,
@@ -371,6 +378,7 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
     match adapter_key {
         "TEXT_TO_VIDEO:vidu:viduq3-pro:v2"
         | "REFERENCE_TO_VIDEO:vidu:viduq3:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2"
         | "START_END_TO_VIDEO:vidu:viduq3-pro:v2"
         | "IMAGE_TO_VIDEO:vidu:viduq3:v2"
         | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2"
@@ -1065,6 +1073,24 @@ mod tests {
             .expect("reference video adapter should resolve");
         assert_eq!(reference.path, "/ent/v2/reference2video");
         assert_eq!(reference.model, "viduq3");
+        let drama = provider_target("REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2", "global")
+            .expect("Q3-Drama reference video adapter should resolve");
+        assert_eq!(drama.path, "/ent/v2/reference2video");
+        let drama_body = provider_payload(
+            drama,
+            json!({
+                "images": ["https://example.com/reference.png"],
+                "prompt": "dialogue scene",
+                "duration": 8,
+                "aspect_ratio": "16:9",
+                "resolution": "1080p",
+                "audio": true
+            }),
+        )
+        .expect("Q3-Drama payload should serialize");
+        let parsed_drama: serde_json::Value =
+            serde_json::from_slice(&drama_body).expect("valid Q3-Drama JSON");
+        assert_eq!(parsed_drama["model"], "viduq3-drama");
         let text = provider_target("TEXT_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("text video adapter should resolve");
         assert_eq!(text.path, "/ent/v2/text2video");
@@ -1135,6 +1161,7 @@ mod tests {
     fn video_task_contract_extracts_only_declared_task_fields() {
         assert!(ensure_video_adapter("TEXT_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3:v2").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2").is_ok());
         assert!(ensure_video_adapter("START_END_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
