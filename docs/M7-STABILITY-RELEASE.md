@@ -1,7 +1,7 @@
 # M7 稳定性和发布
 
 日期：2026-08-03  
-状态：本地自动化复验通过，等待 Hosted Windows 和人工发布验证（HOLD）
+状态：自动化复验通过，等待人工发布验证（HOLD）
 
 ## 1. 阶段目标
 
@@ -151,7 +151,7 @@ diagnostics-<UTC timestamp>-<id>/
 - 对抗性硬化回归已覆盖签名 URL 和旧库迁移、最近项目写失败、素材新增/删除 SQLite 故障、分块视频低空间、LLM 过期回包，以及真实开发 HTTP Server 的 Origin/Content-Type/随机令牌拒绝路径。
 - NSIS 已通过本机干净安装生命周期，以及同一安装包覆盖安装时外部项目 ID、文档摘要、SQLite 完整性和卸载后项目保留验证。
 - 项目维护界面已在 1280x720 和 390x844 视口检查；对话框和交互控件无越界、文本溢出或重叠。
-- 上一候选的 Hosted Windows CI run `30754118267` 全部通过；当前硬化候选尚待新的 Hosted Windows run，旧 run 不作为本次修复的签收证据。
+- 当前硬化提交 `a8ddaa261c117b32d6f60fdafad2df45da97260d` 的 Hosted Windows CI run `30757944779` 全部通过；`validate` job 的 22 个步骤覆盖构建、146 项测试、M7 Sidecar、Tauri/NSIS、干净安装和覆盖安装保留验证。
 - 当前安装包未签名；签名校验脚本只接受 Authenticode `Valid`，不会用测试证书替代正式证书。
 
 同一安装包覆盖安装只能证明安装器生命周期和外部项目保留基线，不能替代上一正式版本到当前版本的真实升级验证。

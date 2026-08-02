@@ -3,7 +3,7 @@
 - Started: 2026-08-03T00:18:39+08:00
 - Repository: D:\SB\xlngaiforwindows
 - Base revision: main at afb340bc9f38e44d10e2eeea5070789bd165bbb0
-- Status: in progress
+- Status: complete
 
 ## Objective
 
@@ -52,3 +52,12 @@ Reopen M7 after adversarial failure-path review, fix the reported signed-URL per
 - Evidence artifact: x64 NSIS size `20,275,869` bytes; SHA-256 `1DC290F9FCDD9773B275026D24C662EC5C7E6CE929005FF9506844B29474A7C8`.
 - Decision: Local code-level P1/P2 are cleared, but M7 stays `HOLD` until the current commit passes Hosted Windows and the documented human release gates are completed.
 - Next: Re-run the source gates after documentation edits, review the final diff, commit and push `main`, then monitor the new Hosted Windows run.
+
+### 2026-08-03T01:11:26+08:00 - Hosted Windows hardening gate passed
+
+- Evidence: GitHub Actions run `30757944779` completed `success` for commit `a8ddaa261c117b32d6f60fdafad2df45da97260d`; its Windows `validate` job completed all 22 steps, including 146 tests, Sidecar validation, Tauri/NSIS build, clean install, and overwrite/external-project preservation.
+- Action: Pushed the verified hardening commit after bypassing the stale per-user Git proxy only for GitHub commands; updated the M7 quality and release documents with the current run rather than relying on an earlier candidate's CI.
+- Commands: `git -c http.proxy= -c https.proxy= push origin main` -> exit `0`; GitHub Actions API polling -> completed `success`.
+- Residual risks: Formal Authenticode signing, a real previous-version upgrade, clean Windows VM, current release-candidate Provider requests, disconnect/reconnect, system sleep, low-disk human exercise, and final human release signoff remain outside automated authority.
+- Rollback: Revert commit `a8ddaa2`; SQLite v6 is forward-only, so projects already opened by this candidate retain sanitized URL fields even if application code is rolled back.
+- Decision: The hardening follow-up is complete and automatic M7 gates are green. M7 itself remains `HOLD` at the documented human release boundary.

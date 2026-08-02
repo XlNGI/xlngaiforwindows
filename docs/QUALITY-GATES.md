@@ -163,9 +163,10 @@ created -> streaming -> complete
 - M7 签名门禁：当前安装包 Authenticode 状态为 `NotSigned`，`scripts/validate-windows-signature.ps1` 按预期拒绝；正式证书签名和时间戳仍是发布阻断项。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
 - 当前硬化候选的本机干净 NSIS 安装和同包覆盖生命周期通过；覆盖前后项目 ID、文档摘要、SQLite 完整性和卸载后外部项目保留均通过。
+- 当前硬化提交 `a8ddaa261c117b32d6f60fdafad2df45da97260d` 的 GitHub Hosted Windows CI run `30757944779` 通过，`validate` job 的 22 个步骤全部成功，包括 146 项测试、M7 Sidecar、Tauri/NSIS、干净安装和覆盖安装保留验证。
 - 本轮 M7 未验证：真实 OpenAI/Vidu 发布候选成功请求、正式签名、上一正式版本升级、干净 Windows 虚拟机、断网/联网切换和真实系统休眠恢复。既有 M6 真实参考生视频证据不替代当前发布候选验证。
 
-因此本地复验中的已知代码级 `P1/P2` 已清零；当前硬化提交仍需新的 GitHub Hosted Windows CI 通过。最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
+因此本轮已知代码级 `P1/P2` 已清零，当前硬化提交的本地与 Hosted Windows 自动门禁均通过。最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
 
 ## 7. 签收规则
 
