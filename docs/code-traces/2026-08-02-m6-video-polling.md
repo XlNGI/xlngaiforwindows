@@ -79,3 +79,9 @@ Follow `docs/IMPLEMENTATION-PLAN.md` and `docs/QUALITY-GATES.md` for M6: impleme
 - Evidence: changed/untracked-file scanning found no OpenAI-style key, AWS access key, bearer literal, or private-key block; one generic API-key rule matched the explicit `must-not-persist` negative-test placeholder and was confirmed non-secret. Git tracks no `.env`, SQLite database, certificate, or private-key artifact.
 - Decision: the worktree is eligible for commit; generated installer, build directories, credentials, and project runtime data remain untracked.
 - Next: push the M6 implementation commit and require Hosted Windows CI success before human-testing handoff.
+
+### 2026-08-02T16:46:17+08:00 - First Hosted Windows run failed without a reproducible assertion
+- Evidence: GitHub Actions run `30739886232` for commit `a270096` passed setup, dependency installation, native-module alignment, formatting, build, lint, and typecheck, then failed the TypeScript test step; later packaging steps were correctly skipped. The public check annotation exposed only exit code `1`, while detailed logs required an authenticated repository session that was not available and no credential was accessed.
+- Experiment: used the bundled Node `24.14.0`, ran the same native-module alignment command, and reran `pnpm test`; all 15 files/107 tests passed. Then ran the complete Worker and Desktop suites 15 consecutive times under Node 24; every iteration passed.
+- Decision: retain the Hosted failure as an unresolved transient result and trigger a second full Hosted run with this trace-only commit. Do not hand off M6 unless the rerun completes through NSIS installation successfully.
+- Next: monitor the rerun; repeated failure blocks M6 and requires added CI-side diagnostics before another attempt.
