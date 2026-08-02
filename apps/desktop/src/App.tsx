@@ -255,12 +255,28 @@ export function App() {
     }
   };
 
-  const createProject = () =>
-    runProjectAction(() =>
-      callWorker('project.create', { name: projectName, rootPath: projectPath }),
-    );
-  const openProject = (rootPath = projectPath) =>
-    runProjectAction(() => callWorker('project.open', { rootPath }));
+  const normalizeProjectPath = (value: unknown): string | undefined => {
+    if (typeof value !== 'string' || !value.trim()) {
+      setProjectMessage('请输入项目绝对目录');
+      return undefined;
+    }
+    return value.trim();
+  };
+
+  const createProject = () => {
+    const rootPath = normalizeProjectPath(projectPath);
+    const name = projectName.trim();
+    if (!rootPath || !name) {
+      if (!name) setProjectMessage('请输入项目名称');
+      return;
+    }
+    return runProjectAction(() => callWorker('project.create', { name, rootPath }));
+  };
+  const openProject = (requestedPath?: string) => {
+    const rootPath = normalizeProjectPath(requestedPath ?? projectPath);
+    if (!rootPath) return;
+    return runProjectAction(() => callWorker('project.open', { rootPath }));
+  };
   const closeProject = () =>
     runProjectAction(async () => {
       await callWorker('project.close', {});
@@ -723,10 +739,18 @@ export function App() {
                 placeholder="D:\Projects\my-drama"
               />
               <div className="project-actions">
-                <button type="button" onClick={() => void createProject()}>
+                <button
+                  type="button"
+                  onClick={() => void createProject()}
+                  disabled={projectBusy || !projectPath.trim() || !projectName.trim()}
+                >
                   新建
                 </button>
-                <button type="button" onClick={() => void openProject()}>
+                <button
+                  type="button"
+                  onClick={() => void openProject()}
+                  disabled={projectBusy || !projectPath.trim()}
+                >
                   打开
                 </button>
               </div>

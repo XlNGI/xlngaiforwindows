@@ -149,3 +149,11 @@
 - Evidence: GitHub Actions run `30726901221` for commit `03b5456` completed with `completed successfully`; the `validate` job was successful and the rendered Annotations region was empty.
 - Decision: hosted code/native/package/install gates remain `PASS`. Real Vidu credentialed success, asset persistence from a real result, and human visual acceptance remain `HOLD` and are the only M5 acceptance boundary still open.
 - Next: perform one controlled real request in the rebuilt app only when authorized; record terminal status and asset/manifest evidence without recording the API key.
+
+### 2026-08-02T09:47:00+08:00 - Empty project path validation fixed
+
+- Evidence: clicking the left-side project action with an empty path sent an empty value to Worker and displayed `rootPath must be a string.`; the topbar actions were already disabled, but the left-side actions were not.
+- Action: normalized project name/path before IPC, added clear client-side validation, and disabled left-side `New`/`Open` buttons until the required absolute path (and project name for New) is present. Added a Desktop regression test.
+- Files: `apps/desktop/src/App.tsx`, `apps/desktop/src/App.test.tsx`.
+- Verification: Desktop tests passed (9); workspace format/lint/typecheck passed; Release Tauri/NSIS build passed; clean install lifecycle passed; rebuilt Release UI confirmed both left-side actions disabled for an empty path.
+- Decision: the invalid IPC error path is fixed. Real Provider success and human M5 acceptance remain `HOLD`.

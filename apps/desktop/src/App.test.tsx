@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
 import { App, mergeGenerationMessage } from './App';
@@ -43,6 +43,15 @@ describe('App', () => {
     expect(screen.getByText('生产参数')).toBeInTheDocument();
     expect(screen.getByText('项目会话')).toBeInTheDocument();
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
+  });
+
+  it('disables project actions until an absolute path is entered', () => {
+    render(<App />);
+    const manager = screen.getByRole('region', { name: '项目管理' });
+    expect(within(manager).getByRole('button', { name: '新建' })).toBeDisabled();
+    expect(within(manager).getByRole('button', { name: '打开' })).toBeDisabled();
+    expect(callWorker).not.toHaveBeenCalledWith('project.create', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith('project.open', expect.anything());
   });
 
   it('does not merge a streaming message into another conversation', () => {
