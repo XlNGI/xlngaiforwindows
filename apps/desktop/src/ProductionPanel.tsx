@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   CircleAlert,
   CircleCheck,
+  Eye,
+  FolderOpen,
   KeyRound,
   Plus,
   Save,
@@ -18,6 +20,7 @@ import type {
   AdapterValidationError,
   AssetInfo,
   GenerationCapability,
+  ImagePreviewInfo,
 } from '@ai-video/contracts';
 import {
   canUseSecureCredentials,
@@ -31,11 +34,16 @@ import { submitProviderRequest, type ProviderRegion } from './provider-client';
 
 interface ProductionPanelProps {
   projectId?: string;
+  projectRootPath?: string;
   shotId?: string;
   writable: boolean;
+  assets?: AssetInfo[];
+  onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
+  onOpenAssetLibrary?: (assetId?: string) => void;
 }
 
 const PROVIDER_REGION_STORAGE_KEY = 'ai-video.vidu-provider-region';
+const AUTO_SAVE_STORAGE_KEY = 'ai-video.image-auto-save-local';
 
 function initialProviderRegion(): ProviderRegion {
   try {
@@ -45,6 +53,14 @@ function initialProviderRegion(): ProviderRegion {
     // The native WebView normally exposes localStorage; use the domestic default if it does not.
   }
   return 'cn';
+}
+
+function initialAutoSaveLocal(): boolean {
+  try {
+    return window.localStorage.getItem(AUTO_SAVE_STORAGE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
 }
 
 function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
@@ -79,7 +95,15 @@ function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
   });
 }
 
-export function ProductionPanel({ projectId, shotId, writable }: ProductionPanelProps) {
+export function ProductionPanel({
+  projectId,
+  projectRootPath,
+  shotId,
+  writable,
+  assets: controlledAssets,
+  onAssetsChanged,
+  onOpenAssetLibrary,
+}: ProductionPanelProps) {
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [capability, setCapability] = useState<GenerationCapability>();
   const [provider, setProvider] = useState('');
@@ -100,7 +124,12 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
   const [assetKind, setAssetKind] = useState<
     'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image'
   >('generated-image');
-  const [assets, setAssets] = useState<AssetInfo[]>([]);
+  const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
+  const [selectedAssetId, setSelectedAssetId] = useState<string>();
+  const [preview, setPreview] = useState<ImagePreviewInfo>();
+  const [autoSaveLocal, setAutoSaveLocal] = useState(initialAutoSaveLocal);
+  const assets = controlledAssets ?? localAssets;
+  const selectedAsset = assets.find((item) => item.id === selectedAssetId);
 
   const credentialProvider =
     adapter?.provider === 'vidu' && providerRegion === 'cn'
@@ -114,6 +143,14 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       // Region remains valid for the current session when storage is unavailable.
     }
   }, [providerRegion]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AUTO_SAVE_STORAGE_KEY, autoSaveLocal ? 'true' : 'false');
+    } catch {
+      // Auto-save remains valid for the current session when storage is unavailable.
+    }
+  }, [autoSaveLocal]);
 
   useEffect(() => {
     void callWorker('adapter.catalog', {})
@@ -182,11 +219,13 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
 
   useEffect(() => {
     let active = true;
-    setAssets([]);
+    if (controlledAssets !== undefined) return () => undefined;
+    setLocalAssets([]);
+    setSelectedAssetId(undefined);
     if (!projectId) return () => undefined;
     void callWorker('asset.list', {})
       .then((items) => {
-        if (active) setAssets(items);
+        if (active) setLocalAssets(items);
       })
       .catch((reason) => {
         if (active) setGenerationStatus(errorMessage(reason, '素材列表读取失败。'));
@@ -194,7 +233,23 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     return () => {
       active = false;
     };
-  }, [projectId]);
+  }, [controlledAssets, projectId]);
+
+  useEffect(() => {
+    setPreview(undefined);
+    if (!selectedAssetId) return;
+    let active = true;
+    void callWorker('asset.preview', { assetId: selectedAssetId })
+      .then((nextPreview) => {
+        if (active) setPreview(nextPreview);
+      })
+      .catch((reason) => {
+        if (active) setGenerationStatus(errorMessage(reason, '素材预览读取失败。'));
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedAssetId]);
 
   const capabilityAdapters = useMemo(
     () => catalog?.adapters.filter((item) => item.capability === capability) ?? [],
@@ -242,6 +297,32 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     setErrors((current) => current.filter((error) => normalizeErrorPath(error.path) !== key));
     setMessage('');
     setGenerationStatus('');
+  };
+
+  const publishAssets = (nextAssets: AssetInfo[], nextSelectedAssetId?: string) => {
+    if (controlledAssets === undefined) setLocalAssets(nextAssets);
+    if (nextSelectedAssetId !== undefined) {
+      setSelectedAssetId(nextSelectedAssetId);
+    } else if (selectedAssetId && !nextAssets.some((item) => item.id === selectedAssetId)) {
+      setSelectedAssetId(nextAssets[0]?.id);
+    }
+    onAssetsChanged?.(nextAssets, nextSelectedAssetId);
+  };
+
+  const localAssetPath = (asset: AssetInfo): string => {
+    if (!projectRootPath) return asset.relativePath;
+    const root = projectRootPath.replace(/[\\/]+$/, '');
+    return `${root}\\${asset.relativePath}`;
+  };
+
+  const revealAsset = async (asset: AssetInfo | undefined = selectedAsset) => {
+    if (!asset) return;
+    try {
+      const result = await callWorker('asset.reveal', { assetId: asset.id });
+      setGenerationStatus(`已打开本地位置：${result.path}`);
+    } catch (reason) {
+      setGenerationStatus(errorMessage(reason, '本地位置打开失败。'));
+    }
   };
 
   const saveDraft = async () => {
@@ -323,15 +404,23 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
         providerStatus: response.status,
         providerBody: response.body,
         assetKind,
+        saveAsset: autoSaveLocal,
       });
+      if (completed.preview) setPreview(completed.preview);
       setGenerationStatus(
         completed.status === 'succeeded'
-          ? '图片已保存到资产库。'
+          ? autoSaveLocal
+            ? '图片已保存到本地素材库。'
+            : '图片已生成，仅预览，未保存到素材库。'
           : completed.status === 'cancelled'
             ? '已取消图片生成。'
             : (completed.error ?? '生成失败。'),
       );
-      if (completed.status === 'succeeded') setAssets(await callWorker('asset.list', {}));
+      const savedAsset = completed.results.find((result) => result.asset)?.asset;
+      if (completed.status === 'succeeded' && savedAsset) {
+        const nextAssets = await callWorker('asset.list', {});
+        publishAssets(nextAssets, savedAsset.id);
+      }
     } catch (reason) {
       if (preparedJobId) {
         try {
@@ -353,7 +442,10 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     if (!name) return;
     try {
       const renamed = await callWorker('asset.rename', { assetId: asset.id, name });
-      setAssets((current) => current.map((item) => (item.id === renamed.id ? renamed : item)));
+      publishAssets(
+        assets.map((item) => (item.id === renamed.id ? renamed : item)),
+        renamed.id,
+      );
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '素材重命名失败。'));
     }
@@ -363,7 +455,8 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     if (!window.confirm('确定删除此图片素材？')) return;
     try {
       await callWorker('asset.delete', { assetId: asset.id });
-      setAssets((current) => current.filter((item) => item.id !== asset.id));
+      const nextAssets = assets.filter((item) => item.id !== asset.id);
+      publishAssets(nextAssets);
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '素材删除失败。'));
     }
@@ -562,21 +655,92 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
                     <option value="last-frame">尾帧</option>
                   </select>
                 </label>
+                <label className="auto-save-toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoSaveLocal}
+                    onChange={(event) => setAutoSaveLocal(event.target.checked)}
+                    disabled={busy}
+                  />
+                  自动保存到本地素材库
+                </label>
                 {generationStatus && <span className="credential-message">{generationStatus}</span>}
               </div>
+              {(preview || selectedAsset) && (
+                <div className="asset-preview-card" aria-label="图片预览">
+                  <div className="asset-preview-frame">
+                    {preview ? (
+                      <img
+                        src={preview.dataUrl}
+                        alt={selectedAsset?.relativePath ?? '生成图片预览'}
+                      />
+                    ) : (
+                      <span>正在读取预览</span>
+                    )}
+                  </div>
+                  <div className="asset-preview-meta">
+                    <strong>{selectedAsset?.relativePath ?? '本次生成预览'}</strong>
+                    {selectedAsset && <small>{localAssetPath(selectedAsset)}</small>}
+                  </div>
+                  {selectedAsset && (
+                    <div className="asset-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => void revealAsset(selectedAsset)}
+                      >
+                        <FolderOpen size={14} />
+                        打开位置
+                      </button>
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => onOpenAssetLibrary?.(selectedAsset.id)}
+                      >
+                        <Eye size={14} />
+                        查看素材库
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               {assets.length > 0 && (
                 <div className="asset-list" aria-label="素材列表">
                   {assets.map((asset) => (
-                    <div className="asset-row" key={asset.id}>
+                    <div
+                      className={`asset-row${asset.id === selectedAssetId ? ' selected' : ''}`}
+                      key={asset.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedAssetId(asset.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ')
+                          setSelectedAssetId(asset.id);
+                      }}
+                    >
                       <span title={asset.sourceUrl}>{asset.relativePath}</span>
-                      <small>
+                      <small title={localAssetPath(asset)}>
                         {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
                       </small>
                       <button
                         className="icon-button subtle"
                         type="button"
+                        title="打开位置"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void revealAsset(asset);
+                        }}
+                      >
+                        <FolderOpen size={13} />
+                      </button>
+                      <button
+                        className="icon-button subtle"
+                        type="button"
                         title="重命名素材"
-                        onClick={() => void renameAsset(asset)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void renameAsset(asset);
+                        }}
                       >
                         <Save size={13} />
                       </button>
@@ -584,7 +748,10 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
                         className="icon-button danger"
                         type="button"
                         title="删除素材"
-                        onClick={() => void removeAsset(asset)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void removeAsset(asset);
+                        }}
                       >
                         <Trash2 size={13} />
                       </button>

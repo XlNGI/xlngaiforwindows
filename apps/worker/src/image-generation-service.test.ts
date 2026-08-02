@@ -42,6 +42,55 @@ describe('ImageGenerationService', () => {
     expect(
       existsSync(join(project.current()!.rootPath, result.results[0]!.asset!.relativePath)),
     ).toBe(true);
+    expect(result.preview?.dataUrl).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it('previews and reveals only registered local assets', async () => {
+    const { project } = await setup();
+    const opened: string[] = [];
+    const service = new ImageGenerationService(project, (path) => opened.push(path));
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const asset = result.results[0]!.asset!;
+
+    expect(service.previewAsset({ assetId: asset.id })).toMatchObject({
+      assetId: asset.id,
+      contentType: 'image/png',
+    });
+    expect(service.previewAsset({ assetId: asset.id }).dataUrl).toMatch(/^data:image\/png;base64,/);
+
+    const revealed = service.revealAsset({ assetId: asset.id });
+
+    expect(revealed.path).toBe(join(project.current()!.rootPath, asset.relativePath));
+    expect(opened).toEqual([revealed.path]);
+    expect(() => service.revealAsset({ assetId: '../outside' })).toThrow('Asset was not found.');
+  });
+
+  it('can return a preview without saving a local asset', async () => {
+    const { service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+      saveAsset: false,
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(result.results).toHaveLength(0);
+    expect(result.preview).toMatchObject({ jobId: job.id, contentType: 'image/png' });
+    expect(service.listAssets({})).toHaveLength(0);
   });
 
   it('prefers Vidu creation output URLs over echoed input URLs', async () => {

@@ -15,6 +15,8 @@ import {
   type GenerationDraftSaveParams,
   type ImageGenerationPrepareParams,
   type ImageGenerationCompleteParams,
+  type AssetPreviewParams,
+  type AssetRevealParams,
   type AssetRenameParams,
   type ProjectCreateParams,
   type ProjectExportParams,
@@ -88,6 +90,8 @@ const methods = new Set<WorkerMethod>([
   'image.generate.cancel',
   'image.generate.get',
   'asset.list',
+  'asset.preview',
+  'asset.reveal',
   'asset.rename',
   'asset.delete',
 ]);
@@ -409,6 +413,16 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         result = imageGenerationService.listAssets({
           kind: typeof params.kind === 'string' ? params.kind : undefined,
         });
+        break;
+      case 'asset.preview':
+        result = imageGenerationService.previewAsset({
+          assetId: requireString(params, 'assetId'),
+        } satisfies AssetPreviewParams);
+        break;
+      case 'asset.reveal':
+        result = imageGenerationService.revealAsset({
+          assetId: requireString(params, 'assetId'),
+        } satisfies AssetRevealParams);
         break;
       case 'asset.rename':
         result = imageGenerationService.renameAsset(params as unknown as AssetRenameParams);

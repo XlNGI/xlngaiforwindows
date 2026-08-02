@@ -23,6 +23,7 @@ import {
   Square,
 } from 'lucide-react';
 import type {
+  AssetInfo,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -39,12 +40,13 @@ import type {
   SceneInfo,
   ShotInfo,
   SqliteProbeResult,
+  ImagePreviewInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { ProductionPanel } from './ProductionPanel';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'shots';
+type WorkspaceView = 'documents' | 'shots' | 'assets';
 
 const documentKinds: { value: DocumentKind; label: string }[] = [
   { value: 'outline', label: '项目大纲' },
@@ -99,6 +101,10 @@ export function App() {
   const [scene, setScene] = useState<SceneInfo>();
   const [shots, setShots] = useState<ShotInfo[]>([]);
   const [shot, setShot] = useState<ShotInfo>();
+  const [assets, setAssets] = useState<AssetInfo[]>([]);
+  const [asset, setAsset] = useState<AssetInfo>();
+  const [assetPreview, setAssetPreview] = useState<ImagePreviewInfo>();
+  const [assetMessage, setAssetMessage] = useState('');
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
@@ -143,6 +149,7 @@ export function App() {
         callWorker('document.list', {}),
         callWorker('scene.list', {}),
       ]);
+      const assetList = await callWorker('asset.list', {});
       const firstScene = sceneList[0];
       const shotList = firstScene ? await callWorker('shot.list', { sceneId: firstScene.id }) : [];
       if (requestId !== projectContentRequest.current) return;
@@ -151,6 +158,8 @@ export function App() {
       setScene(firstScene);
       setShots(shotList);
       setShot(undefined);
+      setAssets(assetList);
+      setAsset(assetList[0]);
     } catch (reason) {
       if (requestId === projectContentRequest.current) {
         setContentMessage(reason instanceof Error ? reason.message : '项目内容加载失败');
@@ -283,6 +292,9 @@ export function App() {
       setProject(undefined);
       setDocuments([]);
       setScenes([]);
+      setAssets([]);
+      setAsset(undefined);
+      setAssetPreview(undefined);
       setDocument(undefined);
       setConversation(undefined);
       setMessages([]);
@@ -400,6 +412,47 @@ export function App() {
     setShots(await callWorker('shot.list', { sceneId: scene.id }));
     setShot(created);
   };
+
+  useEffect(() => {
+    let active = true;
+    setAssetPreview(undefined);
+    setAssetMessage('');
+    if (!asset) return () => undefined;
+    void callWorker('asset.preview', { assetId: asset.id })
+      .then((preview) => {
+        if (active) setAssetPreview(preview);
+      })
+      .catch((reason) => {
+        if (active) setAssetMessage(reason instanceof Error ? reason.message : '素材预览失败');
+      });
+    return () => {
+      active = false;
+    };
+  }, [asset?.id]);
+
+  const updateAssets = (nextAssets: AssetInfo[], selectedAssetId?: string) => {
+    setAssets(nextAssets);
+    const selected =
+      (selectedAssetId ? nextAssets.find((item) => item.id === selectedAssetId) : undefined) ??
+      nextAssets.find((item) => item.id === asset?.id) ??
+      nextAssets[0];
+    setAsset(selected);
+  };
+
+  const revealAsset = async (selected: AssetInfo | undefined = asset) => {
+    if (!selected) return;
+    try {
+      const result = await callWorker('asset.reveal', { assetId: selected.id });
+      setAssetMessage(`已打开：${result.path}`);
+    } catch (reason) {
+      setAssetMessage(reason instanceof Error ? reason.message : '打开素材位置失败');
+    }
+  };
+
+  const assetAbsolutePath = (item: AssetInfo): string =>
+    project
+      ? `${project.rootPath.replace(/[\\/]+$/, '')}\\${item.relativePath}`
+      : item.relativePath;
 
   const createConversation = async () => {
     if (!scopeAvailable) return;
@@ -585,10 +638,14 @@ export function App() {
             <span>角色与场景</span>
             <span className="count">0</span>
           </button>
-          <button className="nav-item" type="button">
+          <button
+            className={`nav-item ${view === 'assets' ? 'active' : ''}`}
+            type="button"
+            onClick={() => setView('assets')}
+          >
             <Image size={16} />
             <span>素材库</span>
-            <span className="count">0</span>
+            <span className="count">{assets.length}</span>
           </button>
         </nav>
 
@@ -621,7 +678,7 @@ export function App() {
                 ))}
                 {documents.length === 0 && <small className="tree-empty">暂无正式文档</small>}
               </>
-            ) : (
+            ) : view === 'shots' ? (
               <>
                 <div className="tree-heading">
                   <span>场次</span>
@@ -676,6 +733,33 @@ export function App() {
                     ))}
                   </>
                 )}
+              </>
+            ) : (
+              <>
+                <div className="tree-heading">
+                  <span>素材</span>
+                  <button
+                    className="icon-button subtle"
+                    type="button"
+                    title="打开素材文件夹"
+                    onClick={() => void revealAsset()}
+                    disabled={!asset}
+                  >
+                    <FolderOpen size={14} />
+                  </button>
+                </div>
+                {assets.map((item) => (
+                  <button
+                    className={`tree-item ${asset?.id === item.id ? 'selected' : ''}`}
+                    type="button"
+                    key={item.id}
+                    onClick={() => setAsset(item)}
+                  >
+                    <Image size={13} />
+                    <span>{item.relativePath.split(/[\\/]/).pop() ?? item.relativePath}</span>
+                  </button>
+                ))}
+                {assets.length === 0 && <small className="tree-empty">暂无本地素材</small>}
               </>
             )}
           </div>
@@ -892,7 +976,7 @@ export function App() {
               <EmptyWorkspace />
             )}
           </>
-        ) : (
+        ) : view === 'shots' ? (
           <>
             <div className="workspace-toolbar">
               <div>
@@ -931,10 +1015,63 @@ export function App() {
               <EmptyWorkspace title={scene ? '还没有镜头' : '还没有场次'} />
             )}
           </>
+        ) : (
+          <>
+            <div className="workspace-toolbar">
+              <div>
+                <span className="eyebrow">本地素材</span>
+                <h1>{asset ? asset.relativePath.split(/[\\/]/).pop() : '素材库'}</h1>
+              </div>
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => void revealAsset()}
+                disabled={!asset}
+              >
+                <FolderOpen size={15} />
+                打开位置
+              </button>
+            </div>
+            {project && asset ? (
+              <div className="asset-workspace">
+                <div className="asset-preview-stage">
+                  {assetPreview ? (
+                    <img src={assetPreview.dataUrl} alt={asset.relativePath} />
+                  ) : (
+                    <div className="asset-preview-empty">正在读取预览</div>
+                  )}
+                </div>
+                <div className="asset-detail-panel">
+                  <strong>{asset.relativePath}</strong>
+                  <span>{asset.kind}</span>
+                  <span>{(asset.sizeBytes / 1024).toFixed(1)} KiB</span>
+                  <span title={assetAbsolutePath(asset)}>{assetAbsolutePath(asset)}</span>
+                  <button type="button" onClick={() => void revealAsset(asset)}>
+                    <FolderOpen size={13} />
+                    打开保存位置
+                  </button>
+                </div>
+                {assetMessage && <div className="inline-status">{assetMessage}</div>}
+              </div>
+            ) : (
+              <EmptyWorkspace title={project ? '暂无本地素材' : '请打开一个项目'} />
+            )}
+          </>
         )}
       </main>
 
-      <ProductionPanel projectId={project?.id} shotId={shot?.id} writable={writable} />
+      <ProductionPanel
+        projectId={project?.id}
+        projectRootPath={project?.rootPath}
+        shotId={shot?.id}
+        writable={writable}
+        assets={assets}
+        onAssetsChanged={updateAssets}
+        onOpenAssetLibrary={(assetId) => {
+          updateAssets(assets, assetId);
+          setView('assets');
+        }}
+      />
 
       <aside className="chat-panel panel-border">
         <div className="panel-heading">

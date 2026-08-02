@@ -1,14 +1,27 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import type {
   AdapterParameters,
   AssetInfo,
   AssetListParams,
+  AssetPreviewParams,
+  AssetRevealParams,
+  AssetRevealResult,
   AssetRenameParams,
   ImageGenerationCompleteParams,
   ImageGenerationJobInfo,
   ImageGenerationPrepareParams,
+  ImagePreviewInfo,
 } from '@ai-video/contracts';
 import type { AssetRecord, JobRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
@@ -24,8 +37,13 @@ interface DownloadedImage {
   sourceUrl?: string;
 }
 
+type AssetPathOpener = (path: string) => void;
+
 export class ImageGenerationService {
-  constructor(private readonly projects: ProjectService) {}
+  constructor(
+    private readonly projects: ProjectService,
+    private readonly openAssetPath: AssetPathOpener = revealPathInFileManager,
+  ) {}
 
   prepare(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
     const adapter = getAdapter(params.adapterKey);
@@ -102,17 +120,8 @@ export class ImageGenerationService {
     });
     if (activeJob.status !== 'running') return this.get(activeJob.id);
 
-    const extension = extensionFor(image.contentType, image.sourceUrl);
-    const assetId = randomUUID();
-    const relativePath = join('assets', 'images', `${assetId}${extension}`);
-    const finalPath = resolveProjectRelativePath(projectSession.rootPath, relativePath);
-    const temporaryPath = `${finalPath}.${process.pid}.tmp`;
-    mkdirSync(join(projectSession.rootPath, 'assets', 'images'), { recursive: true });
-    try {
-      writeFileSync(temporaryPath, image.bytes, { flag: 'wx' });
-      renameSync(temporaryPath, finalPath);
-      const hash = createHash('sha256').update(image.bytes).digest('hex');
-      const size = statSync(finalPath).size;
+    const preview = toPreviewInfo(image, { jobId: job.id });
+    if (params.saveAsset === false) {
       return this.projects.access(true, (database, project) => {
         if (project !== projectSession)
           throw new Error('Project session changed during generation.');
@@ -121,38 +130,49 @@ export class ImageGenerationService {
         if (!current || current.projectId !== project.id)
           throw new Error('Generation job was not found.');
         const now = new Date().toISOString();
-        const asset: AssetRecord = {
-          id: assetId,
-          projectId: project.id,
-          kind: params.assetKind ?? 'generated-image',
-          relativePath,
-          contentHash: hash,
-          sizeBytes: size,
-          sourceUrl: image.sourceUrl,
-          createdAt: now,
-        };
         const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
-        const result = {
-          id: randomUUID(),
-          jobId: current.id,
-          assetId: asset.id,
-          providerUrl: image.sourceUrl,
-          createdAt: now,
-        };
-        database.transaction(() => {
-          repositories.assets.save(asset);
-          repositories.generationResults.save(result);
-          repositories.jobs.save(completed);
-        })();
+        repositories.jobs.save(completed);
         repositories.projects.touch(now);
         project.updatedAt = now;
-        return this.toInfo(completed, [asset], [result]);
+        return {
+          ...this.toInfo(completed, [], repositories.generationResults.listByJob(completed.id)),
+          preview,
+        };
       });
-    } catch (error) {
-      rmSync(temporaryPath, { force: true });
-      rmSync(finalPath, { force: true });
-      throw error;
     }
+
+    const persisted = this.persistDownloadedImage(projectSession.rootPath, image, {
+      projectId: projectSession.id,
+      assetKind: params.assetKind,
+    });
+    return this.projects.access(true, (database, project) => {
+      if (project !== projectSession) throw new Error('Project session changed during generation.');
+      const repositories = createRepositories(database);
+      const current = repositories.jobs.get(job.id);
+      if (!current || current.projectId !== project.id)
+        throw new Error('Generation job was not found.');
+      const now = new Date().toISOString();
+      const asset: AssetRecord = { ...persisted.asset, createdAt: now };
+      const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
+      const result = {
+        id: randomUUID(),
+        jobId: current.id,
+        assetId: asset.id,
+        providerUrl: image.sourceUrl,
+        createdAt: now,
+      };
+      database.transaction(() => {
+        repositories.assets.save(asset);
+        repositories.generationResults.save(result);
+        repositories.jobs.save(completed);
+        repositories.projects.touch(now);
+      })();
+      project.updatedAt = now;
+      return {
+        ...this.toInfo(completed, [asset], [result]),
+        preview: toPreviewInfo(image, { assetId: asset.id, jobId: completed.id }),
+      };
+    });
   }
 
   cancel(jobId: string): ImageGenerationJobInfo {
@@ -205,6 +225,29 @@ export class ImageGenerationService {
     });
   }
 
+  previewAsset(params: AssetPreviewParams): ImagePreviewInfo {
+    const { asset, path } = this.assetRecordAndPath(params.assetId);
+    const bytes = readFileSync(path);
+    if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES)
+      throw new Error('Image size is invalid.');
+    const contentType = contentTypeFor(asset.relativePath);
+    if (!contentType.startsWith('image/')) throw new Error('Asset is not a previewable image.');
+    return toPreviewInfo(
+      {
+        bytes,
+        contentType,
+        sourceUrl: asset.sourceUrl,
+      },
+      { assetId: asset.id },
+    );
+  }
+
+  revealAsset(params: AssetRevealParams): AssetRevealResult {
+    const { path } = this.assetRecordAndPath(params.assetId);
+    this.openAssetPath(path);
+    return { path };
+  }
+
   renameAsset(params: AssetRenameParams): AssetInfo {
     const name = basename(params.name.trim());
     if (!name || name !== params.name.trim() || name.includes('..'))
@@ -244,6 +287,54 @@ export class ImageGenerationService {
       project.updatedAt = now;
       return { deleted: true as const };
     });
+  }
+
+  private assetRecordAndPath(assetId: string): { asset: AssetRecord; path: string } {
+    return this.projects.access(false, (database, project) => {
+      const asset = createRepositories(database).assets.get(assetId);
+      if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      const path = resolveProjectRelativePath(project.rootPath, asset.relativePath);
+      if (!existsSync(path)) throw new Error('Asset file is missing.');
+      return { asset, path };
+    });
+  }
+
+  private persistDownloadedImage(
+    projectRootPath: string,
+    image: DownloadedImage,
+    params: {
+      projectId: string;
+      assetKind?: 'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
+    },
+  ): { asset: AssetRecord } {
+    const extension = extensionFor(image.contentType, image.sourceUrl);
+    const assetId = randomUUID();
+    const relativePath = join('assets', 'images', `${assetId}${extension}`);
+    const finalPath = resolveProjectRelativePath(projectRootPath, relativePath);
+    const temporaryPath = `${finalPath}.${process.pid}.tmp`;
+    mkdirSync(join(projectRootPath, 'assets', 'images'), { recursive: true });
+    try {
+      writeFileSync(temporaryPath, image.bytes, { flag: 'wx' });
+      renameSync(temporaryPath, finalPath);
+      const hash = createHash('sha256').update(image.bytes).digest('hex');
+      const size = statSync(finalPath).size;
+      return {
+        asset: {
+          id: assetId,
+          projectId: params.projectId,
+          kind: params.assetKind ?? 'generated-image',
+          relativePath,
+          contentHash: hash,
+          sizeBytes: size,
+          sourceUrl: image.sourceUrl,
+          createdAt: new Date().toISOString(),
+        },
+      };
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      rmSync(finalPath, { force: true });
+      throw error;
+    }
   }
 
   private fail(jobId: string, message: string): ImageGenerationJobInfo {
@@ -333,6 +424,18 @@ export class ImageGenerationService {
 
 function toAssetInfo(asset: AssetRecord): AssetInfo {
   return { ...asset };
+}
+
+function toPreviewInfo(
+  image: DownloadedImage,
+  params: { assetId?: string; jobId?: string } = {},
+): ImagePreviewInfo {
+  return {
+    ...params,
+    dataUrl: `data:${image.contentType};base64,${Buffer.from(image.bytes).toString('base64')}`,
+    contentType: image.contentType,
+    sourceUrl: image.sourceUrl,
+  };
 }
 
 function redactParameters(parameters: AdapterParameters): AdapterParameters {
@@ -520,4 +623,33 @@ function extensionFor(contentType: string, sourceUrl?: string): string {
     'image/gif': '.gif',
   };
   return known[contentType] ?? (extname(sourceUrl ?? '').slice(0, 5) || '.bin');
+}
+
+function contentTypeFor(relativePath: string): string {
+  const extension = extname(relativePath).toLowerCase();
+  const known: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+  };
+  return known[extension] ?? 'application/octet-stream';
+}
+
+function revealPathInFileManager(path: string): void {
+  const command =
+    process.platform === 'win32'
+      ? 'explorer.exe'
+      : process.platform === 'darwin'
+        ? 'open'
+        : 'xdg-open';
+  const args =
+    process.platform === 'win32'
+      ? [`/select,${path}`]
+      : process.platform === 'darwin'
+        ? ['-R', path]
+        : [path];
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+  child.unref();
 }

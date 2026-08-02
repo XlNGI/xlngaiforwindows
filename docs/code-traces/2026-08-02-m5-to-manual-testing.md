@@ -223,3 +223,17 @@
 - Evidence: GitHub Actions run `30732119587` for commit `1c0782c` completed with `success`. Step status showed formatting, TypeScript build/lint/typecheck, 79 tests, standalone Worker, `cargo check`, Tauri/NSIS bundle, and clean install lifecycle all completed successfully.
 - Decision: automated code, native, package, install, and Hosted gates are `PASS` for the output extraction and download diagnostics patch. M5 remains `HOLD` for the real domestic result download and human visual acceptance.
 - Next: restart the dev desktop from `main`, open `D:\ts`, keep `China site (api.vidu.cn)`, and run one controlled generation. If it still fails, record the new host/cause error without recording the API key or full signed URL.
+
+### 2026-08-02T13:21:38+08:00 - Local asset save and preview workflow implemented
+- Evidence: the user confirmed that closing the proxy made domestic Vidu image generation work; the prior `ECONNRESET` path is therefore an environment/proxy interaction, not a reason to automate proxy changes.
+- Action: added the optional `自动保存到本地素材库` toggle (default on and remembered when local storage is available), preview data on generation completion, registered-asset preview loading, one-click reveal through the native file manager, and asset-library navigation. A successful save refreshes the project asset list and preserves the selected asset kind (`generated-image`, `character`, `scene`, `first-frame`, or `last-frame`).
+- Files: `packages/contracts/src/index.ts`, `apps/worker/src/handler.ts`, `apps/worker/src/image-generation-service.ts`, `apps/worker/src/image-generation-service.test.ts`, `apps/desktop/src/ProductionPanel.tsx`, `apps/desktop/src/App.tsx`, `apps/desktop/src/styles.css`, `apps/desktop/src/ProductionPanel.test.tsx`.
+- Verification: focused Worker tests passed (12); focused Desktop tests passed (12). After an initial `format:check` failure on the three edited TypeScript files, Prettier was run and the gate was rerun successfully. `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm worker:sidecar`, and `git diff --check` all passed. No real Provider request was issued.
+- Decision: the local code path for optional save, preview, reveal, and material-library discovery is ready for Hosted Windows verification and human UI testing. M5 remains `HOLD` for real credentialed success, actual downloaded output, and human acceptance.
+- Next: commit/push this revision, verify Hosted Windows Rust/Tauri/NSIS gates, then manually generate once with the proxy state that the user has validated and confirm preview, file-manager reveal, selected asset kind, and material-library presence.
+
+### 2026-08-02T13:25:39+08:00 - Asset IPC input validation tightened
+- Action: changed `asset.preview` and `asset.reveal` handler routing to require a non-empty string `assetId` at the IPC boundary, and added a regression test for invalid input.
+- Files: `apps/worker/src/handler.ts`, `apps/worker/src/handler.test.ts`.
+- Verification: Worker suite passed (44 tests), `pnpm format:check`, `pnpm typecheck`, and `git diff --check` passed.
+- Decision: keep the feature within M5 and preserve the manual/real-Provider `HOLD`; no real request or credential was accessed.

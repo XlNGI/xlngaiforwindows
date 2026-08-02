@@ -64,6 +64,20 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects asset preview requests without a valid asset id', async () => {
+    const response = await handleRequest({
+      id: 'asset-preview-invalid',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'asset.preview',
+      params: {},
+    });
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'assetId must be a string.' },
+    });
+  });
+
   it('resolves adapters and persists only validated per-shot parameter drafts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'ai-video-adapter-worker-'));
     temporaryDirectories.push(root);

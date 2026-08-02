@@ -417,6 +417,14 @@ export interface ImageGenerationResultInfo {
   createdAt: string;
 }
 
+export interface ImagePreviewInfo {
+  assetId?: string;
+  jobId?: string;
+  dataUrl: string;
+  contentType: string;
+  sourceUrl?: string;
+}
+
 export interface ImageGenerationJobInfo {
   id: string;
   shotId?: string;
@@ -425,6 +433,7 @@ export interface ImageGenerationJobInfo {
   request: AdapterParameters;
   results: ImageGenerationResultInfo[];
   error?: string;
+  preview?: ImagePreviewInfo;
   createdAt: string;
   updatedAt: string;
 }
@@ -440,6 +449,7 @@ export interface ImageGenerationCompleteParams {
   providerStatus: number;
   providerBody: unknown;
   assetKind?: 'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
+  saveAsset?: boolean;
 }
 
 export interface ImageGenerationFailParams {
@@ -465,6 +475,18 @@ export interface AssetRenameParams {
 
 export interface AssetDeleteParams {
   assetId: string;
+}
+
+export interface AssetPreviewParams {
+  assetId: string;
+}
+
+export interface AssetRevealParams {
+  assetId: string;
+}
+
+export interface AssetRevealResult {
+  path: string;
 }
 
 export interface WorkerMethodMap {
@@ -533,6 +555,8 @@ export interface WorkerMethodMap {
     result: ImageGenerationJobInfo;
   };
   'asset.list': { params: AssetListParams; result: AssetInfo[] };
+  'asset.preview': { params: AssetPreviewParams; result: ImagePreviewInfo };
+  'asset.reveal': { params: AssetRevealParams; result: AssetRevealResult };
   'asset.rename': { params: AssetRenameParams; result: AssetInfo };
   'asset.delete': { params: AssetDeleteParams; result: { deleted: true } };
 }

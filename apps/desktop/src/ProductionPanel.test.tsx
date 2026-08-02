@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AdapterCatalogResult, AdapterDescriptor } from '@ai-video/contracts';
+import type { AdapterCatalogResult, AdapterDescriptor, AssetInfo } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
 import { submitProviderRequest } from './provider-client';
 import { callWorker } from './worker-client';
@@ -59,10 +59,20 @@ const catalog: AdapterCatalogResult = {
   adapters: [descriptor],
 };
 
+const savedAsset: AssetInfo = {
+  id: 'asset-generated',
+  projectId: 'project',
+  kind: 'generated-image',
+  relativePath: 'assets/images/generated.png',
+  contentHash: 'hash',
+  sizeBytes: 8192,
+  createdAt: '2026-08-02T00:00:00.000Z',
+};
+
 describe('ProductionPanel', () => {
   beforeEach(() => {
     cleanup();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.mocked(canUseSecureCredentials).mockReturnValue(false);
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -77,6 +87,16 @@ describe('ProductionPanel', () => {
           parameters: { prompt: '电影画面', resolution: '1080p' },
           updatedAt: '2026-08-01T12:00:00.000Z',
         });
+      }
+      if (method === 'asset.preview') {
+        return Promise.resolve({
+          assetId: 'asset-generated',
+          dataUrl: 'data:image/png;base64,asset',
+          contentType: 'image/png',
+        });
+      }
+      if (method === 'asset.reveal') {
+        return Promise.resolve({ path: 'D:\\Project\\assets\\images\\generated.png' });
       }
       throw new Error(`Unexpected method ${method}`);
     });
@@ -102,6 +122,7 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText(/草稿已保存/)).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '普通素材' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '角色' })).toBeInTheDocument();
+    expect(screen.getByLabelText('自动保存到本地素材库')).toBeChecked();
   });
 
   it('does not persist a draft when adapter validation fails', async () => {
@@ -132,7 +153,9 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('未配置')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
-    expect(await screen.findByText('请先为当前 Vidu 服务区域保存 API Key。')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText(/Vidu 服务区域.*凭据|API Key/)).toBeInTheDocument(),
+    );
     expect(callWorker).not.toHaveBeenCalledWith('image.generate.prepare', expect.anything());
   });
 
@@ -193,6 +216,169 @@ describe('ProductionPanel', () => {
     expect(callWorker).toHaveBeenCalledWith('asset.list', {});
     expect(screen.getByTitle('重命名素材')).toBeInTheDocument();
     expect(screen.getByTitle('删除素材')).toBeInTheDocument();
+  });
+
+  it('saves a generated image locally by default and exposes preview, reveal, and library actions', async () => {
+    const onAssetsChanged = vi.fn();
+    const onOpenAssetLibrary = vi.fn();
+    vi.mocked(submitProviderRequest).mockResolvedValueOnce({
+      status: 200,
+      body: { images: [{ url: 'https://example.test/generated.png' }] },
+    });
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'running',
+          request: (params as { parameters: Record<string, unknown> }).parameters,
+          results: [],
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:00.000Z',
+        });
+      }
+      if (method === 'image.generate.complete') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'succeeded',
+          request: { prompt: '电影画面', resolution: '1080p' },
+          results: [
+            {
+              id: 'result',
+              jobId: 'job',
+              asset: savedAsset,
+              createdAt: '2026-08-02T00:00:01.000Z',
+            },
+          ],
+          preview: {
+            jobId: 'job',
+            assetId: savedAsset.id,
+            dataUrl: 'data:image/png;base64,generated',
+            contentType: 'image/png',
+          },
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:01.000Z',
+        });
+      }
+      if (method === 'asset.list') return Promise.resolve([savedAsset]);
+      if (method === 'asset.preview') {
+        return Promise.resolve({
+          assetId: savedAsset.id,
+          dataUrl: 'data:image/png;base64,asset',
+          contentType: 'image/png',
+        });
+      }
+      if (method === 'asset.reveal') {
+        return Promise.resolve({ path: 'D:\\Project\\assets\\images\\generated.png' });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(
+      <ProductionPanel
+        projectId="project"
+        projectRootPath="D:\\Project"
+        shotId="shot"
+        writable
+        onAssetsChanged={onAssetsChanged}
+        onOpenAssetLibrary={onOpenAssetLibrary}
+      />,
+    );
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
+      target: { value: '电影画面' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'image.generate.complete',
+        expect.objectContaining({ jobId: 'job', assetKind: 'generated-image', saveAsset: true }),
+      ),
+    );
+    expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
+    expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
+    expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
+      'src',
+      'data:image/png;base64,asset',
+    );
+    expect(onAssetsChanged).toHaveBeenCalledWith([savedAsset], savedAsset.id);
+
+    fireEvent.click(screen.getAllByRole('button', { name: '打开位置' })[0]!);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('asset.reveal', { assetId: savedAsset.id }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '查看素材库' }));
+    expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedAsset.id);
+  });
+
+  it('can generate a preview without saving to the local asset library', async () => {
+    vi.mocked(submitProviderRequest).mockResolvedValueOnce({
+      status: 200,
+      body: { images: [{ url: 'https://example.test/generated.png' }] },
+    });
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'running',
+          request: (params as { parameters: Record<string, unknown> }).parameters,
+          results: [],
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:00.000Z',
+        });
+      }
+      if (method === 'image.generate.complete') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'succeeded',
+          request: { prompt: '电影画面', resolution: '1080p' },
+          results: [],
+          preview: {
+            jobId: 'job',
+            dataUrl: 'data:image/png;base64,preview-only',
+            contentType: 'image/png',
+          },
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:01.000Z',
+        });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
+      target: { value: '电影画面' },
+    });
+    fireEvent.click(screen.getByLabelText('自动保存到本地素材库'));
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'image.generate.complete',
+        expect.objectContaining({ jobId: 'job', saveAsset: false }),
+      ),
+    );
+    expect(await screen.findByText('图片已生成，仅预览，未保存到素材库。')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
+      'src',
+      'data:image/png;base64,preview-only',
+    );
+    expect(screen.queryByText(savedAsset.relativePath)).not.toBeInTheDocument();
   });
 
   it('terminalizes a prepared job when the native provider transport fails', async () => {
