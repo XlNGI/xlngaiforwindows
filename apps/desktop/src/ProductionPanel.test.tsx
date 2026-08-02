@@ -4,11 +4,12 @@ import type { AdapterCatalogResult, AdapterDescriptor } from '@ai-video/contract
 import { ProductionPanel } from './ProductionPanel';
 import { submitProviderRequest } from './provider-client';
 import { callWorker } from './worker-client';
+import { canUseSecureCredentials, getCredentialStatus } from './credential-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('./provider-client', () => ({ submitProviderRequest: vi.fn() }));
 vi.mock('./credential-client', () => ({
-  canUseSecureCredentials: () => false,
+  canUseSecureCredentials: vi.fn(() => false),
   getCredentialStatus: vi.fn(),
   setCredential: vi.fn(),
   deleteCredential: vi.fn(),
@@ -62,6 +63,7 @@ describe('ProductionPanel', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(canUseSecureCredentials).mockReturnValue(false);
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
@@ -83,6 +85,7 @@ describe('ProductionPanel', () => {
   it('renders schema fields and saves a validated per-shot draft', async () => {
     render(<ProductionPanel shotId="shot" writable />);
     const prompt = await screen.findByLabelText(/画面提示词/);
+    expect(screen.getByLabelText('Vidu 服务区域')).toHaveValue('cn');
     expect(screen.getByLabelText('分辨率*')).toBeInTheDocument();
     expect(screen.getByText('专业参数')).toBeInTheDocument();
 
@@ -119,6 +122,18 @@ describe('ProductionPanel', () => {
     fireEvent.click(await screen.findByRole('button', { name: '保存草稿' }));
     expect(await screen.findByText('1 项参数需要修正')).toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('generation.draft.save', expect.anything());
+  });
+
+  it('does not create a generation job until the selected region credential is configured', async () => {
+    vi.mocked(canUseSecureCredentials).mockReturnValue(true);
+    vi.mocked(getCredentialStatus).mockResolvedValue({ provider: 'vidu-cn', configured: false });
+    render(<ProductionPanel writable />);
+
+    expect(await screen.findByText('未配置')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+
+    expect(await screen.findByText('请先为当前 Vidu 服务区域保存 API Key。')).toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('image.generate.prepare', expect.anything());
   });
 
   it('uses the full adapter key and locks the API version during resolution', async () => {
@@ -181,7 +196,7 @@ describe('ProductionPanel', () => {
   });
 
   it('terminalizes a prepared job when the native provider transport fails', async () => {
-    vi.mocked(submitProviderRequest).mockRejectedValueOnce(new Error('安全传输不可用'));
+    vi.mocked(submitProviderRequest).mockRejectedValueOnce('Provider credential is not configured');
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
@@ -221,7 +236,7 @@ describe('ProductionPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
-    expect(await screen.findByText('安全传输不可用')).toBeInTheDocument();
+    expect(await screen.findByText('Provider credential is not configured')).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('image.generate.fail', { jobId: 'job' });
     expect(screen.queryByTitle('取消生成')).not.toBeInTheDocument();
   });

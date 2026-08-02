@@ -190,3 +190,17 @@
 - Evidence: GitHub Actions run `30729007558` for commit `d079ffa` completed successfully. The hosted sequence passed the Node ABI alignment script, formatting, TypeScript build/Lint/typecheck, 74 tests, standalone Worker build, Rust/Tauri check, NSIS bundle, and clean install lifecycle.
 - Decision: code, native, package, install, and Hosted gates for the domestic Vidu routing fix are `PASS`. M5 remains `HOLD` only for one authorized real request and human visual/interaction acceptance.
 - Next: in the rebuilt app select `China site (api.vidu.cn)`, save the raw domestic API key without an authorization prefix, perform one controlled generation, and record the terminal job/asset outcome without recording the key.
+
+### 2026-08-02T11:08:00+08:00 - Generic image failure diagnosed
+- Evidence: the visible desktop error was only `图片生成失败。`; the current region credential status was `未配置`. The active project database contained a prior HTTP 401 followed by two terminal transport failures and no assets. No credential value or request payload was read.
+- Evidence: Tauri command rejections are strings, while `ProductionPanel` only surfaced `Error` instances; the actual `Provider credential is not configured` message was replaced by the generic fallback. Region selection also reset to the international site on each fresh session.
+- Action: normalized string/object/Error rejection messages, defaulted new sessions to the China site, persisted the region preference, cleared unsaved key input when switching regions, and blocked generation until the selected region credential status is configured.
+- Files: `apps/desktop/src/ProductionPanel.tsx`, `apps/desktop/src/ProductionPanel.test.tsx`.
+- Decision: this is a UI error-reporting and region-state defect, not evidence of a failed domestic image task. Real domestic Provider success remains `HOLD`; the user must save the raw key in the China-region credential slot and retry once after the updated build passes.
+- Next: run local and Hosted gates, then hand off one controlled domestic request.
+
+### 2026-08-02T11:12:00+08:00 - Credential/region guard passed local gates
+- Verification: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test` (13 files, 77 tests), `pnpm build`, focused Desktop tests (10), and `git diff --check` passed.
+- Evidence: the restarted desktop exposes the Chinese Vidu region control, defaults to the China credential slot, reports it as unconfigured, and did not issue a Provider request during inspection.
+- Decision: the UI guard and error visibility fix are ready for Hosted Windows verification. M5 remains `HOLD`; a real request is still intentionally not automated.
+- Next: commit/push, verify Hosted CI, then ask the user to open the project, save the raw key under `中国站`, and retry once.

@@ -35,6 +35,18 @@ interface ProductionPanelProps {
   writable: boolean;
 }
 
+const PROVIDER_REGION_STORAGE_KEY = 'ai-video.vidu-provider-region';
+
+function initialProviderRegion(): ProviderRegion {
+  try {
+    const stored = window.localStorage.getItem(PROVIDER_REGION_STORAGE_KEY);
+    if (stored === 'global' || stored === 'cn') return stored;
+  } catch {
+    // The native WebView normally exposes localStorage; use the domestic default if it does not.
+  }
+  return 'cn';
+}
+
 function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
   return Object.fromEntries(
     Object.entries(adapter.parameterSchema.properties)
@@ -45,6 +57,16 @@ function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
 
 function normalizeErrorPath(path: string): string {
   return path.replace(/^\//, '');
+}
+
+function errorMessage(reason: unknown, fallback: string): string {
+  if (reason instanceof Error && reason.message.trim()) return reason.message;
+  if (typeof reason === 'string' && reason.trim()) return reason.trim();
+  if (reason && typeof reason === 'object' && 'message' in reason) {
+    const message = (reason as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return fallback;
 }
 
 function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
@@ -61,7 +83,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [capability, setCapability] = useState<GenerationCapability>();
   const [provider, setProvider] = useState('');
-  const [providerRegion, setProviderRegion] = useState<ProviderRegion>('global');
+  const [providerRegion, setProviderRegion] = useState<ProviderRegion>(initialProviderRegion);
   const [adapterKey, setAdapterKey] = useState('');
   const [adapter, setAdapter] = useState<AdapterDescriptor>();
   const [parameters, setParameters] = useState<AdapterParameters>({});
@@ -86,6 +108,14 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       : adapter?.credentialProvider;
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(PROVIDER_REGION_STORAGE_KEY, providerRegion);
+    } catch {
+      // Region remains valid for the current session when storage is unavailable.
+    }
+  }, [providerRegion]);
+
+  useEffect(() => {
     void callWorker('adapter.catalog', {})
       .then((nextCatalog) => {
         setCatalog(nextCatalog);
@@ -96,9 +126,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
           setAdapterKey(first.key);
         }
       })
-      .catch((reason) =>
-        setMessage(reason instanceof Error ? reason.message : '适配器目录读取失败'),
-      );
+      .catch((reason) => setMessage(errorMessage(reason, '适配器目录读取失败')));
   }, []);
 
   useEffect(() => {
@@ -135,7 +163,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
         if (active) {
           setAdapter(undefined);
           setParameters({});
-          setMessage(reason instanceof Error ? reason.message : '适配器解析失败');
+          setMessage(errorMessage(reason, '适配器解析失败'));
         }
       });
     return () => {
@@ -149,9 +177,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     if (!credentialProvider || !canUseSecureCredentials()) return;
     void getCredentialStatus(credentialProvider)
       .then(setCredentialState)
-      .catch((reason) =>
-        setCredentialMessage(reason instanceof Error ? reason.message : '凭据状态读取失败'),
-      );
+      .catch((reason) => setCredentialMessage(errorMessage(reason, '凭据状态读取失败')));
   }, [credentialProvider]);
 
   useEffect(() => {
@@ -163,8 +189,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
         if (active) setAssets(items);
       })
       .catch((reason) => {
-        if (active)
-          setGenerationStatus(reason instanceof Error ? reason.message : '素材列表读取失败。');
+        if (active) setGenerationStatus(errorMessage(reason, '素材列表读取失败。'));
       });
     return () => {
       active = false;
@@ -195,6 +220,14 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     const first = capabilityAdapters.find((item) => item.provider === next);
     setProvider(next);
     setAdapterKey(first?.key ?? '');
+  };
+
+  const chooseProviderRegion = (next: ProviderRegion) => {
+    setProviderRegion(next);
+    setCredentialState(undefined);
+    setCredentialSecret('');
+    setCredentialMessage('');
+    setGenerationStatus('');
   };
 
   const updateParameter = (key: string, value: AdapterParameters[string] | undefined) => {
@@ -232,7 +265,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       });
       setMessage(`草稿已保存 · ${new Date(saved.updatedAt).toLocaleTimeString()}`);
     } catch (reason) {
-      setMessage(reason instanceof Error ? reason.message : '草稿保存失败');
+      setMessage(errorMessage(reason, '草稿保存失败'));
     } finally {
       setBusy(false);
     }
@@ -247,7 +280,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       setCredentialSecret('');
       setCredentialMessage('凭据已保存到 Windows 凭据管理器');
     } catch (reason) {
-      setCredentialMessage(reason instanceof Error ? reason.message : '凭据保存失败');
+      setCredentialMessage(errorMessage(reason, '凭据保存失败'));
     } finally {
       setCredentialBusy(false);
     }
@@ -255,6 +288,14 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
 
   const generateImage = async () => {
     if (!adapter || !writable) return;
+    if (canUseSecureCredentials() && credential?.configured !== true) {
+      setGenerationStatus(
+        credential
+          ? '请先为当前 Vidu 服务区域保存 API Key。'
+          : '正在读取当前 Vidu 服务区域的凭据状态，请稍后重试。',
+      );
+      return;
+    }
     let preparedJobId: string | undefined;
     setBusy(true);
     setGenerationStatus('');
@@ -299,7 +340,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
           // Project close/restart recovery owns terminalization when the Worker is unavailable.
         }
       }
-      setGenerationStatus(reason instanceof Error ? reason.message : '图片生成失败。');
+      setGenerationStatus(errorMessage(reason, '图片生成失败。'));
     } finally {
       setGenerationJobId(undefined);
       setBusy(false);
@@ -314,7 +355,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       const renamed = await callWorker('asset.rename', { assetId: asset.id, name });
       setAssets((current) => current.map((item) => (item.id === renamed.id ? renamed : item)));
     } catch (reason) {
-      setGenerationStatus(reason instanceof Error ? reason.message : '素材重命名失败。');
+      setGenerationStatus(errorMessage(reason, '素材重命名失败。'));
     }
   };
 
@@ -324,7 +365,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       await callWorker('asset.delete', { assetId: asset.id });
       setAssets((current) => current.filter((item) => item.id !== asset.id));
     } catch (reason) {
-      setGenerationStatus(reason instanceof Error ? reason.message : '素材删除失败。');
+      setGenerationStatus(errorMessage(reason, '素材删除失败。'));
     }
   };
 
@@ -334,7 +375,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       await callWorker('image.generate.cancel', { jobId: generationJobId });
       setGenerationStatus('已取消图片生成。');
     } catch (reason) {
-      setGenerationStatus(reason instanceof Error ? reason.message : '取消失败。');
+      setGenerationStatus(errorMessage(reason, '取消失败。'));
     }
   };
 
@@ -347,7 +388,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       setCredentialState(await deleteCredential(credentialProvider));
       setCredentialMessage('凭据已删除');
     } catch (reason) {
-      setCredentialMessage(reason instanceof Error ? reason.message : '凭据删除失败');
+      setCredentialMessage(errorMessage(reason, '凭据删除失败'));
     } finally {
       setCredentialBusy(false);
     }
@@ -414,14 +455,15 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
 
           {provider === 'vidu' && (
             <div className="field-group">
-              <label htmlFor="provider-region">Vidu region</label>
+              <label htmlFor="provider-region">Vidu 服务区域</label>
               <select
                 id="provider-region"
                 value={providerRegion}
-                onChange={(event) => setProviderRegion(event.target.value as ProviderRegion)}
+                onChange={(event) => chooseProviderRegion(event.target.value as ProviderRegion)}
+                disabled={busy || credentialBusy}
               >
-                <option value="global">Global site (api.vidu.com)</option>
-                <option value="cn">China site (api.vidu.cn)</option>
+                <option value="cn">中国站 (api.vidu.cn)</option>
+                <option value="global">国际站 (api.vidu.com)</option>
               </select>
             </div>
           )}
