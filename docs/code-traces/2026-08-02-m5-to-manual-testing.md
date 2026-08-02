@@ -237,3 +237,8 @@
 - Files: `apps/worker/src/handler.ts`, `apps/worker/src/handler.test.ts`.
 - Verification: Worker suite passed (44 tests), `pnpm format:check`, `pnpm typecheck`, and `git diff --check` passed.
 - Decision: keep the feature within M5 and preserve the manual/real-Provider `HOLD`; no real request or credential was accessed.
+
+### 2026-08-02T13:40:16+08:00 - Hosted Windows gate passed for local asset preview flow
+- Evidence: GitHub Actions run `30734207680` for commit `b0f35a5` completed with `success`. Step status showed formatting, TypeScript build/lint/typecheck, 84 tests, standalone Worker build, Rust/Tauri check, NSIS bundle, and clean install lifecycle completed successfully.
+- Decision: automated code, native, package, install, and Hosted gates are `PASS` for the optional local-save/preview/reveal/material-library flow. M5 remains `HOLD` only for human confirmation of the real generated image preview, file-manager reveal, selected asset kind, material-library presence, and any further real Provider acceptance checks.
+- Next: restart the desktop from `main`, open the target project, keep the proxy state that allowed the successful domestic download, generate once with auto-save enabled, then repeat once with auto-save disabled to confirm preview-only behavior.
