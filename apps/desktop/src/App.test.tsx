@@ -54,6 +54,33 @@ describe('App', () => {
     expect(callWorker).not.toHaveBeenCalledWith('project.open', expect.anything());
   });
 
+  it('offers a sample project on first use and sends the selected absolute path', async () => {
+    render(<App />);
+    const sampleButton = await screen.findByRole('button', { name: '创建示例项目' });
+    expect(sampleButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('项目绝对目录'), {
+      target: { value: 'D:\\Projects\\sample-drama' },
+    });
+    fireEvent.click(sampleButton);
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('project.createSample', {
+        rootPath: 'D:\\Projects\\sample-drama',
+        name: '我的短剧',
+      }),
+    );
+  });
+
+  it('opens the project maintenance dialog with restore controls when no project is open', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: '项目维护' }));
+
+    expect(await screen.findByRole('dialog', { name: '项目维护' })).toBeInTheDocument();
+    expect(screen.getByText('从 SQLite 备份恢复')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '恢复并打开项目' })).toBeDisabled();
+  });
+
   it('does not merge a streaming message into another conversation', () => {
     const messages = [
       {

@@ -8,9 +8,11 @@ import {
   CircleCheck,
   Clapperboard,
   Copy,
+  Database,
   FilePlus2,
   FileText,
   FolderOpen,
+  HardDrive,
   Image,
   MessageSquarePlus,
   PanelLeftClose,
@@ -22,10 +24,13 @@ import {
   Save,
   Settings2,
   Square,
+  Trash2,
   Video,
+  X,
 } from 'lucide-react';
 import type {
   AssetInfo,
+  CacheInspectionResult,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -33,6 +38,7 @@ import type {
   DocumentKind,
   DocumentSummary,
   DocumentVersionInfo,
+  DiagnosticExportResult,
   HealthResult,
   LlmGenerationInfo,
   LlmStatusResult,
@@ -92,6 +98,16 @@ export function App() {
   const [projectPath, setProjectPath] = useState('');
   const [projectMessage, setProjectMessage] = useState('');
   const [projectBusy, setProjectBusy] = useState(false);
+  const [startupLoaded, setStartupLoaded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
+  const [maintenanceMessage, setMaintenanceMessage] = useState('');
+  const [cacheInspection, setCacheInspection] = useState<CacheInspectionResult>();
+  const [diagnosticExport, setDiagnosticExport] = useState<DiagnosticExportResult>();
+  const [diagnosticDestination, setDiagnosticDestination] = useState('');
+  const [exportDestination, setExportDestination] = useState('');
+  const [restoreBackupPath, setRestoreBackupPath] = useState('');
+  const [restoreDestination, setRestoreDestination] = useState('');
 
   const [view, setView] = useState<WorkspaceView>('documents');
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
@@ -184,7 +200,8 @@ export function App() {
         setRecentProjects(recent);
         if (current) await loadProjectContent();
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setStartupLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -287,6 +304,16 @@ export function App() {
     }
     return runProjectAction(() => callWorker('project.create', { name, rootPath }));
   };
+  const createSampleProject = () => {
+    const rootPath = normalizeProjectPath(projectPath);
+    if (!rootPath) return;
+    return runProjectAction(() =>
+      callWorker('project.createSample', {
+        rootPath,
+        name: projectName.trim() || undefined,
+      }),
+    );
+  };
   const openProject = (requestedPath?: string) => {
     const rootPath = normalizeProjectPath(requestedPath ?? projectPath);
     if (!rootPath) return;
@@ -307,6 +334,81 @@ export function App() {
       setGeneration(undefined);
       return '项目已安全关闭';
     });
+
+  const runMaintenanceAction = async (action: () => Promise<string>) => {
+    setMaintenanceBusy(true);
+    setMaintenanceMessage('');
+    try {
+      setMaintenanceMessage(await action());
+    } catch (reason) {
+      setMaintenanceMessage(reason instanceof Error ? reason.message : '项目维护操作失败');
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  };
+
+  const inspectCache = () =>
+    runMaintenanceAction(async () => {
+      const result = await callWorker('maintenance.cache.inspect', {});
+      setCacheInspection(result);
+      return `缓存占用 ${(result.sizeBytes / 1024 / 1024).toFixed(2)} MiB`;
+    });
+
+  const clearCache = () => {
+    if (!window.confirm('确定清理当前项目的媒体缓存？已保存素材不会被删除。')) return;
+    return runMaintenanceAction(async () => {
+      const result = await callWorker('maintenance.cache.clear', {});
+      const next = await callWorker('maintenance.cache.inspect', {});
+      setCacheInspection(next);
+      return `已释放 ${(result.freedBytes / 1024 / 1024).toFixed(2)} MiB，删除 ${result.removedFiles} 个缓存文件`;
+    });
+  };
+
+  const exportDiagnostics = () =>
+    runMaintenanceAction(async () => {
+      const result = await callWorker('maintenance.diagnostics.export', {
+        destinationRoot: diagnosticDestination.trim() || undefined,
+      });
+      setDiagnosticExport(result);
+      return '脱敏诊断包已导出';
+    });
+
+  const revealDiagnostics = () => {
+    if (!diagnosticExport) return;
+    return runMaintenanceAction(async () => {
+      await callWorker('maintenance.diagnostics.reveal', { path: diagnosticExport.path });
+      return '已打开诊断包位置';
+    });
+  };
+
+  const exportProject = () => {
+    const destinationRoot = exportDestination.trim();
+    if (!destinationRoot) {
+      setMaintenanceMessage('请输入项目导出的绝对目录');
+      return;
+    }
+    return runMaintenanceAction(async () => {
+      const result = await callWorker('project.export', { destinationRoot });
+      return `项目已导出：${result.path}`;
+    });
+  };
+
+  const restoreProject = () => {
+    const backupPath = restoreBackupPath.trim();
+    const destinationRoot = restoreDestination.trim();
+    if (!backupPath || !destinationRoot) {
+      setMaintenanceMessage('请输入备份文件和恢复目标绝对目录');
+      return;
+    }
+    setSettingsOpen(false);
+    return runProjectAction(() => callWorker('project.restore', { backupPath, destinationRoot }));
+  };
+
+  const openSettings = () => {
+    setSettingsOpen(true);
+    setMaintenanceMessage('');
+    if (project) void inspectCache();
+  };
 
   const selectDocument = async (summary: DocumentSummary) => {
     const requestId = ++documentRequest.current;
@@ -612,11 +714,203 @@ export function App() {
           >
             <Plus size={18} />
           </button>
-          <button className="icon-button" type="button" title="设置">
+          <button
+            className="icon-button"
+            type="button"
+            title="项目维护"
+            aria-expanded={settingsOpen}
+            onClick={openSettings}
+          >
             <Settings2 size={17} />
           </button>
         </div>
       </header>
+
+      {settingsOpen && (
+        <div className="dialog-backdrop" role="presentation">
+          <section
+            className="maintenance-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="maintenance-title"
+          >
+            <header>
+              <div>
+                <span className="eyebrow">本地项目工具</span>
+                <h2 id="maintenance-title">项目维护</h2>
+              </div>
+              <button
+                className="icon-button subtle"
+                type="button"
+                title="关闭项目维护"
+                onClick={() => setSettingsOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            {project ? (
+              <>
+                <section className="maintenance-section">
+                  <div className="maintenance-section-title">
+                    <Database size={15} />
+                    <strong>备份与迁移</strong>
+                  </div>
+                  <div className="maintenance-actions">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runMaintenanceAction(async () => {
+                          const result = await callWorker('project.integrity', {});
+                          return result.ok
+                            ? `完整性检查通过 · Schema v${result.schemaVersion}`
+                            : result.messages.join('; ');
+                        })
+                      }
+                      disabled={maintenanceBusy}
+                    >
+                      检查
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runMaintenanceAction(async () => {
+                          const result = await callWorker('project.backup', {});
+                          return `备份完成：${result.path}`;
+                        })
+                      }
+                      disabled={maintenanceBusy || !writable}
+                    >
+                      <Save size={13} />
+                      备份
+                    </button>
+                  </div>
+                  <label>
+                    项目导出目录
+                    <input
+                      value={exportDestination}
+                      onChange={(event) => setExportDestination(event.target.value)}
+                      placeholder="D:\Projects\exported-drama"
+                    />
+                  </label>
+                  <button
+                    className="maintenance-command"
+                    type="button"
+                    onClick={() => void exportProject()}
+                    disabled={maintenanceBusy || !writable || !exportDestination.trim()}
+                  >
+                    <FolderOpen size={14} />
+                    导出项目副本
+                  </button>
+                </section>
+
+                <section className="maintenance-section">
+                  <div className="maintenance-section-title">
+                    <HardDrive size={15} />
+                    <strong>媒体缓存</strong>
+                    {cacheInspection && (
+                      <span>
+                        {cacheInspection.fileCount} 个文件 ·{' '}
+                        {(cacheInspection.sizeBytes / 1024 / 1024).toFixed(2)} MiB
+                      </span>
+                    )}
+                  </div>
+                  <div className="maintenance-actions">
+                    <button
+                      type="button"
+                      onClick={() => void inspectCache()}
+                      disabled={maintenanceBusy}
+                    >
+                      检查占用
+                    </button>
+                    <button
+                      className="danger-command"
+                      type="button"
+                      onClick={() => void clearCache()}
+                      disabled={maintenanceBusy || !writable}
+                    >
+                      <Trash2 size={13} />
+                      清理缓存
+                    </button>
+                  </div>
+                </section>
+
+                <section className="maintenance-section">
+                  <div className="maintenance-section-title">
+                    <HardDrive size={15} />
+                    <strong>脱敏诊断</strong>
+                  </div>
+                  <label>
+                    导出目录（留空则保存到项目 exports）
+                    <input
+                      value={diagnosticDestination}
+                      onChange={(event) => setDiagnosticDestination(event.target.value)}
+                      placeholder="D:\Support"
+                    />
+                  </label>
+                  <div className="maintenance-actions">
+                    <button
+                      type="button"
+                      onClick={() => void exportDiagnostics()}
+                      disabled={maintenanceBusy}
+                    >
+                      导出诊断包
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void revealDiagnostics()}
+                      disabled={maintenanceBusy || !diagnosticExport}
+                    >
+                      <FolderOpen size={13} />
+                      打开位置
+                    </button>
+                  </div>
+                  {diagnosticExport && (
+                    <small className="maintenance-path" title={diagnosticExport.path}>
+                      {diagnosticExport.path}
+                    </small>
+                  )}
+                </section>
+              </>
+            ) : (
+              <section className="maintenance-section restore-section">
+                <div className="maintenance-section-title">
+                  <Database size={15} />
+                  <strong>从 SQLite 备份恢复</strong>
+                </div>
+                <label>
+                  备份文件
+                  <input
+                    value={restoreBackupPath}
+                    onChange={(event) => setRestoreBackupPath(event.target.value)}
+                    placeholder="D:\Backups\project.sqlite"
+                  />
+                </label>
+                <label>
+                  恢复目标目录
+                  <input
+                    value={restoreDestination}
+                    onChange={(event) => setRestoreDestination(event.target.value)}
+                    placeholder="D:\Projects\restored-drama"
+                  />
+                </label>
+                <button
+                  className="maintenance-command"
+                  type="button"
+                  onClick={() => void restoreProject()}
+                  disabled={
+                    maintenanceBusy || !restoreBackupPath.trim() || !restoreDestination.trim()
+                  }
+                >
+                  恢复并打开项目
+                </button>
+              </section>
+            )}
+
+            {maintenanceMessage && <div className="maintenance-message">{maintenanceMessage}</div>}
+          </section>
+        </div>
+      )}
 
       <aside className="project-rail panel-border">
         <div className="panel-heading">
@@ -825,6 +1119,12 @@ export function App() {
             </>
           ) : (
             <>
+              {startupLoaded && recentProjects.length === 0 && (
+                <div className="first-run-block">
+                  <strong>开始创作</strong>
+                  <span>示例：雾港来信</span>
+                </div>
+              )}
               <label htmlFor="project-name">项目名称</label>
               <input
                 id="project-name"
@@ -854,6 +1154,17 @@ export function App() {
                   打开
                 </button>
               </div>
+              {startupLoaded && recentProjects.length === 0 && (
+                <button
+                  className="sample-project-button"
+                  type="button"
+                  onClick={() => void createSampleProject()}
+                  disabled={projectBusy || !projectPath.trim()}
+                >
+                  <Clapperboard size={13} />
+                  创建示例项目
+                </button>
+              )}
               {recentProjects.map((recent) => (
                 <button
                   className="recent-link"

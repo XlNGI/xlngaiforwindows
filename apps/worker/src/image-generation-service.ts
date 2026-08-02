@@ -30,6 +30,7 @@ import type { AssetRecord, JobRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
 import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
+import { assertStorageCapacity } from './storage-capacity.js';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -390,8 +391,10 @@ export class ImageGenerationService {
     const relativePath = join('assets', 'images', `${assetId}${extension}`);
     const finalPath = resolveProjectRelativePath(projectRootPath, relativePath);
     const temporaryPath = `${finalPath}.${process.pid}.tmp`;
-    mkdirSync(join(projectRootPath, 'assets', 'images'), { recursive: true });
+    const imageDirectory = join(projectRootPath, 'assets', 'images');
+    mkdirSync(imageDirectory, { recursive: true });
     try {
+      assertStorageCapacity(imageDirectory, image.bytes.byteLength);
       writeFileSync(temporaryPath, image.bytes, { flag: 'wx' });
       renameSync(temporaryPath, finalPath);
       const hash = createHash('sha256').update(image.bytes).digest('hex');

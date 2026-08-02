@@ -242,6 +242,43 @@ describe('VideoGenerationService', () => {
     expect(service.list()[0]?.results).toHaveLength(0);
   });
 
+  it('rejects an oversized video from Content-Length without creating a partial asset', async () => {
+    const { project, service } = await setup();
+    const job = prepare(service);
+    service.attachTask({ jobId: job.id, providerTaskId: 'provider-large-video' });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(new Uint8Array(), {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp4',
+              'content-length': String(512 * 1024 * 1024 + 1),
+            },
+          }),
+        ),
+      ),
+    );
+
+    const observation = service.observe({
+      jobId: job.id,
+      providerTaskId: 'provider-large-video',
+      providerStatus: 200,
+      providerBody: {
+        state: 'success',
+        creations: [{ video_url: 'https://example.com/large.mp4' }],
+      },
+    });
+    expect(observation.status).toBe('downloading');
+    await vi.waitFor(() => expect(service.get(job.id).status).toBe('failed'));
+
+    const failed = service.get(job.id);
+    expect(failed.error).toContain('512 MiB limit');
+    expect(failed.results).toEqual([]);
+    expect(readdirSync(join(project.current()!.rootPath, 'assets', 'videos'))).toEqual([]);
+  });
+
   it('does not commit a video cancelled while the download is pending', async () => {
     const { project, service } = await setup();
     let resolveFetch: (response: Response) => void = () => undefined;

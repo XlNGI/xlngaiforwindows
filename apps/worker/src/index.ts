@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
-import { handleRequest, parseRequest } from './handler.js';
+import { handleRequest, parseRequest, recordWorkerError } from './handler.js';
 
 let requestQueue = Promise.resolve();
 
@@ -22,9 +22,20 @@ function startStdio(): void {
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', (line) => {
     void enqueue(async () => {
-      const parsed = parseRequest(JSON.parse(line) as unknown);
+      let value: unknown;
+      try {
+        value = JSON.parse(line) as unknown;
+      } catch (error) {
+        recordWorkerError('ipc.parse', error);
+        writeResponse(parseRequest(null));
+        return;
+      }
+      const parsed = parseRequest(value);
       writeResponse('ok' in parsed ? parsed : await handleRequest(parsed));
-    }).catch(() => writeResponse(parseRequest(null)));
+    }).catch((error) => {
+      recordWorkerError('ipc.request', error);
+      writeResponse(parseRequest(null));
+    });
   });
 }
 
@@ -43,11 +54,21 @@ function startHttp(port: number): void {
     });
     request.on('end', () => {
       void enqueue(async () => {
-        const parsed = parseRequest(JSON.parse(body) as unknown);
+        let value: unknown;
+        try {
+          value = JSON.parse(body) as unknown;
+        } catch (error) {
+          recordWorkerError('http.parse', error);
+          response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          response.end(JSON.stringify(parseRequest(null)));
+          return;
+        }
+        const parsed = parseRequest(value);
         const result = 'ok' in parsed ? parsed : await handleRequest(parsed);
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(result));
-      }).catch(() => {
+      }).catch((error) => {
+        recordWorkerError('http.request', error);
         response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(parseRequest(null)));
       });

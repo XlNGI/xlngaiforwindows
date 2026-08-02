@@ -12,4 +12,22 @@ describe('IPC protocol', () => {
 
     expect(request.protocolVersion).toBe(1);
   });
+
+  it('types M7 maintenance requests without accepting payload data for cache operations', () => {
+    const cacheRequest: WorkerRequest<'maintenance.cache.inspect'> = {
+      id: 'cache',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'maintenance.cache.inspect',
+      params: {},
+    };
+    const diagnosticRequest: WorkerRequest<'maintenance.diagnostics.export'> = {
+      id: 'diagnostics',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'maintenance.diagnostics.export',
+      params: { destinationRoot: 'D:\\Support' },
+    };
+
+    expect(cacheRequest.params).toEqual({});
+    expect(diagnosticRequest.params.destinationRoot).toBe('D:\\Support');
+  });
 });

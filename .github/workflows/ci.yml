@@ -34,6 +34,8 @@ jobs:
         run: pnpm test
       - name: Build standalone worker
         run: pnpm worker:sidecar
+      - name: Validate M7 offline diagnostics and maintenance sidecar
+        run: pnpm --filter @ai-video/worker validate:m7-sidecar
       - name: Check Tauri host
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Build NSIS bundle
@@ -43,3 +45,8 @@ jobs:
         run: |
           .\scripts\validate-nsis-install.ps1 `
             -InstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\AI Video Workspace_0.1.0_x64-setup.exe"
+      - name: Validate NSIS overwrite and external project preservation
+        shell: powershell
+        run: |
+          .\scripts\validate-nsis-upgrade.ps1 `
+            -UpgradeInstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\AI Video Workspace_0.1.0_x64-setup.exe"

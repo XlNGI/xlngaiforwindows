@@ -28,6 +28,8 @@ import {
   type AssetRevealParams,
   type AssetRenameParams,
   type ProjectCreateParams,
+  type SampleProjectCreateParams,
+  type DiagnosticExportParams,
   type ProjectExportParams,
   type ProjectOpenParams,
   type ProjectRestoreParams,
@@ -53,12 +55,15 @@ import { GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
+import { MaintenanceService } from './maintenance-service.js';
+import { SampleProjectService } from './sample-project-service.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
   'health',
   'sqlite.probe',
   'project.create',
+  'project.createSample',
   'project.open',
   'project.close',
   'project.current',
@@ -67,6 +72,10 @@ const methods = new Set<WorkerMethod>([
   'project.backup',
   'project.export',
   'project.restore',
+  'maintenance.cache.inspect',
+  'maintenance.cache.clear',
+  'maintenance.diagnostics.export',
+  'maintenance.diagnostics.reveal',
   'document.list',
   'document.get',
   'document.save',
@@ -128,6 +137,8 @@ const contentService = new ContentService(projectService);
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
 const videoGenerationService = new VideoGenerationService(projectService);
+const maintenanceService = new MaintenanceService(projectService);
+const sampleProjectService = new SampleProjectService(projectService);
 const contextService = new ContextService(projectService);
 const llmProvider = new OpenAIResponsesProvider({
   apiKey: process.env.OPENAI_API_KEY,
@@ -143,6 +154,10 @@ const generationService = new GenerationService(
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
   return { id, protocolVersion: IPC_PROTOCOL_VERSION, ok: false, error };
+}
+
+export function recordWorkerError(operation: string, error: unknown): void {
+  maintenanceService.recordError(operation, error);
 }
 
 export function parseRequest(value: unknown): WorkerRequest | WorkerResponse {
@@ -299,7 +314,30 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
         videoGenerationService.cancelAll();
+        maintenanceService.resetSession();
         result = projectService.create(typedParams.rootPath, typedParams.name);
+        generationService.recoverInterrupted();
+        imageGenerationService.recoverInterrupted();
+        videoGenerationService.recoverInterrupted();
+        break;
+      }
+      case 'project.createSample': {
+        const typedParams: SampleProjectCreateParams = {
+          rootPath: requireString(params, 'rootPath'),
+          name:
+            params.name === undefined
+              ? undefined
+              : typeof params.name === 'string'
+                ? params.name
+                : (() => {
+                    throw new Error('name must be a string.');
+                  })(),
+        };
+        await generationService.cancelAll();
+        imageGenerationService.cancelAll();
+        videoGenerationService.cancelAll();
+        maintenanceService.resetSession();
+        result = sampleProjectService.create(typedParams);
         generationService.recoverInterrupted();
         imageGenerationService.recoverInterrupted();
         videoGenerationService.recoverInterrupted();
@@ -310,6 +348,7 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
         videoGenerationService.cancelAll();
+        maintenanceService.resetSession();
         result = projectService.open(typedParams.rootPath);
         generationService.recoverInterrupted();
         imageGenerationService.recoverInterrupted();
@@ -321,6 +360,7 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         imageGenerationService.cancelAll();
         videoGenerationService.cancelAll();
         projectService.close();
+        maintenanceService.resetSession();
         result = { closed: true };
         break;
       case 'project.current':
@@ -352,12 +392,36 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
         videoGenerationService.cancelAll();
+        maintenanceService.resetSession();
         result = projectService.restore(typedParams.backupPath, typedParams.destinationRoot);
         generationService.recoverInterrupted();
         imageGenerationService.recoverInterrupted();
         videoGenerationService.recoverInterrupted();
         break;
       }
+      case 'maintenance.cache.inspect':
+        result = maintenanceService.inspectCache();
+        break;
+      case 'maintenance.cache.clear':
+        result = maintenanceService.clearCache();
+        break;
+      case 'maintenance.diagnostics.export': {
+        const typedParams: DiagnosticExportParams = {
+          destinationRoot:
+            params.destinationRoot === undefined
+              ? undefined
+              : typeof params.destinationRoot === 'string'
+                ? params.destinationRoot
+                : (() => {
+                    throw new Error('destinationRoot must be a string.');
+                  })(),
+        };
+        result = maintenanceService.exportDiagnostics(typedParams);
+        break;
+      }
+      case 'maintenance.diagnostics.reveal':
+        result = maintenanceService.revealDiagnostics(requireString(params, 'path'));
+        break;
       case 'document.list':
         result = contentService.listDocuments();
         break;
@@ -563,6 +627,7 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
       result,
     } as WorkerResponse;
   } catch (error) {
+    recordWorkerError(request.method, error);
     return errorResponse(request.id, {
       code:
         error instanceof AdapterNotFoundError

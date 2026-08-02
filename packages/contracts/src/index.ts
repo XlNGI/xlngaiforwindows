@@ -43,6 +43,11 @@ export interface ProjectCreateParams {
   rootPath: string;
 }
 
+export interface SampleProjectCreateParams {
+  rootPath: string;
+  name?: string;
+}
+
 export interface ProjectOpenParams {
   rootPath: string;
 }
@@ -67,6 +72,35 @@ export interface ProjectRestoreParams {
 }
 
 export interface PathResult {
+  path: string;
+}
+
+export interface CacheInspectionResult {
+  fileCount: number;
+  directoryCount: number;
+  sizeBytes: number;
+  skippedLinks: number;
+}
+
+export interface CacheClearResult {
+  removedFiles: number;
+  removedDirectories: number;
+  freedBytes: number;
+  removedLinks: number;
+}
+
+export interface DiagnosticExportParams {
+  destinationRoot?: string;
+}
+
+export interface DiagnosticExportResult {
+  path: string;
+  createdAt: string;
+  manifestVersion: 1;
+  fileCount: number;
+}
+
+export interface DiagnosticRevealParams {
   path: string;
 }
 
@@ -595,6 +629,7 @@ export interface WorkerMethodMap {
   health: { params: Record<string, never>; result: HealthResult };
   'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
   'project.create': { params: ProjectCreateParams; result: ProjectInfo };
+  'project.createSample': { params: SampleProjectCreateParams; result: ProjectInfo };
   'project.open': { params: ProjectOpenParams; result: ProjectInfo };
   'project.close': { params: Record<string, never>; result: { closed: true } };
   'project.current': { params: Record<string, never>; result: ProjectInfo | null };
@@ -603,6 +638,19 @@ export interface WorkerMethodMap {
   'project.backup': { params: ProjectBackupParams; result: PathResult };
   'project.export': { params: ProjectExportParams; result: PathResult };
   'project.restore': { params: ProjectRestoreParams; result: ProjectInfo };
+  'maintenance.cache.inspect': {
+    params: Record<string, never>;
+    result: CacheInspectionResult;
+  };
+  'maintenance.cache.clear': { params: Record<string, never>; result: CacheClearResult };
+  'maintenance.diagnostics.export': {
+    params: DiagnosticExportParams;
+    result: DiagnosticExportResult;
+  };
+  'maintenance.diagnostics.reveal': {
+    params: DiagnosticRevealParams;
+    result: PathResult;
+  };
   'document.list': { params: Record<string, never>; result: DocumentSummary[] };
   'document.get': { params: DocumentGetParams; result: DocumentDetail };
   'document.save': { params: DocumentSaveParams; result: DocumentDetail };

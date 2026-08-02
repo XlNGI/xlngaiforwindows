@@ -257,6 +257,39 @@ describe('ImageGenerationService', () => {
     expect(service.listAssets({})).toHaveLength(0);
   });
 
+  it('rejects an oversized image before registering an asset', async () => {
+    const { project, service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          headers: new Headers({ 'content-type': 'image/png' }),
+          arrayBuffer: () => Promise.resolve(new ArrayBuffer(25 * 1024 * 1024 + 1)),
+        } as Response),
+      ),
+    );
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'https://example.com/oversized.png' }] },
+    });
+
+    expect(result).toMatchObject({ status: 'failed', results: [] });
+    project.access(false, (database, activeProject) => {
+      expect(
+        database
+          .prepare('SELECT COUNT(*) AS count FROM assets WHERE project_id = ?')
+          .get(activeProject.id),
+      ).toEqual({ count: 0 });
+    });
+  });
+
   it('marks invalid provider output failed without leaving an asset', async () => {
     const { service } = await setup();
     const job = service.prepare({

@@ -1,0 +1,138 @@
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { MaintenanceService, redactDiagnosticText } from './maintenance-service.js';
+import { ProjectService } from './project-service.js';
+
+const temporaryDirectories: string[] = [];
+const projectServices: ProjectService[] = [];
+
+afterEach(async () => {
+  for (const projectService of projectServices.splice(0)) projectService.close();
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })));
+});
+
+async function temporaryRoot(name: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), `ai-video-m7-${name}-`));
+  temporaryDirectories.push(root);
+  return root;
+}
+
+function createProjectService(recentProjectsPath: string): ProjectService {
+  const projectService = new ProjectService({ recentProjectsPath });
+  projectServices.push(projectService);
+  return projectService;
+}
+
+describe('MaintenanceService', () => {
+  it('redacts credentials, URLs, data payloads, and absolute paths with a length bound', () => {
+    const secret = 'sk-live-secret-value';
+    const text = [
+      `Authorization: Bearer ${secret}`,
+      `api_key=${secret}`,
+      'https://provider.example/result.png?X-Amz-Signature=signed-secret',
+      'data:image/png;base64,aGVsbG8=',
+      'D:\\Private\\Project\\project.sqlite',
+      'x'.repeat(2_000),
+    ].join(' ');
+
+    const redacted = redactDiagnosticText(text);
+    expect(redacted).not.toContain(secret);
+    expect(redacted).not.toContain('provider.example');
+    expect(redacted).not.toContain('aGVsbG8');
+    expect(redacted).not.toContain('D:\\Private');
+    expect(redacted).toContain('[REDACTED]');
+    expect(redacted.length).toBeLessThanOrEqual(1_024);
+  });
+
+  it('exports a bounded diagnostic package without project content or sensitive errors', async () => {
+    const base = await temporaryRoot('diagnostics');
+    const projectRoot = join(base, 'private-project');
+    const destinationRoot = join(base, 'support-output');
+    const projects = createProjectService(join(base, 'recent.json'));
+    projects.create(projectRoot, 'Confidential Drama Title');
+    const openedPaths: string[] = [];
+    const maintenance = new MaintenanceService(projects, {
+      openPath: (path) => openedPaths.push(path),
+    });
+    maintenance.recordError(
+      'provider.submit',
+      new Error(
+        `Bearer sk-sensitive https://api.example/task?id=1 data:image/png;base64,c2VjcmV0 ${projectRoot}`,
+      ),
+    );
+
+    const result = maintenance.exportDiagnostics({ destinationRoot });
+    const manifest = await readFile(join(result.path, 'manifest.json'), 'utf8');
+    const report = await readFile(join(result.path, 'report.json'), 'utf8');
+    const combined = manifest + report;
+
+    expect(result).toMatchObject({ manifestVersion: 1, fileCount: 2 });
+    expect(combined).not.toContain('sk-sensitive');
+    expect(combined).not.toContain('api.example');
+    expect(combined).not.toContain('c2VjcmV0');
+    expect(combined).not.toContain(projectRoot);
+    expect(combined).not.toContain('Confidential Drama Title');
+    expect(combined).not.toContain('project.sqlite');
+    expect(combined).toContain('[REDACTED]');
+    expect(Buffer.byteLength(report)).toBeLessThanOrEqual(256 * 1_024);
+
+    expect(maintenance.revealDiagnostics(result.path)).toEqual({ path: result.path });
+    expect(openedPaths).toEqual([result.path]);
+    expect(() => maintenance.revealDiagnostics(base)).toThrow('not created by this Worker');
+  });
+
+  it('inspects and clears only cache content without following directory links', async () => {
+    const base = await temporaryRoot('cache');
+    const projectRoot = join(base, 'project');
+    const outside = join(base, 'outside');
+    const projects = createProjectService(join(base, 'recent.json'));
+    projects.create(projectRoot, 'Cache Project');
+    await mkdir(join(projectRoot, 'cache', 'nested'), { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(projectRoot, 'cache', 'one.bin'), Buffer.alloc(5));
+    await writeFile(join(projectRoot, 'cache', 'nested', 'two.bin'), Buffer.alloc(7));
+    await writeFile(join(outside, 'sentinel.txt'), 'keep');
+    await symlink(outside, join(projectRoot, 'cache', 'outside-link'), 'junction');
+    const maintenance = new MaintenanceService(projects);
+
+    expect(maintenance.inspectCache()).toEqual({
+      fileCount: 2,
+      directoryCount: 1,
+      sizeBytes: 12,
+      skippedLinks: 1,
+    });
+    expect(maintenance.clearCache()).toEqual({
+      removedFiles: 2,
+      removedDirectories: 1,
+      freedBytes: 12,
+      removedLinks: 1,
+    });
+    expect(maintenance.inspectCache()).toEqual({
+      fileCount: 0,
+      directoryCount: 0,
+      sizeBytes: 0,
+      skippedLinks: 0,
+    });
+    expect(existsSync(join(outside, 'sentinel.txt'))).toBe(true);
+    expect(existsSync(join(projectRoot, 'assets'))).toBe(true);
+    expect(existsSync(join(projectRoot, 'project.sqlite'))).toBe(true);
+  });
+
+  it('allows cache inspection but refuses cache clearing from a read-only session', async () => {
+    const base = await temporaryRoot('readonly-cache');
+    const projectRoot = join(base, 'project');
+    const writer = createProjectService(join(base, 'writer-recent.json'));
+    writer.create(projectRoot, 'Writer');
+    await writeFile(join(projectRoot, 'cache', 'keep.bin'), 'keep');
+    const reader = createProjectService(join(base, 'reader-recent.json'));
+    expect(reader.open(projectRoot).mode).toBe('read-only');
+    const maintenance = new MaintenanceService(reader);
+
+    expect(maintenance.inspectCache().fileCount).toBe(1);
+    expect(() => maintenance.clearCache()).toThrow('read-only');
+    expect(existsSync(join(projectRoot, 'cache', 'keep.bin'))).toBe(true);
+  });
+});

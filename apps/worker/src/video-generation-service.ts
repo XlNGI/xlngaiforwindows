@@ -11,7 +11,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { isIP } from 'node:net';
-import { extname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import type {
   AdapterParameters,
   AssetInfo,
@@ -29,6 +29,7 @@ import type { AssetRecord, GenerationResultRecord, JobRecord } from '@ai-video/d
 import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
+import { assertStorageCapacity } from './storage-capacity.js';
 
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const OFF_PEAK_POLL_TIMEOUT_MS = 48 * 60 * 60 * 1000;
@@ -907,6 +908,17 @@ async function downloadVideo(
     const contentType =
       response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
     const extension = videoExtension(contentType, source);
+    const declaredSizeValue = response.headers.get('content-length');
+    const declaredSize = declaredSizeValue === null ? undefined : Number(declaredSizeValue);
+    if (declaredSize !== undefined) {
+      if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
+        throw new Error('Video download returned an invalid Content-Length.');
+      }
+      if (declaredSize > MAX_VIDEO_BYTES) {
+        throw new Error('Video download exceeds the 512 MiB limit.');
+      }
+      assertStorageCapacity(dirname(temporaryPath), declaredSize);
+    }
     if (!response.body) throw new Error('Video download returned an empty body.');
     descriptor = openSync(temporaryPath, 'wx');
     const hash = createHash('sha256');
