@@ -143,3 +143,9 @@
 - Safety: no credential value, request body, or Provider response containing user data was read or logged; no additional real Provider request was sent. The rebuilt Release app was relaunched after the install check and is running with Worker PID 28080; the UI health/SQLite indicators are normal.
 - Decision: the asynchronous Provider contract defect is fixed in code, but M5 real credentialed success and human acceptance remain `HOLD`; do not sign the stage or start M6 until the user performs one controlled real request and records the outcome.
 - Next: use the rebuilt app for one authorized real Vidu test, then verify the asset file/manifest and failure/retry behavior without exposing the key.
+
+### 2026-08-02T09:31:00+08:00 - Hosted Windows gate passed for the polling fix
+
+- Evidence: GitHub Actions run `30726901221` for commit `03b5456` completed with `completed successfully`; the `validate` job was successful and the rendered Annotations region was empty.
+- Decision: hosted code/native/package/install gates remain `PASS`. Real Vidu credentialed success, asset persistence from a real result, and human visual acceptance remain `HOLD` and are the only M5 acceptance boundary still open.
+- Next: perform one controlled real request in the rebuilt app only when authorized; record terminal status and asset/manifest evidence without recording the API key.
