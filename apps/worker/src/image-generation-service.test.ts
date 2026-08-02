@@ -72,6 +72,17 @@ describe('ImageGenerationService', () => {
     expect(service.listAssets({})).toHaveLength(0);
   });
 
+  it('explains that HTTP 401 may be caused by a region/key mismatch', async () => {
+    const { service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const result = await service.complete({ jobId: job.id, providerStatus: 401, providerBody: {} });
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('selected service region and API key');
+  });
+
   it('marks a prepared job failed when the native transport fails', async () => {
     const { service } = await setup();
     const job = service.prepare({

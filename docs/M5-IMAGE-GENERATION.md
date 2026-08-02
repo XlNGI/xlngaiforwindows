@@ -4,6 +4,10 @@
 
 Vidu image endpoints are asynchronous. The native bridge sends the POST creation request, then polls `GET /ent/v2/tasks/{task_id}/creations` until the response contains an image source or a terminal failure. Task IDs are validated before being used as URL path segments. Polling has a bounded 120-second deadline; failed states and missing image output are surfaced as terminal errors and do not create an asset.
 
+## Vidu service regions
+
+The production panel exposes two fixed Vidu regions. Select `Global site (api.vidu.com)` for an international key or `China site (api.vidu.cn)` for a domestic key. The native bridge accepts only these two region values and never accepts an endpoint from the WebView. Credentials are isolated in Windows Credential Manager targets `vidu` and `vidu-cn`; enter the raw API key without a `Token` or `Bearer` prefix. HTTP 401 failures point back to the selected region and key.
+
 状态：代码、自动化 UI 安全路径和本地安装生命周期验证 `PASS`；真实 Vidu 成功请求和人工测试尚未执行，阶段签收保持 `HOLD`。
 
 ## 范围

@@ -30,7 +30,7 @@ use windows_sys::Win32::{
 };
 
 const CREDENTIAL_SERVICE: &str = "com.ai-video.workspace";
-const SUPPORTED_CREDENTIAL_PROVIDERS: &[&str] = &["vidu"];
+const SUPPORTED_CREDENTIAL_PROVIDERS: &[&str] = &["vidu", "vidu-cn"];
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -69,39 +69,51 @@ const V2_VIDEO_FIELDS: &[&str] = &[
     "seed",
 ];
 
-fn provider_target(adapter_key: &str) -> Result<ProviderTarget, String> {
+fn provider_region_target(provider_region: &str) -> Result<(&'static str, &'static str), String> {
+    match provider_region {
+        "global" => Ok(("vidu", "api.vidu.com")),
+        "cn" => Ok(("vidu-cn", "api.vidu.cn")),
+        _ => Err("Unsupported Vidu service region".to_string()),
+    }
+}
+
+fn provider_target(
+    adapter_key: &str,
+    provider_region: &str,
+) -> Result<ProviderTarget, String> {
+    let (credential_provider, host) = provider_region_target(provider_region)?;
     let target = match adapter_key {
         "TEXT_TO_IMAGE:vidu:viduq2:v2" => ProviderTarget {
-            credential_provider: "vidu",
-            host: "api.vidu.com",
+            credential_provider,
+            host,
             path: "/ent/v2/reference2image",
             model: "viduq2",
             allowed_fields: IMAGE_FIELDS,
         },
         "REFERENCE_TO_IMAGE:vidu:viduq2:v2" => ProviderTarget {
-            credential_provider: "vidu",
-            host: "api.vidu.com",
+            credential_provider,
+            host,
             path: "/ent/v2/reference2image",
             model: "viduq2",
             allowed_fields: REFERENCE_IMAGE_FIELDS,
         },
         "REFERENCE_TO_IMAGE:vidu:viduq1:v2" => ProviderTarget {
-            credential_provider: "vidu",
-            host: "api.vidu.com",
+            credential_provider,
+            host,
             path: "/ent/v2/reference2image",
             model: "viduq1",
             allowed_fields: REFERENCE_IMAGE_FIELDS,
         },
         "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => ProviderTarget {
-            credential_provider: "vidu",
-            host: "api.vidu.com",
+            credential_provider,
+            host,
             path: "/ent/v2/img2video",
             model: "viduq3-pro",
             allowed_fields: Q3_VIDEO_FIELDS,
         },
         "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => ProviderTarget {
-            credential_provider: "vidu",
-            host: "api.vidu.com",
+            credential_provider,
+            host,
             path: "/ent/v2/img2video",
             model: "vidu2.0",
             allowed_fields: V2_VIDEO_FIELDS,
@@ -195,6 +207,11 @@ fn credential_set(provider: String, secret: String) -> Result<CredentialStatus, 
         || value.bytes().any(|byte| byte.is_ascii_control())
     {
         return Err("Credential length is outside the Windows secure storage limit".to_string());
+    }
+    if (value.len() >= 6 && value[..6].eq_ignore_ascii_case("token "))
+        || (value.len() >= 7 && value[..7].eq_ignore_ascii_case("bearer "))
+    {
+        return Err("Enter the raw API key without a Token or Bearer prefix".to_string());
     }
     let mut target = credential_target(&provider)?;
     let mut username: Vec<u16> = provider.encode_utf16().chain(std::iter::once(0)).collect();
@@ -322,18 +339,22 @@ fn provider_task_error(body: &serde_json::Value) -> String {
 #[tauri::command]
 async fn provider_submit(
     adapter_key: String,
+    provider_region: String,
     payload: serde_json::Value,
 ) -> Result<ProviderHttpResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || provider_submit_blocking(&adapter_key, payload))
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_submit_blocking(&adapter_key, &provider_region, payload)
+    })
         .await
         .map_err(|error| format!("Native provider task failed: {error}"))?
 }
 
 fn provider_submit_blocking(
     adapter_key: &str,
+    provider_region: &str,
     payload: serde_json::Value,
 ) -> Result<ProviderHttpResponse, String> {
-    let target = provider_target(adapter_key)?;
+    let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
     let secret = credential_read(target.credential_provider)?;
     let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
@@ -796,12 +817,13 @@ mod tests {
     #[test]
     fn credential_provider_allowlist_rejects_unknown_targets() {
         assert!(validate_credential_provider("vidu").is_ok());
+        assert!(validate_credential_provider("vidu-cn").is_ok());
         assert!(validate_credential_provider("../../project.sqlite").is_err());
     }
 
     #[test]
     fn provider_bridge_is_bound_to_an_exact_adapter_and_injects_its_model() {
-        let target = provider_target("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2")
+        let target = provider_target("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("known adapter should resolve");
         assert_eq!(target.host, "api.vidu.com");
         assert_eq!(target.path, "/ent/v2/img2video");
@@ -812,13 +834,22 @@ mod tests {
         .expect("adapter payload should serialize");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(parsed["model"], "viduq3-pro");
-        assert!(provider_target("IMAGE_TO_VIDEO:evil:viduq3-pro:v2").is_err());
+        assert!(provider_target("IMAGE_TO_VIDEO:evil:viduq3-pro:v2", "global").is_err());
+    }
+
+    #[test]
+    fn provider_bridge_routes_domestic_region_to_domestic_credential_target() {
+        let target = provider_target("TEXT_TO_IMAGE:vidu:viduq2:v2", "cn")
+            .expect("domestic region should resolve");
+        assert_eq!(target.host, "api.vidu.cn");
+        assert_eq!(target.credential_provider, "vidu-cn");
+        assert!(provider_target("TEXT_TO_IMAGE:vidu:viduq2:v2", "unknown").is_err());
     }
 
     #[test]
     fn provider_bridge_rejects_credential_and_endpoint_fields() {
-        let target =
-            provider_target("TEXT_TO_IMAGE:vidu:viduq2:v2").expect("known adapter should resolve");
+        let target = provider_target("TEXT_TO_IMAGE:vidu:viduq2:v2", "global")
+            .expect("known adapter should resolve");
         assert!(provider_payload(target, json!({"prompt": "frame", "apiKey": "secret"})).is_err());
         assert!(provider_payload(
             target,

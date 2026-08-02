@@ -27,7 +27,7 @@ import {
   type CredentialStatus,
 } from './credential-client';
 import { callWorker } from './worker-client';
-import { submitProviderRequest } from './provider-client';
+import { submitProviderRequest, type ProviderRegion } from './provider-client';
 
 interface ProductionPanelProps {
   projectId?: string;
@@ -61,6 +61,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [capability, setCapability] = useState<GenerationCapability>();
   const [provider, setProvider] = useState('');
+  const [providerRegion, setProviderRegion] = useState<ProviderRegion>('global');
   const [adapterKey, setAdapterKey] = useState('');
   const [adapter, setAdapter] = useState<AdapterDescriptor>();
   const [parameters, setParameters] = useState<AdapterParameters>({});
@@ -78,6 +79,11 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
     'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image'
   >('generated-image');
   const [assets, setAssets] = useState<AssetInfo[]>([]);
+
+  const credentialProvider =
+    adapter?.provider === 'vidu' && providerRegion === 'cn'
+      ? `${adapter.credentialProvider}-cn`
+      : adapter?.credentialProvider;
 
   useEffect(() => {
     void callWorker('adapter.catalog', {})
@@ -140,13 +146,13 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
   useEffect(() => {
     setCredentialState(undefined);
     setCredentialMessage('');
-    if (!adapter || !canUseSecureCredentials()) return;
-    void getCredentialStatus(adapter.credentialProvider)
+    if (!credentialProvider || !canUseSecureCredentials()) return;
+    void getCredentialStatus(credentialProvider)
       .then(setCredentialState)
       .catch((reason) =>
         setCredentialMessage(reason instanceof Error ? reason.message : '凭据状态读取失败'),
       );
-  }, [adapter?.credentialProvider]);
+  }, [credentialProvider]);
 
   useEffect(() => {
     let active = true;
@@ -233,11 +239,11 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
   };
 
   const saveCredential = async () => {
-    if (!adapter || !credentialSecret) return;
+    if (!adapter || !credentialProvider || !credentialSecret) return;
     setCredentialBusy(true);
     setCredentialMessage('');
     try {
-      setCredentialState(await setCredential(adapter.credentialProvider, credentialSecret));
+      setCredentialState(await setCredential(credentialProvider, credentialSecret));
       setCredentialSecret('');
       setCredentialMessage('凭据已保存到 Windows 凭据管理器');
     } catch (reason) {
@@ -270,7 +276,7 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
       preparedJobId = job.id;
       setGenerationJobId(job.id);
       setGenerationStatus('正在请求 Provider...');
-      const response = await submitProviderRequest(adapter.key, parameters);
+      const response = await submitProviderRequest(adapter.key, parameters, providerRegion);
       const completed = await callWorker('image.generate.complete', {
         jobId: job.id,
         providerStatus: response.status,
@@ -333,11 +339,12 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
   };
 
   const removeCredential = async () => {
+    if (!credentialProvider) return;
     if (!adapter || !window.confirm('删除此供应商的本机凭据？')) return;
     setCredentialBusy(true);
     setCredentialMessage('');
     try {
-      setCredentialState(await deleteCredential(adapter.credentialProvider));
+      setCredentialState(await deleteCredential(credentialProvider));
       setCredentialMessage('凭据已删除');
     } catch (reason) {
       setCredentialMessage(reason instanceof Error ? reason.message : '凭据删除失败');
@@ -404,6 +411,20 @@ export function ProductionPanel({ projectId, shotId, writable }: ProductionPanel
               ))}
             </select>
           </div>
+
+          {provider === 'vidu' && (
+            <div className="field-group">
+              <label htmlFor="provider-region">Vidu region</label>
+              <select
+                id="provider-region"
+                value={providerRegion}
+                onChange={(event) => setProviderRegion(event.target.value as ProviderRegion)}
+              >
+                <option value="global">Global site (api.vidu.com)</option>
+                <option value="cn">China site (api.vidu.cn)</option>
+              </select>
+            </div>
+          )}
 
           {adapter && (
             <>

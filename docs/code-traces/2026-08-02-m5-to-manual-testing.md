@@ -171,3 +171,17 @@
 - Verification: `pnpm format:check`, `pnpm worker:sidecar`, `cargo fmt --check`, `cargo check --offline`, `cargo test --offline` (9 Rust tests), and `git diff --check` passed.
 - Decision: the workflow change is locally verified across the exact CI Node major and the developer runtime. It is ready to commit and push; Hosted Windows remains the required final check.
 - Next: push the CI correction and monitor the replacement workflow through NSIS lifecycle completion.
+
+### 2026-08-02T10:32:00+08:00 - Domestic Vidu routing and CI resolver implemented
+- Evidence: the reported HTTP 401 came from a domestic Vidu key being sent to the fixed international host; the existing native command also had no region parameter. Hosted CI used PowerShell `.Trim()` around `pnpm exec` output and failed before validation.
+- Action: added a Rust allowlist for `global` and `cn` regions, fixed hosts `api.vidu.com`/`api.vidu.cn`, separate Credential Manager targets `vidu`/`vidu-cn`, raw-key prefix rejection, a React region selector, and a bounded provider-client region parameter. Added a clear HTTP 401 region/key message and replaced the CI PowerShell resolver with `scripts/align-native-node-runtime.mjs` using `createRequire` and the active Node runtime.
+- Files: `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/provider-client.ts`, `apps/desktop/src/ProductionPanel.tsx`, `apps/worker/src/image-generation-service.ts`, `scripts/align-native-node-runtime.mjs`, `.github/workflows/ci.yml`.
+- Verification: Desktop tests passed (9); Worker tests passed (39) on the rerun; workspace typecheck and build passed; the resolver installed the active Node 26 ABI prebuild; `git diff --check` passed. Cargo is unavailable in this local shell and remains Hosted-only.
+- Decision: domestic routing is safe to test after a new hosted build; no API key or real Provider request was read or sent. M5 real success and human acceptance remain `HOLD`.
+- Next: run the complete local gates, commit/push, confirm Hosted Windows CI, then ask the user to select `China site (api.vidu.cn)`, save the raw domestic key, and perform one controlled real request.
+
+### 2026-08-02T10:35:00+08:00 - Local gate rerun completed
+- Evidence: the first parallel `worker:sidecar` attempt hit a transient Windows `EBUSY` while replacing `better_sqlite3.node`; a serial rerun completed and produced the sidecar successfully.
+- Verification: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test` (13 files, 74 tests), `pnpm build`, `pnpm worker:sidecar`, and `git diff --check` passed. Cargo remains unavailable locally.
+- Decision: all locally executable TypeScript/Worker/package gates are `PASS`; native Rust/Tauri/NSIS gates remain pending Hosted Windows. No real Provider request was sent.
+- Next: commit and push the domestic-region and CI fix, then verify the Hosted run before manual testing.

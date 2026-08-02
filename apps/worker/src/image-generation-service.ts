@@ -75,7 +75,11 @@ export class ImageGenerationService {
     });
     if (job.status !== 'running') return this.get(job.id);
     if (params.providerStatus < 200 || params.providerStatus >= 300) {
-      return this.fail(job.id, `Provider request failed with HTTP ${params.providerStatus}.`);
+      const message =
+        params.providerStatus === 401
+          ? 'Provider authentication failed with HTTP 401. Check the selected service region and API key.'
+          : `Provider request failed with HTTP ${params.providerStatus}.`;
+      return this.fail(job.id, message);
     }
     let image: DownloadedImage;
     try {

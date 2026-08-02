@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AdapterParameters } from '@ai-video/contracts';
 
+export type ProviderRegion = 'global' | 'cn';
+
 export interface NativeProviderResponse {
   status: number;
   body: unknown;
@@ -9,9 +11,10 @@ export interface NativeProviderResponse {
 export async function submitProviderRequest(
   adapterKey: string,
   payload: AdapterParameters,
+  providerRegion: ProviderRegion,
 ): Promise<NativeProviderResponse> {
   if (!('__TAURI_INTERNALS__' in window)) {
     throw new Error('供应商请求只能由桌面应用的安全传输层发送。');
   }
-  return invoke<NativeProviderResponse>('provider_submit', { adapterKey, payload });
+  return invoke<NativeProviderResponse>('provider_submit', { adapterKey, payload, providerRegion });
 }
