@@ -983,6 +983,10 @@ button {
   gap: 7px;
 }
 
+.asset-actions.single {
+  grid-template-columns: 1fr;
+}
+
 .asset-actions .button {
   justify-content: center;
   min-height: 30px;

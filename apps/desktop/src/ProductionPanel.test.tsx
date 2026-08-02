@@ -319,6 +319,7 @@ describe('ProductionPanel', () => {
   });
 
   it('can generate a preview without saving to the local asset library', async () => {
+    let assetListCalls = 0;
     vi.mocked(submitProviderRequest).mockResolvedValueOnce({
       status: 200,
       body: { images: [{ url: 'https://example.test/generated.png' }] },
@@ -357,10 +358,46 @@ describe('ProductionPanel', () => {
           updatedAt: '2026-08-02T00:00:01.000Z',
         });
       }
+      if (method === 'image.generate.savePreview') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'succeeded',
+          request: { prompt: '电影画面', resolution: '1080p' },
+          results: [
+            {
+              id: 'result',
+              jobId: 'job',
+              asset: savedAsset,
+              createdAt: '2026-08-02T00:00:02.000Z',
+            },
+          ],
+          preview: {
+            jobId: 'job',
+            assetId: savedAsset.id,
+            dataUrl: 'data:image/png;base64,asset',
+            contentType: 'image/png',
+          },
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:02.000Z',
+        });
+      }
+      if (method === 'asset.list') {
+        assetListCalls += 1;
+        return Promise.resolve(assetListCalls === 1 ? [] : [savedAsset]);
+      }
+      if (method === 'asset.preview') {
+        return Promise.resolve({
+          assetId: savedAsset.id,
+          dataUrl: 'data:image/png;base64,asset',
+          contentType: 'image/png',
+        });
+      }
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    render(<ProductionPanel projectId="project" shotId="shot" writable />);
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
@@ -379,6 +416,19 @@ describe('ProductionPanel', () => {
       'data:image/png;base64,preview-only',
     );
     expect(screen.queryByText(savedAsset.relativePath)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存到素材库' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('image.generate.savePreview', {
+        jobId: 'job',
+        dataUrl: 'data:image/png;base64,preview-only',
+        contentType: 'image/png',
+        assetKind: 'generated-image',
+      }),
+    );
+    expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
+    expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
   });
 
   it('terminalizes a prepared job when the native provider transport fails', async () => {

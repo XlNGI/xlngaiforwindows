@@ -74,7 +74,7 @@ describe('ImageGenerationService', () => {
   });
 
   it('can return a preview without saving a local asset', async () => {
-    const { service } = await setup();
+    const { project, service } = await setup();
     const job = service.prepare({
       adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
       parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
@@ -91,6 +91,20 @@ describe('ImageGenerationService', () => {
     expect(result.results).toHaveLength(0);
     expect(result.preview).toMatchObject({ jobId: job.id, contentType: 'image/png' });
     expect(service.listAssets({})).toHaveLength(0);
+
+    const saved = service.savePreview({
+      jobId: job.id,
+      dataUrl: result.preview!.dataUrl,
+      contentType: result.preview!.contentType,
+      assetKind: 'character',
+    });
+
+    expect(saved.results).toHaveLength(1);
+    expect(saved.results[0]?.asset).toMatchObject({ kind: 'character' });
+    expect(service.listAssets({ kind: 'character' })).toHaveLength(1);
+    expect(
+      existsSync(join(project.current()!.rootPath, saved.results[0]!.asset!.relativePath)),
+    ).toBe(true);
   });
 
   it('prefers Vidu creation output URLs over echoed input URLs', async () => {

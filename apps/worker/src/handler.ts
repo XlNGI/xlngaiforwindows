@@ -10,11 +10,13 @@ import {
   type ConversationCreateParams,
   type DocumentRestoreParams,
   type DocumentSaveParams,
+  type ImageAssetKind,
   type HealthResult,
   type GenerationDraftGetParams,
   type GenerationDraftSaveParams,
   type ImageGenerationPrepareParams,
   type ImageGenerationCompleteParams,
+  type ImageGenerationSavePreviewParams,
   type AssetPreviewParams,
   type AssetRevealParams,
   type AssetRenameParams,
@@ -86,6 +88,7 @@ const methods = new Set<WorkerMethod>([
   'generation.draft.save',
   'image.generate.prepare',
   'image.generate.complete',
+  'image.generate.savePreview',
   'image.generate.fail',
   'image.generate.cancel',
   'image.generate.get',
@@ -206,6 +209,25 @@ function optionalNumber(params: Record<string, unknown>, key: string): number | 
   if (typeof value !== 'number' || !Number.isFinite(value))
     throw new Error(`${key} must be a number.`);
   return value;
+}
+
+const imageAssetKinds = new Set<ImageAssetKind>([
+  'character',
+  'scene',
+  'first-frame',
+  'last-frame',
+  'generated-image',
+]);
+
+function optionalImageAssetKind(
+  params: Record<string, unknown>,
+  key: string,
+): ImageAssetKind | undefined {
+  const value = params[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !imageAssetKinds.has(value as ImageAssetKind))
+    throw new Error(`${key} must be a valid image asset kind.`);
+  return value as ImageAssetKind;
 }
 
 export async function handleRequest(request: WorkerRequest): Promise<WorkerResponse> {
@@ -396,9 +418,20 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         result = imageGenerationService.prepare(params as unknown as ImageGenerationPrepareParams);
         break;
       case 'image.generate.complete':
-        result = await imageGenerationService.complete(
-          params as unknown as ImageGenerationCompleteParams,
-        );
+        result = await imageGenerationService.complete({
+          ...(params as unknown as ImageGenerationCompleteParams),
+          jobId: requireString(params, 'jobId'),
+          assetKind: optionalImageAssetKind(params, 'assetKind'),
+          saveAsset: typeof params.saveAsset === 'boolean' ? params.saveAsset : undefined,
+        });
+        break;
+      case 'image.generate.savePreview':
+        result = imageGenerationService.savePreview({
+          jobId: requireString(params, 'jobId'),
+          dataUrl: requireString(params, 'dataUrl'),
+          contentType: requireString(params, 'contentType'),
+          assetKind: optionalImageAssetKind(params, 'assetKind'),
+        } satisfies ImageGenerationSavePreviewParams);
         break;
       case 'image.generate.fail':
         result = imageGenerationService.failTransport(requireString(params, 'jobId'));

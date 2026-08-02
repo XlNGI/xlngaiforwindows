@@ -20,6 +20,7 @@ import type {
   AdapterValidationError,
   AssetInfo,
   GenerationCapability,
+  ImageAssetKind,
   ImagePreviewInfo,
 } from '@ai-video/contracts';
 import {
@@ -121,13 +122,12 @@ export function ProductionPanel({
   const [credentialBusy, setCredentialBusy] = useState(false);
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
-  const [assetKind, setAssetKind] = useState<
-    'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image'
-  >('generated-image');
+  const [assetKind, setAssetKind] = useState<ImageAssetKind>('generated-image');
   const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
   const [preview, setPreview] = useState<ImagePreviewInfo>();
   const [autoSaveLocal, setAutoSaveLocal] = useState(initialAutoSaveLocal);
+  const [savingPreview, setSavingPreview] = useState(false);
   const assets = controlledAssets ?? localAssets;
   const selectedAsset = assets.find((item) => item.id === selectedAssetId);
 
@@ -325,6 +325,29 @@ export function ProductionPanel({
     }
   };
 
+  const savePreviewToAssetLibrary = async () => {
+    if (!preview?.jobId || preview.assetId || !writable) return;
+    setSavingPreview(true);
+    setGenerationStatus('');
+    try {
+      const saved = await callWorker('image.generate.savePreview', {
+        jobId: preview.jobId,
+        dataUrl: preview.dataUrl,
+        contentType: preview.contentType,
+        assetKind,
+      });
+      const savedAsset = saved.results.find((result) => result.asset)?.asset;
+      const nextAssets = await callWorker('asset.list', {});
+      publishAssets(nextAssets, savedAsset?.id);
+      if (saved.preview) setPreview(saved.preview);
+      setGenerationStatus('图片已保存到本地素材库。');
+    } catch (reason) {
+      setGenerationStatus(errorMessage(reason, '预览保存失败。'));
+    } finally {
+      setSavingPreview(false);
+    }
+  };
+
   const saveDraft = async () => {
     if (!adapter || !shotId) return;
     setBusy(true);
@@ -406,7 +429,10 @@ export function ProductionPanel({
         assetKind,
         saveAsset: autoSaveLocal,
       });
-      if (completed.preview) setPreview(completed.preview);
+      if (completed.preview) {
+        if (!autoSaveLocal) setSelectedAssetId(undefined);
+        setPreview(completed.preview);
+      }
       setGenerationStatus(
         completed.status === 'succeeded'
           ? autoSaveLocal
@@ -699,6 +725,19 @@ export function ProductionPanel({
                       >
                         <Eye size={14} />
                         查看素材库
+                      </button>
+                    </div>
+                  )}
+                  {preview?.jobId && !preview.assetId && !selectedAsset && (
+                    <div className="asset-actions single">
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void savePreviewToAssetLibrary()}
+                        disabled={!writable || savingPreview}
+                      >
+                        <Save size={14} />
+                        保存到素材库
                       </button>
                     </div>
                   )}

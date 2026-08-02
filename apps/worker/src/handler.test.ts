@@ -78,6 +78,25 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects unknown image asset kinds at the IPC boundary', async () => {
+    const response = await handleRequest({
+      id: 'image-save-preview-invalid-kind',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'image.generate.savePreview',
+      params: {
+        jobId: 'job',
+        dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+        contentType: 'image/png',
+        assetKind: 'unknown',
+      },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'assetKind must be a valid image asset kind.' },
+    });
+  });
+
   it('resolves adapters and persists only validated per-shot parameter drafts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'ai-video-adapter-worker-'));
     temporaryDirectories.push(root);

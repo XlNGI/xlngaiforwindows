@@ -18,9 +18,11 @@ import type {
   AssetRevealParams,
   AssetRevealResult,
   AssetRenameParams,
+  ImageAssetKind,
   ImageGenerationCompleteParams,
   ImageGenerationJobInfo,
   ImageGenerationPrepareParams,
+  ImageGenerationSavePreviewParams,
   ImagePreviewInfo,
 } from '@ai-video/contracts';
 import type { AssetRecord, JobRecord } from '@ai-video/domain';
@@ -175,6 +177,63 @@ export class ImageGenerationService {
     });
   }
 
+  savePreview(params: ImageGenerationSavePreviewParams): ImageGenerationJobInfo {
+    const projectSession = this.projects.current();
+    if (!projectSession) throw new Error('No project is open.');
+    const image = imageFromPreview(params);
+    const existing = this.projects.access(false, (database, project) => {
+      if (project !== projectSession) throw new Error('Project session changed during generation.');
+      const repositories = createRepositories(database);
+      const job = repositories.jobs.get(params.jobId);
+      if (!job || job.projectId !== project.id) throw new Error('Generation job was not found.');
+      if (job.status !== 'succeeded') throw new Error('Generation job is not saveable.');
+      const results = repositories.generationResults.listByJob(job.id);
+      return {
+        job,
+        results,
+        assets: repositories.assets.listByProject(project.id),
+      };
+    });
+    if (existing.results.some((result) => result.assetId)) {
+      return this.toInfo(existing.job, existing.assets, existing.results);
+    }
+
+    const persisted = this.persistDownloadedImage(projectSession.rootPath, image, {
+      projectId: projectSession.id,
+      assetKind: params.assetKind,
+    });
+    return this.projects.access(true, (database, project) => {
+      if (project !== projectSession) throw new Error('Project session changed during generation.');
+      const repositories = createRepositories(database);
+      const current = repositories.jobs.get(params.jobId);
+      if (!current || current.projectId !== project.id)
+        throw new Error('Generation job was not found.');
+      if (current.status !== 'succeeded') throw new Error('Generation job is not saveable.');
+      const currentResults = repositories.generationResults.listByJob(current.id);
+      if (currentResults.some((result) => result.assetId)) {
+        return this.toInfo(current, repositories.assets.listByProject(project.id), currentResults);
+      }
+      const now = new Date().toISOString();
+      const asset: AssetRecord = { ...persisted.asset, createdAt: now };
+      const result = {
+        id: randomUUID(),
+        jobId: current.id,
+        assetId: asset.id,
+        createdAt: now,
+      };
+      database.transaction(() => {
+        repositories.assets.save(asset);
+        repositories.generationResults.save(result);
+        repositories.projects.touch(now);
+      })();
+      project.updatedAt = now;
+      return {
+        ...this.toInfo(current, [asset], [result]),
+        preview: toPreviewInfo(image, { assetId: asset.id, jobId: current.id }),
+      };
+    });
+  }
+
   cancel(jobId: string): ImageGenerationJobInfo {
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -304,7 +363,7 @@ export class ImageGenerationService {
     image: DownloadedImage,
     params: {
       projectId: string;
-      assetKind?: 'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
+      assetKind?: ImageAssetKind;
     },
   ): { asset: AssetRecord } {
     const extension = extensionFor(image.contentType, image.sourceUrl);
@@ -436,6 +495,19 @@ function toPreviewInfo(
     contentType: image.contentType,
     sourceUrl: image.sourceUrl,
   };
+}
+
+function imageFromPreview(params: ImageGenerationSavePreviewParams): DownloadedImage {
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(params.dataUrl);
+  if (!match) throw new Error('Preview image data is invalid.');
+  const contentType = match[1]!.toLowerCase();
+  if (!contentType.startsWith('image/')) throw new Error('Preview is not a saveable image.');
+  if (params.contentType && params.contentType.toLowerCase() !== contentType)
+    throw new Error('Preview content type does not match the image data.');
+  const bytes = Buffer.from(match[2]!.replace(/\s/g, ''), 'base64');
+  if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES)
+    throw new Error('Preview image size is invalid.');
+  return { bytes, contentType };
 }
 
 function redactParameters(parameters: AdapterParameters): AdapterParameters {

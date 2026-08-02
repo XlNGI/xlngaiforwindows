@@ -397,6 +397,8 @@ export interface GenerationDraftSaveParams extends GenerationDraftGetParams {
 }
 
 export type ImageGenerationJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type ImageAssetKind =
+  'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
 
 export interface AssetInfo {
   id: string;
@@ -448,8 +450,15 @@ export interface ImageGenerationCompleteParams {
   jobId: string;
   providerStatus: number;
   providerBody: unknown;
-  assetKind?: 'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
+  assetKind?: ImageAssetKind;
   saveAsset?: boolean;
+}
+
+export interface ImageGenerationSavePreviewParams {
+  jobId: string;
+  dataUrl: string;
+  contentType: string;
+  assetKind?: ImageAssetKind;
 }
 
 export interface ImageGenerationFailParams {
@@ -540,6 +549,10 @@ export interface WorkerMethodMap {
   };
   'image.generate.complete': {
     params: ImageGenerationCompleteParams;
+    result: ImageGenerationJobInfo;
+  };
+  'image.generate.savePreview': {
+    params: ImageGenerationSavePreviewParams;
     result: ImageGenerationJobInfo;
   };
   'image.generate.fail': {
