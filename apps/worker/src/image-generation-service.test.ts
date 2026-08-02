@@ -44,6 +44,71 @@ describe('ImageGenerationService', () => {
     ).toBe(true);
   });
 
+  it('prefers Vidu creation output URLs over echoed input URLs', async () => {
+    const { service } = await setup();
+    const outputUrl = 'https://example.invalid/output.png?signature=kept-in-manifest';
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const job = service.prepare({
+      adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+      parameters: {
+        images: ['https://example.invalid/input.png'],
+        prompt: 'frame',
+        aspect_ratio: '16:9',
+        resolution: '1080p',
+      },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: {
+        input: { images: ['https://example.invalid/input.png'] },
+        creations: [{ url: outputUrl }],
+      },
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(fetchMock).toHaveBeenCalledWith(outputUrl, expect.anything());
+    expect(result.results[0]?.asset?.sourceUrl).toBe(outputUrl);
+  });
+
+  it('keeps remote image download failures actionable without storing signed URLs', async () => {
+    const { service } = await setup();
+    const signedUrl =
+      'https://prod-ss-vidu.s3.cn-northwest-1.amazonaws.com.cn/output.png?X-Amz-Signature=secret';
+    const failure = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(failure)),
+    );
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { creations: [{ url: signedUrl }] },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('prod-ss-vidu.s3.cn-northwest-1.amazonaws.com.cn');
+    expect(result.error).toContain('ECONNRESET');
+    expect(result.error).not.toContain('X-Amz-Signature');
+    expect(service.listAssets({})).toHaveLength(0);
+  });
+
   it('marks invalid provider output failed without leaving an asset', async () => {
     const { service } = await setup();
     const job = service.prepare({

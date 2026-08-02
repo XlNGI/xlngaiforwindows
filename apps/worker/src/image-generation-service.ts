@@ -340,12 +340,73 @@ function redactParameters(parameters: AdapterParameters): AdapterParameters {
 }
 
 function extractImageSource(body: unknown): string {
-  const found = findString(
-    body,
-    (value) => value.startsWith('data:image/') || /^https?:\/\//i.test(value),
-  );
+  const embedded = findString(body, isEmbeddedImageSource);
+  if (embedded) return embedded;
+
+  const creation = findCreationImageSource(body);
+  if (creation) return creation;
+
+  const found = findString(body, isRemoteImageSource);
   if (!found) throw new Error('Provider response did not contain an image URL or Base64 image.');
   return found;
+}
+
+function isEmbeddedImageSource(value: string): boolean {
+  return value.startsWith('data:image/');
+}
+
+function isRemoteImageSource(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+const CREATION_IMAGE_FIELDS = [
+  'url',
+  'uri',
+  'image_url',
+  'imageUrl',
+  'cover_url',
+  'coverUrl',
+] as const;
+
+function findCreationImageSource(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCreationImageSource(item);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+
+  const object = value as Record<string, unknown>;
+  for (const key of ['creations', 'Creations']) {
+    const creations = object[key];
+    if (!Array.isArray(creations)) continue;
+    for (const creation of creations) {
+      const found = findCreationField(creation);
+      if (found) return found;
+    }
+  }
+  for (const item of Object.values(object)) {
+    const found = findCreationImageSource(item);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findCreationField(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const object = value as Record<string, unknown>;
+  for (const key of CREATION_IMAGE_FIELDS) {
+    const candidate = object[key];
+    if (
+      typeof candidate === 'string' &&
+      (isEmbeddedImageSource(candidate) || isRemoteImageSource(candidate))
+    ) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function findString(value: unknown, predicate: (value: string) => boolean): string | undefined {
@@ -378,22 +439,77 @@ async function downloadImage(source: string): Promise<DownloadedImage> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
   try {
-    const response = await fetch(source, { signal: controller.signal });
-    if (!response.ok) throw new Error(`Image download failed with HTTP ${response.status}.`);
+    let response: Response;
+    try {
+      response = await fetch(source, { signal: controller.signal });
+    } catch (error) {
+      throw formatImageDownloadError(source, error);
+    }
+    if (!response.ok)
+      throw new Error(
+        `Image download failed${sourceHostSuffix(source)} with HTTP ${response.status}.`,
+      );
     const contentType =
       response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (!contentType.startsWith('image/')) throw new Error('Downloaded result is not an image.');
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!contentType.startsWith('image/'))
+      throw new Error(`Downloaded result${sourceHostSuffix(source)} is not an image.`);
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      throw formatImageDownloadError(source, error, 'while reading the image body');
+    }
     if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES)
       throw new Error('Image size is invalid.');
     return { bytes, contentType, sourceUrl: source };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError')
-      throw new Error('Image download timed out.');
+      throw new Error(`Image download${sourceHostSuffix(source)} timed out.`);
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function sourceHostSuffix(source: string): string {
+  try {
+    return ` from host ${new URL(source).host}`;
+  } catch {
+    return '';
+  }
+}
+
+function formatImageDownloadError(source: string, error: unknown, phase?: string): Error {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return new Error(`Image download${sourceHostSuffix(source)} timed out.`);
+  }
+  const message = error instanceof Error && error.message.trim() ? error.message.trim() : 'failed';
+  const cause = error instanceof Error ? summarizeCause(error.cause) : undefined;
+  const suffix = cause && cause !== message ? ` (${cause})` : '';
+  const phaseText = phase ? ` ${phase}` : '';
+  return new Error(
+    `Image download${sourceHostSuffix(source)} failed${phaseText}: ${message}${suffix}.`,
+  );
+}
+
+function summarizeCause(cause: unknown): string | undefined {
+  if (!cause) return undefined;
+  if (typeof cause === 'string') return cause.trim() || undefined;
+  if (cause instanceof Error) {
+    const code = errorCode(cause);
+    if (code) return code;
+    return cause.message.trim() || undefined;
+  }
+  if (typeof cause !== 'object') return undefined;
+  const code = 'code' in cause ? (cause as { code?: unknown }).code : undefined;
+  if (typeof code === 'string' && code.trim()) return code.trim();
+  const message = 'message' in cause ? (cause as { message?: unknown }).message : undefined;
+  return typeof message === 'string' && message.trim() ? message.trim() : undefined;
+}
+
+function errorCode(error: Error): string | undefined {
+  const code = 'code' in error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && code.trim() ? code.trim() : undefined;
 }
 
 function extensionFor(contentType: string, sourceUrl?: string): string {

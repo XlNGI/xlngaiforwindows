@@ -313,16 +313,44 @@ fn provider_task_path(task_id: &str) -> Result<String, String> {
 }
 
 fn contains_image_source(value: &serde_json::Value) -> bool {
+    find_creation_image_source(value).is_some()
+}
+
+fn find_creation_image_source(value: &serde_json::Value) -> Option<&str> {
     match value {
-        serde_json::Value::String(value) => {
-            value.starts_with("data:image/")
-                || value.starts_with("http://")
-                || value.starts_with("https://")
+        serde_json::Value::Array(values) => values.iter().find_map(find_creation_image_source),
+        serde_json::Value::Object(values) => {
+            for key in ["creations", "Creations"] {
+                if let Some(serde_json::Value::Array(creations)) = values.get(key) {
+                    for creation in creations {
+                        if let Some(source) = creation_image_source(creation) {
+                            return Some(source);
+                        }
+                    }
+                }
+            }
+            values.values().find_map(find_creation_image_source)
         }
-        serde_json::Value::Array(values) => values.iter().any(contains_image_source),
-        serde_json::Value::Object(values) => values.values().any(contains_image_source),
-        _ => false,
+        _ => None,
     }
+}
+
+fn creation_image_source(value: &serde_json::Value) -> Option<&str> {
+    let object = value.as_object()?;
+    for key in ["url", "uri", "image_url", "imageUrl", "cover_url", "coverUrl"] {
+        if let Some(source) = object.get(key).and_then(serde_json::Value::as_str) {
+            if is_image_source(source) {
+                return Some(source);
+            }
+        }
+    }
+    None
+}
+
+fn is_image_source(value: &str) -> bool {
+    value.starts_with("data:image/")
+        || value.starts_with("http://")
+        || value.starts_with("https://")
 }
 
 fn provider_task_error(body: &serde_json::Value) -> String {
@@ -870,10 +898,19 @@ mod tests {
     }
 
     #[test]
-    fn provider_polling_requires_an_image_source_on_success() {
+    fn provider_polling_requires_a_creation_output_source_on_success() {
         assert!(contains_image_source(&json!({
             "state": "success",
-            "images": ["https://cdn.example/image.png"]
+            "creations": [{ "url": "https://cdn.example/image.png" }]
+        })));
+        assert!(contains_image_source(&json!({
+            "data": {
+                "creations": [{ "cover_url": "data:image/png;base64,iVBORw0KGgo=" }]
+            }
+        })));
+        assert!(!contains_image_source(&json!({
+            "state": "processing",
+            "input": { "images": ["https://cdn.example/input.png"] }
         })));
         assert!(!contains_image_source(&json!({ "state": "processing" })));
         assert_eq!(
