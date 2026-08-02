@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
+import {
+  authorizeDevHttpRequest,
+  createDevHttpToken,
+  DEV_HTTP_TOKEN_HEADER,
+  publishDevHttpToken,
+  removeDevHttpToken,
+} from './dev-http-security.js';
 import { handleRequest, parseRequest, recordWorkerError } from './handler.js';
 
 let requestQueue = Promise.resolve();
@@ -16,6 +23,10 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
 
 function writeResponse(response: unknown): void {
   process.stdout.write(`${JSON.stringify(response)}\n`);
+}
+
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
 function startStdio(): void {
@@ -39,11 +50,31 @@ function startStdio(): void {
   });
 }
 
-function startHttp(port: number): void {
+function startHttp(port: number, secureDevelopmentMode: boolean): void {
+  const developmentToken = secureDevelopmentMode ? createDevHttpToken() : undefined;
+  let developmentTokenPath: string | undefined;
   const server = createServer((request, response) => {
     if (request.method !== 'POST' || request.url !== '/rpc') {
       response.writeHead(404).end();
       return;
+    }
+
+    if (developmentToken) {
+      const authorization = authorizeDevHttpRequest(
+        {
+          origin: singleHeader(request.headers.origin),
+          contentType: singleHeader(request.headers['content-type']),
+          token: singleHeader(request.headers[DEV_HTTP_TOKEN_HEADER]),
+        },
+        developmentToken,
+      );
+      if (!authorization.ok) {
+        response.writeHead(authorization.status, {
+          'content-type': 'application/json; charset=utf-8',
+        });
+        response.end(JSON.stringify({ error: authorization.message }));
+        return;
+      }
     }
 
     let body = '';
@@ -76,12 +107,29 @@ function startHttp(port: number): void {
   });
 
   server.listen(port, '127.0.0.1', () => {
+    if (developmentToken) {
+      try {
+        developmentTokenPath = publishDevHttpToken(port, developmentToken);
+      } catch (error) {
+        recordWorkerError('http.dev-token', error);
+        server.close(() => process.exit(1));
+        return;
+      }
+    }
     process.stderr.write(`AI Video Worker listening on http://127.0.0.1:${port}\n`);
   });
 
+  const cleanupDevelopmentToken = (): void => {
+    if (developmentToken && developmentTokenPath) {
+      removeDevHttpToken(developmentTokenPath, developmentToken);
+      developmentTokenPath = undefined;
+    }
+  };
   const close = (): void => {
+    cleanupDevelopmentToken();
     server.close(() => process.exit(0));
   };
+  process.once('exit', cleanupDevelopmentToken);
   process.on('SIGINT', close);
   process.on('SIGTERM', close);
 }
@@ -89,7 +137,7 @@ function startHttp(port: number): void {
 const httpFlagIndex = process.argv.indexOf('--http');
 if (httpFlagIndex >= 0) {
   const port = Number(process.argv[httpFlagIndex + 1] ?? 43120);
-  startHttp(port);
+  startHttp(port, process.argv.includes('--dev-http'));
 } else {
   startStdio();
 }

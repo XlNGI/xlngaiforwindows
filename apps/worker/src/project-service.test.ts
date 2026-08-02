@@ -50,7 +50,7 @@ describe('ProjectService', () => {
     const recent = join(base, 'recent.json');
     const first = service(recent);
     const created = first.create(root, 'First Project');
-    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 5 });
+    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 6 });
     for (const path of [
       'project.sqlite',
       'assets/images',
@@ -167,7 +167,7 @@ describe('ProjectService', () => {
     writer.close();
     expect(service(recent).open(exported)).toMatchObject({
       name: 'Portable Project',
-      schemaVersion: 5,
+      schemaVersion: 6,
     });
   });
 
@@ -218,6 +218,25 @@ describe('ProjectService', () => {
     const contents = await readFile(recent, 'utf8');
     expect(contents).toContain('Recent Project');
     expect(contents).not.toContain('token');
+  });
+
+  it('keeps create and open sessions usable when recent-project metadata cannot be written', async () => {
+    const base = await temporaryRoot('recent-write-failure');
+    const root = join(base, 'project');
+    const blockedParent = join(base, 'blocked-parent');
+    const recent = join(blockedParent, 'recent.json');
+    await writeFile(blockedParent, 'not-a-directory');
+
+    const creator = service(recent);
+    expect(creator.create(root, 'Usable Project')).toMatchObject({ mode: 'read-write' });
+    expect(creator.current()).toMatchObject({ name: 'Usable Project', mode: 'read-write' });
+    expect(creator.integrity().ok).toBe(true);
+    creator.close();
+
+    const opener = service(recent);
+    expect(opener.open(root)).toMatchObject({ name: 'Usable Project', mode: 'read-write' });
+    expect(opener.current()).toMatchObject({ name: 'Usable Project', mode: 'read-write' });
+    expect(opener.integrity().ok).toBe(true);
   });
 
   it('rejects relative project paths', async () => {

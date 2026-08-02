@@ -140,8 +140,20 @@ export function App() {
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
   const conversationRequest = useRef(0);
+  const generationPollVersion = useRef(0);
+  const generationPollOwner = useRef({
+    projectId: undefined as string | undefined,
+    conversationId: undefined as string | undefined,
+    generationId: undefined as string | undefined,
+  });
   const documentRequest = useRef(0);
   const sceneRequest = useRef(0);
+
+  generationPollOwner.current = {
+    projectId: project?.id,
+    conversationId: conversation?.id,
+    generationId: generation?.generationId,
+  };
 
   const writable = project?.mode === 'read-write';
   const scopeId = scopeType === 'scene' ? scene?.id : scopeType === 'shot' ? shot?.id : undefined;
@@ -244,24 +256,52 @@ export function App() {
 
   useEffect(() => {
     if (!generation || generation.status !== 'streaming') return;
+    const projectId = project?.id;
+    const conversationId = conversation?.id;
+    const generationId = generation.generationId;
+    if (!projectId || !conversationId || generation.conversationId !== conversationId) return;
+    const version = ++generationPollVersion.current;
+    let requestPending = false;
     const timer = window.setInterval(() => {
-      void callWorker('llm.generation.get', { generationId: generation.generationId })
+      if (version !== generationPollVersion.current || requestPending) return;
+      requestPending = true;
+      void callWorker('llm.generation.get', { generationId })
         .then((next) => {
+          const owner = generationPollOwner.current;
+          if (
+            version !== generationPollVersion.current ||
+            owner.projectId !== projectId ||
+            owner.conversationId !== conversationId ||
+            owner.generationId !== generationId ||
+            next.generationId !== generationId ||
+            next.conversationId !== conversationId
+          ) {
+            return;
+          }
           setGeneration(next);
-          setMessages((current) => mergeGenerationMessage(current, conversation?.id, next));
-          if (next.status !== 'streaming' && next.conversationId === conversation?.id) {
+          setMessages((current) => mergeGenerationMessage(current, conversationId, next));
+          if (next.status !== 'streaming') {
             setChatMessage(next.error ?? '生成完成');
           }
         })
-        .catch((reason) =>
-          setChatMessage(reason instanceof Error ? reason.message : '生成状态读取失败'),
-        );
+        .catch((reason) => {
+          if (version === generationPollVersion.current) {
+            setChatMessage(reason instanceof Error ? reason.message : '生成状态读取失败');
+          }
+        })
+        .finally(() => {
+          requestPending = false;
+        });
     }, 250);
-    return () => window.clearInterval(timer);
-  }, [generation?.generationId, generation?.status, conversation?.id]);
+    return () => {
+      window.clearInterval(timer);
+      if (generationPollVersion.current === version) generationPollVersion.current += 1;
+    };
+  }, [project?.id, generation?.generationId, generation?.status, conversation?.id]);
 
   const runProjectAction = async (action: () => Promise<ProjectInfo | string | undefined>) => {
     const requestId = ++projectActionRequest.current;
+    generationPollVersion.current += 1;
     projectContentRequest.current += 1;
     conversationRequest.current += 1;
     documentRequest.current += 1;
@@ -575,6 +615,7 @@ export function App() {
   const createConversation = async () => {
     if (!scopeAvailable) return;
     const requestId = ++conversationRequest.current;
+    generationPollVersion.current += 1;
     try {
       const created = await callWorker('conversation.create', { scopeType, scopeId });
       const preview = await callWorker('context.preview', { conversationId: created.id });
@@ -592,6 +633,7 @@ export function App() {
 
   const selectConversation = async (selected: ConversationInfo) => {
     const requestId = ++conversationRequest.current;
+    generationPollVersion.current += 1;
     setChatMessage('');
     try {
       if (generation?.status === 'streaming' && generation.conversationId !== selected.id) {
@@ -1433,6 +1475,7 @@ export function App() {
               className={scopeType === scope ? 'active' : ''}
               onClick={() => {
                 conversationRequest.current += 1;
+                generationPollVersion.current += 1;
                 setScopeType(scope);
               }}
             >

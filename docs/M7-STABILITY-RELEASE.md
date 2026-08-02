@@ -1,7 +1,7 @@
 # M7 稳定性和发布
 
-日期：2026-08-02  
-状态：自动化门禁通过，等待人工发布验证（HOLD）
+日期：2026-08-03  
+状态：本地自动化复验通过，等待 Hosted Windows 和人工发布验证（HOLD）
 
 ## 1. 阶段目标
 
@@ -29,6 +29,11 @@
 8. 示例初始化失败时关闭数据库、释放锁，并只清理本次创建且原先为空的目标目录。
 9. 升级安装不得删除或迁移用户项目；首次打开旧项目只能执行已声明的 SQLite 前向迁移。
 10. 发布构建必须携带独立 Worker，不依赖用户预装 Node.js、pnpm、Cargo 或 SQLite。
+11. Provider 图片签名 URL 只用于当次下载；SQLite、备份和导出不得包含查询参数或 fragment，既有 v5 项目升级到 v6 时清理旧值。
+12. 图片文件与素材记录的新增、删除必须具备失败补偿；SQLite 失败不得产生孤儿文件或删除仍被记录引用的文件。
+13. 最近项目历史是非关键元数据；其写入失败不得关闭或污染已经成功打开的项目会话。
+14. 视频下载无论是否提供可信 `Content-Length`，都必须根据实际数据块在写入前保留最少 16 MiB 磁盘余量。
+15. 浏览器开发 Worker 必须校验本地 Origin、JSON Content-Type 和每进程 256-bit 随机会话令牌；标准输入输出发布 IPC 不暴露该入口。
 
 ## 4. 状态机和所有权
 
@@ -85,6 +90,12 @@ requested -> container-created -> seeding-transaction -> open
 | 磁盘空间不足或文件过大 | 原子写入失败并清理临时文件，不登记素材或成功结果 |
 | Worker 收到损坏 JSON | 返回有界协议错误并继续服务后续请求 |
 | 新版本覆盖安装 | 应用二进制升级，外部项目内容和摘要保持不变 |
+| 最近项目文件不可写 | 项目创建/打开仍成功，`current` 和完整性检查继续可用 |
+| 图片结果 URL 含对象存储签名 | 完整 URL 仅用于下载；数据库和备份不含签名查询参数 |
+| 素材 INSERT/DELETE 被 SQLite 拒绝 | 新增时删除最终文件并终止任务；删除时从 tombstone 恢复原文件 |
+| 视频分块传输或少报大小 | 按实际块检查磁盘余量，失败时删除临时文件且不登记素材 |
+| 切换会话后旧 LLM 请求才返回 | 项目、会话、生成 ID 或请求版本不一致时丢弃回包 |
+| 外部网页请求本地开发 Worker | Origin、JSON 或随机令牌不匹配时返回 403/415，不执行 RPC |
 
 ## 6. IPC 契约
 
@@ -120,6 +131,11 @@ diagnostics-<UTC timestamp>-<id>/
 | 无 Node 运行时 | Tauri bundle、NSIS | clean install lifecycle | 干净 Windows 虚拟机 |
 | 升级不损坏项目 | NSIS upgrade script、SQLite | before/after digest and integrity | 旧版覆盖安装 |
 | 签名链可信 | 发布流程 | 签名存在性检查 | 证书持有人签名和 SmartScreen 验证 |
+| Provider 临时 URL 不持久化 | Image Generation、SQLite v6 | signed URL scrub、backup byte exclusion | 打开升级项目并检查素材可用 |
+| 素材新增/删除可补偿 | Image Generation、SQLite | INSERT/DELETE trigger failure injection | 素材库保存和删除复核 |
+| 分块下载保留磁盘余量 | Video Generation | no Content-Length capacity failure | 低空间卷真实下载 |
+| 旧 LLM 回包不覆盖当前会话 | Desktop Workspace | deferred poll after conversation switch | 生成中快速切换会话 |
+| 开发 HTTP Worker 有会话边界 | Worker、Vite | unit + live HTTP 403/415/200 | 浏览器开发启动检查 |
 
 ## 9. 发布边界
 
@@ -129,12 +145,13 @@ diagnostics-<UTC timestamp>-<id>/
 
 ## 10. 自动化验证结论
 
-- TypeScript 工作区的构建、类型检查、Lint、格式检查和全部自动测试通过。
+- TypeScript 工作区的构建、类型检查、Lint、格式检查和 22 个测试文件、146 项自动测试通过。
 - Rust/Tauri 的格式检查、编译检查和全部原生测试通过。
 - 打包 Worker 已通过损坏 JSON 恢复、离线健康检查、示例项目创建、缓存检查/清理、诊断脱敏和 SQLite 完整性验证。
+- 对抗性硬化回归已覆盖签名 URL 和旧库迁移、最近项目写失败、素材新增/删除 SQLite 故障、分块视频低空间、LLM 过期回包，以及真实开发 HTTP Server 的 Origin/Content-Type/随机令牌拒绝路径。
 - NSIS 已通过本机干净安装生命周期，以及同一安装包覆盖安装时外部项目 ID、文档摘要、SQLite 完整性和卸载后项目保留验证。
 - 项目维护界面已在 1280x720 和 390x844 视口检查；对话框和交互控件无越界、文本溢出或重叠。
-- Hosted Windows CI run `30754118267` 全部通过，包含构建、135 个测试、M7 Sidecar、Tauri/NSIS、干净安装和覆盖安装保留验证。
+- 上一候选的 Hosted Windows CI run `30754118267` 全部通过；当前硬化候选尚待新的 Hosted Windows run，旧 run 不作为本次修复的签收证据。
 - 当前安装包未签名；签名校验脚本只接受 Authenticode `Valid`，不会用测试证书替代正式证书。
 
 同一安装包覆盖安装只能证明安装器生命周期和外部项目保留基线，不能替代上一正式版本到当前版本的真实升级验证。

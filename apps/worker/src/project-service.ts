@@ -175,9 +175,10 @@ export class ProjectService {
           schemaVersion,
         },
       };
-      this.remember(this.session.project);
+      this.rememberBestEffort(this.session.project);
       return this.session.project;
     } catch (error) {
+      if (this.session?.database === database) this.session = undefined;
       database.close();
       rmSync(lock.path, { force: true });
       throw error;
@@ -223,9 +224,10 @@ export class ProjectService {
           schemaVersion,
         },
       };
-      this.remember(this.session.project);
+      this.rememberBestEffort(this.session.project);
       return this.session.project;
     } catch (error) {
+      if (this.session?.database === database) this.session = undefined;
       database.close();
       if (lock) rmSync(lock.path, { force: true });
       throw error;
@@ -364,6 +366,14 @@ export class ProjectService {
     return this.session;
   }
 
+  private rememberBestEffort(project: OpenProject): void {
+    try {
+      this.remember(project);
+    } catch {
+      // Recent-project history is auxiliary metadata and must not invalidate an open database.
+    }
+  }
+
   private remember(project: OpenProject): void {
     const recent = this.listRecent().filter((item) => item.rootPath !== project.rootPath);
     recent.unshift({
@@ -373,8 +383,12 @@ export class ProjectService {
     });
     mkdirSync(dirname(this.recentProjectsPath), { recursive: true });
     const temporary = `${this.recentProjectsPath}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify(recent.slice(0, 10), null, 2), 'utf8');
-    renameSync(temporary, this.recentProjectsPath);
+    try {
+      writeFileSync(temporary, JSON.stringify(recent.slice(0, 10), null, 2), 'utf8');
+      renameSync(temporary, this.recentProjectsPath);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
   }
 }
 

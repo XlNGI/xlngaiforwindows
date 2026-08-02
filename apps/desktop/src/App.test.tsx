@@ -242,4 +242,162 @@ describe('App', () => {
     expect(screen.queryByRole('option', { name: '旧项目会话' })).not.toBeInTheDocument();
     expect(screen.getByRole('option', { name: '场次会话' })).toBeInTheDocument();
   });
+
+  it('ignores an in-flight generation poll after switching conversations', async () => {
+    const conversationA: ConversationInfo = {
+      id: 'conversation-a',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '会话 A',
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const conversationB: ConversationInfo = {
+      ...conversationA,
+      id: 'conversation-b',
+      title: '会话 B',
+    };
+    const streaming: LlmGenerationInfo = {
+      generationId: 'generation-a',
+      conversationId: conversationA.id,
+      snapshotId: 'snapshot-a',
+      status: 'streaming',
+      userMessage: {
+        id: 'user-a',
+        conversationId: conversationA.id,
+        role: 'user',
+        content: '生成内容',
+        status: 'complete',
+        createdAt: 'now',
+      },
+      assistantMessage: {
+        id: 'assistant-a',
+        conversationId: conversationA.id,
+        replyToMessageId: 'user-a',
+        role: 'assistant',
+        content: '旧生成增量',
+        status: 'streaming',
+        createdAt: 'now',
+      },
+      sources: [],
+    };
+    const cancelled: LlmGenerationInfo = {
+      ...streaming,
+      status: 'cancelled',
+      assistantMessage: { ...streaming.assistantMessage, status: 'failed' },
+      error: 'Generation was cancelled.',
+    };
+    let resolveStalePoll!: (value: LlmGenerationInfo) => void;
+    const stalePoll = new Promise<LlmGenerationInfo>((resolve) => {
+      resolveStalePoll = resolve;
+    });
+
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'health') {
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      }
+      if (method === 'sqlite.probe') {
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      }
+      if (method === 'project.current') {
+        return Promise.resolve({
+          id: 'project',
+          name: 'Poll Race Project',
+          rootPath: 'D:\\PollRace',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 5,
+        });
+      }
+      if (
+        method === 'project.recent' ||
+        method === 'document.list' ||
+        method === 'scene.list' ||
+        method === 'asset.list' ||
+        method === 'video.generate.list'
+      ) {
+        return Promise.resolve([]);
+      }
+      if (method === 'adapter.catalog') {
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      }
+      if (method === 'llm.status') {
+        return Promise.resolve({ provider: 'OpenAI', model: 'test', configured: true });
+      }
+      if (method === 'conversation.list') return Promise.resolve([conversationA, conversationB]);
+      if (method === 'chat.message.list') {
+        const conversationId = (params as { conversationId: string }).conversationId;
+        return Promise.resolve({
+          items:
+            conversationId === conversationB.id
+              ? [
+                  {
+                    id: 'message-b',
+                    conversationId: conversationB.id,
+                    role: 'assistant' as const,
+                    content: '会话 B 当前消息',
+                    status: 'complete' as const,
+                    createdAt: 'now',
+                  },
+                ]
+              : [],
+        });
+      }
+      if (method === 'context.preview') {
+        return Promise.resolve({
+          version: 1,
+          scopeType: 'project',
+          scopeLabel: 'project',
+          estimatedTokens: 1,
+          budgetTokens: 1_000,
+          sources: [],
+        });
+      }
+      if (method === 'llm.generate') return Promise.resolve(streaming);
+      if (method === 'llm.generation.get') return stalePoll;
+      if (method === 'llm.generation.cancel') return Promise.resolve(cancelled);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<App />);
+    const conversationSelect = await screen.findByDisplayValue('会话 A');
+    fireEvent.change(screen.getByLabelText('会话消息'), { target: { value: '生成内容' } });
+    fireEvent.click(screen.getByTitle('发送消息'));
+    expect(await screen.findByTitle('停止生成')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'llm.generation.get'),
+      ).toHaveLength(1),
+    );
+
+    fireEvent.change(conversationSelect, { target: { value: conversationB.id } });
+    expect(await screen.findByText('会话 B 当前消息')).toBeInTheDocument();
+    expect(screen.getByTitle('发送消息')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveStalePoll(streaming);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    expect(screen.queryByTitle('停止生成')).not.toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'llm.generation.get'),
+    ).toHaveLength(1);
+  });
 });

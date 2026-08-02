@@ -41,6 +41,11 @@ interface DownloadedImage {
   sourceUrl?: string;
 }
 
+interface PersistedImage {
+  asset: AssetRecord;
+  finalPath: string;
+}
+
 type AssetPathOpener = (path: string) => void;
 
 export class ImageGenerationService {
@@ -155,34 +160,59 @@ export class ImageGenerationService {
       projectId: projectSession.id,
       assetKind: params.assetKind,
     });
-    return this.projects.access(true, (database, project) => {
-      if (project !== projectSession) throw new Error('Project session changed during generation.');
-      const repositories = createRepositories(database);
-      const current = repositories.jobs.get(job.id);
-      if (!current || current.projectId !== project.id)
-        throw new Error('Generation job was not found.');
-      const now = new Date().toISOString();
-      const asset: AssetRecord = { ...persisted.asset, createdAt: now };
-      const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
-      const result = {
-        id: randomUUID(),
-        jobId: current.id,
-        assetId: asset.id,
-        providerUrl: image.sourceUrl,
-        createdAt: now,
-      };
-      database.transaction(() => {
-        repositories.assets.save(asset);
-        repositories.generationResults.save(result);
-        repositories.jobs.save(completed);
-        repositories.projects.touch(now);
-      })();
-      project.updatedAt = now;
-      return {
-        ...this.toInfo(completed, [asset], [result]),
-        preview: toPreviewInfo(image, { assetId: asset.id, jobId: completed.id }),
-      };
-    });
+    let committed = false;
+    try {
+      const info = this.projects.access(true, (database, project) => {
+        if (project !== projectSession)
+          throw new Error('Project session changed during generation.');
+        const repositories = createRepositories(database);
+        const current = repositories.jobs.get(job.id);
+        if (!current || current.projectId !== project.id)
+          throw new Error('Generation job was not found.');
+        if (current.status !== 'running') {
+          return this.toInfo(
+            current,
+            repositories.assets.listByProject(project.id),
+            repositories.generationResults.listByJob(current.id),
+          );
+        }
+        const now = new Date().toISOString();
+        const asset: AssetRecord = { ...persisted.asset, createdAt: now };
+        const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
+        const result = {
+          id: randomUUID(),
+          jobId: current.id,
+          assetId: asset.id,
+          providerUrl: sanitizeRemoteUrlForPersistence(image.sourceUrl),
+          createdAt: now,
+        };
+        database.transaction(() => {
+          repositories.assets.save(asset);
+          repositories.generationResults.save(result);
+          repositories.jobs.save(completed);
+          repositories.projects.touch(now);
+        })();
+        committed = true;
+        project.updatedAt = now;
+        return {
+          ...this.toInfo(completed, [asset], [result]),
+          preview: toPreviewInfo(image, { assetId: asset.id, jobId: completed.id }),
+        };
+      });
+      if (!committed) rmSync(persisted.finalPath, { force: true });
+      return info;
+    } catch (error) {
+      rmSync(persisted.finalPath, { force: true });
+      if (this.projects.current() === projectSession) {
+        try {
+          const message = error instanceof Error ? error.message : 'Unknown database error.';
+          return this.fail(job.id, `Image asset registration failed: ${message}`);
+        } catch {
+          // Preserve the original database or project-session error when terminalization also fails.
+        }
+      }
+      throw error;
+    }
   }
 
   savePreview(params: ImageGenerationSavePreviewParams): ImageGenerationJobInfo {
@@ -210,36 +240,50 @@ export class ImageGenerationService {
       projectId: projectSession.id,
       assetKind: params.assetKind,
     });
-    return this.projects.access(true, (database, project) => {
-      if (project !== projectSession) throw new Error('Project session changed during generation.');
-      const repositories = createRepositories(database);
-      const current = repositories.jobs.get(params.jobId);
-      if (!current || current.projectId !== project.id)
-        throw new Error('Generation job was not found.');
-      if (current.status !== 'succeeded') throw new Error('Generation job is not saveable.');
-      const currentResults = repositories.generationResults.listByJob(current.id);
-      if (currentResults.some((result) => result.assetId)) {
-        return this.toInfo(current, repositories.assets.listByProject(project.id), currentResults);
-      }
-      const now = new Date().toISOString();
-      const asset: AssetRecord = { ...persisted.asset, createdAt: now };
-      const result = {
-        id: randomUUID(),
-        jobId: current.id,
-        assetId: asset.id,
-        createdAt: now,
-      };
-      database.transaction(() => {
-        repositories.assets.save(asset);
-        repositories.generationResults.save(result);
-        repositories.projects.touch(now);
-      })();
-      project.updatedAt = now;
-      return {
-        ...this.toInfo(current, [asset], [result]),
-        preview: toPreviewInfo(image, { assetId: asset.id, jobId: current.id }),
-      };
-    });
+    let committed = false;
+    try {
+      const info = this.projects.access(true, (database, project) => {
+        if (project !== projectSession)
+          throw new Error('Project session changed during generation.');
+        const repositories = createRepositories(database);
+        const current = repositories.jobs.get(params.jobId);
+        if (!current || current.projectId !== project.id)
+          throw new Error('Generation job was not found.');
+        if (current.status !== 'succeeded') throw new Error('Generation job is not saveable.');
+        const currentResults = repositories.generationResults.listByJob(current.id);
+        if (currentResults.some((result) => result.assetId)) {
+          return this.toInfo(
+            current,
+            repositories.assets.listByProject(project.id),
+            currentResults,
+          );
+        }
+        const now = new Date().toISOString();
+        const asset: AssetRecord = { ...persisted.asset, createdAt: now };
+        const result = {
+          id: randomUUID(),
+          jobId: current.id,
+          assetId: asset.id,
+          createdAt: now,
+        };
+        database.transaction(() => {
+          repositories.assets.save(asset);
+          repositories.generationResults.save(result);
+          repositories.projects.touch(now);
+        })();
+        committed = true;
+        project.updatedAt = now;
+        return {
+          ...this.toInfo(current, [asset], [result]),
+          preview: toPreviewInfo(image, { assetId: asset.id, jobId: current.id }),
+        };
+      });
+      if (!committed) rmSync(persisted.finalPath, { force: true });
+      return info;
+    } catch (error) {
+      rmSync(persisted.finalPath, { force: true });
+      throw error;
+    }
   }
 
   cancel(jobId: string): ImageGenerationJobInfo {
@@ -359,11 +403,46 @@ export class ImageGenerationService {
       const asset = repositories.assets.get(assetId);
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       const path = resolveProjectRelativePath(project.rootPath, asset.relativePath);
-      rmSync(path, { force: true });
-      repositories.assets.delete(assetId);
+      const deletedAssetDirectory = resolveProjectRelativePath(
+        project.rootPath,
+        join('cache', 'deleted-assets'),
+      );
+      const tombstonePath = join(deletedAssetDirectory, `${randomUUID()}.trash`);
+      let movedToTombstone = false;
+      if (existsSync(path)) {
+        mkdirSync(deletedAssetDirectory, { recursive: true });
+        renameSync(path, tombstonePath);
+        movedToTombstone = true;
+      }
       const now = new Date().toISOString();
-      repositories.projects.touch(now);
+      try {
+        database.transaction(() => {
+          repositories.assets.delete(assetId);
+          repositories.projects.touch(now);
+        })();
+      } catch (error) {
+        if (movedToTombstone && existsSync(tombstonePath)) {
+          try {
+            renameSync(tombstonePath, path);
+          } catch (restoreError) {
+            const reason =
+              restoreError instanceof Error ? restoreError.message : String(restoreError);
+            throw new Error(
+              `Asset deletion failed and its file could not be restored. Recover it from ${tombstonePath}. ${reason}`,
+              { cause: error },
+            );
+          }
+        }
+        throw error;
+      }
       project.updatedAt = now;
+      if (movedToTombstone) {
+        try {
+          rmSync(tombstonePath, { force: true });
+        } catch {
+          // The database deletion is authoritative; stale tombstones are recoverable cache files.
+        }
+      }
       return { deleted: true as const };
     });
   }
@@ -385,7 +464,7 @@ export class ImageGenerationService {
       projectId: string;
       assetKind?: ImageAssetKind;
     },
-  ): { asset: AssetRecord } {
+  ): PersistedImage {
     const extension = extensionFor(image.contentType, image.sourceUrl);
     const assetId = randomUUID();
     const relativePath = join('assets', 'images', `${assetId}${extension}`);
@@ -400,6 +479,7 @@ export class ImageGenerationService {
       const hash = createHash('sha256').update(image.bytes).digest('hex');
       const size = statSync(finalPath).size;
       return {
+        finalPath,
         asset: {
           id: assetId,
           projectId: params.projectId,
@@ -407,7 +487,7 @@ export class ImageGenerationService {
           relativePath,
           contentHash: hash,
           sizeBytes: size,
-          sourceUrl: image.sourceUrl,
+          sourceUrl: sanitizeRemoteUrlForPersistence(image.sourceUrl),
           createdAt: new Date().toISOString(),
         },
       };
@@ -517,6 +597,19 @@ function toPreviewInfo(
     contentType: image.contentType,
     sourceUrl: image.sourceUrl,
   };
+}
+
+function sanitizeRemoteUrlForPersistence(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function imageFromPreview(params: ImageGenerationSavePreviewParams): DownloadedImage {

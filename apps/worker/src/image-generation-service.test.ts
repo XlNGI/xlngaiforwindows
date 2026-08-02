@@ -1,5 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -156,9 +156,11 @@ describe('ImageGenerationService', () => {
     ).toBe(true);
   });
 
-  it('prefers Vidu creation output URLs over echoed input URLs', async () => {
-    const { service } = await setup();
-    const outputUrl = 'https://example.invalid/output.png?signature=kept-in-manifest';
+  it('downloads the full signed output URL but strips credentials before persistence', async () => {
+    const { project, service } = await setup();
+    const outputUrl =
+      'https://example.invalid/output.png?X-Amz-Credential=temporary&X-Amz-Signature=secret#fragment';
+    const persistedUrl = 'https://example.invalid/output.png';
     const fetchMock = vi.fn(() =>
       Promise.resolve(
         new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
@@ -189,7 +191,23 @@ describe('ImageGenerationService', () => {
 
     expect(result.status).toBe('succeeded');
     expect(fetchMock).toHaveBeenCalledWith(outputUrl, expect.anything());
-    expect(result.results[0]?.asset?.sourceUrl).toBe(outputUrl);
+    expect(result.results[0]?.providerUrl).toBe(persistedUrl);
+    expect(result.results[0]?.asset?.sourceUrl).toBe(persistedUrl);
+    project.access(false, (database) => {
+      expect(
+        database
+          .prepare(
+            `SELECT generation_results.provider_url AS providerUrl, assets.source_url AS sourceUrl
+             FROM generation_results
+             JOIN assets ON assets.id = generation_results.asset_id
+             WHERE generation_results.job_id = ?`,
+          )
+          .get(job.id),
+      ).toEqual({ providerUrl: persistedUrl, sourceUrl: persistedUrl });
+    });
+    const backup = await project.backup();
+    expect(readFileSync(backup).includes(Buffer.from('X-Amz-Signature'))).toBe(false);
+    expect(readFileSync(backup).includes(Buffer.from('secret'))).toBe(false);
   });
 
   it('does not mistake an echoed local Base64 input for the generated image', async () => {
@@ -304,6 +322,62 @@ describe('ImageGenerationService', () => {
     expect(result.status).toBe('failed');
     expect(result.results).toHaveLength(0);
     expect(service.listAssets({})).toHaveLength(0);
+  });
+
+  it('removes a downloaded image and terminates the job when asset registration fails', async () => {
+    const { project, service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    project.access(true, (database) => {
+      database.exec(`
+        CREATE TRIGGER reject_generated_asset_insert
+        BEFORE INSERT ON assets
+        BEGIN
+          SELECT RAISE(ABORT, 'injected asset insert failure');
+        END;
+      `);
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('injected asset insert failure');
+    expect(service.listAssets({})).toHaveLength(0);
+    expect(readdirSync(join(project.current()!.rootPath, 'assets', 'images'))).toEqual([]);
+  });
+
+  it('restores an asset file when its database deletion is rejected', async () => {
+    const { project, service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const completed = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const asset = completed.results[0]!.asset!;
+    const assetPath = join(project.current()!.rootPath, asset.relativePath);
+    project.access(true, (database) => {
+      database.exec(`
+        CREATE TRIGGER reject_generated_asset_delete
+        BEFORE DELETE ON assets
+        BEGIN
+          SELECT RAISE(ABORT, 'injected asset delete failure');
+        END;
+      `);
+    });
+
+    expect(() => service.deleteAsset(asset.id)).toThrow('injected asset delete failure');
+    expect(existsSync(assetPath)).toBe(true);
+    expect(service.listAssets({}).map((item) => item.id)).toContain(asset.id);
   });
 
   it('maps provider HTTP errors to failed jobs', async () => {

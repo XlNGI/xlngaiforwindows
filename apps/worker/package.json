@@ -9,7 +9,7 @@
     "build:sidecar": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm build && node scripts/build-sidecar.mjs",
     "validate:m4-sidecar": "node scripts/validate-m4-sidecar.mjs",
     "validate:m7-sidecar": "node scripts/validate-m7-sidecar.mjs",
-    "dev": "tsx watch src/index.ts --http 43120",
+    "dev": "tsx watch src/index.ts --http 43120 --dev-http",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

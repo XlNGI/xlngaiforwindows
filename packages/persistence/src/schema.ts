@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -173,4 +173,26 @@ CREATE INDEX idx_generation_results_job ON generation_results(job_id, created_at
 export const MIGRATION_V5 = `
 ALTER TABLE generation_jobs ADD COLUMN metadata_json TEXT
   CHECK (metadata_json IS NULL OR json_valid(metadata_json));
+`;
+
+export const MIGRATION_V6 = `
+UPDATE assets
+SET source_url = CASE
+  WHEN instr(source_url, '?') > 0 AND instr(source_url, '#') > 0
+    THEN substr(source_url, 1, min(instr(source_url, '?'), instr(source_url, '#')) - 1)
+  WHEN instr(source_url, '?') > 0 THEN substr(source_url, 1, instr(source_url, '?') - 1)
+  WHEN instr(source_url, '#') > 0 THEN substr(source_url, 1, instr(source_url, '#') - 1)
+  ELSE source_url
+END
+WHERE source_url LIKE 'http://%' OR source_url LIKE 'https://%';
+
+UPDATE generation_results
+SET provider_url = CASE
+  WHEN instr(provider_url, '?') > 0 AND instr(provider_url, '#') > 0
+    THEN substr(provider_url, 1, min(instr(provider_url, '?'), instr(provider_url, '#')) - 1)
+  WHEN instr(provider_url, '?') > 0 THEN substr(provider_url, 1, instr(provider_url, '?') - 1)
+  WHEN instr(provider_url, '#') > 0 THEN substr(provider_url, 1, instr(provider_url, '#') - 1)
+  ELSE provider_url
+END
+WHERE provider_url LIKE 'http://%' OR provider_url LIKE 'https://%';
 `;

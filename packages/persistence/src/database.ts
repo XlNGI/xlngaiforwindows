@@ -9,6 +9,7 @@ import {
   MIGRATION_V3,
   MIGRATION_V4,
   MIGRATION_V5,
+  MIGRATION_V6,
 } from './schema.js';
 
 export interface OpenDatabaseOptions {
@@ -104,6 +105,14 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(5, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 5) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V6);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(6, now);
     })();
   }
   return getSchemaVersion(database);

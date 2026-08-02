@@ -1,7 +1,7 @@
 # 工程质量门禁
 
-版本：4  
-日期：2026-08-02
+版本：5  
+日期：2026-08-03
 
 本规范适用于 M3 及后续所有里程碑。计划中的功能条目只有在其不变量、失败路径和验证证据同时完成后才可标记为完成。
 
@@ -29,6 +29,9 @@
 - 流式界面更新必须同时匹配项目 ID、会话 ID 和任务 ID。
 - 重试必须幂等地复用原始输入，不得重复写入输入消息或选择相邻但无关的数据。
 - 凭据不得进入数据库、快照、日志、测试输出或错误详情。
+- 对象存储签名 URL 的查询参数和 fragment 视为临时凭据，不得进入 SQLite、备份或导出；旧项目必须通过前向迁移清理。
+- 素材文件与 SQLite 记录的创建、删除必须具备补偿回滚；任一侧失败不得留下孤儿文件或丢失仍被数据库引用的文件。
+- 浏览器开发 HTTP Worker 只接受受信任的本地 Origin、JSON Content-Type 和当前进程随机令牌；发布版标准输入输出 IPC 不受该开发入口影响。
 
 ## 3. 异步状态机门禁
 
@@ -81,6 +84,13 @@ created -> streaming -> complete
 | 只读项目请求清理缓存 | 明确拒绝清理；缓存检查和诊断导出仍可用 |
 | 示例项目目标非空或事务失败 | 不删除既有内容；回滚数据库并仅清理本次新建容器 |
 | 媒体写入时磁盘余量不足或文件超限 | 在登记素材前拒绝，清理临时文件，不产生成功结果 |
+| 最近项目记录不可写 | 项目仍成功创建/打开且数据库连接可用；最近列表作为非关键元数据降级失败 |
+| 图片 Provider 返回签名 URL | 下载使用完整 URL；SQLite、备份和导出只保留去查询参数和 fragment 的 URL |
+| 图片文件已落盘但 SQLite 登记失败 | 删除最终文件并把活动任务写入失败终态；不得留下孤儿素材 |
+| 删除素材时 SQLite 事务失败 | 从项目缓存 tombstone 恢复原文件，数据库记录和文件保持一致 |
+| 视频响应缺少或少报 Content-Length | 按实际流入数据块持续检查磁盘余量，写盘前拒绝并清理临时文件 |
+| 切换会话后旧生成查询回包 | 同时校验项目、会话、生成 ID 和请求版本，不更新状态或重启轮询 |
+| 恶意网页向开发 Worker 发送 POST | Origin、Content-Type 或随机会话令牌任一不匹配即拒绝，不进入 RPC 处理 |
 | Worker 收到损坏 JSON | 返回有界协议错误并继续处理后续请求 |
 | 新安装包覆盖安装或卸载 | 外部项目 ID、内容摘要和完整性保持不变，卸载不得删除用户项目 |
 
@@ -119,6 +129,13 @@ created -> streaming -> complete
 | 缓存维护受项目边界和链接隔离 | Worker Maintenance Service | nested-files/symlink-junction/read-only |
 | 示例项目原子初始化 | Worker Sample Project Service | seeded-content/non-empty/rollback |
 | 媒体写入受磁盘余量和体积上限保护 | Worker Image/Video Generation | low-space/image-limit/video-limit |
+| 签名 URL 不得持久化或继续存在于旧项目 | Worker Image Generation / SQLite Migration | signed-download-sanitization/v5-url-scrub/backup-byte-exclusion |
+| 最近项目历史失败不得破坏项目会话 | Worker Project Service | recent-write-failure-create-open-integrity |
+| 素材文件和数据库删除保持一致 | Worker Image Generation / SQLite | delete-trigger-tombstone-restore |
+| 图片最终文件和任务提交保持一致 | Worker Image Generation / SQLite | insert-trigger-file-rollback/failed-terminal-state |
+| 分块视频下载不能绕过磁盘预留 | Worker Video Generation | no-content-length-stream-capacity |
+| LLM 轮询回包必须属于当前选择 | Desktop Workspace | in-flight-generation-switch |
+| 浏览器开发 Worker 只接受本次可信会话 | Worker HTTP / Vite Proxy | origin/content-type/token unit-and-live-server |
 | 损坏 JSON 不终止 Worker | Worker IPC Handler / Packaged Sidecar | parser-recovery/subsequent-health |
 | 安装升级不得损坏外部项目 | NSIS / SQLite | clean-install/overwrite-digest/integrity/uninstall-preservation |
 
@@ -126,13 +143,14 @@ created -> streaming -> complete
 
 ## 6. 本轮复验状态
 
-2026-08-02 自动化与外部条件复验：
+2026-08-03 自动化与外部条件复验：
 
-- `pnpm test`：20 个实际测试文件、135 个测试通过。
+- `pnpm test`：22 个实际测试文件、146 个测试通过。
 - `pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`：通过。
-- `pnpm worker:sidecar` 与 M4 Sidecar 生命周期验证：通过。
-- `cargo fmt --check`、`cargo check --offline`、`cargo test --offline`：通过，12 个 Rust 测试通过。
-- `pnpm tauri:build`：通过，生成 20,269,548 字节的 x64 NSIS 安装包；SHA-256 为 `A36856A2CAF91F2F054E469404C87CCDEBFF95C93E9DC9C5B1A57C052B0D6712`。
+- `pnpm worker:sidecar` 与 M7 Sidecar 生命周期验证：通过。
+- `cargo fmt --check`、`cargo check`、`cargo test`：通过，12 个 Rust 测试通过。
+- `pnpm tauri:build`：通过，生成 20,275,869 字节的 x64 NSIS 安装包；SHA-256 为 `1DC290F9FCDD9773B275026D24C662EC5C7E6CE929005FF9506844B29474A7C8`。
+- M7 对抗性复验修复：签名 URL 持久化及旧库清理、最近项目僵尸会话、素材删除数据丢失、图片提交孤儿文件、分块视频磁盘预留、LLM 过期回包和开发 HTTP Worker 信任边界均有失败注入或真实本地服务器回归测试；SQLite 当前 Schema 为 v6。
 - Release 同目录冒烟：通过；桌面程序实际拉起安装后名称 `ai-video-worker.exe`，并在启动 health/SQLite 检查期间保持 Worker 存活。
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
 - 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，fail-fast GitHub Windows runner run `30720119063` 通过且无错误注解（包括该安装生命周期步骤）。
@@ -144,9 +162,10 @@ created -> streaming -> complete
 - M7 视觉门禁：项目维护对话框在 1280x720 和 390x844 视口均未发现越界、文本/控件溢出或交互控件重叠。
 - M7 签名门禁：当前安装包 Authenticode 状态为 `NotSigned`，`scripts/validate-windows-signature.ps1` 按预期拒绝；正式证书签名和时间戳仍是发布阻断项。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
+- 当前硬化候选的本机干净 NSIS 安装和同包覆盖生命周期通过；覆盖前后项目 ID、文档摘要、SQLite 完整性和卸载后外部项目保留均通过。
 - 本轮 M7 未验证：真实 OpenAI/Vidu 发布候选成功请求、正式签名、上一正式版本升级、干净 Windows 虚拟机、断网/联网切换和真实系统休眠恢复。既有 M6 真实参考生视频证据不替代当前发布候选验证。
 
-因此已知代码级 `P1/P2` 为零；最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
+因此本地复验中的已知代码级 `P1/P2` 已清零；当前硬化提交仍需新的 GitHub Hosted Windows CI 通过。最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
 
 ## 7. 签收规则
 

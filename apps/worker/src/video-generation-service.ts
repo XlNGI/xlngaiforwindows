@@ -64,10 +64,15 @@ interface DownloadedVideo {
   sizeBytes: number;
 }
 
+type StorageCapacityCheck = (directoryPath: string, requiredBytes: number) => void;
+
 export class VideoGenerationService {
   private readonly downloads = new Map<string, AbortController>();
 
-  constructor(private readonly projects: ProjectService) {}
+  constructor(
+    private readonly projects: ProjectService,
+    private readonly storageCapacityCheck: StorageCapacityCheck = assertStorageCapacity,
+  ) {}
 
   prepare(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
     const adapter = getAdapter(params.adapterKey);
@@ -539,7 +544,7 @@ export class VideoGenerationService {
     mkdirSync(join(projectSession.rootPath, 'assets', 'videos'), { recursive: true });
     let downloaded: DownloadedVideo;
     try {
-      downloaded = await downloadVideo(source, temporaryPath, signal);
+      downloaded = await downloadVideo(source, temporaryPath, signal, this.storageCapacityCheck);
     } catch (error) {
       if (this.projects.current() !== projectSession) {
         rmSync(temporaryPath, { force: true });
@@ -897,6 +902,7 @@ async function downloadVideo(
   source: string,
   temporaryPath: string,
   cancellationSignal: AbortSignal,
+  storageCapacityCheck: StorageCapacityCheck,
 ): Promise<DownloadedVideo> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VIDEO_DOWNLOAD_TIMEOUT_MS);
@@ -917,7 +923,7 @@ async function downloadVideo(
       if (declaredSize > MAX_VIDEO_BYTES) {
         throw new Error('Video download exceeds the 512 MiB limit.');
       }
-      assertStorageCapacity(dirname(temporaryPath), declaredSize);
+      storageCapacityCheck(dirname(temporaryPath), declaredSize);
     }
     if (!response.body) throw new Error('Video download returned an empty body.');
     descriptor = openSync(temporaryPath, 'wx');
@@ -929,6 +935,7 @@ async function downloadVideo(
       if (done) break;
       sizeBytes += value.byteLength;
       if (sizeBytes > MAX_VIDEO_BYTES) throw new Error('Video download exceeds the 512 MiB limit.');
+      storageCapacityCheck(dirname(temporaryPath), value.byteLength);
       hash.update(value);
       writeSync(descriptor, value);
     }

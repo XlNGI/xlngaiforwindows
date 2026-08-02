@@ -17,13 +17,15 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(
+  storageCapacityCheck?: (directoryPath: string, requiredBytes: number) => void,
+) {
   const base = await mkdtemp(join(tmpdir(), 'ai-video-video-'));
   roots.push(base);
   const project = new ProjectService({ recentProjectsPath: join(base, 'recent.json') });
   projects.push(project);
   project.create(join(base, 'project'), 'Video Project');
-  return { project, service: new VideoGenerationService(project) };
+  return { project, service: new VideoGenerationService(project, storageCapacityCheck) };
 }
 
 function prepare(service: VideoGenerationService) {
@@ -276,6 +278,37 @@ describe('VideoGenerationService', () => {
     const failed = service.get(job.id);
     expect(failed.error).toContain('512 MiB limit');
     expect(failed.results).toEqual([]);
+    expect(readdirSync(join(project.current()!.rootPath, 'assets', 'videos'))).toEqual([]);
+  });
+
+  it('checks actual streamed bytes when Content-Length is absent', async () => {
+    const storageCapacityCheck = vi.fn((_directoryPath: string, requiredBytes: number) => {
+      if (requiredBytes > 0) throw new Error('Insufficient disk space for media output.');
+    });
+    const { project, service } = await setup(storageCapacityCheck);
+    const job = prepare(service);
+    service.attachTask({ jobId: job.id, providerTaskId: 'provider-chunked-video' });
+    const response = mp4Response();
+    expect(response.headers.get('content-length')).toBeNull();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(response)),
+    );
+
+    const observation = service.observe({
+      jobId: job.id,
+      providerTaskId: 'provider-chunked-video',
+      providerStatus: 200,
+      providerBody: {
+        state: 'success',
+        creations: [{ video_url: 'https://example.com/chunked.mp4' }],
+      },
+    });
+    expect(observation.status).toBe('downloading');
+    await vi.waitFor(() => expect(service.get(job.id).status).toBe('failed'));
+
+    expect(storageCapacityCheck).toHaveBeenCalledWith(expect.any(String), 16);
+    expect(service.get(job.id).error).toContain('Insufficient disk space');
     expect(readdirSync(join(project.current()!.rootPath, 'assets', 'videos'))).toEqual([]);
   });
 
