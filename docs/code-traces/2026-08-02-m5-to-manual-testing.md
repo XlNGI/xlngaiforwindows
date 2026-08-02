@@ -204,3 +204,8 @@
 - Evidence: the restarted desktop exposes the Chinese Vidu region control, defaults to the China credential slot, reports it as unconfigured, and did not issue a Provider request during inspection.
 - Decision: the UI guard and error visibility fix are ready for Hosted Windows verification. M5 remains `HOLD`; a real request is still intentionally not automated.
 - Next: commit/push, verify Hosted CI, then ask the user to open the project, save the raw key under `中国站`, and retry once.
+
+### 2026-08-02T11:22:00+08:00 - Credential/region guard passed Hosted Windows
+- Evidence: GitHub Actions run `30730154927` for commit `3e9156d` completed with `success`; formatting, TypeScript build/Lint/typecheck, 77 tests, Worker Sidecar, Rust/Tauri check, NSIS bundle, and clean install lifecycle all passed.
+- Decision: automated code/native/package/install gates are `PASS`. M5 remains `HOLD` only for the real domestic Provider result and human visual acceptance.
+- Next: the user opens `D:\ts`, confirms `中国站 (api.vidu.cn)`, saves the raw domestic API Key in the selected region slot, and manually runs one generation. Record the exact visible terminal result without recording the key.
