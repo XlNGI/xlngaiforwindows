@@ -4,6 +4,7 @@ import {
   CircleCheck,
   Eye,
   FolderOpen,
+  ImagePlus,
   KeyRound,
   Pause,
   Play,
@@ -44,6 +45,14 @@ import {
   type ProviderRegion,
 } from './provider-client';
 import { VideoPollingScheduler } from './video-polling-scheduler';
+import {
+  hasLocalImageParameters,
+  isLocalImageDataUrl,
+  MAX_LOCAL_IMAGE_TOTAL_BYTES,
+  readLocalImageFile,
+  totalLocalImageBytes,
+  type LocalImageSelection,
+} from './local-image-input';
 
 interface ProductionPanelProps {
   projectId?: string;
@@ -130,6 +139,13 @@ function formatElapsed(elapsedMs: number): string {
   const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
   const minutes = Math.floor(seconds / 60);
   return minutes > 0 ? `${minutes}分${seconds % 60}秒` : `${seconds}秒`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kibibytes = bytes / 1024;
+  if (kibibytes < 1024) return `${kibibytes.toFixed(kibibytes >= 10 ? 0 : 1)} KiB`;
+  return `${(kibibytes / 1024).toFixed(1)} MiB`;
 }
 
 function upsertVideoJob(
@@ -254,8 +270,8 @@ export function ProductionPanel({
         setErrors([]);
         setMessage('');
         const defaults = defaultParameters(resolved);
+        setParameters(defaults);
         if (!shotId) {
-          setParameters(defaults);
           return;
         }
         const draft = await callWorker('generation.draft.get', {
@@ -274,7 +290,7 @@ export function ProductionPanel({
     return () => {
       active = false;
     };
-  }, [adapterKey, catalog, shotId]);
+  }, [adapterKey, catalog, projectId, shotId]);
 
   useEffect(() => {
     setCredentialState(undefined);
@@ -490,6 +506,18 @@ export function ProductionPanel({
 
   const saveDraft = async () => {
     if (!adapter || !shotId) return;
+    if (hasLocalImageParameters(parameters)) {
+      const localField = Object.entries(parameters).find(([, value]) =>
+        Array.isArray(value) ? value.some(isLocalImageDataUrl) : isLocalImageDataUrl(value),
+      )?.[0];
+      setErrors(
+        localField
+          ? [{ path: localField, message: '本地图片仅用于当前提交，不会写入项目草稿。' }]
+          : [],
+      );
+      setMessage('本地图片不会写入草稿，请改用公开 URL 后保存。');
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -853,7 +881,7 @@ export function ProductionPanel({
               <div className="parameter-fields">
                 {basicFields.map((field) => (
                   <ParameterField
-                    key={field.key}
+                    key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
                     field={field}
                     property={adapter.parameterSchema.properties[field.key]!}
                     value={parameters[field.key]}
@@ -871,7 +899,7 @@ export function ProductionPanel({
                   <div className="parameter-fields">
                     {advancedFields.map((field) => (
                       <ParameterField
-                        key={field.key}
+                        key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
                         field={field}
                         property={adapter.parameterSchema.properties[field.key]!}
                         value={parameters[field.key]}
@@ -1229,6 +1257,8 @@ function ParameterField({
   onChange,
 }: ParameterFieldProps) {
   const inputId = `parameter-${field.key}`;
+  const [localFiles, setLocalFiles] = useState<Array<LocalImageSelection | undefined>>([]);
+  const [selectionError, setSelectionError] = useState('');
   const label = (
     <label htmlFor={inputId}>
       {property.title}
@@ -1254,45 +1284,138 @@ function ParameterField({
   }
 
   if (field.control === 'url-list') {
-    const items = Array.isArray(value) && value.length > 0 ? value : [''];
+    const minimumRows = Math.max(1, property.minItems ?? 1);
+    const currentItems = Array.isArray(value) ? value : [];
+    const items = Array.from(
+      { length: Math.max(minimumRows, currentItems.length) },
+      (_, index) => currentItems[index] ?? '',
+    );
+    const commitItems = (next: string[]) => {
+      let length = next.length;
+      while (length > minimumRows && !next[length - 1]) length -= 1;
+      setSelectionError('');
+      onChange(next.slice(0, length));
+    };
+    const chooseLocalFile = async (file: File | undefined, index: number) => {
+      if (!file) return;
+      try {
+        const selected = await readLocalImageFile(file);
+        const next = [...items];
+        next[index] = selected.dataUrl;
+        if (totalLocalImageBytes(next) > MAX_LOCAL_IMAGE_TOTAL_BYTES) {
+          throw new Error('同一请求中的本地图片合计不能超过 20 MiB。');
+        }
+        setLocalFiles((current) => {
+          const updated = [...current];
+          updated[index] = selected;
+          return updated;
+        });
+        commitItems(next);
+      } catch (reason) {
+        setSelectionError(errorMessage(reason, '本地图片选择失败。'));
+      }
+    };
+    const clearItem = (index: number) => {
+      if (items.length <= minimumRows) {
+        const next = [...items];
+        next[index] = '';
+        setLocalFiles((current) => {
+          const updated = [...current];
+          updated[index] = undefined;
+          return updated;
+        });
+        commitItems(next);
+      } else {
+        setLocalFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
+        commitItems(items.filter((_, itemIndex) => itemIndex !== index));
+      }
+    };
+    const visibleError = selectionError || error;
     return (
-      <div className={`parameter-field ${error ? 'invalid' : ''}`}>
+      <div className={`parameter-field ${visibleError ? 'invalid' : ''}`}>
         {label}
         <div className="url-list">
-          {items.map((item, index) => (
-            <div className="url-row" key={`${field.key}-${index}`}>
-              <input
-                id={index === 0 ? inputId : undefined}
-                type="url"
-                value={item}
-                onChange={(event) => {
-                  const next = [...items];
-                  next[index] = event.target.value;
-                  onChange(next.filter((entry, entryIndex) => entry || entryIndex <= index));
-                }}
-              />
-              <button
-                className="icon-button subtle"
-                type="button"
-                title="移除 URL"
-                onClick={() => onChange(items.filter((_, itemIndex) => itemIndex !== index))}
-                disabled={items.length === 1}
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
-          ))}
-          <button
-            className="icon-button subtle"
-            type="button"
-            title="添加 URL"
-            onClick={() => onChange([...items, ''])}
-            disabled={property.maxItems !== undefined && items.length >= property.maxItems}
-          >
-            <Plus size={14} />
-          </button>
+          {items.map((item, index) => {
+            const selectedFile = localFiles[index];
+            const localFile = selectedFile?.dataUrl === item ? selectedFile : undefined;
+            const orderedRole = property.minItems === 2 && property.maxItems === 2;
+            const rowLabel = orderedRole ? (index === 0 ? '首帧' : '尾帧') : undefined;
+            const fileInputId = `${inputId}-file-${index}`;
+            return (
+              <div className="url-list-item" key={`${field.key}-${index}`}>
+                {rowLabel && <span className="url-row-role">{rowLabel}</span>}
+                <div className="url-row">
+                  {isLocalImageDataUrl(item) ? (
+                    <div className="local-image-value" id={index === 0 ? inputId : undefined}>
+                      <img src={item} alt="" />
+                      <span>
+                        <strong>{localFile?.name ?? '本地图片'}</strong>
+                        {localFile && <small>{formatBytes(localFile.size)}</small>}
+                      </span>
+                    </div>
+                  ) : (
+                    <input
+                      id={index === 0 ? inputId : undefined}
+                      aria-label={rowLabel ? `${rowLabel} URL` : undefined}
+                      type="url"
+                      value={item}
+                      placeholder={rowLabel ? `输入${rowLabel}公开 URL` : field.placeholder}
+                      onChange={(event) => {
+                        const next = [...items];
+                        next[index] = event.target.value;
+                        setLocalFiles((current) => {
+                          const updated = [...current];
+                          updated[index] = undefined;
+                          return updated;
+                        });
+                        commitItems(next);
+                      }}
+                    />
+                  )}
+                  <label
+                    className="icon-button subtle file-picker-button"
+                    htmlFor={fileInputId}
+                    title={item ? '替换为本地图片' : '选择本地图片'}
+                  >
+                    <ImagePlus size={14} />
+                    <input
+                      id={fileInputId}
+                      className="url-file-input"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,.jpg,.jpeg,.png,.webp"
+                      aria-label={`为${rowLabel ?? property.title}选择本地图片`}
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        event.currentTarget.value = '';
+                        void chooseLocalFile(file, index);
+                      }}
+                    />
+                  </label>
+                  <button
+                    className="icon-button subtle"
+                    type="button"
+                    title={item ? '清除此图片输入' : '移除此输入行'}
+                    onClick={() => clearItem(index)}
+                    disabled={!item && items.length <= minimumRows}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {(property.maxItems === undefined || items.length < property.maxItems) && (
+            <button
+              className="icon-button subtle"
+              type="button"
+              title="添加图片输入"
+              onClick={() => commitItems([...items, ''])}
+            >
+              <Plus size={14} />
+            </button>
+          )}
         </div>
-        {error && <small>{error}</small>}
+        {visibleError && <small>{visibleError}</small>}
       </div>
     );
   }

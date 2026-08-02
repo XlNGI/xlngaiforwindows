@@ -5,7 +5,7 @@
 
 ## 1. 范围与非目标
 
-M6 在不配置公网 `callback_url` 的条件下，支持 Vidu `/ent/v2/reference2video` 参考生视频（1–7 张参考图）和 `/ent/v2/start-end2video` 首尾帧生视频（严格按首帧、尾帧顺序传入 2 张图）的提交、本地轮询、重启恢复、暂停、继续、取消、结果下载、资产登记及任务中心展示。
+M6 在不配置公网 `callback_url` 的条件下，支持 Vidu `/ent/v2/reference2video` 参考生视频（1–7 张参考图）和 `/ent/v2/start-end2video` 首尾帧生视频（严格按首帧、尾帧顺序传入 2 张图）的提交、本地轮询、重启恢复、暂停、继续、取消、结果下载、资产登记及任务中心展示。图片参数同时支持公开 URL 和从本机选择的 PNG/JPEG/WebP 文件；本机文件仅在当前界面会话中转换为 Provider 官方支持的 Data URL。
 
 M6 不实现 M7 的发布迁移、诊断导出或自动更新；不自动调用真实 Provider；不把 API 密钥、完整签名 URL 或完整 Provider 响应写入项目数据库和日志。
 
@@ -21,6 +21,9 @@ M6 不实现 M7 的发布迁移、诊断导出或自动更新；不自动调用�
 8. `succeeded`、`failed`、`timed-out` 和 `cancelled` 是幂等终态；其中 `succeeded` 对应质量门禁的 complete 语义，`timed-out` 对应 failed 语义。
 9. 用户取消至少停止本地查询并持久化 `cancelled`；只有厂商明确提供取消能力时才调用远端取消，不能把“不支持远端取消”伪装为失败。
 10. 请求快照只保存适配器声明字段；凭据、回调地址、任意端点、完整 Provider 响应和完整签名 URL不得持久化。
+11. 本地图片选择不得改变 URL 输入能力；每一行的文件选择只替换该行，首帧和尾帧顺序必须与界面行顺序一致。取消文件对话框、格式不支持、空文件、单文件超过 20 MiB 或同一请求本地图片合计超过 20 MiB 时，原参数保持不变并显示可操作错误。
+12. 本地图片只接受 PNG、JPEG/JPG 和 WebP。Data URL 仅存在于当前渲染会话和一次原生 Provider 提交中；草稿保存必须拒绝完整 Data URL，生成任务快照必须用有界占位符替代 Base64，任务中心、SQLite 和日志不得包含完整 Base64。
+13. 原生 Provider 桥允许的 JSON 请求体上限为 32 MiB；桌面端 20 MiB 原始图片总量经 Base64 扩张后仍必须保留 JSON 与提示词余量。原生层继续执行最终请求体上限，绕过界面的超限请求也必须失败。
 
 ## 3. 状态机
 
@@ -63,6 +66,11 @@ pending --attach providerTaskId--> polling --provider success--> downloading --a
 | 应用重启 | 已提交 `polling` 保持可恢复，遗留 `downloading` 回到 `polling` | 清理严格命名的旧临时文件，从 SQLite 恢复唯一调度项 |
 | 重复 attach/poll/complete/cancel | 原状态或同一终态 | 不重复提交、不重复下载、不重复登记 |
 | 多任务同时查询 | 状态各自持久化 | 有界并发，单任务指数退避加随机抖动 |
+| 取消本地文件选择 | 不改变参数 | 保留原 URL 或本地预览，不产生错误 |
+| 本地图片格式不支持、为空或单张/合计超限 | 不创建任务、不写草稿 | 保留原参数并显示格式或体积错误 |
+| 切换适配器、镜头或项目 | 不持久化本地 Base64 | 清除旧控件和预览；新选择不继承旧文件 |
+| 保存包含本地图片的草稿 | 不写入 SQLite | 明确提示本地图片仅用于当前提交，改用 URL 才可保存草稿 |
+| 绕过界面提交超过 32 MiB 的 JSON | 不发送 Provider 请求 | 原生桥在读取凭据和发起网络请求前拒绝 |
 
 ## 5. 契约
 
@@ -74,10 +82,11 @@ Worker IPC：
 - `video.generate.fail`：提交或本地传输失败时写入脱敏错误。
 - `video.generate.pause` / `resume` / `cancel`：幂等状态转换。
 - `video.generate.get` / `list`：按当前项目读取任务中心数据。
+- `video.generate.prepare` 和 M5 `image.generate.prepare`：在 Schema 校验后把 Data URL 请求字段改写为有界的 `[local image omitted]` 快照；提交给 Provider 的内存参数不变。
 
 原生命令：
 
-- `provider_submit_task(adapterKey, providerRegion, payload)`：只允许视频适配器，只执行一次 POST，返回 HTTP 状态、脱敏后的任务 ID和 Provider 状态，不轮询。
+- `provider_submit_task(adapterKey, providerRegion, payload)`：只允许视频适配器，只执行一次 POST，允许官方定义的 URL/Data URL 图片值，并在 32 MiB JSON 上限内返回 HTTP 状态、脱敏后的任务 ID和 Provider 状态，不轮询。
 - `provider_poll_task(adapterKey, providerRegion, taskId)`：校验适配器和任务 ID，只执行一次 GET。
 - `provider_cancel_task`：只向官方 `/ent/v2/tasks/{id}/cancel` 发送一次受控 POST；远端失败不回滚已经持久化的本地取消。
 
@@ -100,3 +109,4 @@ Provider 合法形态：
 | 多任务限流且不重复轮询 | Desktop polling scheduler | concurrency/backoff/dedup 测试 | 同时提交两个任务观察查询 |
 | 凭据和响应不落库 | Native bridge / request snapshot | allowlist、redaction、SQLite 审计 | 检查项目文件与错误展示 |
 | 无 callback 完成 | Native submit/poll + local scheduler | submit/poll 契约集成测试 | 不填写 callback 完成真实任务 |
+| 本地图片输入有界且不落库 | Desktop file field / Worker request snapshot / Native bridge | format/size/cancel/order、Base64 redaction、body-limit 测试 | URL 与本地文件分别提交，重开项目检查输入已清除 |

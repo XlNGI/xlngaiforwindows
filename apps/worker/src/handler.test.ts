@@ -164,6 +164,29 @@ describe('worker handler', () => {
     });
     expect(invalid).toMatchObject({ ok: false, error: { code: 'INVALID_PARAMETERS' } });
 
+    const localImageDraft = await handleRequest({
+      id: 'local-image-draft',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'generation.draft.save',
+      params: {
+        shotId: createdShot.id,
+        adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+        parameters: {
+          images: ['DATA:image/png;base64,bXVzdC1ub3QtcGVyc2lzdA=='],
+          prompt: 'Frame',
+          aspect_ratio: '16:9',
+          resolution: '1080p',
+        },
+      },
+    });
+    expect(localImageDraft).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_PARAMETERS',
+      },
+    });
+    expect(JSON.stringify(localImageDraft)).toContain('不能写入项目草稿');
+
     const parameters = { prompt: 'Frame', aspect_ratio: '16:9', resolution: '2K' };
     const saved = await handleRequest({
       id: 'valid-draft',
@@ -192,5 +215,6 @@ describe('worker handler', () => {
     });
     const databaseBytes = await readFile(join(root, 'project.sqlite'));
     expect(databaseBytes.includes(Buffer.from('must-not-persist'))).toBe(false);
+    expect(databaseBytes.includes(Buffer.from('bXVzdC1ub3QtcGVyc2lzdA=='))).toBe(false);
   });
 });

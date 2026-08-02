@@ -733,7 +733,18 @@ function requireProviderRegion(value: string): VideoProviderRegion {
 }
 
 function cloneParameters(parameters: AdapterParameters): AdapterParameters {
-  return JSON.parse(JSON.stringify(parameters)) as AdapterParameters;
+  return Object.fromEntries(
+    Object.entries(parameters).map(([key, value]) => [
+      key,
+      Array.isArray(value)
+        ? value.map((item) =>
+            item.toLowerCase().startsWith('data:image/') ? 'local-image://omitted' : item,
+          )
+        : typeof value === 'string' && value.toLowerCase().startsWith('data:image/')
+          ? 'local-image://omitted'
+          : value,
+    ]),
+  );
 }
 
 function observedMetadata(metadata: VideoJobMetadata, body: unknown): VideoJobMetadata {

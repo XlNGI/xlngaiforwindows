@@ -49,6 +49,29 @@ function mp4Response(): Response {
 }
 
 describe('VideoGenerationService', () => {
+  it('redacts local image Data URLs from the durable video request', async () => {
+    const { project, service } = await setup();
+    const localImage = 'DATA:image/png;base64,iVBORw0KGgo=';
+    const job = service.prepare({
+      adapterKey: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
+      parameters: {
+        images: [localImage, localImage],
+        duration: 5,
+        resolution: '720p',
+        audio: true,
+      },
+      providerRegion: 'cn',
+    });
+
+    expect(job.request.images).toEqual(['local-image://omitted', 'local-image://omitted']);
+    project.access(false, (database) => {
+      const row = database
+        .prepare('SELECT request_json FROM generation_jobs WHERE id = ?')
+        .get(job.id) as { request_json: string };
+      expect(row.request_json).not.toContain('iVBORw0KGgo=');
+    });
+  });
+
   it('accepts only validated IMAGE_TO_VIDEO adapters', async () => {
     const { service } = await setup();
     expect(() =>

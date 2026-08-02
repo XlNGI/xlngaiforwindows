@@ -33,7 +33,8 @@ const CREDENTIAL_SERVICE: &str = "com.ai-video.workspace";
 const SUPPORTED_CREDENTIAL_PROVIDERS: &[&str] = &["vidu", "vidu-cn"];
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
-const PROVIDER_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const PROVIDER_REQUEST_BODY_LIMIT: usize = 32 * 1024 * 1024;
+const PROVIDER_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_TASK_ID_LIMIT: usize = 256;
@@ -165,7 +166,7 @@ fn provider_payload(target: ProviderTarget, payload: serde_json::Value) -> Resul
     );
     let encoded = serde_json::to_vec(&object)
         .map_err(|error| format!("Unable to serialize provider payload: {error}"))?;
-    if encoded.len() > PROVIDER_BODY_LIMIT {
+    if encoded.len() > PROVIDER_REQUEST_BODY_LIMIT {
         return Err("Provider payload exceeds the native transport limit".to_string());
     }
     Ok(encoded)
@@ -725,7 +726,7 @@ fn request_provider_json(
             break;
         }
         response.extend_from_slice(&chunk[..read as usize]);
-        if response.len() > PROVIDER_BODY_LIMIT {
+        if response.len() > PROVIDER_RESPONSE_BODY_LIMIT {
             return Err("Provider response exceeds the native transport limit".to_string());
         }
     }
@@ -968,6 +969,7 @@ mod tests {
         bundled_worker_path, contains_image_source, ensure_video_adapter, provider_cancel_path,
         provider_payload, provider_state, provider_target, provider_task_error, provider_task_id,
         provider_task_path, validate_credential_provider, WorkerProcess, BUNDLED_WORKER_FILENAME,
+        PROVIDER_REQUEST_BODY_LIMIT,
     };
     use serde_json::json;
     use std::{path::Path, process::Command, time::Duration};
@@ -1064,6 +1066,27 @@ mod tests {
             json!({"prompt": "frame", "endpoint": "https://attacker.invalid"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn provider_bridge_accepts_bounded_data_urls_and_rejects_oversized_json() {
+        let target = provider_target("REFERENCE_TO_IMAGE:vidu:viduq2:v2", "global")
+            .expect("known adapter should resolve");
+        assert!(provider_payload(
+            target,
+            json!({
+                "images": ["data:image/png;base64,iVBORw0KGgo="],
+                "prompt": "frame",
+                "aspect_ratio": "16:9",
+                "resolution": "1080p"
+            })
+        )
+        .is_ok());
+
+        let oversized = "x".repeat(PROVIDER_REQUEST_BODY_LIMIT);
+        let error = provider_payload(target, json!({ "prompt": oversized }))
+            .expect_err("oversized request must be rejected");
+        assert!(error.contains("native transport limit"));
     }
 
     #[test]

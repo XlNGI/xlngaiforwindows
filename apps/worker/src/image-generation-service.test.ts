@@ -25,6 +25,29 @@ async function setup() {
 }
 
 describe('ImageGenerationService', () => {
+  it('redacts local image Data URLs from the persisted request snapshot', async () => {
+    const { project, service } = await setup();
+    const localImage = 'DATA:image/png;base64,iVBORw0KGgo=';
+    const job = service.prepare({
+      adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+      parameters: {
+        images: [localImage],
+        prompt: 'frame',
+        aspect_ratio: '16:9',
+        resolution: '1080p',
+      },
+    });
+
+    expect(job.request.images).toEqual(['local-image://omitted']);
+    project.access(false, (database) => {
+      const row = database
+        .prepare('SELECT request_json FROM generation_jobs WHERE id = ?')
+        .get(job.id) as { request_json: string };
+      expect(row.request_json).toContain('local-image://omitted');
+      expect(row.request_json).not.toContain('iVBORw0KGgo=');
+    });
+  });
+
   it('saves a Base64 provider result as an asset and result manifest', async () => {
     const { project, service } = await setup();
     const job = service.prepare({
@@ -149,6 +172,42 @@ describe('ImageGenerationService', () => {
     });
 
     expect(result.status).toBe('succeeded');
+    expect(fetchMock).toHaveBeenCalledWith(outputUrl, expect.anything());
+    expect(result.results[0]?.asset?.sourceUrl).toBe(outputUrl);
+  });
+
+  it('does not mistake an echoed local Base64 input for the generated image', async () => {
+    const { service } = await setup();
+    const outputUrl = 'https://example.invalid/generated.png';
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const localInput = 'data:image/png;base64,iVBORw0KGgo=';
+    const job = service.prepare({
+      adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+      parameters: {
+        images: [localInput],
+        prompt: 'frame',
+        aspect_ratio: '16:9',
+        resolution: '1080p',
+      },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: {
+        input: { images: [localInput] },
+        creations: [{ url: outputUrl }],
+      },
+    });
+
     expect(fetchMock).toHaveBeenCalledWith(outputUrl, expect.anything());
     expect(result.results[0]?.asset?.sourceUrl).toBe(outputUrl);
   });

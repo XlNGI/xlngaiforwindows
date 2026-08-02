@@ -84,7 +84,7 @@ const videoDescriptor: AdapterDescriptor = {
   modelLabel: 'Vidu Q3 Pro',
   apiVersion: 'v2',
   schemaVersion: 1,
-  endpoint: 'https://api.vidu.com/ent/v2/img2video',
+  endpoint: 'https://api.vidu.com/ent/v2/start-end2video',
   documentationUrl: 'https://platform.vidu.com/docs/image-to-video',
   credentialProvider: 'vidu',
   parameterSchema: {
@@ -95,9 +95,9 @@ const videoDescriptor: AdapterDescriptor = {
     properties: {
       images: {
         type: 'array',
-        title: '起始帧 URL',
-        minItems: 1,
-        maxItems: 1,
+        title: '首帧与尾帧',
+        minItems: 2,
+        maxItems: 2,
         items: { type: 'string', format: 'uri' },
       },
       duration: { type: 'integer', title: '时长', minimum: 1, maximum: 16, default: 5 },
@@ -136,7 +136,7 @@ function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobI
     providerTaskId: status === 'pending' ? undefined : 'provider-task',
     status,
     request: {
-      images: ['https://example.invalid/start.png'],
+      images: ['https://example.invalid/start.png', 'https://example.invalid/end.png'],
       duration: 5,
       resolution: '720p',
       audio: true,
@@ -602,8 +602,11 @@ describe('ProductionPanel', () => {
     });
 
     render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
-    fireEvent.change(await screen.findByLabelText(/起始帧 URL/), {
+    fireEvent.change(await screen.findByLabelText('首帧 URL'), {
       target: { value: 'https://example.invalid/start.png' },
+    });
+    fireEvent.change(screen.getByLabelText('尾帧 URL'), {
+      target: { value: 'https://example.invalid/end.png' },
     });
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
 
@@ -620,7 +623,9 @@ describe('ProductionPanel', () => {
     );
     expect(submitVideoProviderTask).toHaveBeenCalledWith(
       videoDescriptor.key,
-      expect.objectContaining({ images: ['https://example.invalid/start.png'] }),
+      expect.objectContaining({
+        images: ['https://example.invalid/start.png', 'https://example.invalid/end.png'],
+      }),
       'cn',
     );
     expect(callWorker).toHaveBeenCalledWith('video.generate.attachTask', {
@@ -628,6 +633,98 @@ describe('ProductionPanel', () => {
       providerTaskId: 'provider-task',
     });
     expect(await screen.findByText('视频任务已提交，正在本地查询。')).toBeInTheDocument();
+  });
+
+  it('selects ordered local start and end frames and submits Data URLs once', async () => {
+    vi.mocked(submitVideoProviderTask).mockResolvedValue({
+      status: 200,
+      taskId: 'provider-task',
+      state: 'created',
+    });
+    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
+      if (method === 'video.generate.attachTask') return Promise.resolve(videoJob('polling'));
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const jpeg = new Uint8Array([255, 216, 255, 224]);
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+
+    fireEvent.change(await screen.findByLabelText('为首帧选择本地图片'), {
+      target: { files: [new File([png], 'start.png', { type: 'image/png' })] },
+    });
+    expect(await screen.findByText('start.png')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('为尾帧选择本地图片'), {
+      target: { files: [new File([jpeg], 'end.jpg', { type: 'image/jpeg' })] },
+    });
+    expect(await screen.findByText('end.jpg')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+
+    await waitFor(() => expect(submitVideoProviderTask).toHaveBeenCalledTimes(1));
+    expect(submitVideoProviderTask).toHaveBeenCalledWith(
+      videoDescriptor.key,
+      expect.objectContaining({
+        images: [
+          expect.stringMatching(/^data:image\/png;base64,/),
+          expect.stringMatching(/^data:image\/jpeg;base64,/),
+        ],
+      }),
+      'cn',
+    );
+  });
+
+  it('keeps the existing URL after cancellation or an invalid local file selection', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    const startUrl = await screen.findByLabelText('首帧 URL');
+    fireEvent.change(startUrl, { target: { value: 'https://example.invalid/start.png' } });
+    const picker = screen.getByLabelText('为首帧选择本地图片');
+
+    fireEvent.change(picker, { target: { files: [] } });
+    expect(startUrl).toHaveValue('https://example.invalid/start.png');
+    fireEvent.change(picker, {
+      target: { files: [new File(['gif'], 'bad.gif', { type: 'image/gif' })] },
+    });
+
+    expect(await screen.findByText('仅支持 PNG、JPEG/JPG 和 WebP 图片。')).toBeInTheDocument();
+    expect(startUrl).toHaveValue('https://example.invalid/start.png');
+  });
+
+  it('does not persist a draft containing a selected local image', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    fireEvent.change(await screen.findByLabelText('为首帧选择本地图片'), {
+      target: { files: [new File([png], 'start.png', { type: 'image/png' })] },
+    });
+    expect(await screen.findByText('start.png')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+
+    expect(
+      await screen.findByText('本地图片不会写入草稿，请改用公开 URL 后保存。'),
+    ).toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('generation.draft.save', expect.anything());
   });
 
   it('resumes without resubmission and keeps local cancellation when remote cancellation fails', async () => {

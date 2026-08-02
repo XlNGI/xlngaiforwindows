@@ -525,15 +525,24 @@ function imageFromPreview(params: ImageGenerationSavePreviewParams): DownloadedI
 }
 
 function redactParameters(parameters: AdapterParameters): AdapterParameters {
-  return JSON.parse(JSON.stringify(parameters)) as AdapterParameters;
+  return Object.fromEntries(
+    Object.entries(parameters).map(([key, value]) => [
+      key,
+      Array.isArray(value)
+        ? value.map((item) => (isEmbeddedImageSource(item) ? 'local-image://omitted' : item))
+        : typeof value === 'string' && isEmbeddedImageSource(value)
+          ? 'local-image://omitted'
+          : value,
+    ]),
+  );
 }
 
 function extractImageSource(body: unknown): string {
-  const embedded = findString(body, isEmbeddedImageSource);
-  if (embedded) return embedded;
-
   const creation = findCreationImageSource(body);
   if (creation) return creation;
+
+  const embedded = findString(body, isEmbeddedImageSource);
+  if (embedded) return embedded;
 
   const found = findString(body, isRemoteImageSource);
   if (!found) throw new Error('Provider response did not contain an image URL or Base64 image.');
@@ -541,7 +550,7 @@ function extractImageSource(body: unknown): string {
 }
 
 function isEmbeddedImageSource(value: string): boolean {
-  return value.startsWith('data:image/');
+  return value.toLowerCase().startsWith('data:image/');
 }
 
 function isRemoteImageSource(value: string): boolean {

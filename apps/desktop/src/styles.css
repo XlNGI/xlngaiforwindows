@@ -816,16 +816,82 @@ button {
   gap: 5px;
 }
 
+.url-list-item {
+  display: grid;
+  gap: 3px;
+}
+
+.url-row-role {
+  color: #777d82;
+  font-size: 9px;
+}
+
 .url-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 28px;
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
   gap: 3px;
+}
+
+.local-image-value {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  height: 32px;
+  padding: 3px 7px 3px 3px;
+  overflow: hidden;
+  color: #d4d7da;
+  border: 1px solid #383d40;
+  border-radius: 4px;
+  background: #222629;
+}
+
+.parameter-field.invalid .local-image-value {
+  border-color: #8e4e4e;
+}
+
+.local-image-value img {
+  width: 24px;
+  height: 24px;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+.local-image-value > span {
+  display: grid;
+  min-width: 0;
+  padding-left: 6px;
+}
+
+.local-image-value strong,
+.local-image-value small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-image-value strong {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.local-image-value small {
+  color: #777d82;
+  font-size: 8px;
 }
 
 .url-row .icon-button,
 .url-list > .icon-button {
   width: 28px;
   height: 28px;
+}
+
+.file-picker-button {
+  cursor: pointer;
+}
+
+.url-file-input {
+  display: none;
 }
 
 .url-list > .icon-button {

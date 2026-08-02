@@ -67,6 +67,12 @@ export class AdapterService {
     this.requireAdapter(params.adapterKey);
     const validation = validateAdapterParameters(params.adapterKey, params.parameters);
     if (!validation.valid) throw new InvalidAdapterParametersError(validation);
+    if (containsLocalImageData(params.parameters)) {
+      throw new InvalidAdapterParametersError({
+        valid: false,
+        errors: [{ path: 'images', message: '本地图片仅用于当前提交，不能写入项目草稿。' }],
+      });
+    }
 
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -105,4 +111,12 @@ export class AdapterService {
       throw new Error('镜头不属于当前项目。');
     }
   }
+}
+
+function containsLocalImageData(parameters: GenerationDraftSaveParams['parameters']): boolean {
+  return Object.values(parameters).some((value) =>
+    Array.isArray(value)
+      ? value.some((item) => item.toLowerCase().startsWith('data:image/'))
+      : typeof value === 'string' && value.toLowerCase().startsWith('data:image/'),
+  );
 }

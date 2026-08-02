@@ -86,7 +86,7 @@ const adapters: AdapterDescriptor[] = [
       properties: {
         images: {
           type: 'array',
-          title: '参考图片 URL',
+          title: '参考图片',
           minItems: 1,
           maxItems: 7,
           items: { type: 'string', format: 'uri' },
@@ -119,7 +119,7 @@ const adapters: AdapterDescriptor[] = [
           control: 'url-list',
           group: 'basic',
           order: 10,
-          placeholder: '每行一个图片 URL',
+          placeholder: '输入公开 URL，或选择本地图片',
         },
         { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
         { key: 'aspect_ratio', control: 'select', group: 'basic', order: 30 },
@@ -149,7 +149,7 @@ const adapters: AdapterDescriptor[] = [
       properties: {
         images: {
           type: 'array',
-          title: '参考图片 URL',
+          title: '参考图片',
           minItems: 1,
           maxItems: 7,
           items: { type: 'string', format: 'uri' },
@@ -182,7 +182,7 @@ const adapters: AdapterDescriptor[] = [
           control: 'url-list',
           group: 'basic',
           order: 10,
-          placeholder: '每行一个图片 URL',
+          placeholder: '输入公开 URL，或选择本地图片',
         },
         { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
         { key: 'aspect_ratio', control: 'select', group: 'basic', order: 30 },
@@ -212,7 +212,7 @@ const adapters: AdapterDescriptor[] = [
       properties: {
         images: {
           type: 'array',
-          title: '参考图片 URL',
+          title: '参考图片',
           minItems: 1,
           maxItems: 7,
           items: { type: 'string', format: 'uri' },
@@ -249,7 +249,7 @@ const adapters: AdapterDescriptor[] = [
           control: 'url-list',
           group: 'basic',
           order: 10,
-          placeholder: '每行一个参考图片 URL（最多 7 张）',
+          placeholder: '输入公开 URL，或选择本地图片（最多 7 张）',
         },
         { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
         { key: 'duration', control: 'number', group: 'basic', order: 30 },
@@ -282,7 +282,7 @@ const adapters: AdapterDescriptor[] = [
       properties: {
         images: {
           type: 'array',
-          title: '首帧与尾帧 URL',
+          title: '首帧与尾帧',
           minItems: 2,
           maxItems: 2,
           items: { type: 'string', format: 'uri' },
@@ -314,7 +314,7 @@ const adapters: AdapterDescriptor[] = [
           control: 'url-list',
           group: 'basic',
           order: 10,
-          placeholder: '依次输入首帧、尾帧 URL',
+          placeholder: '依次输入首帧、尾帧 URL 或本地图片',
         },
         { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
         { key: 'duration', control: 'number', group: 'basic', order: 30 },
@@ -347,7 +347,7 @@ const adapters: AdapterDescriptor[] = [
       properties: {
         images: {
           type: 'array',
-          title: '起始帧 URL',
+          title: '起始帧',
           minItems: 1,
           maxItems: 1,
           items: { type: 'string', format: 'uri' },
@@ -387,7 +387,7 @@ const adapters: AdapterDescriptor[] = [
           control: 'url-list',
           group: 'basic',
           order: 10,
-          placeholder: '输入一张起始帧 URL',
+          placeholder: '输入起始帧公开 URL，或选择本地图片',
         },
         { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
         { key: 'duration', control: 'select', group: 'basic', order: 30 },
