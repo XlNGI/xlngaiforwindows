@@ -249,3 +249,9 @@
 - Files: `packages/contracts/src/index.ts`, `apps/worker/src/image-generation-service.ts`, `apps/worker/src/handler.ts`, `apps/desktop/src/ProductionPanel.tsx`, `apps/desktop/src/styles.css`, focused tests.
 - Verification: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, focused Worker tests (19), focused Desktop production-panel tests (8), `pnpm test` (84 tests), `pnpm build`, `pnpm worker:sidecar`, and `git diff --check` passed. The first sidecar run hit the known Windows `better_sqlite3.node` `EBUSY` lock while project dev processes were still running; after stopping only the project `tauri dev`, Vite, esbuild, and `ai-video-desktop.exe` processes, a serial sidecar rerun passed.
 - Decision: the requested UI behavior is implemented in M5 scope. Real Provider/manual acceptance remains `HOLD`; no real request or credential was accessed.
+
+### 2026-08-02T15:05:36+08:00 - Hosted Windows gate passed for preview-only manual save
+- Evidence: GitHub Actions run `30736751960` for commit `9263e48` completed with `success`.
+- Verification: Hosted Windows passed formatting, TypeScript build/lint/typecheck, workspace tests, standalone Worker build, Rust/Tauri check, NSIS bundle, and clean NSIS install lifecycle.
+- Decision: automated code, native, package, install, and Hosted gates are `PASS` for the preview-only manual save flow. M5 remains `HOLD` for human confirmation in the real desktop UI and any further credentialed Provider acceptance checks.
+- Next: restart the desktop from `main`; generate once with automatic local save disabled, confirm preview-only behavior, then click the manual save button and verify that the selected asset kind appears in the project asset library.
