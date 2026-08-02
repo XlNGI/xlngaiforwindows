@@ -3,7 +3,7 @@
 - Started: 2026-08-02T18:40:00+08:00
 - Repository: `D:\SB\xlngaiforwindows`
 - Base revision: `main` at `b490507`
-- Status: in progress
+- Status: complete
 
 ## Objective
 
@@ -72,3 +72,10 @@ Expose text-to-video, image-to-video, reference-to-video, and start/end-frame-to
 - Files: `packages/generation-adapters/src/index.ts`, `apps/desktop/src/ProductionPanel.tsx`, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/worker/scripts/validate-m4-sidecar.mjs`
 - Decision: optional audio-reference files from the supplied API document remain outside this change because the current local-input and persistence-redaction boundary is image-specific; Q3-Drama itself is usable with one to seven image references and all verified core generation fields.
 - Next: commit and push the local changes, wait for Hosted Windows, and stop before any real credentialed Provider request.
+
+### 2026-08-02T20:47:03+08:00 - Hosted Windows gate passed
+
+- Evidence: GitHub Actions run `30748123116` for commit `0d6cffc` completed successfully; the Hosted Windows job passed formatting, build, lint, typecheck, all tests, standalone Worker build, Tauri host checks, NSIS build, and clean NSIS install lifecycle validation.
+- Evidence: local `main` and `origin/main` both contain the implementation commit; the development desktop remains running after release verification.
+- Decision: automated implementation and release validation are complete. No real credentialed Provider request was sent, so the remaining Q3-Drama success-path check is an explicit human test that may consume credits.
+- Rollback: revert `0d6cffc` to remove Q3-Drama and restore the prior model-label presentation while preserving the preceding video-mode implementation.
