@@ -80,3 +80,9 @@ Implement M7 in the documented order: specify stability and release invariants f
 - Evidence: The ownership fix changed the packaged Worker, so the 23:11 installer hash is superseded. The current 20,269,548-byte NSIS installer has SHA-256 `A36856A2CAF91F2F054E469404C87CCDEBFF95C93E9DC9C5B1A57C052B0D6712` and remains `NotSigned`.
 - Commands: format, lint, typecheck, `pnpm tauri:build`, M7 packaged Sidecar validation, clean NSIS lifecycle, and same-installer overwrite lifecycle -> exit `0` after the fix.
 - Decision: This hash identifies the M7 candidate sent to Hosted Windows CI; the release state remains `HOLD` at the same human gates.
+
+### 2026-08-02T23:32:00+08:00 - Hosted Windows validation passed
+
+- Evidence: GitHub Actions run `30754118267` for commit `3a2bc23845adae0b474ccaca81c7195edc93c63b` completed successfully. All 22 job/setup/cleanup steps passed, including formatting, build, lint, typecheck, 135 tests, packaged M7 Sidecar, Tauri host check, NSIS build, clean install lifecycle, and overwrite/external-project preservation.
+- Commands: `git push origin main` -> exit `0`; GitHub Actions public API reported run conclusion `success` and no failed steps.
+- Decision: Automatic local and Hosted Windows gates are complete. The trace stays `stopped`, not `complete`, because the documented human release gates remain outstanding.
