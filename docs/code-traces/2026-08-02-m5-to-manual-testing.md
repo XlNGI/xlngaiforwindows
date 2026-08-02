@@ -3,7 +3,7 @@
 - Started: 2026-08-02T02:08:29+08:00
 - Repository: `D:\SB\xlngaiforwindows`
 - Base revision: `main` at `856e30c`
-- Status: stopped
+- Status: in progress
 
 ## Objective
 
@@ -127,3 +127,19 @@
 - Decision: all safe and automatable M5 code, UI failure/restart, persistence, native, package, install, and hosted gates are `PASS`. Real Vidu success, real OpenAI success, Windows credential entry/use, and human visual/interaction acceptance remain explicitly `HOLD`/unverified because no credential or quota authorization was provided.
 - Decision: do not begin M6 and do not sign M5 as fully accepted until the human checklist in `docs/M5-IMAGE-GENERATION.md` records those outcomes.
 - Next: a human supplies authorized test credentials and performs the remaining real Provider and visual acceptance checklist; record results before changing this trace from `stopped`.
+
+### 2026-08-02T08:20:00+08:00 - Real Provider click reported no visible result
+
+- Evidence: the running release window was currently on `No project open`; the Generate button was disabled and the project database had one project, zero shots, zero generation jobs, zero results, and zero assets. No new credential or request body was read.
+- Investigation: the Vidu reference-to-image API documents an asynchronous contract: the POST returns a `task_id` and `state`, while the image URLs are returned by `GET /ent/v2/tasks/{id}/creations`. The native bridge only performed the POST and returned immediately; the Worker then looked for an image URL in the creation response and could never persist a normal Vidu task result.
+- Decision: keep M5 blocked and patch the native bridge to poll the documented task endpoint with a bounded timeout, validate the task id before constructing the path, and surface failed/timeout states as terminal UI errors. Do not issue another real request until the rebuilt binary and regression tests pass.
+- Next: implement the bounded Provider task polling, add native tests, rebuild, and re-run safe gates.
+
+### 2026-08-02T09:18:00+08:00 - Bounded Vidu polling implemented and safe gates passed
+
+- Action: refactored the native WinHTTP bridge to support POST and GET, poll Vidu task creations for up to 120 seconds, reject unsafe task IDs, require image output on success, and map terminal Provider failures/timeouts to UI-visible errors.
+- Files: `apps/desktop/src-tauri/src/lib.rs`, `docs/M5-IMAGE-GENERATION.md`.
+- Verification: Rust offline tests passed (9); `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test` (74 tests), `pnpm build`, and `git diff --check` passed. Release Tauri/NSIS build succeeded and clean install lifecycle passed (`WorkerStarted`, startup checks, graceful close, Worker cleanup, uninstall, and binary removal all true).
+- Safety: no credential value, request body, or Provider response containing user data was read or logged; no additional real Provider request was sent. The rebuilt Release app was relaunched after the install check and is running with Worker PID 28080; the UI health/SQLite indicators are normal.
+- Decision: the asynchronous Provider contract defect is fixed in code, but M5 real credentialed success and human acceptance remain `HOLD`; do not sign the stage or start M6 until the user performs one controlled real request and records the outcome.
+- Next: use the rebuilt app for one authorized real Vidu test, then verify the asset file/manifest and failure/retry behavior without exposing the key.

@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(any(not(debug_assertions), test))]
@@ -34,6 +34,9 @@ const SUPPORTED_CREDENTIAL_PROVIDERS: &[&str] = &["vidu"];
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_TASK_ID_LIMIT: usize = 256;
 #[cfg(any(not(debug_assertions), test))]
 const BUNDLED_WORKER_FILENAME: &str = "ai-video-worker.exe";
 
@@ -280,6 +283,42 @@ struct ProviderHttpResponse {
     body: serde_json::Value,
 }
 
+fn provider_task_path(task_id: &str) -> Result<String, String> {
+    if task_id.is_empty()
+        || task_id.len() > PROVIDER_TASK_ID_LIMIT
+        || !task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("Provider returned an invalid task id".to_string());
+    }
+    Ok(format!("/ent/v2/tasks/{task_id}/creations"))
+}
+
+fn contains_image_source(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            value.starts_with("data:image/")
+                || value.starts_with("http://")
+                || value.starts_with("https://")
+        }
+        serde_json::Value::Array(values) => values.iter().any(contains_image_source),
+        serde_json::Value::Object(values) => values.values().any(contains_image_source),
+        _ => false,
+    }
+}
+
+fn provider_task_error(body: &serde_json::Value) -> String {
+    let code = body
+        .get("err_code")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| body.get("error").and_then(serde_json::Value::as_str));
+    match code {
+        Some(code) if !code.is_empty() => format!("Provider task failed ({code})."),
+        _ => "Provider task failed.".to_string(),
+    }
+}
+
 #[tauri::command]
 async fn provider_submit(
     adapter_key: String,
@@ -297,18 +336,66 @@ fn provider_submit_blocking(
     let target = provider_target(adapter_key)?;
     let body = provider_payload(target, payload)?;
     let secret = credential_read(target.credential_provider)?;
-    post_provider_json(target, &secret, &body)
+    let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
+    if response.status < 200 || response.status >= 300 {
+        return Ok(response);
+    }
+    if contains_image_source(&response.body) {
+        return Ok(response);
+    }
+
+    let task_id = response
+        .body
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Provider response did not contain an image or task id".to_string())?;
+    let task_path = provider_task_path(task_id)?;
+    let deadline = Instant::now() + PROVIDER_POLL_TIMEOUT;
+    loop {
+        let poll = request_provider_json(target, &secret, "GET", &task_path, None)?;
+        if poll.status < 200 || poll.status >= 300 {
+            return Ok(poll);
+        }
+        if contains_image_source(&poll.body) {
+            return Ok(poll);
+        }
+        match poll.body.get("state").and_then(serde_json::Value::as_str) {
+            Some("failed") => return Err(provider_task_error(&poll.body)),
+            Some("success") => {
+                return Err("Provider reported success without image output".to_string())
+            }
+            Some("created" | "queueing" | "processing") => {}
+            Some(_) => return Err("Provider returned an unsupported task state".to_string()),
+            None => {
+                return Err(
+                    "Provider polling response did not contain a task state or image output"
+                        .to_string(),
+                )
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "Provider task timed out after {} seconds",
+                PROVIDER_POLL_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(PROVIDER_POLL_INTERVAL.min(remaining));
+    }
 }
 
-fn post_provider_json(
+fn request_provider_json(
     target: ProviderTarget,
     secret: &CredentialSecret,
-    body: &[u8],
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
 ) -> Result<ProviderHttpResponse, String> {
     let agent = wide("AI Video Workspace/0.1");
     let host = wide(target.host);
-    let verb = wide("POST");
-    let path = wide(target.path);
+    let verb = wide(method);
+    let path = wide(path);
     let session = WinHttpHandle::new(
         unsafe {
             WinHttpOpen(
@@ -365,9 +452,10 @@ fn post_provider_json(
             request.0,
             headers.as_ptr(),
             headers.len() as u32,
-            body.as_ptr().cast(),
-            body.len() as u32,
-            body.len() as u32,
+            body.map(|value| value.as_ptr().cast())
+                .unwrap_or(std::ptr::null()),
+            body.map_or(0, |value| value.len() as u32),
+            body.map_or(0, |value| value.len() as u32),
             0,
         )
     };
@@ -652,8 +740,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_worker_path, provider_payload, provider_target, validate_credential_provider,
-        WorkerProcess, BUNDLED_WORKER_FILENAME,
+        bundled_worker_path, contains_image_source, provider_payload, provider_target,
+        provider_task_error, provider_task_path, validate_credential_provider, WorkerProcess,
+        BUNDLED_WORKER_FILENAME,
     };
     use serde_json::json;
     use std::{path::Path, process::Command, time::Duration};
@@ -736,6 +825,30 @@ mod tests {
             json!({"prompt": "frame", "endpoint": "https://attacker.invalid"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn provider_task_path_accepts_safe_ids_and_rejects_path_injection() {
+        assert_eq!(
+            provider_task_path("task-123.A").expect("safe task id"),
+            "/ent/v2/tasks/task-123.A/creations"
+        );
+        assert!(provider_task_path("../secrets").is_err());
+        assert!(provider_task_path("task/123").is_err());
+        assert!(provider_task_path("").is_err());
+    }
+
+    #[test]
+    fn provider_polling_requires_an_image_source_on_success() {
+        assert!(contains_image_source(&json!({
+            "state": "success",
+            "images": ["https://cdn.example/image.png"]
+        })));
+        assert!(!contains_image_source(&json!({ "state": "processing" })));
+        assert_eq!(
+            provider_task_error(&json!({ "state": "failed", "err_code": "quota" })),
+            "Provider task failed (quota)."
+        );
     }
 
     #[test]
