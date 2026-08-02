@@ -157,3 +157,17 @@
 - Files: `apps/desktop/src/App.tsx`, `apps/desktop/src/App.test.tsx`.
 - Verification: Desktop tests passed (9); workspace format/lint/typecheck passed; Release Tauri/NSIS build passed; clean install lifecycle passed; rebuilt Release UI confirmed both left-side actions disabled for an empty path.
 - Decision: the invalid IPC error path is fixed. Real Provider success and human M5 acceptance remain `HOLD`.
+
+### 2026-08-02T10:06:30+08:00 - Hosted test failure traced to native ABI cache
+- Evidence: Hosted run `30727633358` passed formatting, build, lint, and typecheck, then failed only at `Test TypeScript workspace`; the public check annotation contained only the generic exit-code failure. Local `pnpm test` passed under Node `26.5.0`.
+- Experiment: reproducing the test command under Node `24.18.1` failed all seven persistence tests with `better_sqlite3.node` compiled for `NODE_MODULE_VERSION 147` while Node 24 requires `137`.
+- Action: updated `.github/workflows/ci.yml` to resolve `better-sqlite3` and its `prebuild-install` executable from the workspace, then install the prebuilt binary after dependency installation using the active CI Node runtime.
+- Verification: the same Node 24 prebuild command installed `better-sqlite3-v12.11.1-node-v137-win32-x64` and the persistence test passed (7 tests). The workflow fix is ready for a fresh hosted run.
+- Decision: the Hosted failure was an environment/cache ABI mismatch, not an application regression. Do not accept run `30727633358`; wait for the replacement run before changing the stage gate.
+- Next: run the local checks affected by the workflow edit, commit/push the CI fix, and verify a new Hosted Windows run.
+
+### 2026-08-02T10:09:38+08:00 - Native ABI fix passed local gates
+- Evidence: after installing the Node ABI 137 prebuild, the complete Node `24.18.1` workspace run passed 13 test files and 74 tests. After restoring the ABI 147 prebuild for the local Node `26.5.0` runtime, build, lint, typecheck, and the same 74 tests passed.
+- Verification: `pnpm format:check`, `pnpm worker:sidecar`, `cargo fmt --check`, `cargo check --offline`, `cargo test --offline` (9 Rust tests), and `git diff --check` passed.
+- Decision: the workflow change is locally verified across the exact CI Node major and the developer runtime. It is ready to commit and push; Hosted Windows remains the required final check.
+- Next: push the CI correction and monitor the replacement workflow through NSIS lifecycle completion.

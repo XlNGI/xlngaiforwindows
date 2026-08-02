@@ -20,6 +20,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Align native Node modules with CI runtime
+        shell: powershell
+        run: |
+          $betterSqlitePackage = (pnpm --filter @ai-video/persistence exec node -p "require.resolve('better-sqlite3/package.json')").Trim()
+          $prebuildInstall = (pnpm --filter @ai-video/persistence exec node -p "require.resolve('prebuild-install/bin.js', { paths: [require.resolve('better-sqlite3/package.json')] })").Trim()
+          Push-Location (Split-Path $betterSqlitePackage)
+          try {
+            node $prebuildInstall --verbose
+          } finally {
+            Pop-Location
+          }
       - name: Check formatting
         run: pnpm format:check
       - name: Build TypeScript workspace
