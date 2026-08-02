@@ -145,6 +145,7 @@ export interface JobRecord {
   status: string;
   requestJson: string;
   errorJson?: string;
+  metadataJson?: string;
   createdAt: string;
   updatedAt: string;
 }

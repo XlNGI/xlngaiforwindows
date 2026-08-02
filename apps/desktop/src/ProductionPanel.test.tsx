@@ -1,13 +1,28 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AdapterCatalogResult, AdapterDescriptor, AssetInfo } from '@ai-video/contracts';
+import type {
+  AdapterCatalogResult,
+  AdapterDescriptor,
+  AssetInfo,
+  VideoGenerationJobInfo,
+} from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
-import { submitProviderRequest } from './provider-client';
+import {
+  cancelVideoProviderTask,
+  pollVideoProviderTask,
+  submitProviderRequest,
+  submitVideoProviderTask,
+} from './provider-client';
 import { callWorker } from './worker-client';
 import { canUseSecureCredentials, getCredentialStatus } from './credential-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
-vi.mock('./provider-client', () => ({ submitProviderRequest: vi.fn() }));
+vi.mock('./provider-client', () => ({
+  submitProviderRequest: vi.fn(),
+  submitVideoProviderTask: vi.fn(),
+  pollVideoProviderTask: vi.fn(),
+  cancelVideoProviderTask: vi.fn(),
+}));
 vi.mock('./credential-client', () => ({
   canUseSecureCredentials: vi.fn(() => false),
   getCredentialStatus: vi.fn(),
@@ -59,6 +74,85 @@ const catalog: AdapterCatalogResult = {
   adapters: [descriptor],
 };
 
+const videoDescriptor: AdapterDescriptor = {
+  key: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
+  capability: 'IMAGE_TO_VIDEO',
+  capabilityLabel: '图生视频',
+  provider: 'vidu',
+  providerLabel: 'Vidu',
+  model: 'viduq3-pro',
+  modelLabel: 'Vidu Q3 Pro',
+  apiVersion: 'v2',
+  schemaVersion: 1,
+  endpoint: 'https://api.vidu.com/ent/v2/img2video',
+  documentationUrl: 'https://platform.vidu.com/docs/image-to-video',
+  credentialProvider: 'vidu',
+  parameterSchema: {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object',
+    additionalProperties: false,
+    required: ['images', 'duration', 'resolution', 'audio'],
+    properties: {
+      images: {
+        type: 'array',
+        title: '起始帧 URL',
+        minItems: 1,
+        maxItems: 1,
+        items: { type: 'string', format: 'uri' },
+      },
+      duration: { type: 'integer', title: '时长', minimum: 1, maximum: 16, default: 5 },
+      resolution: {
+        type: 'string',
+        title: '分辨率',
+        enum: ['720p'],
+        default: '720p',
+      },
+      audio: { type: 'boolean', title: '声音', default: true },
+    },
+  },
+  uiSchema: {
+    fields: [
+      { key: 'images', control: 'url-list', group: 'basic', order: 10 },
+      { key: 'duration', control: 'number', group: 'basic', order: 20 },
+      { key: 'resolution', control: 'select', group: 'basic', order: 30 },
+      { key: 'audio', control: 'toggle', group: 'basic', order: 40 },
+    ],
+  },
+};
+
+const videoCatalog: AdapterCatalogResult = {
+  capabilities: [{ key: 'IMAGE_TO_VIDEO', label: '图生视频' }],
+  providers: [{ key: 'vidu', label: 'Vidu' }],
+  adapters: [videoDescriptor],
+};
+
+function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobInfo {
+  return {
+    id: 'video-job',
+    projectId: 'project',
+    shotId: 'shot',
+    adapterKey: videoDescriptor.key,
+    assetKind: 'shot-video',
+    providerTaskId: status === 'pending' ? undefined : 'provider-task',
+    status,
+    request: {
+      images: ['https://example.invalid/start.png'],
+      duration: 5,
+      resolution: '720p',
+      audio: true,
+    },
+    metadata: {
+      providerRegion: 'cn',
+      pollAttempts: 0,
+      pollDeadlineAt: '2099-01-01T00:00:00.000Z',
+    },
+    results: [],
+    elapsedMs: 1_000,
+    createdAt: '2026-08-02T00:00:00.000Z',
+    updatedAt: '2026-08-02T00:00:01.000Z',
+  };
+}
+
 const savedAsset: AssetInfo = {
   id: 'asset-generated',
   projectId: 'project',
@@ -98,6 +192,7 @@ describe('ProductionPanel', () => {
       if (method === 'asset.reveal') {
         return Promise.resolve({ path: 'D:\\Project\\assets\\images\\generated.png' });
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
   });
@@ -136,6 +231,7 @@ describe('ProductionPanel', () => {
           errors: [{ path: 'prompt', message: 'must have required property prompt' }],
         });
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -171,6 +267,7 @@ describe('ProductionPanel', () => {
         );
       }
       if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
     render(<ProductionPanel shotId="shot" writable />);
@@ -207,6 +304,7 @@ describe('ProductionPanel', () => {
           },
         ]);
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -278,6 +376,7 @@ describe('ProductionPanel', () => {
       if (method === 'asset.reveal') {
         return Promise.resolve({ path: 'D:\\Project\\assets\\images\\generated.png' });
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -394,6 +493,7 @@ describe('ProductionPanel', () => {
           contentType: 'image/png',
         });
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -463,6 +563,7 @@ describe('ProductionPanel', () => {
           updatedAt: '2026-08-02T00:00:01.000Z',
         });
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
     render(<ProductionPanel shotId="shot" writable />);
@@ -475,5 +576,94 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('Provider credential is not configured')).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('image.generate.fail', { jobId: 'job' });
     expect(screen.queryByTitle('取消生成')).not.toBeInTheDocument();
+  });
+
+  it('submits a video task once and persists its provider task association', async () => {
+    vi.mocked(submitVideoProviderTask).mockResolvedValue({
+      status: 200,
+      taskId: 'provider-task',
+      state: 'created',
+    });
+    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'video.generate.prepare') {
+        return Promise.resolve({
+          ...videoJob('pending'),
+          request: (params as { parameters: VideoGenerationJobInfo['request'] }).parameters,
+        });
+      }
+      if (method === 'video.generate.attachTask') return Promise.resolve(videoJob('polling'));
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    fireEvent.change(await screen.findByLabelText(/起始帧 URL/), {
+      target: { value: 'https://example.invalid/start.png' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'video.generate.prepare',
+        expect.objectContaining({
+          shotId: 'shot',
+          adapterKey: videoDescriptor.key,
+          providerRegion: 'cn',
+          assetKind: 'shot-video',
+        }),
+      ),
+    );
+    expect(submitVideoProviderTask).toHaveBeenCalledWith(
+      videoDescriptor.key,
+      expect.objectContaining({ images: ['https://example.invalid/start.png'] }),
+      'cn',
+    );
+    expect(callWorker).toHaveBeenCalledWith('video.generate.attachTask', {
+      jobId: 'video-job',
+      providerTaskId: 'provider-task',
+    });
+    expect(await screen.findByText('视频任务已提交，正在本地查询。')).toBeInTheDocument();
+  });
+
+  it('resumes without resubmission and keeps local cancellation when remote cancellation fails', async () => {
+    const polling = videoJob('polling');
+    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(cancelVideoProviderTask).mockRejectedValue(new Error('offline'));
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([polling]);
+      if (method === 'video.generate.cancel') {
+        return Promise.resolve({ ...polling, status: 'cancelled' as const });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    expect(await screen.findByText('生成中')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pollVideoProviderTask).toHaveBeenCalledWith(
+        videoDescriptor.key,
+        'cn',
+        'provider-task',
+      ),
+    );
+    expect(submitVideoProviderTask).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '取消任务' }));
+
+    expect(await screen.findByText('视频任务已取消，本地轮询已停止。')).toBeInTheDocument();
+    expect(cancelVideoProviderTask).toHaveBeenCalledWith(
+      videoDescriptor.key,
+      'cn',
+      'provider-task',
+    );
   });
 });

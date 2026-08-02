@@ -15,12 +15,14 @@ import {
   MessageSquarePlus,
   PanelLeftClose,
   PanelRightClose,
+  Play,
   Plus,
   RotateCcw,
   RefreshCw,
   Save,
   Settings2,
   Square,
+  Video,
 } from 'lucide-react';
 import type {
   AssetInfo,
@@ -59,6 +61,10 @@ const documentKinds: { value: DocumentKind; label: string }[] = [
 
 function scopeLabel(scope: ConversationScopeType): string {
   return scope === 'project' ? '项目' : scope === 'scene' ? '场次' : '镜头';
+}
+
+function isVideoAsset(asset: AssetInfo | undefined): boolean {
+  return asset?.kind === 'generated-video' || asset?.kind === 'shot-video';
 }
 
 export function mergeGenerationMessage(
@@ -417,7 +423,7 @@ export function App() {
     let active = true;
     setAssetPreview(undefined);
     setAssetMessage('');
-    if (!asset) return () => undefined;
+    if (!asset || isVideoAsset(asset)) return () => undefined;
     void callWorker('asset.preview', { assetId: asset.id })
       .then((preview) => {
         if (active) setAssetPreview(preview);
@@ -446,6 +452,16 @@ export function App() {
       setAssetMessage(`已打开：${result.path}`);
     } catch (reason) {
       setAssetMessage(reason instanceof Error ? reason.message : '打开素材位置失败');
+    }
+  };
+
+  const openAsset = async (selected: AssetInfo | undefined = asset) => {
+    if (!selected) return;
+    try {
+      await callWorker('asset.open', { assetId: selected.id });
+      setAssetMessage('已使用本机默认应用打开素材。');
+    } catch (reason) {
+      setAssetMessage(reason instanceof Error ? reason.message : '素材打开失败');
     }
   };
 
@@ -1035,7 +1051,20 @@ export function App() {
             {project && asset ? (
               <div className="asset-workspace">
                 <div className="asset-preview-stage">
-                  {assetPreview ? (
+                  {isVideoAsset(asset) ? (
+                    <div className="asset-preview-empty video-asset-placeholder">
+                      <Video size={42} />
+                      <span>视频素材</span>
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void openAsset(asset)}
+                      >
+                        <Play size={14} />
+                        播放视频
+                      </button>
+                    </div>
+                  ) : assetPreview ? (
                     <img src={assetPreview.dataUrl} alt={asset.relativePath} />
                   ) : (
                     <div className="asset-preview-empty">正在读取预览</div>

@@ -473,6 +473,89 @@ export interface ImageGenerationGetParams {
   jobId: string;
 }
 
+export type VideoGenerationJobStatus =
+  | 'pending'
+  | 'polling'
+  | 'downloading'
+  | 'paused'
+  | 'succeeded'
+  | 'failed'
+  | 'timed-out'
+  | 'cancelled';
+export type VideoGenerationFailureKind =
+  'transport' | 'provider' | 'download' | 'interrupted' | 'timeout';
+export type VideoAssetKind = 'generated-video' | 'shot-video';
+export type VideoProviderRegion = 'global' | 'cn';
+
+export interface VideoGenerationCostInfo {
+  amount: number;
+  unit: 'credits' | 'unknown';
+}
+
+export interface VideoGenerationMetadataInfo {
+  providerRegion: VideoProviderRegion;
+  providerState?: string;
+  pollAttempts: number;
+  lastPolledAt?: string;
+  pollDeadlineAt?: string;
+  failureKind?: VideoGenerationFailureKind;
+  cost?: VideoGenerationCostInfo;
+}
+
+export interface VideoGenerationResultInfo {
+  id: string;
+  jobId: string;
+  asset: AssetInfo;
+  createdAt: string;
+}
+
+export interface VideoGenerationJobInfo {
+  id: string;
+  projectId: string;
+  shotId?: string;
+  adapterKey: string;
+  assetKind: VideoAssetKind;
+  providerTaskId?: string;
+  status: VideoGenerationJobStatus;
+  request: AdapterParameters;
+  metadata: VideoGenerationMetadataInfo;
+  results: VideoGenerationResultInfo[];
+  error?: string;
+  elapsedMs: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VideoGenerationPrepareParams {
+  shotId?: string;
+  adapterKey: string;
+  parameters: AdapterParameters;
+  providerRegion: VideoProviderRegion;
+  assetKind?: VideoAssetKind;
+}
+
+export interface VideoGenerationAttachTaskParams {
+  jobId: string;
+  providerTaskId: string;
+}
+
+export interface VideoGenerationObserveParams {
+  jobId: string;
+  providerTaskId: string;
+  providerStatus: number;
+  providerBody: unknown;
+}
+
+export interface VideoGenerationFailParams {
+  jobId: string;
+  failureKind: VideoGenerationFailureKind;
+  message?: string;
+}
+
+export interface VideoGenerationJobParams {
+  jobId: string;
+}
+
 export interface AssetListParams {
   kind?: string;
 }
@@ -491,6 +574,10 @@ export interface AssetPreviewParams {
 }
 
 export interface AssetRevealParams {
+  assetId: string;
+}
+
+export interface AssetOpenParams {
   assetId: string;
 }
 
@@ -567,8 +654,49 @@ export interface WorkerMethodMap {
     params: ImageGenerationGetParams;
     result: ImageGenerationJobInfo;
   };
+  'video.generate.prepare': {
+    params: VideoGenerationPrepareParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.attachTask': {
+    params: VideoGenerationAttachTaskParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.observe': {
+    params: VideoGenerationObserveParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.fail': {
+    params: VideoGenerationFailParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.pause': {
+    params: VideoGenerationJobParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.resume': {
+    params: VideoGenerationJobParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.timeout': {
+    params: VideoGenerationJobParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.cancel': {
+    params: VideoGenerationJobParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.get': {
+    params: VideoGenerationJobParams;
+    result: VideoGenerationJobInfo;
+  };
+  'video.generate.list': {
+    params: Record<string, never>;
+    result: VideoGenerationJobInfo[];
+  };
   'asset.list': { params: AssetListParams; result: AssetInfo[] };
   'asset.preview': { params: AssetPreviewParams; result: ImagePreviewInfo };
+  'asset.open': { params: AssetOpenParams; result: AssetRevealResult };
   'asset.reveal': { params: AssetRevealParams; result: AssetRevealResult };
   'asset.rename': { params: AssetRenameParams; result: AssetInfo };
   'asset.delete': { params: AssetDeleteParams; result: { deleted: true } };

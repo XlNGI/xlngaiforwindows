@@ -3,7 +3,7 @@
 - Started: 2026-08-02T02:08:29+08:00
 - Repository: `D:\SB\xlngaiforwindows`
 - Base revision: `main` at `856e30c`
-- Status: in progress
+- Status: complete
 
 ## Objective
 
@@ -255,3 +255,8 @@
 - Verification: Hosted Windows passed formatting, TypeScript build/lint/typecheck, workspace tests, standalone Worker build, Rust/Tauri check, NSIS bundle, and clean NSIS install lifecycle.
 - Decision: automated code, native, package, install, and Hosted gates are `PASS` for the preview-only manual save flow. M5 remains `HOLD` for human confirmation in the real desktop UI and any further credentialed Provider acceptance checks.
 - Next: restart the desktop from `main`; generate once with automatic local save disabled, confirm preview-only behavior, then click the manual save button and verify that the selected asset kind appears in the project asset library.
+
+### 2026-08-02T15:13:32+08:00 - M5 manual acceptance confirmed
+- Evidence: the user reported that manual testing had no issues after the Hosted Windows run for `9263e48` passed.
+- Decision: M5 image-generation loop, optional local-save flow, preview-only manual save, asset reveal, and material-library discovery are accepted for this phase. Remaining real-provider caveats move forward as M6/M7 release risks instead of blocking M5.
+- Next: start M6 video-generation and local-polling work in `docs/code-traces/2026-08-02-m6-video-polling.md`.

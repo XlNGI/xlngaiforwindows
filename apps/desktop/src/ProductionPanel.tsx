@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CircleAlert,
   CircleCheck,
   Eye,
   FolderOpen,
   KeyRound,
+  Pause,
+  Play,
   Plus,
   Save,
   Trash2,
   WandSparkles,
   Square,
+  Video,
 } from 'lucide-react';
 import type {
   AdapterCatalogResult,
@@ -22,6 +25,8 @@ import type {
   GenerationCapability,
   ImageAssetKind,
   ImagePreviewInfo,
+  VideoAssetKind,
+  VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 import {
   canUseSecureCredentials,
@@ -31,7 +36,14 @@ import {
   type CredentialStatus,
 } from './credential-client';
 import { callWorker } from './worker-client';
-import { submitProviderRequest, type ProviderRegion } from './provider-client';
+import {
+  cancelVideoProviderTask,
+  pollVideoProviderTask,
+  submitProviderRequest,
+  submitVideoProviderTask,
+  type ProviderRegion,
+} from './provider-client';
+import { VideoPollingScheduler } from './video-polling-scheduler';
 
 interface ProductionPanelProps {
   projectId?: string;
@@ -96,6 +108,51 @@ function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
   });
 }
 
+function isVideoAsset(asset: AssetInfo | undefined): boolean {
+  return asset?.kind === 'generated-video' || asset?.kind === 'shot-video';
+}
+
+function videoStatusLabel(status: VideoGenerationJobInfo['status']): string {
+  const labels: Record<VideoGenerationJobInfo['status'], string> = {
+    pending: '正在提交',
+    polling: '生成中',
+    downloading: '下载中',
+    paused: '已暂停',
+    succeeded: '已完成',
+    failed: '失败',
+    'timed-out': '已超时',
+    cancelled: '已取消',
+  };
+  return labels[status];
+}
+
+function formatElapsed(elapsedMs: number): string {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes}分${seconds % 60}秒` : `${seconds}秒`;
+}
+
+function upsertVideoJob(
+  jobs: VideoGenerationJobInfo[],
+  next: VideoGenerationJobInfo,
+): VideoGenerationJobInfo[] {
+  const existing = jobs.findIndex((job) => job.id === next.id);
+  if (existing < 0) return [next, ...jobs];
+  const updated = [...jobs];
+  updated[existing] = next;
+  return updated;
+}
+
+function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  const title = job.status === 'succeeded' ? '视频生成完成' : '视频任务已结束';
+  try {
+    new Notification(title, { body: videoStatusLabel(job.status) });
+  } catch {
+    // The task center remains the durable notification surface when OS notifications are unavailable.
+  }
+}
+
 export function ProductionPanel({
   projectId,
   projectRootPath,
@@ -123,13 +180,24 @@ export function ProductionPanel({
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
   const [assetKind, setAssetKind] = useState<ImageAssetKind>('generated-image');
+  const [videoAssetKind, setVideoAssetKind] = useState<VideoAssetKind>('shot-video');
+  const [videoJobs, setVideoJobs] = useState<VideoGenerationJobInfo[]>([]);
   const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
   const [preview, setPreview] = useState<ImagePreviewInfo>();
   const [autoSaveLocal, setAutoSaveLocal] = useState(initialAutoSaveLocal);
   const [savingPreview, setSavingPreview] = useState(false);
+  const videoScheduler = useRef<VideoPollingScheduler | undefined>(undefined);
+  const onAssetsChangedRef = useRef(onAssetsChanged);
+  const controlledAssetsRef = useRef(controlledAssets);
+  const currentProjectIdRef = useRef(projectId);
   const assets = controlledAssets ?? localAssets;
   const selectedAsset = assets.find((item) => item.id === selectedAssetId);
+  const selectedImageAsset = isVideoAsset(selectedAsset) ? undefined : selectedAsset;
+
+  onAssetsChangedRef.current = onAssetsChanged;
+  controlledAssetsRef.current = controlledAssets;
+  currentProjectIdRef.current = projectId;
 
   const credentialProvider =
     adapter?.provider === 'vidu' && providerRegion === 'cn'
@@ -236,8 +304,71 @@ export function ProductionPanel({
   }, [controlledAssets, projectId]);
 
   useEffect(() => {
+    videoScheduler.current?.dispose();
+    videoScheduler.current = undefined;
+    setVideoJobs([]);
+    if (!projectId) return () => undefined;
+    let active = true;
+    const scheduler = writable
+      ? new VideoPollingScheduler({
+          poll: (job) =>
+            pollVideoProviderTask(job.adapterKey, job.metadata.providerRegion, job.providerTaskId!),
+          observe: (job, response) =>
+            callWorker('video.generate.observe', {
+              jobId: job.id,
+              providerTaskId: job.providerTaskId!,
+              providerStatus: response.status,
+              providerBody: response.body,
+            }),
+          timeout: (job) => callWorker('video.generate.timeout', { jobId: job.id }),
+          refresh: (job) => callWorker('video.generate.get', { jobId: job.id }),
+          onUpdate: (job) => {
+            if (!active || job.projectId !== projectId) return;
+            setVideoJobs((current) => upsertVideoJob(current, job));
+          },
+          onTransientError: (job, reason) => {
+            if (!active || job.projectId !== projectId) return;
+            setGenerationStatus(
+              `视频任务查询暂时失败，正在自动重试：${errorMessage(reason, '网络错误')}`,
+            );
+          },
+          onTerminal: (job) => {
+            if (!active || job.projectId !== projectId) return;
+            setGenerationStatus(job.error ?? `视频任务${videoStatusLabel(job.status)}。`);
+            notifyVideoTerminal(job);
+            if (job.status === 'succeeded') {
+              const assetId = job.results[0]?.asset.id;
+              void callWorker('asset.list', {}).then((items) => {
+                if (!active) return;
+                if (controlledAssetsRef.current === undefined) setLocalAssets(items);
+                onAssetsChangedRef.current?.(items, assetId);
+              });
+            }
+          },
+        })
+      : undefined;
+    videoScheduler.current = scheduler;
+    void callWorker('video.generate.list', {})
+      .then((jobs) => {
+        if (active) setVideoJobs(jobs);
+      })
+      .catch((reason) => {
+        if (active) setGenerationStatus(errorMessage(reason, '视频任务列表读取失败。'));
+      });
+    return () => {
+      active = false;
+      scheduler?.dispose();
+      if (videoScheduler.current === scheduler) videoScheduler.current = undefined;
+    };
+  }, [projectId, writable]);
+
+  useEffect(() => {
+    videoScheduler.current?.sync(videoJobs);
+  }, [videoJobs]);
+
+  useEffect(() => {
     setPreview(undefined);
-    if (!selectedAssetId) return;
+    if (!selectedAssetId || isVideoAsset(selectedAsset)) return;
     let active = true;
     void callWorker('asset.preview', { assetId: selectedAssetId })
       .then((nextPreview) => {
@@ -249,7 +380,7 @@ export function ProductionPanel({
     return () => {
       active = false;
     };
-  }, [selectedAssetId]);
+  }, [selectedAsset?.kind, selectedAssetId]);
 
   const capabilityAdapters = useMemo(
     () => catalog?.adapters.filter((item) => item.capability === capability) ?? [],
@@ -322,6 +453,15 @@ export function ProductionPanel({
       setGenerationStatus(`已打开本地位置：${result.path}`);
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '本地位置打开失败。'));
+    }
+  };
+
+  const openAsset = async (asset: AssetInfo) => {
+    try {
+      await callWorker('asset.open', { assetId: asset.id });
+      setGenerationStatus('已使用本机默认应用打开素材。');
+    } catch (reason) {
+      setGenerationStatus(errorMessage(reason, '素材打开失败。'));
     }
   };
 
@@ -459,6 +599,121 @@ export function ProductionPanel({
     } finally {
       setGenerationJobId(undefined);
       setBusy(false);
+    }
+  };
+
+  const generateVideo = async () => {
+    if (!adapter || adapter.capability !== 'IMAGE_TO_VIDEO' || !writable) return;
+    if (canUseSecureCredentials() && credential?.configured !== true) {
+      setGenerationStatus(
+        credential
+          ? '请先为当前 Vidu 服务区域保存 API Key。'
+          : '正在读取当前 Vidu 服务区域的凭据状态，请稍后重试。',
+      );
+      return;
+    }
+    let preparedJobId: string | undefined;
+    const submissionProjectId = projectId;
+    setBusy(true);
+    setGenerationStatus('');
+    try {
+      const validation = await callWorker('adapter.validate', {
+        adapterKey: adapter.key,
+        parameters,
+      });
+      setErrors(validation.errors);
+      if (!validation.valid) {
+        setGenerationStatus('请先修正参数。');
+        return;
+      }
+      const prepared = await callWorker('video.generate.prepare', {
+        shotId,
+        adapterKey: adapter.key,
+        parameters,
+        providerRegion,
+        assetKind: videoAssetKind,
+      });
+      if (currentProjectIdRef.current !== submissionProjectId) return;
+      preparedJobId = prepared.id;
+      setVideoJobs((current) => upsertVideoJob(current, prepared));
+      setGenerationStatus('正在提交视频任务...');
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        void Notification.requestPermission().catch(() => undefined);
+      }
+      const response = await submitVideoProviderTask(adapter.key, parameters, providerRegion);
+      if (currentProjectIdRef.current !== submissionProjectId) return;
+      if (response.status < 200 || response.status >= 300 || !response.taskId) {
+        const failed = await callWorker('video.generate.fail', {
+          jobId: prepared.id,
+          failureKind: 'provider',
+          message: `Provider 视频任务提交失败，HTTP ${response.status}。`,
+        });
+        setVideoJobs((current) => upsertVideoJob(current, failed));
+        setGenerationStatus(failed.error ?? '视频任务提交失败。');
+        return;
+      }
+      const attached = await callWorker('video.generate.attachTask', {
+        jobId: prepared.id,
+        providerTaskId: response.taskId,
+      });
+      if (currentProjectIdRef.current !== submissionProjectId) return;
+      setVideoJobs((current) => upsertVideoJob(current, attached));
+      setGenerationStatus('视频任务已提交，正在本地查询。');
+    } catch (reason) {
+      if (preparedJobId && currentProjectIdRef.current === submissionProjectId) {
+        try {
+          const failed = await callWorker('video.generate.fail', {
+            jobId: preparedJobId,
+            failureKind: 'transport',
+            message: errorMessage(reason, '视频任务提交传输失败。'),
+          });
+          setVideoJobs((current) => upsertVideoJob(current, failed));
+        } catch {
+          // Restart recovery terminalizes an unsubmitted job when the Worker is unavailable.
+        }
+      }
+      if (currentProjectIdRef.current === submissionProjectId) {
+        setGenerationStatus(errorMessage(reason, '视频任务提交失败。'));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pauseVideo = async (job: VideoGenerationJobInfo) => {
+    try {
+      const paused = await callWorker('video.generate.pause', { jobId: job.id });
+      setVideoJobs((current) => upsertVideoJob(current, paused));
+      setGenerationStatus('视频任务轮询已暂停。');
+    } catch (reason) {
+      setGenerationStatus(errorMessage(reason, '暂停视频任务失败。'));
+    }
+  };
+
+  const resumeVideo = async (job: VideoGenerationJobInfo) => {
+    try {
+      const resumed = await callWorker('video.generate.resume', { jobId: job.id });
+      setVideoJobs((current) => upsertVideoJob(current, resumed));
+      setGenerationStatus('视频任务已继续查询。');
+    } catch (reason) {
+      setGenerationStatus(errorMessage(reason, '继续视频任务失败。'));
+    }
+  };
+
+  const cancelVideo = async (job: VideoGenerationJobInfo) => {
+    try {
+      const cancelled = await callWorker('video.generate.cancel', { jobId: job.id });
+      setVideoJobs((current) => upsertVideoJob(current, cancelled));
+      if (job.providerTaskId) {
+        void cancelVideoProviderTask(
+          job.adapterKey,
+          job.metadata.providerRegion,
+          job.providerTaskId,
+        ).catch(() => undefined);
+      }
+      setGenerationStatus('视频任务已取消，本地轮询已停止。');
+    } catch (reason) {
+      setGenerationStatus(errorMessage(reason, '取消视频任务失败。'));
     }
   };
 
@@ -648,72 +903,181 @@ export function ProductionPanel({
                     {message}
                   </span>
                 )}
-                <button
-                  className="button primary"
-                  type="button"
-                  onClick={() => void generateImage()}
-                  disabled={!writable || busy || !adapter}
-                >
-                  <WandSparkles size={14} />
-                  生成图片
-                </button>
-                {generationJobId && busy && (
-                  <button
-                    className="icon-button danger"
-                    type="button"
-                    title="取消生成"
-                    onClick={() => void cancelImage()}
-                  >
-                    <Square size={13} />
-                  </button>
+                {adapter.capability === 'IMAGE_TO_VIDEO' ? (
+                  <>
+                    <button
+                      className="button primary"
+                      type="button"
+                      onClick={() => void generateVideo()}
+                      disabled={!writable || busy}
+                    >
+                      <Video size={14} />
+                      提交视频任务
+                    </button>
+                    <label className="asset-kind-field">
+                      保存为
+                      <select
+                        value={videoAssetKind}
+                        onChange={(event) =>
+                          setVideoAssetKind(event.target.value as VideoAssetKind)
+                        }
+                        disabled={busy}
+                      >
+                        <option value="shot-video">镜头视频</option>
+                        <option value="generated-video">普通视频素材</option>
+                      </select>
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      className="button primary"
+                      type="button"
+                      onClick={() => void generateImage()}
+                      disabled={!writable || busy}
+                    >
+                      <WandSparkles size={14} />
+                      生成图片
+                    </button>
+                    {generationJobId && busy && (
+                      <button
+                        className="icon-button danger"
+                        type="button"
+                        title="取消生成"
+                        onClick={() => void cancelImage()}
+                      >
+                        <Square size={13} />
+                      </button>
+                    )}
+                    <label className="asset-kind-field">
+                      保存为
+                      <select
+                        value={assetKind}
+                        onChange={(event) => setAssetKind(event.target.value as typeof assetKind)}
+                        disabled={busy}
+                      >
+                        <option value="generated-image">普通素材</option>
+                        <option value="character">角色</option>
+                        <option value="scene">场景</option>
+                        <option value="first-frame">首帧</option>
+                        <option value="last-frame">尾帧</option>
+                      </select>
+                    </label>
+                    <label className="auto-save-toggle">
+                      <input
+                        type="checkbox"
+                        checked={autoSaveLocal}
+                        onChange={(event) => setAutoSaveLocal(event.target.checked)}
+                        disabled={busy}
+                      />
+                      自动保存到本地素材库
+                    </label>
+                  </>
                 )}
-                <label className="asset-kind-field">
-                  保存为
-                  <select
-                    value={assetKind}
-                    onChange={(event) => setAssetKind(event.target.value as typeof assetKind)}
-                    disabled={busy}
-                  >
-                    <option value="generated-image">普通素材</option>
-                    <option value="character">角色</option>
-                    <option value="scene">场景</option>
-                    <option value="first-frame">首帧</option>
-                    <option value="last-frame">尾帧</option>
-                  </select>
-                </label>
-                <label className="auto-save-toggle">
-                  <input
-                    type="checkbox"
-                    checked={autoSaveLocal}
-                    onChange={(event) => setAutoSaveLocal(event.target.checked)}
-                    disabled={busy}
-                  />
-                  自动保存到本地素材库
-                </label>
                 {generationStatus && <span className="credential-message">{generationStatus}</span>}
               </div>
-              {(preview || selectedAsset) && (
+              {adapter.capability === 'IMAGE_TO_VIDEO' && (
+                <section className="video-task-center" aria-label="视频任务">
+                  <header>
+                    <strong>视频任务</strong>
+                    <span>{videoJobs.length}</span>
+                  </header>
+                  {videoJobs.map((job) => {
+                    const resultAsset = job.results[0]?.asset;
+                    return (
+                      <div className="video-task-row" key={job.id}>
+                        <div className="video-task-summary">
+                          <strong>{videoStatusLabel(job.status)}</strong>
+                          <span>{formatElapsed(job.elapsedMs)}</span>
+                          <small>
+                            {job.metadata.cost
+                              ? `${job.metadata.cost.amount} ${job.metadata.cost.unit}`
+                              : '费用未返回'}
+                            {' · '}
+                            查询 {job.metadata.pollAttempts} 次
+                          </small>
+                          {job.error && <small className="error-copy">{job.error}</small>}
+                        </div>
+                        <div className="video-task-actions">
+                          {job.status === 'polling' && (
+                            <button
+                              className="icon-button subtle"
+                              type="button"
+                              title="暂停查询"
+                              onClick={() => void pauseVideo(job)}
+                            >
+                              <Pause size={13} />
+                            </button>
+                          )}
+                          {job.status === 'paused' && (
+                            <button
+                              className="icon-button subtle"
+                              type="button"
+                              title="继续查询"
+                              onClick={() => void resumeVideo(job)}
+                            >
+                              <Play size={13} />
+                            </button>
+                          )}
+                          {['pending', 'polling', 'downloading', 'paused'].includes(job.status) && (
+                            <button
+                              className="icon-button danger"
+                              type="button"
+                              title="取消任务"
+                              onClick={() => void cancelVideo(job)}
+                            >
+                              <Square size={13} />
+                            </button>
+                          )}
+                          {resultAsset && (
+                            <button
+                              className="icon-button subtle"
+                              type="button"
+                              title="播放视频"
+                              onClick={() => void openAsset(resultAsset)}
+                            >
+                              <Play size={13} />
+                            </button>
+                          )}
+                          {resultAsset && (
+                            <button
+                              className="icon-button subtle"
+                              type="button"
+                              title="打开视频位置"
+                              onClick={() => void revealAsset(resultAsset)}
+                            >
+                              <FolderOpen size={13} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {videoJobs.length === 0 && <span className="video-task-empty">暂无视频任务</span>}
+                </section>
+              )}
+              {(preview || selectedImageAsset) && (
                 <div className="asset-preview-card" aria-label="图片预览">
                   <div className="asset-preview-frame">
                     {preview ? (
                       <img
                         src={preview.dataUrl}
-                        alt={selectedAsset?.relativePath ?? '生成图片预览'}
+                        alt={selectedImageAsset?.relativePath ?? '生成图片预览'}
                       />
                     ) : (
                       <span>正在读取预览</span>
                     )}
                   </div>
                   <div className="asset-preview-meta">
-                    <strong>{selectedAsset?.relativePath ?? '本次生成预览'}</strong>
-                    {selectedAsset && <small>{localAssetPath(selectedAsset)}</small>}
+                    <strong>{selectedImageAsset?.relativePath ?? '本次生成预览'}</strong>
+                    {selectedImageAsset && <small>{localAssetPath(selectedImageAsset)}</small>}
                   </div>
-                  {selectedAsset && (
+                  {selectedImageAsset && (
                     <div className="asset-actions">
                       <button
                         className="button"
                         type="button"
-                        onClick={() => void revealAsset(selectedAsset)}
+                        onClick={() => void revealAsset(selectedImageAsset)}
                       >
                         <FolderOpen size={14} />
                         打开位置
@@ -721,14 +1085,14 @@ export function ProductionPanel({
                       <button
                         className="button"
                         type="button"
-                        onClick={() => onOpenAssetLibrary?.(selectedAsset.id)}
+                        onClick={() => onOpenAssetLibrary?.(selectedImageAsset.id)}
                       >
                         <Eye size={14} />
                         查看素材库
                       </button>
                     </div>
                   )}
-                  {preview?.jobId && !preview.assetId && !selectedAsset && (
+                  {preview?.jobId && !preview.assetId && !selectedImageAsset && (
                     <div className="asset-actions single">
                       <button
                         className="button primary"

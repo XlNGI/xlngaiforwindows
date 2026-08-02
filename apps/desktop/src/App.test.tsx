@@ -165,6 +165,7 @@ describe('App', () => {
       if (method === 'adapter.catalog') {
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
       }
+      if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'conversation.list') {
         return (params as { scopeType: string }).scopeType === 'project'
           ? projectConversations

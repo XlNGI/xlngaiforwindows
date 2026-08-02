@@ -48,7 +48,12 @@ describe('ImageGenerationService', () => {
   it('previews and reveals only registered local assets', async () => {
     const { project } = await setup();
     const opened: string[] = [];
-    const service = new ImageGenerationService(project, (path) => opened.push(path));
+    const played: string[] = [];
+    const service = new ImageGenerationService(
+      project,
+      (path) => opened.push(path),
+      (path) => played.push(path),
+    );
     const job = service.prepare({
       adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
       parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
@@ -70,6 +75,11 @@ describe('ImageGenerationService', () => {
 
     expect(revealed.path).toBe(join(project.current()!.rootPath, asset.relativePath));
     expect(opened).toEqual([revealed.path]);
+    expect(service.openAsset({ assetId: asset.id })).toEqual(revealed);
+    expect(played).toEqual([revealed.path]);
+    expect(() => service.renameAsset({ assetId: asset.id, name: 'unsafe.exe' })).toThrow(
+      'extension must be preserved',
+    );
     expect(() => service.revealAsset({ assetId: '../outside' })).toThrow('Asset was not found.');
   });
 

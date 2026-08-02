@@ -78,6 +78,20 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects asset open requests without a valid asset id', async () => {
+    const response = await handleRequest({
+      id: 'asset-open-invalid',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'asset.open',
+      params: {},
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'assetId must be a string.' },
+    });
+  });
+
   it('rejects unknown image asset kinds at the IPC boundary', async () => {
     const response = await handleRequest({
       id: 'image-save-preview-invalid-kind',

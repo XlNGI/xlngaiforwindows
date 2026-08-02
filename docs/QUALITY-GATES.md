@@ -68,6 +68,13 @@ created -> streaming -> complete
 | 中文上下文接近预算 | 中文保守估算与裁剪共用规则，不绕过 token 门禁 |
 | 同模型存在多个 API Version | UI 使用完整 adapter key，解析显式携带版本 |
 | 快速切换项目/场次/镜头/会话 | 过期请求结果和错误不得覆盖当前选择 |
+| 视频任务提交后应用退出 | 已持久化的 `providerTaskId`、适配器和区域可恢复查询，不重新提交计费任务 |
+| 视频多任务同时轮询 | 每个任务只有一个调度项，全局请求间隔和并发数有界 |
+| 视频查询返回 429/5xx 或断网 | 保持可恢复状态并退避重试，达到持久化总期限后写入超时终态 |
+| 视频 Provider 报成功但无视频输出 | 写入失败终态，不把输入图或封面图登记为视频 |
+| 视频下载超过 Worker IPC 的 30 秒期限 | Provider 成功先持久化为 `downloading` 并释放 IPC，后台下载完成后由本地状态刷新进入终态 |
+| 视频下载中取消、关闭或切换项目 | 删除临时文件，旧项目回调不得登记资产或覆盖新项目界面 |
+| 视频任务取消 | 先稳定写入本地取消并停止轮询；远端取消失败不得恢复本地任务 |
 
 ## 5. 需求追踪
 
@@ -92,6 +99,14 @@ created -> streaming -> complete
 | 凭据只向指定适配器使用 | Tauri Native Provider Bridge | exact-adapter/field-and-endpoint-rejection |
 | 流增量写入有界 | Worker Generation Service | batched-delta-persistence |
 | 过期 UI 请求不得回写 | Desktop Workspace | stale-conversation-load |
+| 视频任务 ID、区域和轮询状态原子持久化 | Worker Video Generation / SQLite | attach-idempotency/restart-recovery |
+| 视频轮询去重、限流和退避 | Desktop Video Polling Scheduler | deduplicate/backoff/deadline/dispose |
+| 视频 Provider 终态不可误判 | Worker Video Generation | active/failure/success-without-output/input-not-output |
+| 视频下载和资产提交受项目会话隔离 | Worker Video Generation / Asset Repository | cancel-during-download/atomic-result/signed-url-exclusion |
+| 视频长下载不占用 Worker IPC | Worker Video Generation / Desktop Polling Scheduler | pending-download-return/local-download-refresh/restart-temp-cleanup |
+| 视频暂停、继续、超时和取消幂等 | Worker Video Generation | pause-resume/timeout/terminal-cancel |
+| 视频适配器与原生端点精确匹配 | Adapter Registry / Tauri Provider Bridge | reference-count/start-end-count/exact-path/task-id-rejection |
+| 视频重启恢复不重新提交 | Desktop Production Panel / Polling Scheduler | restored-polling-without-submit |
 
 后续里程碑必须在本表中追加不变量，不得删除历史条目来规避门禁。
 
@@ -99,15 +114,16 @@ created -> streaming -> complete
 
 2026-08-02 自动化与外部条件复验：
 
-- `pnpm test`：13 个测试文件、74 个测试通过。
+- `pnpm test`：15 个测试文件、107 个测试通过。
 - `pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`：通过。
 - `pnpm worker:sidecar` 与 M4 Sidecar 生命周期验证：通过。
-- `cargo fmt --check`、`cargo check --offline`、`cargo test --offline`：通过，7 个 Rust 测试通过。
-- `pnpm tauri:build`：通过，生成 20,212,345 字节的 x64 NSIS 安装包；SHA-256 为 `12B64D57F78C9C7FF02D5754F8C9913954C2FEF8ED2C5975EF89183531C50829`。
+- `cargo fmt --check`、`cargo check --offline`、`cargo test --offline`：通过，11 个 Rust 测试通过。
+- `pnpm tauri:build`：通过，生成 20,255,794 字节的 x64 NSIS 安装包；SHA-256 为 `C8A5E8030AE433B59303F1A6B49D7A66CB8870B64866ED0F60F83518D9E2DE2C`。
 - Release 同目录冒烟：通过；桌面程序实际拉起安装后名称 `ai-video-worker.exe`，并在启动 health/SQLite 检查期间保持 Worker 存活。
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
 - 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，fail-fast GitHub Windows runner run `30720119063` 通过且无错误注解（包括该安装生命周期步骤）。
 - M5 生图失败路径：安全传输失败显式落为 `failed`，关闭/切换落为 `cancelled`，Worker 重启将遗留活动任务恢复为 `failed`；下载结束后复验项目会话和任务状态。自动化 UI/SQLite 复测未发现 `running` 遗留、结果记录或素材半成品。
+- M6 生视频本地门禁：Provider 任务 ID/区域持久化、退避轮询、`downloading` 后台传输、重启恢复、暂停/继续/取消/超时、临时文件清理、素材登记和本地打开均通过自动化及干净 NSIS 生命周期；Hosted Windows CI 与真实 Vidu 人工成功路径待验证。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
 - 未验证：真实 OpenAI 模型请求、带真实凭据的 Vidu 成功请求。当前环境未配置 Provider 凭据，且 OpenAI 443 连接超时。
 

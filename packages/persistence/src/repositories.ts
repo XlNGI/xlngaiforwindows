@@ -717,11 +717,12 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
       .prepare(
         `INSERT INTO generation_jobs
          (id, project_id, shot_id, adapter_key, provider_task_id, status,
-          request_json, error_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          request_json, error_json, metadata_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            provider_task_id = excluded.provider_task_id, status = excluded.status,
-           error_json = excluded.error_json, updated_at = excluded.updated_at`,
+           error_json = excluded.error_json, metadata_json = excluded.metadata_json,
+           updated_at = excluded.updated_at`,
       )
       .run(
         record.id,
@@ -732,6 +733,7 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
         record.status,
         record.requestJson,
         record.errorJson ?? null,
+        record.metadataJson ?? null,
         record.createdAt,
         record.updatedAt,
       );
@@ -809,6 +811,7 @@ interface JobRow {
   status: string;
   request_json: string;
   error_json: string | null;
+  metadata_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -823,6 +826,7 @@ function mapJob(row: JobRow): JobRecord {
     status: row.status,
     requestJson: row.request_json,
     errorJson: row.error_json ?? undefined,
+    metadataJson: row.metadata_json ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

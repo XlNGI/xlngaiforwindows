@@ -9,11 +9,12 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, extname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import type {
   AdapterParameters,
   AssetInfo,
   AssetListParams,
+  AssetOpenParams,
   AssetPreviewParams,
   AssetRevealParams,
   AssetRevealResult,
@@ -45,6 +46,7 @@ export class ImageGenerationService {
   constructor(
     private readonly projects: ProjectService,
     private readonly openAssetPath: AssetPathOpener = revealPathInFileManager,
+    private readonly playAssetPath: AssetPathOpener = openPathWithDefaultApplication,
   ) {}
 
   prepare(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
@@ -307,6 +309,15 @@ export class ImageGenerationService {
     return { path };
   }
 
+  openAsset(params: AssetOpenParams): AssetRevealResult {
+    const { asset, path } = this.assetRecordAndPath(params.assetId);
+    if (!OPENABLE_ASSET_EXTENSIONS.has(extname(asset.relativePath).toLowerCase())) {
+      throw new Error('Asset type cannot be opened by the application.');
+    }
+    this.playAssetPath(path);
+    return { path };
+  }
+
   renameAsset(params: AssetRenameParams): AssetInfo {
     const name = basename(params.name.trim());
     if (!name || name !== params.name.trim() || name.includes('..'))
@@ -316,7 +327,10 @@ export class ImageGenerationService {
       const asset = repositories.assets.get(params.assetId);
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       const oldPath = resolveProjectRelativePath(project.rootPath, asset.relativePath);
-      const nextRelative = join('assets', 'images', name);
+      if (extname(name).toLowerCase() !== extname(asset.relativePath).toLowerCase()) {
+        throw new Error('Asset file extension must be preserved.');
+      }
+      const nextRelative = join(dirname(asset.relativePath), name);
       const nextPath = resolveProjectRelativePath(project.rootPath, nextRelative);
       if (!existsSync(oldPath)) throw new Error('Asset file is missing.');
       if (existsSync(nextPath) && oldPath !== nextPath)
@@ -709,6 +723,16 @@ function contentTypeFor(relativePath: string): string {
   return known[extension] ?? 'application/octet-stream';
 }
 
+const OPENABLE_ASSET_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.gif',
+  '.mp4',
+  '.webm',
+]);
+
 function revealPathInFileManager(path: string): void {
   const command =
     process.platform === 'win32'
@@ -723,5 +747,16 @@ function revealPathInFileManager(path: string): void {
         ? ['-R', path]
         : [path];
   const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+function openPathWithDefaultApplication(path: string): void {
+  const command =
+    process.platform === 'win32'
+      ? 'explorer.exe'
+      : process.platform === 'darwin'
+        ? 'open'
+        : 'xdg-open';
+  const child = spawn(command, [path], { detached: true, stdio: 'ignore' });
   child.unref();
 }

@@ -8,13 +8,68 @@ export interface NativeProviderResponse {
   body: unknown;
 }
 
+export interface NativeProviderTaskSubmitResponse {
+  status: number;
+  taskId?: string;
+  state?: string;
+}
+
+export interface NativeProviderCancelResponse {
+  supported: boolean;
+  cancelled: boolean;
+  status: number;
+}
+
+function requireDesktopTransport(): void {
+  if (!('__TAURI_INTERNALS__' in window)) {
+    throw new Error('供应商请求只能由桌面应用的安全传输层发送。');
+  }
+}
+
 export async function submitProviderRequest(
   adapterKey: string,
   payload: AdapterParameters,
   providerRegion: ProviderRegion,
 ): Promise<NativeProviderResponse> {
-  if (!('__TAURI_INTERNALS__' in window)) {
-    throw new Error('供应商请求只能由桌面应用的安全传输层发送。');
-  }
+  requireDesktopTransport();
   return invoke<NativeProviderResponse>('provider_submit', { adapterKey, payload, providerRegion });
+}
+
+export async function submitVideoProviderTask(
+  adapterKey: string,
+  payload: AdapterParameters,
+  providerRegion: ProviderRegion,
+): Promise<NativeProviderTaskSubmitResponse> {
+  requireDesktopTransport();
+  return invoke<NativeProviderTaskSubmitResponse>('provider_submit_task', {
+    adapterKey,
+    payload,
+    providerRegion,
+  });
+}
+
+export async function pollVideoProviderTask(
+  adapterKey: string,
+  providerRegion: ProviderRegion,
+  taskId: string,
+): Promise<NativeProviderResponse> {
+  requireDesktopTransport();
+  return invoke<NativeProviderResponse>('provider_poll_task', {
+    adapterKey,
+    providerRegion,
+    taskId,
+  });
+}
+
+export async function cancelVideoProviderTask(
+  adapterKey: string,
+  providerRegion: ProviderRegion,
+  taskId: string,
+): Promise<NativeProviderCancelResponse> {
+  requireDesktopTransport();
+  return invoke<NativeProviderCancelResponse>('provider_cancel_task', {
+    adapterKey,
+    providerRegion,
+    taskId,
+  });
 }

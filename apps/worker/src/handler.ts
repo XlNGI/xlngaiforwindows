@@ -17,7 +17,14 @@ import {
   type ImageGenerationPrepareParams,
   type ImageGenerationCompleteParams,
   type ImageGenerationSavePreviewParams,
+  type VideoAssetKind,
+  type VideoGenerationAttachTaskParams,
+  type VideoGenerationFailParams,
+  type VideoGenerationFailureKind,
+  type VideoGenerationObserveParams,
+  type VideoGenerationPrepareParams,
   type AssetPreviewParams,
+  type AssetOpenParams,
   type AssetRevealParams,
   type AssetRenameParams,
   type ProjectCreateParams,
@@ -45,6 +52,7 @@ import { ContextService } from './context-service.js';
 import { GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
+import { VideoGenerationService } from './video-generation-service.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -92,8 +100,19 @@ const methods = new Set<WorkerMethod>([
   'image.generate.fail',
   'image.generate.cancel',
   'image.generate.get',
+  'video.generate.prepare',
+  'video.generate.attachTask',
+  'video.generate.observe',
+  'video.generate.fail',
+  'video.generate.pause',
+  'video.generate.resume',
+  'video.generate.timeout',
+  'video.generate.cancel',
+  'video.generate.get',
+  'video.generate.list',
   'asset.list',
   'asset.preview',
+  'asset.open',
   'asset.reveal',
   'asset.rename',
   'asset.delete',
@@ -108,6 +127,7 @@ const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding
 const contentService = new ContentService(projectService);
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
+const videoGenerationService = new VideoGenerationService(projectService);
 const contextService = new ContextService(projectService);
 const llmProvider = new OpenAIResponsesProvider({
   apiKey: process.env.OPENAI_API_KEY,
@@ -203,6 +223,14 @@ function requireString(params: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function requireNumber(params: Record<string, unknown>, key: string): number {
+  const value = params[key];
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${key} must be a number.`);
+  }
+  return value;
+}
+
 function optionalNumber(params: Record<string, unknown>, key: string): number | undefined {
   const value = params[key];
   if (value === undefined) return undefined;
@@ -270,23 +298,28 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         };
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
+        videoGenerationService.cancelAll();
         result = projectService.create(typedParams.rootPath, typedParams.name);
         generationService.recoverInterrupted();
         imageGenerationService.recoverInterrupted();
+        videoGenerationService.recoverInterrupted();
         break;
       }
       case 'project.open': {
         const typedParams: ProjectOpenParams = { rootPath: requireString(params, 'rootPath') };
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
+        videoGenerationService.cancelAll();
         result = projectService.open(typedParams.rootPath);
         generationService.recoverInterrupted();
         imageGenerationService.recoverInterrupted();
+        videoGenerationService.recoverInterrupted();
         break;
       }
       case 'project.close':
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
+        videoGenerationService.cancelAll();
         projectService.close();
         result = { closed: true };
         break;
@@ -318,9 +351,11 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         };
         await generationService.cancelAll();
         imageGenerationService.cancelAll();
+        videoGenerationService.cancelAll();
         result = projectService.restore(typedParams.backupPath, typedParams.destinationRoot);
         generationService.recoverInterrupted();
         imageGenerationService.recoverInterrupted();
+        videoGenerationService.recoverInterrupted();
         break;
       }
       case 'document.list':
@@ -442,6 +477,52 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
       case 'image.generate.get':
         result = imageGenerationService.get(requireString(params, 'jobId'));
         break;
+      case 'video.generate.prepare':
+        result = videoGenerationService.prepare({
+          ...(params as unknown as VideoGenerationPrepareParams),
+          adapterKey: requireString(params, 'adapterKey'),
+          assetKind: optionalVideoAssetKind(params, 'assetKind'),
+        });
+        break;
+      case 'video.generate.attachTask':
+        result = videoGenerationService.attachTask({
+          jobId: requireString(params, 'jobId'),
+          providerTaskId: requireString(params, 'providerTaskId'),
+        } satisfies VideoGenerationAttachTaskParams);
+        break;
+      case 'video.generate.observe':
+        result = videoGenerationService.observe({
+          jobId: requireString(params, 'jobId'),
+          providerTaskId: requireString(params, 'providerTaskId'),
+          providerStatus: requireNumber(params, 'providerStatus'),
+          providerBody: params.providerBody,
+        } satisfies VideoGenerationObserveParams);
+        break;
+      case 'video.generate.fail':
+        result = videoGenerationService.fail({
+          jobId: requireString(params, 'jobId'),
+          failureKind: requireVideoFailureKind(params, 'failureKind'),
+          message: typeof params.message === 'string' ? params.message : undefined,
+        } satisfies VideoGenerationFailParams);
+        break;
+      case 'video.generate.pause':
+        result = videoGenerationService.pause(requireString(params, 'jobId'));
+        break;
+      case 'video.generate.resume':
+        result = videoGenerationService.resume(requireString(params, 'jobId'));
+        break;
+      case 'video.generate.timeout':
+        result = videoGenerationService.timeout(requireString(params, 'jobId'));
+        break;
+      case 'video.generate.cancel':
+        result = videoGenerationService.cancel(requireString(params, 'jobId'));
+        break;
+      case 'video.generate.get':
+        result = videoGenerationService.get(requireString(params, 'jobId'));
+        break;
+      case 'video.generate.list':
+        result = videoGenerationService.list();
+        break;
       case 'asset.list':
         result = imageGenerationService.listAssets({
           kind: typeof params.kind === 'string' ? params.kind : undefined,
@@ -451,6 +532,11 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         result = imageGenerationService.previewAsset({
           assetId: requireString(params, 'assetId'),
         } satisfies AssetPreviewParams);
+        break;
+      case 'asset.open':
+        result = imageGenerationService.openAsset({
+          assetId: requireString(params, 'assetId'),
+        } satisfies AssetOpenParams);
         break;
       case 'asset.reveal':
         result = imageGenerationService.revealAsset({
@@ -492,4 +578,25 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
       details: error instanceof InvalidAdapterParametersError ? error.validation.errors : undefined,
     });
   }
+}
+
+function optionalVideoAssetKind(
+  params: Record<string, unknown>,
+  key: string,
+): VideoAssetKind | undefined {
+  const value = params[key];
+  if (value === undefined) return undefined;
+  if (value === 'generated-video' || value === 'shot-video') return value;
+  throw new Error(`${key} must be a supported video asset kind.`);
+}
+
+function requireVideoFailureKind(
+  params: Record<string, unknown>,
+  key: string,
+): VideoGenerationFailureKind {
+  const value = requireString(params, key);
+  if (['transport', 'provider', 'download', 'interrupted', 'timeout'].includes(value)) {
+    return value as VideoGenerationFailureKind;
+  }
+  throw new Error(`${key} must be a supported video failure kind.`);
 }

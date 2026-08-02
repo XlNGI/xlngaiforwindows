@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -168,4 +168,9 @@ CREATE INDEX idx_chat_messages_reply ON chat_messages(reply_to_message_id);
 
 export const MIGRATION_V4 = `
 CREATE INDEX idx_generation_results_job ON generation_results(job_id, created_at);
+`;
+
+export const MIGRATION_V5 = `
+ALTER TABLE generation_jobs ADD COLUMN metadata_json TEXT
+  CHECK (metadata_json IS NULL OR json_valid(metadata_json));
 `;

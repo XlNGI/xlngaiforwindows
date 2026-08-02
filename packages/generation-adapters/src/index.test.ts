@@ -66,4 +66,51 @@ describe('adapter registry', () => {
       }),
     ).toMatchObject({ valid: true });
   });
+
+  it('enforces the official reference-video image count and fields', () => {
+    const key = 'IMAGE_TO_VIDEO:vidu:viduq3:v2';
+    const base = {
+      prompt: '角色在雨夜街道行走',
+      duration: 5,
+      aspect_ratio: '16:9',
+      resolution: '720p',
+      audio: true,
+    };
+    expect(
+      validateAdapterParameters(key, {
+        ...base,
+        images: ['https://example.com/reference.png'],
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(key, {
+        ...base,
+        images: Array.from({ length: 8 }, (_, index) => `https://example.com/${index}.png`),
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters(key, {
+        ...base,
+        images: ['https://example.com/reference.png'],
+        callback_url: 'https://attacker.invalid/callback',
+      }),
+    ).toMatchObject({ valid: false });
+  });
+
+  it('requires exactly two ordered images for start-end video', () => {
+    const key = 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2';
+    const base = { duration: 5, resolution: '720p', audio: true };
+    expect(
+      validateAdapterParameters(key, {
+        ...base,
+        images: ['https://example.com/start.png'],
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters(key, {
+        ...base,
+        images: ['https://example.com/start.png', 'https://example.com/end.png'],
+      }),
+    ).toMatchObject({ valid: true });
+  });
 });

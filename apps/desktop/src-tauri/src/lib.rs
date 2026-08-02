@@ -51,9 +51,20 @@ struct ProviderTarget {
 
 const IMAGE_FIELDS: &[&str] = &["prompt", "aspect_ratio", "resolution", "seed"];
 const REFERENCE_IMAGE_FIELDS: &[&str] = &["images", "prompt", "aspect_ratio", "resolution", "seed"];
+const REFERENCE_VIDEO_FIELDS: &[&str] = &[
+    "images",
+    "prompt",
+    "duration",
+    "aspect_ratio",
+    "resolution",
+    "audio",
+    "seed",
+    "off_peak",
+];
 const Q3_VIDEO_FIELDS: &[&str] = &[
     "images",
     "prompt",
+    "is_rec",
     "duration",
     "resolution",
     "audio",
@@ -77,10 +88,7 @@ fn provider_region_target(provider_region: &str) -> Result<(&'static str, &'stat
     }
 }
 
-fn provider_target(
-    adapter_key: &str,
-    provider_region: &str,
-) -> Result<ProviderTarget, String> {
+fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderTarget, String> {
     let (credential_provider, host) = provider_region_target(provider_region)?;
     let target = match adapter_key {
         "TEXT_TO_IMAGE:vidu:viduq2:v2" => ProviderTarget {
@@ -104,10 +112,17 @@ fn provider_target(
             model: "viduq1",
             allowed_fields: REFERENCE_IMAGE_FIELDS,
         },
+        "IMAGE_TO_VIDEO:vidu:viduq3:v2" => ProviderTarget {
+            credential_provider,
+            host,
+            path: "/ent/v2/reference2video",
+            model: "viduq3",
+            allowed_fields: REFERENCE_VIDEO_FIELDS,
+        },
         "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => ProviderTarget {
             credential_provider,
             host,
-            path: "/ent/v2/img2video",
+            path: "/ent/v2/start-end2video",
             model: "viduq3-pro",
             allowed_fields: Q3_VIDEO_FIELDS,
         },
@@ -300,6 +315,22 @@ struct ProviderHttpResponse {
     body: serde_json::Value,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTaskSubmitResponse {
+    status: u32,
+    task_id: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderCancelResponse {
+    supported: bool,
+    cancelled: bool,
+    status: u32,
+}
+
 fn provider_task_path(task_id: &str) -> Result<String, String> {
     if task_id.is_empty()
         || task_id.len() > PROVIDER_TASK_ID_LIMIT
@@ -310,6 +341,41 @@ fn provider_task_path(task_id: &str) -> Result<String, String> {
         return Err("Provider returned an invalid task id".to_string());
     }
     Ok(format!("/ent/v2/tasks/{task_id}/creations"))
+}
+
+fn provider_cancel_path(task_id: &str) -> Result<String, String> {
+    provider_task_path(task_id)?;
+    Ok(format!("/ent/v2/tasks/{task_id}/cancel"))
+}
+
+fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
+    match adapter_key {
+        "IMAGE_TO_VIDEO:vidu:viduq3:v2"
+        | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2"
+        | "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => Ok(()),
+        _ => Err("Native video task commands require an IMAGE_TO_VIDEO adapter".to_string()),
+    }
+}
+
+fn provider_task_id(body: &serde_json::Value) -> Option<&str> {
+    body.get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            body.get("data")
+                .and_then(|data| data.get("task_id"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn provider_state(body: &serde_json::Value) -> Option<&str> {
+    body.get("state")
+        .or_else(|| body.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            body.get("data")
+                .and_then(|data| data.get("state").or_else(|| data.get("status")))
+                .and_then(serde_json::Value::as_str)
+        })
 }
 
 fn contains_image_source(value: &serde_json::Value) -> bool {
@@ -337,7 +403,14 @@ fn find_creation_image_source(value: &serde_json::Value) -> Option<&str> {
 
 fn creation_image_source(value: &serde_json::Value) -> Option<&str> {
     let object = value.as_object()?;
-    for key in ["url", "uri", "image_url", "imageUrl", "cover_url", "coverUrl"] {
+    for key in [
+        "url",
+        "uri",
+        "image_url",
+        "imageUrl",
+        "cover_url",
+        "coverUrl",
+    ] {
         if let Some(source) = object.get(key).and_then(serde_json::Value::as_str) {
             if is_image_source(source) {
                 return Some(source);
@@ -373,8 +446,105 @@ async fn provider_submit(
     tauri::async_runtime::spawn_blocking(move || {
         provider_submit_blocking(&adapter_key, &provider_region, payload)
     })
-        .await
-        .map_err(|error| format!("Native provider task failed: {error}"))?
+    .await
+    .map_err(|error| format!("Native provider task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn provider_submit_task(
+    adapter_key: String,
+    provider_region: String,
+    payload: serde_json::Value,
+) -> Result<ProviderTaskSubmitResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_submit_task_blocking(&adapter_key, &provider_region, payload)
+    })
+    .await
+    .map_err(|error| format!("Native provider task submission failed: {error}"))?
+}
+
+fn provider_submit_task_blocking(
+    adapter_key: &str,
+    provider_region: &str,
+    payload: serde_json::Value,
+) -> Result<ProviderTaskSubmitResponse, String> {
+    ensure_video_adapter(adapter_key)?;
+    let target = provider_target(adapter_key, provider_region)?;
+    let body = provider_payload(target, payload)?;
+    let secret = credential_read(target.credential_provider)?;
+    let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
+    if response.status < 200 || response.status >= 300 {
+        return Ok(ProviderTaskSubmitResponse {
+            status: response.status,
+            task_id: None,
+            state: provider_state(&response.body).map(str::to_string),
+        });
+    }
+    let task_id = provider_task_id(&response.body)
+        .ok_or("Provider response did not contain a video task id")?;
+    provider_task_path(task_id)?;
+    Ok(ProviderTaskSubmitResponse {
+        status: response.status,
+        task_id: Some(task_id.to_string()),
+        state: provider_state(&response.body).map(str::to_string),
+    })
+}
+
+#[tauri::command]
+async fn provider_poll_task(
+    adapter_key: String,
+    provider_region: String,
+    task_id: String,
+) -> Result<ProviderHttpResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_poll_task_blocking(&adapter_key, &provider_region, &task_id)
+    })
+    .await
+    .map_err(|error| format!("Native provider task query failed: {error}"))?
+}
+
+fn provider_poll_task_blocking(
+    adapter_key: &str,
+    provider_region: &str,
+    task_id: &str,
+) -> Result<ProviderHttpResponse, String> {
+    ensure_video_adapter(adapter_key)?;
+    let target = provider_target(adapter_key, provider_region)?;
+    let path = provider_task_path(task_id)?;
+    let secret = credential_read(target.credential_provider)?;
+    request_provider_json(target, &secret, "GET", &path, None)
+}
+
+#[tauri::command]
+async fn provider_cancel_task(
+    adapter_key: String,
+    provider_region: String,
+    task_id: String,
+) -> Result<ProviderCancelResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_cancel_task_blocking(&adapter_key, &provider_region, &task_id)
+    })
+    .await
+    .map_err(|error| format!("Native provider task cancellation failed: {error}"))?
+}
+
+fn provider_cancel_task_blocking(
+    adapter_key: &str,
+    provider_region: &str,
+    task_id: &str,
+) -> Result<ProviderCancelResponse, String> {
+    ensure_video_adapter(adapter_key)?;
+    let target = provider_target(adapter_key, provider_region)?;
+    let path = provider_cancel_path(task_id)?;
+    let body = serde_json::to_vec(&serde_json::json!({ "id": task_id }))
+        .map_err(|error| format!("Unable to serialize provider cancellation: {error}"))?;
+    let secret = credential_read(target.credential_provider)?;
+    let response = request_provider_json(target, &secret, "POST", &path, Some(&body))?;
+    Ok(ProviderCancelResponse {
+        supported: true,
+        cancelled: (200..300).contains(&response.status),
+        status: response.status,
+    })
 }
 
 fn provider_submit_blocking(
@@ -382,6 +552,9 @@ fn provider_submit_blocking(
     provider_region: &str,
     payload: serde_json::Value,
 ) -> Result<ProviderHttpResponse, String> {
+    if ensure_video_adapter(adapter_key).is_ok() {
+        return Err("Video adapters must use the asynchronous provider task bridge".to_string());
+    }
     let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
     let secret = credential_read(target.credential_provider)?;
@@ -780,7 +953,10 @@ pub fn run() {
             credential_status,
             credential_set,
             credential_delete,
-            provider_submit
+            provider_submit,
+            provider_submit_task,
+            provider_poll_task,
+            provider_cancel_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Video Workspace");
@@ -789,9 +965,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_worker_path, contains_image_source, provider_payload, provider_target,
-        provider_task_error, provider_task_path, validate_credential_provider, WorkerProcess,
-        BUNDLED_WORKER_FILENAME,
+        bundled_worker_path, contains_image_source, ensure_video_adapter, provider_cancel_path,
+        provider_payload, provider_state, provider_target, provider_task_error, provider_task_id,
+        provider_task_path, validate_credential_provider, WorkerProcess, BUNDLED_WORKER_FILENAME,
     };
     use serde_json::json;
     use std::{path::Path, process::Command, time::Duration};
@@ -854,14 +1030,18 @@ mod tests {
         let target = provider_target("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("known adapter should resolve");
         assert_eq!(target.host, "api.vidu.com");
-        assert_eq!(target.path, "/ent/v2/img2video");
+        assert_eq!(target.path, "/ent/v2/start-end2video");
         let body = provider_payload(
             target,
-            json!({"images": ["https://example.com/start.png"], "duration": 5}),
+            json!({"images": ["https://example.com/start.png", "https://example.com/end.png"], "duration": 5}),
         )
         .expect("adapter payload should serialize");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(parsed["model"], "viduq3-pro");
+        let reference = provider_target("IMAGE_TO_VIDEO:vidu:viduq3:v2", "global")
+            .expect("reference video adapter should resolve");
+        assert_eq!(reference.path, "/ent/v2/reference2video");
+        assert_eq!(reference.model, "viduq3");
         assert!(provider_target("IMAGE_TO_VIDEO:evil:viduq3-pro:v2", "global").is_err());
     }
 
@@ -895,6 +1075,31 @@ mod tests {
         assert!(provider_task_path("../secrets").is_err());
         assert!(provider_task_path("task/123").is_err());
         assert!(provider_task_path("").is_err());
+        assert_eq!(
+            provider_cancel_path("task-123.A").expect("safe cancellation id"),
+            "/ent/v2/tasks/task-123.A/cancel"
+        );
+        assert!(provider_cancel_path("../secrets").is_err());
+    }
+
+    #[test]
+    fn video_task_contract_extracts_only_declared_task_fields() {
+        assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3:v2").is_ok());
+        assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
+        assert!(ensure_video_adapter("TEXT_TO_IMAGE:vidu:viduq2:v2").is_err());
+        assert_eq!(
+            provider_task_id(&json!({"task_id": "task-direct"})),
+            Some("task-direct")
+        );
+        assert_eq!(
+            provider_task_id(&json!({"data": {"task_id": "task-nested"}})),
+            Some("task-nested")
+        );
+        assert_eq!(
+            provider_state(&json!({"data": {"status": "queueing"}})),
+            Some("queueing")
+        );
+        assert_eq!(provider_task_id(&json!({"input": {"id": "wrong"}})), None);
     }
 
     #[test]
