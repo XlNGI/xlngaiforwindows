@@ -25,6 +25,22 @@ async function setup() {
 }
 
 describe('ImageGenerationService', () => {
+  it('rejects video adapters at the image service boundary', async () => {
+    const { service } = await setup();
+    expect(() =>
+      service.prepare({
+        adapterKey: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2',
+        parameters: {
+          prompt: 'camera move',
+          duration: 5,
+          aspect_ratio: '16:9',
+          resolution: '720p',
+          audio: true,
+        },
+      }),
+    ).toThrow('Image generation adapter was not found.');
+  });
+
   it('redacts local image Data URLs from the persisted request snapshot', async () => {
     const { project, service } = await setup();
     const localImage = 'DATA:image/png;base64,iVBORw0KGgo=';

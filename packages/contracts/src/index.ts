@@ -287,7 +287,13 @@ export interface LlmGenerationRetryParams {
   budgetTokens?: number;
 }
 
-export type GenerationCapability = 'TEXT_TO_IMAGE' | 'REFERENCE_TO_IMAGE' | 'IMAGE_TO_VIDEO';
+export type GenerationCapability =
+  | 'TEXT_TO_IMAGE'
+  | 'REFERENCE_TO_IMAGE'
+  | 'TEXT_TO_VIDEO'
+  | 'IMAGE_TO_VIDEO'
+  | 'REFERENCE_TO_VIDEO'
+  | 'START_END_TO_VIDEO';
 
 export type AdapterParameterValue = string | number | boolean | string[];
 export type AdapterParameters = Record<string, AdapterParameterValue>;

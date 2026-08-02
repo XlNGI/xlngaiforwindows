@@ -8,12 +8,21 @@ import type {
   AdapterResolveParams,
   AdapterValidationError,
   AdapterValidationResult,
+  GenerationCapability,
 } from '@ai-video/contracts';
 
 const schemaUri = 'https://json-schema.org/draft/2020-12/schema' as const;
 
 const imageAspectRatios = ['16:9', '9:16', '1:1', '3:4', '4:3'] as const;
 const q2ImageAspectRatios = ['auto', ...imageAspectRatios, '21:9', '2:3', '3:2'] as const;
+const capabilityOrder: GenerationCapability[] = [
+  'TEXT_TO_IMAGE',
+  'REFERENCE_TO_IMAGE',
+  'TEXT_TO_VIDEO',
+  'IMAGE_TO_VIDEO',
+  'REFERENCE_TO_VIDEO',
+  'START_END_TO_VIDEO',
+];
 
 const adapters: AdapterDescriptor[] = [
   {
@@ -192,9 +201,65 @@ const adapters: AdapterDescriptor[] = [
     },
   },
   {
-    key: 'IMAGE_TO_VIDEO:vidu:viduq3:v2',
-    capability: 'IMAGE_TO_VIDEO',
-    capabilityLabel: '图生视频',
+    key: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2',
+    capability: 'TEXT_TO_VIDEO',
+    capabilityLabel: '文生视频',
+    provider: 'vidu',
+    providerLabel: 'Vidu',
+    model: 'viduq3-pro',
+    modelLabel: 'Vidu Q3 Pro',
+    apiVersion: 'v2',
+    schemaVersion: 1,
+    endpoint: 'https://api.vidu.com/ent/v2/text2video',
+    documentationUrl: 'https://platform.vidu.com/docs/text-to-video',
+    credentialProvider: 'vidu',
+    parameterSchema: {
+      $schema: schemaUri,
+      type: 'object',
+      additionalProperties: false,
+      required: ['prompt', 'duration', 'aspect_ratio', 'resolution', 'audio'],
+      properties: {
+        prompt: { type: 'string', title: '视频提示词', minLength: 1, maxLength: 5000 },
+        duration: {
+          type: 'integer',
+          title: '时长（秒）',
+          minimum: 1,
+          maximum: 16,
+          default: 5,
+        },
+        aspect_ratio: {
+          type: 'string',
+          title: '画幅比例',
+          enum: [...imageAspectRatios],
+          default: '16:9',
+        },
+        resolution: {
+          type: 'string',
+          title: '分辨率',
+          enum: ['540p', '720p', '1080p'],
+          default: '720p',
+        },
+        audio: { type: 'boolean', title: '同步生成声音', default: true },
+        seed: { type: 'integer', title: '随机种子', minimum: 0 },
+        off_peak: { type: 'boolean', title: '错峰模式', default: false },
+      },
+    },
+    uiSchema: {
+      fields: [
+        { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+        { key: 'duration', control: 'number', group: 'basic', order: 20 },
+        { key: 'aspect_ratio', control: 'select', group: 'basic', order: 30 },
+        { key: 'resolution', control: 'select', group: 'basic', order: 40 },
+        { key: 'audio', control: 'toggle', group: 'basic', order: 50 },
+        { key: 'seed', control: 'number', group: 'advanced', order: 60 },
+        { key: 'off_peak', control: 'toggle', group: 'advanced', order: 70 },
+      ],
+    },
+  },
+  {
+    key: 'REFERENCE_TO_VIDEO:vidu:viduq3:v2',
+    capability: 'REFERENCE_TO_VIDEO',
+    capabilityLabel: '参考生视频',
     provider: 'vidu',
     providerLabel: 'Vidu',
     model: 'viduq3',
@@ -262,9 +327,9 @@ const adapters: AdapterDescriptor[] = [
     },
   },
   {
-    key: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
-    capability: 'IMAGE_TO_VIDEO',
-    capabilityLabel: '图生视频',
+    key: 'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
+    capability: 'START_END_TO_VIDEO',
+    capabilityLabel: '首尾帧生视频',
     provider: 'vidu',
     providerLabel: 'Vidu',
     model: 'viduq3-pro',
@@ -399,8 +464,24 @@ const adapters: AdapterDescriptor[] = [
   },
 ];
 
-const keySet = new Set(adapters.map((adapter) => adapter.key));
-if (keySet.size !== adapters.length) throw new Error('Adapter keys must be unique.');
+function legacyVideoAdapter(currentKey: string, legacyKey: string): AdapterDescriptor {
+  const current = adapters.find((adapter) => adapter.key === currentKey);
+  if (!current) throw new Error(`Current adapter for legacy key ${legacyKey} was not found.`);
+  return {
+    ...current,
+    key: legacyKey,
+    capability: 'IMAGE_TO_VIDEO',
+    capabilityLabel: '图生视频',
+  };
+}
+
+const legacyAdapters: AdapterDescriptor[] = [
+  legacyVideoAdapter('REFERENCE_TO_VIDEO:vidu:viduq3:v2', 'IMAGE_TO_VIDEO:vidu:viduq3:v2'),
+  legacyVideoAdapter('START_END_TO_VIDEO:vidu:viduq3-pro:v2', 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2'),
+];
+const lookupAdapters = [...adapters, ...legacyAdapters];
+const keySet = new Set(lookupAdapters.map((adapter) => adapter.key));
+if (keySet.size !== lookupAdapters.length) throw new Error('Adapter keys must be unique.');
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 const addFormats = addFormatsModule as unknown as (instance: Ajv2020) => Ajv2020;
@@ -422,17 +503,16 @@ export function getAdapterCatalog(): AdapterCatalogResult {
     providers.set(adapter.provider, adapter.providerLabel);
   }
   return {
-    capabilities: [...capabilities].map(([key, label]) => ({
-      key: key as AdapterCatalogResult['capabilities'][number]['key'],
-      label,
-    })),
+    capabilities: capabilityOrder
+      .filter((key) => capabilities.has(key))
+      .map((key) => ({ key, label: capabilities.get(key)! })),
     providers: [...providers].map(([key, label]) => ({ key, label })),
     adapters,
   };
 }
 
 export function getAdapter(adapterKey: string): AdapterDescriptor | undefined {
-  return adapters.find((adapter) => adapter.key === adapterKey);
+  return lookupAdapters.find((adapter) => adapter.key === adapterKey);
 }
 
 export function resolveAdapter(selection: AdapterResolveParams): AdapterDescriptor {

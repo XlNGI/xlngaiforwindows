@@ -28,7 +28,7 @@ async function setup() {
 
 function prepare(service: VideoGenerationService) {
   return service.prepare({
-    adapterKey: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
+    adapterKey: 'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
     parameters: {
       images: ['https://example.invalid/start.png', 'https://example.invalid/end.png'],
       prompt: 'slow camera move',
@@ -72,7 +72,7 @@ describe('VideoGenerationService', () => {
     });
   });
 
-  it('accepts only validated IMAGE_TO_VIDEO adapters', async () => {
+  it('accepts only validated video adapters', async () => {
     const { service } = await setup();
     expect(() =>
       service.prepare({
@@ -83,11 +83,24 @@ describe('VideoGenerationService', () => {
     ).toThrow('Video generation adapter was not found.');
     expect(() =>
       service.prepare({
-        adapterKey: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
+        adapterKey: 'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
         parameters: { images: [], duration: 99, resolution: '720p', audio: true },
         providerRegion: 'global',
       }),
     ).toThrow('Video generation parameters are invalid.');
+    expect(
+      service.prepare({
+        adapterKey: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2',
+        parameters: {
+          prompt: 'slow camera move through a misty street',
+          duration: 5,
+          aspect_ratio: '16:9',
+          resolution: '720p',
+          audio: true,
+        },
+        providerRegion: 'cn',
+      }),
+    ).toMatchObject({ status: 'pending', adapterKey: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2' });
   });
 
   it('persists the provider task id and polling state atomically and idempotently', async () => {

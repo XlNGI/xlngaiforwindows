@@ -44,6 +44,12 @@ const ACTIVE_STATES = new Set([
   'pending',
 ]);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'timed-out', 'cancelled']);
+const VIDEO_CAPABILITIES = new Set([
+  'TEXT_TO_VIDEO',
+  'IMAGE_TO_VIDEO',
+  'REFERENCE_TO_VIDEO',
+  'START_END_TO_VIDEO',
+]);
 
 interface VideoJobMetadata extends VideoGenerationMetadataInfo {
   assetKind: VideoAssetKind;
@@ -64,7 +70,7 @@ export class VideoGenerationService {
 
   prepare(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
     const adapter = getAdapter(params.adapterKey);
-    if (!adapter || adapter.capability !== 'IMAGE_TO_VIDEO') {
+    if (!adapter || !VIDEO_CAPABILITIES.has(adapter.capability)) {
       throw new Error('Video generation adapter was not found.');
     }
     const validation = validateAdapterParameters(params.adapterKey, params.parameters);
@@ -328,7 +334,7 @@ export class VideoGenerationService {
       const assets = repositories.assets.listByProject(project.id);
       return repositories.jobs
         .listByProject(project.id)
-        .filter((job) => getAdapter(job.adapterKey)?.capability === 'IMAGE_TO_VIDEO')
+        .filter((job) => VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? ''))
         .map((job) => this.toInfo(job, assets, repositories.generationResults.listByJob(job.id)))
         .reverse();
     });
@@ -342,7 +348,7 @@ export class VideoGenerationService {
       const repositories = createRepositories(database);
       const jobs = repositories.jobs
         .listByProject(project.id)
-        .filter((job) => getAdapter(job.adapterKey)?.capability === 'IMAGE_TO_VIDEO');
+        .filter((job) => VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? ''));
       const interrupted = jobs.filter(
         (job) =>
           job.status === 'pending' ||
@@ -609,7 +615,7 @@ export class VideoGenerationService {
     if (
       !job ||
       job.projectId !== projectId ||
-      getAdapter(job.adapterKey)?.capability !== 'IMAGE_TO_VIDEO'
+      !VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? '')
     ) {
       throw new Error('Video generation job was not found.');
     }

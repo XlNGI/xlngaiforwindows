@@ -135,6 +135,15 @@ function videoStatusLabel(status: VideoGenerationJobInfo['status']): string {
   return labels[status];
 }
 
+function isVideoCapability(capability: GenerationCapability | undefined): boolean {
+  return (
+    capability === 'TEXT_TO_VIDEO' ||
+    capability === 'IMAGE_TO_VIDEO' ||
+    capability === 'REFERENCE_TO_VIDEO' ||
+    capability === 'START_END_TO_VIDEO'
+  );
+}
+
 function formatElapsed(elapsedMs: number): string {
   const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
   const minutes = Math.floor(seconds / 60);
@@ -631,7 +640,7 @@ export function ProductionPanel({
   };
 
   const generateVideo = async () => {
-    if (!adapter || adapter.capability !== 'IMAGE_TO_VIDEO' || !writable) return;
+    if (!adapter || !isVideoCapability(adapter.capability) || !writable) return;
     if (canUseSecureCredentials() && credential?.configured !== true) {
       setGenerationStatus(
         credential
@@ -931,7 +940,7 @@ export function ProductionPanel({
                     {message}
                   </span>
                 )}
-                {adapter.capability === 'IMAGE_TO_VIDEO' ? (
+                {isVideoCapability(adapter.capability) ? (
                   <>
                     <button
                       className="button primary"
@@ -1004,7 +1013,7 @@ export function ProductionPanel({
                 )}
                 {generationStatus && <span className="credential-message">{generationStatus}</span>}
               </div>
-              {adapter.capability === 'IMAGE_TO_VIDEO' && (
+              {isVideoCapability(adapter.capability) && (
                 <section className="video-task-center" aria-label="视频任务">
                   <header>
                     <strong>视频任务</strong>

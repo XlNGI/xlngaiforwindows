@@ -51,7 +51,12 @@ export class ImageGenerationService {
 
   prepare(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
     const adapter = getAdapter(params.adapterKey);
-    if (!adapter) throw new Error('Adapter was not found.');
+    if (
+      !adapter ||
+      (adapter.capability !== 'TEXT_TO_IMAGE' && adapter.capability !== 'REFERENCE_TO_IMAGE')
+    ) {
+      throw new Error('Image generation adapter was not found.');
+    }
     const validation = validateAdapterParameters(params.adapterKey, params.parameters);
     if (!validation.valid) throw new Error('Image generation parameters are invalid.');
     return this.projects.access(true, (database, project) => {

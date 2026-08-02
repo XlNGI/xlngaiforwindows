@@ -67,8 +67,37 @@ describe('adapter registry', () => {
     ).toMatchObject({ valid: true });
   });
 
+  it('exposes distinct video production modes and validates text-to-video parameters', () => {
+    const catalog = getAdapterCatalog();
+    expect(catalog.capabilities.map((item) => item.key)).toEqual([
+      'TEXT_TO_IMAGE',
+      'REFERENCE_TO_IMAGE',
+      'TEXT_TO_VIDEO',
+      'IMAGE_TO_VIDEO',
+      'REFERENCE_TO_VIDEO',
+      'START_END_TO_VIDEO',
+    ]);
+    expect(
+      validateAdapterParameters('TEXT_TO_VIDEO:vidu:viduq3-pro:v2', {
+        prompt: '镜头穿过清晨薄雾中的城市街道',
+        duration: 5,
+        aspect_ratio: '16:9',
+        resolution: '720p',
+        audio: true,
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters('TEXT_TO_VIDEO:vidu:viduq3-pro:v2', {
+        duration: 5,
+        aspect_ratio: '16:9',
+        resolution: '720p',
+        audio: true,
+      }),
+    ).toMatchObject({ valid: false });
+  });
+
   it('enforces the official reference-video image count and fields', () => {
-    const key = 'IMAGE_TO_VIDEO:vidu:viduq3:v2';
+    const key = 'REFERENCE_TO_VIDEO:vidu:viduq3:v2';
     const base = {
       prompt: '角色在雨夜街道行走',
       duration: 5,
@@ -98,7 +127,7 @@ describe('adapter registry', () => {
   });
 
   it('requires exactly two ordered images for start-end video', () => {
-    const key = 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2';
+    const key = 'START_END_TO_VIDEO:vidu:viduq3-pro:v2';
     const base = { duration: 5, resolution: '720p', audio: true };
     expect(
       validateAdapterParameters(key, {
@@ -112,5 +141,21 @@ describe('adapter registry', () => {
         images: ['https://example.com/start.png', 'https://example.com/end.png'],
       }),
     ).toMatchObject({ valid: true });
+  });
+
+  it('keeps legacy video adapter keys available without exposing them in the catalog', () => {
+    expect(
+      validateAdapterParameters('IMAGE_TO_VIDEO:vidu:viduq3-pro:v2', {
+        images: ['https://example.com/start.png', 'https://example.com/end.png'],
+        duration: 5,
+        resolution: '720p',
+        audio: true,
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      getAdapterCatalog().adapters.some(
+        (adapter) => adapter.key === 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
+      ),
+    ).toBe(false);
   });
 });

@@ -52,6 +52,15 @@ struct ProviderTarget {
 
 const IMAGE_FIELDS: &[&str] = &["prompt", "aspect_ratio", "resolution", "seed"];
 const REFERENCE_IMAGE_FIELDS: &[&str] = &["images", "prompt", "aspect_ratio", "resolution", "seed"];
+const TEXT_VIDEO_FIELDS: &[&str] = &[
+    "prompt",
+    "duration",
+    "aspect_ratio",
+    "resolution",
+    "audio",
+    "seed",
+    "off_peak",
+];
 const REFERENCE_VIDEO_FIELDS: &[&str] = &[
     "images",
     "prompt",
@@ -113,20 +122,29 @@ fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderT
             model: "viduq1",
             allowed_fields: REFERENCE_IMAGE_FIELDS,
         },
-        "IMAGE_TO_VIDEO:vidu:viduq3:v2" => ProviderTarget {
+        "TEXT_TO_VIDEO:vidu:viduq3-pro:v2" => ProviderTarget {
+            credential_provider,
+            host,
+            path: "/ent/v2/text2video",
+            model: "viduq3-pro",
+            allowed_fields: TEXT_VIDEO_FIELDS,
+        },
+        "REFERENCE_TO_VIDEO:vidu:viduq3:v2" | "IMAGE_TO_VIDEO:vidu:viduq3:v2" => ProviderTarget {
             credential_provider,
             host,
             path: "/ent/v2/reference2video",
             model: "viduq3",
             allowed_fields: REFERENCE_VIDEO_FIELDS,
         },
-        "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => ProviderTarget {
-            credential_provider,
-            host,
-            path: "/ent/v2/start-end2video",
-            model: "viduq3-pro",
-            allowed_fields: Q3_VIDEO_FIELDS,
-        },
+        "START_END_TO_VIDEO:vidu:viduq3-pro:v2" | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => {
+            ProviderTarget {
+                credential_provider,
+                host,
+                path: "/ent/v2/start-end2video",
+                model: "viduq3-pro",
+                allowed_fields: Q3_VIDEO_FIELDS,
+            }
+        }
         "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => ProviderTarget {
             credential_provider,
             host,
@@ -351,10 +369,13 @@ fn provider_cancel_path(task_id: &str) -> Result<String, String> {
 
 fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
     match adapter_key {
-        "IMAGE_TO_VIDEO:vidu:viduq3:v2"
+        "TEXT_TO_VIDEO:vidu:viduq3-pro:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3:v2"
+        | "START_END_TO_VIDEO:vidu:viduq3-pro:v2"
+        | "IMAGE_TO_VIDEO:vidu:viduq3:v2"
         | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2"
         | "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => Ok(()),
-        _ => Err("Native video task commands require an IMAGE_TO_VIDEO adapter".to_string()),
+        _ => Err("Native video task commands require a registered video adapter".to_string()),
     }
 }
 
@@ -1029,7 +1050,7 @@ mod tests {
 
     #[test]
     fn provider_bridge_is_bound_to_an_exact_adapter_and_injects_its_model() {
-        let target = provider_target("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2", "global")
+        let target = provider_target("START_END_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("known adapter should resolve");
         assert_eq!(target.host, "api.vidu.com");
         assert_eq!(target.path, "/ent/v2/start-end2video");
@@ -1040,11 +1061,16 @@ mod tests {
         .expect("adapter payload should serialize");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(parsed["model"], "viduq3-pro");
-        let reference = provider_target("IMAGE_TO_VIDEO:vidu:viduq3:v2", "global")
+        let reference = provider_target("REFERENCE_TO_VIDEO:vidu:viduq3:v2", "global")
             .expect("reference video adapter should resolve");
         assert_eq!(reference.path, "/ent/v2/reference2video");
         assert_eq!(reference.model, "viduq3");
-        assert!(provider_target("IMAGE_TO_VIDEO:evil:viduq3-pro:v2", "global").is_err());
+        let text = provider_target("TEXT_TO_VIDEO:vidu:viduq3-pro:v2", "global")
+            .expect("text video adapter should resolve");
+        assert_eq!(text.path, "/ent/v2/text2video");
+        assert_eq!(text.model, "viduq3-pro");
+        assert!(provider_payload(text, json!({"prompt": "frame", "images": []})).is_err());
+        assert!(provider_target("START_END_TO_VIDEO:evil:viduq3-pro:v2", "global").is_err());
     }
 
     #[test]
@@ -1107,6 +1133,9 @@ mod tests {
 
     #[test]
     fn video_task_contract_extracts_only_declared_task_fields() {
+        assert!(ensure_video_adapter("TEXT_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3:v2").is_ok());
+        assert!(ensure_video_adapter("START_END_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("TEXT_TO_IMAGE:vidu:viduq2:v2").is_err());

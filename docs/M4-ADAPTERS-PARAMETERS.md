@@ -1,6 +1,6 @@
 # M4 适配器与动态参数
 
-版本：2  
+版本：3  
 日期：2026-08-01
 
 状态：M4 代码、自动化修复门禁、Release 同目录启动冒烟和 Vidu 官方失败响应 `PASS`；项目最终发布签收 `HOLD`。带真实凭据的 Vidu 成功调用属于 M5/M6 验收，不作为进入 M5 的循环前置条件。
@@ -16,7 +16,9 @@ M4 建立“生产方式 + 供应商 + 模型 + API 版本”到唯一适配器�
 | `TEXT_TO_IMAGE` | `viduq2` | 无参考图，1080p/2K/4K |
 | `REFERENCE_TO_IMAGE` | `viduq2` | 1–7 张参考图，1080p/2K/4K |
 | `REFERENCE_TO_IMAGE` | `viduq1` | 1–7 张参考图，仅 1080p |
-| `IMAGE_TO_VIDEO` | `viduq3-pro` | 1 张起始帧，1–16 秒，540p/720p/1080p |
+| `TEXT_TO_VIDEO` | `viduq3-pro` | 无输入图片，1–16 秒，540p/720p/1080p |
+| `REFERENCE_TO_VIDEO` | `viduq3` | 1–7 张参考图，3–16 秒，540p/720p/1080p |
+| `START_END_TO_VIDEO` | `viduq3-pro` | 严格 2 张首尾帧，1–16 秒，540p/720p/1080p |
 | `IMAGE_TO_VIDEO` | `vidu2.0` | 1 张起始帧；4 秒支持 360p/720p/1080p，8 秒仅支持 720p |
 
 未列出的能力、模型和字段不进行推测，也不会回退到相近适配器。
@@ -24,6 +26,7 @@ M4 建立“生产方式 + 供应商 + 模型 + API 版本”到唯一适配器�
 ## 2. 不变量
 
 - 适配器键固定为 `capability:provider:model:apiVersion`，Registry 内必须唯一。
+- 已持久化任务使用过的旧视频适配器键只保留为兼容查找项，不再出现在新任务目录中；重启恢复不得因能力拆分而丢失旧任务。
 - 解析结果必须恰好为一个；零个或多个匹配都视为错误。
 - 参数对象必须通过适配器 JSON Schema，`additionalProperties` 固定为 `false`。
 - 模型、时长、分辨率和素材数量的组合约束在 Worker 中复验，React 校验不能作为安全边界。

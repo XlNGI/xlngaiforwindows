@@ -75,9 +75,9 @@ const catalog: AdapterCatalogResult = {
 };
 
 const videoDescriptor: AdapterDescriptor = {
-  key: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
-  capability: 'IMAGE_TO_VIDEO',
-  capabilityLabel: '图生视频',
+  key: 'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
+  capability: 'START_END_TO_VIDEO',
+  capabilityLabel: '首尾帧生视频',
   provider: 'vidu',
   providerLabel: 'Vidu',
   model: 'viduq3-pro',
@@ -121,9 +121,49 @@ const videoDescriptor: AdapterDescriptor = {
 };
 
 const videoCatalog: AdapterCatalogResult = {
-  capabilities: [{ key: 'IMAGE_TO_VIDEO', label: '图生视频' }],
+  capabilities: [{ key: 'START_END_TO_VIDEO', label: '首尾帧生视频' }],
   providers: [{ key: 'vidu', label: 'Vidu' }],
   adapters: [videoDescriptor],
+};
+
+const completeModeCatalog: AdapterCatalogResult = {
+  capabilities: [
+    { key: 'TEXT_TO_IMAGE', label: '文生图' },
+    { key: 'REFERENCE_TO_IMAGE', label: '参考生图' },
+    { key: 'TEXT_TO_VIDEO', label: '文生视频' },
+    { key: 'IMAGE_TO_VIDEO', label: '图生视频' },
+    { key: 'REFERENCE_TO_VIDEO', label: '参考生视频' },
+    { key: 'START_END_TO_VIDEO', label: '首尾帧生视频' },
+  ],
+  providers: [{ key: 'vidu', label: 'Vidu' }],
+  adapters: [
+    descriptor,
+    {
+      ...descriptor,
+      key: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+      capability: 'REFERENCE_TO_IMAGE',
+      capabilityLabel: '参考生图',
+    },
+    {
+      ...videoDescriptor,
+      key: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2',
+      capability: 'TEXT_TO_VIDEO',
+      capabilityLabel: '文生视频',
+    },
+    {
+      ...videoDescriptor,
+      key: 'REFERENCE_TO_VIDEO:vidu:viduq3:v2',
+      capability: 'REFERENCE_TO_VIDEO',
+      capabilityLabel: '参考生视频',
+    },
+    videoDescriptor,
+    {
+      ...videoDescriptor,
+      key: 'IMAGE_TO_VIDEO:vidu:vidu2.0:v2',
+      capability: 'IMAGE_TO_VIDEO',
+      capabilityLabel: '图生视频',
+    },
+  ],
 };
 
 function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobInfo {
@@ -218,6 +258,23 @@ describe('ProductionPanel', () => {
     expect(screen.getByRole('option', { name: '普通素材' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '角色' })).toBeInTheDocument();
     expect(screen.getByLabelText('自动保存到本地素材库')).toBeChecked();
+  });
+
+  it('shows every supported production mode as a distinct option', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(completeModeCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel shotId="shot" writable />);
+
+    const productionMode = await screen.findByLabelText('生产方式');
+    expect(
+      Array.from(productionMode.querySelectorAll('option'), (option) => option.textContent),
+    ).toEqual(['文生图', '参考生图', '文生视频', '图生视频', '参考生视频', '首尾帧生视频']);
   });
 
   it('does not persist a draft when adapter validation fails', async () => {

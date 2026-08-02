@@ -1,18 +1,18 @@
 # M6 生视频与本地轮询设计
 
-版本：1  
+版本：2  
 日期：2026-08-02
 
 ## 1. 范围与非目标
 
-M6 在不配置公网 `callback_url` 的条件下，支持 Vidu `/ent/v2/reference2video` 参考生视频（1–7 张参考图）和 `/ent/v2/start-end2video` 首尾帧生视频（严格按首帧、尾帧顺序传入 2 张图）的提交、本地轮询、重启恢复、暂停、继续、取消、结果下载、资产登记及任务中心展示。图片参数同时支持公开 URL 和从本机选择的 PNG/JPEG/WebP 文件；本机文件仅在当前界面会话中转换为 Provider 官方支持的 Data URL。
+M6 在不配置公网 `callback_url` 的条件下，支持 Vidu `/ent/v2/text2video` 文生视频、`/ent/v2/img2video` 图生视频、`/ent/v2/reference2video` 参考生视频（1–7 张参考图）和 `/ent/v2/start-end2video` 首尾帧生视频（严格按首帧、尾帧顺序传入 2 张图）的提交、本地轮询、重启恢复、暂停、继续、取消、结果下载、资产登记及任务中心展示。四种视频能力在生产方式中独立显示。图片参数同时支持公开 URL 和从本机选择的 PNG/JPEG/WebP 文件；本机文件仅在当前界面会话中转换为 Provider 官方支持的 Data URL。
 
 M6 不实现 M7 的发布迁移、诊断导出或自动更新；不自动调用真实 Provider；不把 API 密钥、完整签名 URL 或完整 Provider 响应写入项目数据库和日志。
 
 ## 2. 领域不变量与所有权
 
 1. 每个视频任务持久属于创建它的 `projectId`，可选属于一个经项目所有权验证的 `shotId`。
-2. `adapterKey` 必须精确解析为 `IMAGE_TO_VIDEO`，参数必须在 Worker 再次通过该适配器 Schema 校验。
+2. `adapterKey` 必须精确解析为 `TEXT_TO_VIDEO`、`IMAGE_TO_VIDEO`、`REFERENCE_TO_VIDEO` 或 `START_END_TO_VIDEO`，参数必须在 Worker 再次通过该适配器 Schema 校验。旧版参考生视频和首尾帧适配器键仅用于恢复已持久化任务，不出现在新任务目录中。
 3. Provider 提交成功后，`providerTaskId` 与 `polling` 状态必须在同一 SQLite 事务中写入；提交时选择的国内站或国际站区域随任务持久化，轮询不得改用当前界面选择或重新提交 Provider 任务。
 4. 同一进程内每个 `jobId` 最多存在一个轮询执行者；查询请求必须受全局并发和最小间隔约束。
 5. 项目会话变化后，旧查询、下载和定时器不得写入新项目。每次异步回写都同时校验项目会话对象、`projectId`、`jobId` 和 `providerTaskId`。

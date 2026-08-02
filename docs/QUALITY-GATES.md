@@ -105,7 +105,7 @@ created -> streaming -> complete
 | 视频下载和资产提交受项目会话隔离 | Worker Video Generation / Asset Repository | cancel-during-download/atomic-result/signed-url-exclusion |
 | 视频长下载不占用 Worker IPC | Worker Video Generation / Desktop Polling Scheduler | pending-download-return/local-download-refresh/restart-temp-cleanup |
 | 视频暂停、继续、超时和取消幂等 | Worker Video Generation | pause-resume/timeout/terminal-cancel |
-| 视频适配器与原生端点精确匹配 | Adapter Registry / Tauri Provider Bridge | reference-count/start-end-count/exact-path/task-id-rejection |
+| 视频适配器与原生端点精确匹配 | Adapter Registry / Tauri Provider Bridge | text/image/reference/start-end schemas/exact-path/task-id-rejection |
 | 视频重启恢复不重新提交 | Desktop Production Panel / Polling Scheduler | restored-polling-without-submit |
 
 后续里程碑必须在本表中追加不变量，不得删除历史条目来规避门禁。
@@ -114,16 +114,17 @@ created -> streaming -> complete
 
 2026-08-02 自动化与外部条件复验：
 
-- `pnpm test`：15 个测试文件、107 个测试通过。
+- `pnpm test`：17 个测试文件、119 个测试通过。
 - `pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`：通过。
 - `pnpm worker:sidecar` 与 M4 Sidecar 生命周期验证：通过。
-- `cargo fmt --check`、`cargo check --offline`、`cargo test --offline`：通过，11 个 Rust 测试通过。
-- `pnpm tauri:build`：通过，生成 20,255,794 字节的 x64 NSIS 安装包；SHA-256 为 `C8A5E8030AE433B59303F1A6B49D7A66CB8870B64866ED0F60F83518D9E2DE2C`。
+- `cargo fmt --check`、`cargo check --offline`、`cargo test --offline`：通过，12 个 Rust 测试通过。
+- `pnpm tauri:build`：通过，生成 20,265,481 字节的 x64 NSIS 安装包；SHA-256 为 `82186147F8124452DFB88CB69B8A04ED7479319FE096B48D4CB0D2D7B1E4CFCB`。
 - Release 同目录冒烟：通过；桌面程序实际拉起安装后名称 `ai-video-worker.exe`，并在启动 health/SQLite 检查期间保持 Worker 存活。
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
 - 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，fail-fast GitHub Windows runner run `30720119063` 通过且无错误注解（包括该安装生命周期步骤）。
 - M5 生图失败路径：安全传输失败显式落为 `failed`，关闭/切换落为 `cancelled`，Worker 重启将遗留活动任务恢复为 `failed`；下载结束后复验项目会话和任务状态。自动化 UI/SQLite 复测未发现 `running` 遗留、结果记录或素材半成品。
-- M6 生视频自动门禁：Provider 任务 ID/区域持久化、退避轮询、`downloading` 后台传输、重启恢复、暂停/继续/取消/超时、临时文件清理、素材登记和本地打开均通过本地自动化、干净 NSIS 生命周期及 Hosted Windows CI run `30740465271`。人工反馈新增的 URL/本地图片混合输入已通过格式、签名、体积、取消、首尾顺序、Base64 不落库、原生请求上限、实际 React 布局和 Hosted Windows CI run `30742683334`；真实 Vidu 人工成功路径待验证。
+- M6 生视频自动门禁：Provider 任务 ID/区域持久化、退避轮询、`downloading` 后台传输、重启恢复、暂停/继续/取消/超时、临时文件清理、素材登记和本地打开均通过本地自动化、干净 NSIS 生命周期及 Hosted Windows CI run `30740465271`。人工反馈新增的 URL/本地图片混合输入已通过格式、签名、体积、取消、首尾顺序、Base64 不落库、原生请求上限、实际 React 布局和 Hosted Windows CI run `30742683334`；真实 Vidu 参考生视频成功路径已于后续人工验证通过。
+- M6 生产方式补全：目录独立显示文生图、参考生图、文生视频、图生视频、参考生视频和首尾帧生视频；新增文生视频固定端点/字段白名单，并保留旧视频任务键的恢复兼容。真实参考生视频已在国内站完成 18 次轮询、MP4 下载和素材登记；新增模式的本地代码、Rust 与 sidecar 门禁通过，Hosted Windows 和真实文生/图生/首尾帧请求待验证。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
 - 未验证：真实 OpenAI 模型请求、带真实凭据的 Vidu 成功请求。当前环境未配置 Provider 凭据，且 OpenAI 443 连接超时。
 
