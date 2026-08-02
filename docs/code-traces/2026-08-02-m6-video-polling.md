@@ -115,3 +115,10 @@ Follow `docs/IMPLEMENTATION-PLAN.md` and `docs/QUALITY-GATES.md` for M6: impleme
 - Environment: the first background Tauri UI launch again lacked Cargo in its inherited PATH and stopped before opening a window; retrying with the existing Cargo directory scoped to that process succeeded. No real credential was read and no Provider request was sent.
 - Status: local code, native, packaging, clean-install, and visual-layout gates are `PASS`. M6 remains `in progress` until this patch passes Hosted Windows CI and the user manually selects real local reference/start-end images in the desktop app and validates a real Vidu task.
 - Next: commit and push the patch, require Hosted Windows success, restart the desktop app, and return to the human-test boundary without entering M7.
+
+### 2026-08-02T18:08:39+08:00 - Local image feedback passed Hosted Windows CI
+- Evidence: GitHub Actions run `30742683334` for commit `3970ded` completed with `Success`; the public run page confirms the Hosted Windows workflow finished after TypeScript gates, standalone Worker, Rust/Tauri, NSIS bundle, and clean NSIS install validation.
+- Transport note: the first Git push inherited the user's disabled global proxy at `127.0.0.1:7897` and failed before contacting GitHub. A command-scoped no-proxy retry succeeded without changing global Git configuration. Public REST monitoring later reached its unauthenticated rate limit, so final status was verified from the public Actions run page without reading credentials.
+- Decision: the local-image feedback's automated local and Hosted gates are `PASS`. No real credential was read and no real Vidu task was submitted automatically.
+- Status: M6 remains `in progress` at the human-test boundary. The user must select local reference images in the real desktop app, submit a real video task, and validate polling/restart/local video material behavior before M6 can be signed off or M7 can begin.
+- Next: restart the Tauri development app with the accepted patch and hand off the exact manual checks.

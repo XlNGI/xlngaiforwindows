@@ -123,7 +123,7 @@ created -> streaming -> complete
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
 - 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，fail-fast GitHub Windows runner run `30720119063` 通过且无错误注解（包括该安装生命周期步骤）。
 - M5 生图失败路径：安全传输失败显式落为 `failed`，关闭/切换落为 `cancelled`，Worker 重启将遗留活动任务恢复为 `failed`；下载结束后复验项目会话和任务状态。自动化 UI/SQLite 复测未发现 `running` 遗留、结果记录或素材半成品。
-- M6 生视频自动门禁：Provider 任务 ID/区域持久化、退避轮询、`downloading` 后台传输、重启恢复、暂停/继续/取消/超时、临时文件清理、素材登记和本地打开均通过本地自动化、干净 NSIS 生命周期及 Hosted Windows CI run `30740465271`。人工反馈新增的 URL/本地图片混合输入已通过格式、签名、体积、取消、首尾顺序、Base64 不落库、原生请求上限和实际 React 布局自动门禁；该补丁的新 Hosted Windows CI 与真实 Vidu 人工成功路径待验证。
+- M6 生视频自动门禁：Provider 任务 ID/区域持久化、退避轮询、`downloading` 后台传输、重启恢复、暂停/继续/取消/超时、临时文件清理、素材登记和本地打开均通过本地自动化、干净 NSIS 生命周期及 Hosted Windows CI run `30740465271`。人工反馈新增的 URL/本地图片混合输入已通过格式、签名、体积、取消、首尾顺序、Base64 不落库、原生请求上限、实际 React 布局和 Hosted Windows CI run `30742683334`；真实 Vidu 人工成功路径待验证。
 - Git 审计基线：仓库已初始化，忽略规则与敏感内容审计通过；`main` 基线使用 GitHub 公开身份与 noreply 邮箱提交。
 - 未验证：真实 OpenAI 模型请求、带真实凭据的 Vidu 成功请求。当前环境未配置 Provider 凭据，且 OpenAI 443 连接超时。
 
