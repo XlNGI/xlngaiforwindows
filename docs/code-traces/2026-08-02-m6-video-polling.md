@@ -85,3 +85,10 @@ Follow `docs/IMPLEMENTATION-PLAN.md` and `docs/QUALITY-GATES.md` for M6: impleme
 - Experiment: used the bundled Node `24.14.0`, ran the same native-module alignment command, and reran `pnpm test`; all 15 files/107 tests passed. Then ran the complete Worker and Desktop suites 15 consecutive times under Node 24; every iteration passed.
 - Decision: retain the Hosted failure as an unresolved transient result and trigger a second full Hosted run with this trace-only commit. Do not hand off M6 unless the rerun completes through NSIS installation successfully.
 - Next: monitor the rerun; repeated failure blocks M6 and requires added CI-side diagnostics before another attempt.
+
+### 2026-08-02T17:00:11+08:00 - Hosted Windows rerun passed the complete release path
+- Evidence: GitHub Actions run `30740465271` for commit `1e6e94b` completed with `success`; formatting, TypeScript build/lint/typecheck/tests, standalone Worker, Rust/Tauri check, NSIS bundle, and clean NSIS install lifecycle all passed.
+- Evidence: the prior TypeScript-step failure did not recur under the same Hosted workflow and was not reproduced by the local Node 24 full run or 15 consecutive Worker/Desktop stress iterations. It remains recorded above instead of being overwritten.
+- Decision: M6 automated code, native, packaging, installed-process, and Hosted gates are `PASS`. No real credential was read and no real Vidu request was sent automatically.
+- Status: M6 remains `in progress` at the required human-testing boundary; do not enter M7 until the user validates the real desktop video flow and reports the result.
+- Next: manually submit one Vidu reference-video or start/end-frame task, exercise pause/resume and app restart recovery while it is active, then confirm the completed video opens locally and appears in the selected material category.
