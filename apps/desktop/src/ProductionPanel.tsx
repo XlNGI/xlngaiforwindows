@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   CircleAlert,
   CircleCheck,
@@ -165,6 +166,14 @@ function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
   }
 }
 
+function mediaSrcForAbsolutePath(absolutePath: string): string | undefined {
+  try {
+    return convertFileSrc(absolutePath);
+  } catch {
+    return undefined;
+  }
+}
+
 export function ProductionPanel({
   expanded = false,
   capability,
@@ -196,6 +205,7 @@ export function ProductionPanel({
   const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
   const [preview, setPreview] = useState<ImagePreviewInfo>();
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
   const [autoSaveLocal, setAutoSaveLocal] = useState(initialAutoSaveLocal);
   const [savingPreview, setSavingPreview] = useState(false);
   const videoScheduler = useRef<VideoPollingScheduler | undefined>(undefined);
@@ -205,6 +215,9 @@ export function ProductionPanel({
   const assets = controlledAssets ?? localAssets;
   const selectedAsset = assets.find((item) => item.id === selectedAssetId);
   const selectedImageAsset = isVideoAsset(selectedAsset) ? undefined : selectedAsset;
+  const selectedVideoAsset = isVideoAsset(selectedAsset) ? selectedAsset : undefined;
+  const unsavedPreview = preview?.jobId && !preview.assetId ? preview : undefined;
+  const showResultPreview = Boolean(preview || selectedImageAsset || selectedVideoAsset);
   const effectiveCapability =
     catalog?.capabilities.some((item) => item.key === capability) === true
       ? capability!
@@ -391,6 +404,7 @@ export function ProductionPanel({
             notifyVideoTerminal(job);
             if (job.status === 'succeeded') {
               const assetId = job.results[0]?.asset.id;
+              if (assetId) setSelectedAssetId(assetId);
               void callWorker('asset.list', {}).then((items) => {
                 if (!active) return;
                 if (controlledAssetsRef.current === undefined) setLocalAssets(items);
@@ -420,9 +434,13 @@ export function ProductionPanel({
   }, [videoJobs]);
 
   useEffect(() => {
-    setPreview(undefined);
-    if (!selectedAssetId || isVideoAsset(selectedAsset)) return;
+    if (!selectedAssetId || isVideoAsset(selectedAsset)) {
+      // Keep unsaved generation previews (jobId without assetId) when selection clears or a video is selected.
+      setPreview((current) => (current?.jobId && !current.assetId ? current : undefined));
+      return;
+    }
     let active = true;
+    setPreview((current) => (current?.assetId === selectedAssetId ? current : undefined));
     void callWorker('asset.preview', { assetId: selectedAssetId })
       .then((nextPreview) => {
         if (active) setPreview(nextPreview);
@@ -434,6 +452,15 @@ export function ProductionPanel({
       active = false;
     };
   }, [selectedAsset?.kind, selectedAssetId]);
+
+  useEffect(() => {
+    if (!selectedAsset || !isVideoAsset(selectedAsset) || !projectRootPath) {
+      setVideoPreviewUrl(undefined);
+      return;
+    }
+    const root = projectRootPath.replace(/[\\/]+$/, '');
+    setVideoPreviewUrl(mediaSrcForAbsolutePath(`${root}\\${selectedAsset.relativePath}`));
+  }, [projectRootPath, selectedAsset]);
 
   const capabilityAdapters = useMemo(
     () => catalog?.adapters.filter((item) => item.capability === effectiveCapability) ?? [],
@@ -554,7 +581,15 @@ export function ProductionPanel({
   };
 
   const saveDraft = async () => {
-    if (!adapter || !shotId || !selectedProfile || !selectedModel) return;
+    if (!adapter) return;
+    if (!shotId) {
+      setMessage('请先在左侧选择镜头后再保存草稿。');
+      return;
+    }
+    if (!selectedProfile || !selectedModel) {
+      setMessage('请先选择可用的供应商连接和模型。');
+      return;
+    }
     if (hasLocalImageParameters(parameters)) {
       const localField = Object.entries(parameters).find(([, value]) =>
         Array.isArray(value) ? value.some(isLocalImageDataUrl) : isLocalImageDataUrl(value),
@@ -630,9 +665,15 @@ export function ProductionPanel({
         assetKind,
         saveAsset: autoSaveLocal,
       });
-      if (completed.preview) {
+      if (completed.status === 'succeeded' && completed.preview) {
         if (!autoSaveLocal) setSelectedAssetId(undefined);
         setPreview(completed.preview);
+      }
+      const savedAsset = completed.results.find((result) => result.asset)?.asset;
+      if (completed.status === 'succeeded' && savedAsset) {
+        const nextAssets = await callWorker('asset.list', {});
+        publishAssets(nextAssets, savedAsset.id);
+        if (completed.preview) setPreview(completed.preview);
       }
       setGenerationStatus(
         completed.status === 'succeeded'
@@ -643,11 +684,6 @@ export function ProductionPanel({
             ? '已取消图片生成。'
             : (completed.error ?? '生成失败。'),
       );
-      const savedAsset = completed.results.find((result) => result.asset)?.asset;
-      if (completed.status === 'succeeded' && savedAsset) {
-        const nextAssets = await callWorker('asset.list', {});
-        publishAssets(nextAssets, savedAsset.id);
-      }
     } catch (reason) {
       if (preparedJobId) {
         try {
@@ -827,6 +863,14 @@ export function ProductionPanel({
   const basicFields = fields.filter((field) => field.group === 'basic');
   const advancedFields = fields.filter((field) => field.group === 'advanced');
 
+  const draftSaveHint = !writable
+    ? '当前项目为只读'
+    : !shotId
+      ? '请先选择镜头'
+      : !selectedProfile || !selectedModel
+        ? '请先选择供应商连接和模型'
+        : undefined;
+
   return (
     <aside className={`production-panel panel-border${expanded ? ' expanded' : ''}`}>
       <div className="panel-heading">
@@ -836,159 +880,145 @@ export function ProductionPanel({
       {!catalog ? (
         <div className="parameter-placeholder">正在读取适配器目录</div>
       ) : (
-        <>
-          <div className="field-group">
-            <label htmlFor="provider-profile">供应商连接</label>
-            <select
-              id="provider-profile"
-              value={selectedProfileId}
-              onChange={(event) => chooseProfile(event.target.value)}
-              disabled={eligibleProfiles.length === 0 || busy}
-            >
-              {eligibleProfiles.length === 0 && <option value="">没有可用连接</option>}
-              {eligibleProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name} · {profile.baseUrl === 'https://api.vidu.cn' ? '中国站' : '国际站'}
-                </option>
-              ))}
-            </select>
-          </div>
-          {eligibleProfiles.length === 0 ? (
-            <div className="provider-required-state">
-              <Settings2 size={20} />
-              <strong>还没有可用于制作的供应商连接</strong>
-              <span>请在设置中心添加并测试 Vidu 中国站或国际站连接。</span>
-              <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
-                前往供应商与模型
-              </button>
-            </div>
-          ) : (
-            <div className="field-group">
-              <label htmlFor="model">模型</label>
-              <select
-                id="model"
-                value={adapterKey}
-                onChange={(event) => setAdapterKey(event.target.value)}
-                disabled={modelOptions.length === 0 || busy}
-              >
-                {modelOptions.length === 0 && <option value="">没有已启用的兼容模型</option>}
-                {modelOptions.map((item) => (
-                  <option key={item.key} value={item.key}>
-                    {item.modelLabel}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {selectedProfile && modelOptions.length === 0 && (
-            <div className="provider-required-state compact">
-              <strong>当前连接没有兼容模型</strong>
-              <span>请在设置中心启用支持当前制作方式的模型。</span>
-              <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
-                管理模型
-              </button>
-            </div>
-          )}
-
-          {adapter && (
-            <>
-              <div className="adapter-meta">
-                <strong>{adapter.modelLabel}</strong>
-                <span>
-                  {selectedProfile?.name} · {adapter.providerLabel} · API {adapter.apiVersion}
-                </span>
-              </div>
-              <div className="parameter-fields">
-                {basicFields.map((field) => (
-                  <ParameterField
-                    key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
-                    field={field}
-                    property={adapter.parameterSchema.properties[field.key]!}
-                    value={parameters[field.key]}
-                    required={adapter.parameterSchema.required.includes(field.key)}
-                    error={
-                      errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message
-                    }
-                    onChange={(value) => updateParameter(field.key, value)}
-                  />
-                ))}
-              </div>
-              {advancedFields.length > 0 && (
-                <details className="advanced-parameters">
-                  <summary>专业参数</summary>
-                  <div className="parameter-fields">
-                    {advancedFields.map((field) => (
-                      <ParameterField
-                        key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
-                        field={field}
-                        property={adapter.parameterSchema.properties[field.key]!}
-                        value={parameters[field.key]}
-                        required={adapter.parameterSchema.required.includes(field.key)}
-                        error={
-                          errors.find((item) => normalizeErrorPath(item.path) === field.key)
-                            ?.message
-                        }
-                        onChange={(value) => updateParameter(field.key, value)}
-                      />
-                    ))}
-                  </div>
-                </details>
-              )}
-
-              <div className="draft-actions">
-                <button
-                  className="button primary"
-                  type="button"
-                  onClick={() => void saveDraft()}
-                  disabled={!writable || !shotId || busy}
+        <div className="production-panel-body">
+          <div className="production-panel-main">
+            <div className="production-config-row">
+              <div className="field-group">
+                <label htmlFor="provider-profile">供应商连接</label>
+                <select
+                  id="provider-profile"
+                  value={selectedProfileId}
+                  onChange={(event) => chooseProfile(event.target.value)}
+                  disabled={eligibleProfiles.length === 0 || busy}
                 >
-                  <Save size={14} />
-                  保存草稿
+                  {eligibleProfiles.length === 0 && <option value="">没有可用连接</option>}
+                  {eligibleProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} ·{' '}
+                      {profile.baseUrl === 'https://api.vidu.cn' ? '中国站' : '国际站'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {eligibleProfiles.length > 0 && (
+                <div className="field-group">
+                  <label htmlFor="model">模型</label>
+                  <select
+                    id="model"
+                    value={adapterKey}
+                    onChange={(event) => setAdapterKey(event.target.value)}
+                    disabled={modelOptions.length === 0 || busy}
+                  >
+                    {modelOptions.length === 0 && <option value="">没有已启用的兼容模型</option>}
+                    {modelOptions.map((item) => (
+                      <option key={item.key} value={item.key}>
+                        {item.modelLabel}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+            {eligibleProfiles.length === 0 ? (
+              <div className="provider-required-state">
+                <Settings2 size={20} />
+                <strong>还没有可用于制作的供应商连接</strong>
+                <span>请在设置中心添加并测试 Vidu 中国站或国际站连接。</span>
+                <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
+                  前往供应商与模型
                 </button>
-                {message && (
-                  <span className={errors.length > 0 ? 'validation-error' : 'validation-ok'}>
-                    {errors.length > 0 ? <CircleAlert size={13} /> : <CircleCheck size={13} />}
-                    {message}
+              </div>
+            ) : null}
+
+            {selectedProfile && modelOptions.length === 0 && (
+              <div className="provider-required-state compact">
+                <strong>当前连接没有兼容模型</strong>
+                <span>请在设置中心启用支持当前制作方式的模型。</span>
+                <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
+                  管理模型
+                </button>
+              </div>
+            )}
+
+            {adapter && (
+              <>
+                <div className="adapter-meta">
+                  <strong>{adapter.modelLabel}</strong>
+                  <span>
+                    {selectedProfile?.name} · {adapter.providerLabel} · API {adapter.apiVersion}
                   </span>
+                </div>
+                <div className="parameter-fields">
+                  {basicFields.map((field) => (
+                    <ParameterField
+                      key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
+                      field={field}
+                      property={adapter.parameterSchema.properties[field.key]!}
+                      value={parameters[field.key]}
+                      required={adapter.parameterSchema.required.includes(field.key)}
+                      error={
+                        errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message
+                      }
+                      onChange={(value) => updateParameter(field.key, value)}
+                    />
+                  ))}
+                </div>
+                {advancedFields.length > 0 && (
+                  <details className="advanced-parameters">
+                    <summary>专业参数</summary>
+                    <div className="parameter-fields">
+                      {advancedFields.map((field) => (
+                        <ParameterField
+                          key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
+                          field={field}
+                          property={adapter.parameterSchema.properties[field.key]!}
+                          value={parameters[field.key]}
+                          required={adapter.parameterSchema.required.includes(field.key)}
+                          error={
+                            errors.find((item) => normalizeErrorPath(item.path) === field.key)
+                              ?.message
+                          }
+                          onChange={(value) => updateParameter(field.key, value)}
+                        />
+                      ))}
+                    </div>
+                  </details>
                 )}
-                {isVideoCapability(adapter.capability) ? (
-                  <>
+
+                <div className="draft-actions">
+                  <div className="draft-action-row">
                     <button
                       className="button primary"
                       type="button"
-                      onClick={() => void generateVideo()}
+                      onClick={() => void saveDraft()}
                       disabled={!writable || busy}
+                      title={draftSaveHint}
                     >
-                      <Video size={14} />
-                      提交视频任务
+                      <Save size={14} />
+                      保存草稿
                     </button>
-                    <label className="asset-kind-field">
-                      保存为
-                      <select
-                        value={videoAssetKind}
-                        onChange={(event) =>
-                          setVideoAssetKind(event.target.value as VideoAssetKind)
-                        }
-                        disabled={busy}
+                    {isVideoCapability(adapter.capability) ? (
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void generateVideo()}
+                        disabled={!writable || busy || !selectedProfile || !selectedModel}
                       >
-                        <option value="shot-video">镜头视频</option>
-                        <option value="generated-video">普通视频素材</option>
-                      </select>
-                    </label>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      className="button primary"
-                      type="button"
-                      onClick={() => void generateImage()}
-                      disabled={!writable || busy}
-                    >
-                      <WandSparkles size={14} />
-                      生成图片
-                    </button>
-                    {generationJobId && busy && (
+                        <Video size={14} />
+                        提交视频任务
+                      </button>
+                    ) : (
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void generateImage()}
+                        disabled={!writable || busy || !selectedProfile || !selectedModel}
+                      >
+                        <WandSparkles size={14} />
+                        生成图片
+                      </button>
+                    )}
+                    {generationJobId && busy && !isVideoCapability(adapter.capability) && (
                       <button
                         className="icon-button danger"
                         type="button"
@@ -998,220 +1028,308 @@ export function ProductionPanel({
                         <Square size={13} />
                       </button>
                     )}
-                    <label className="asset-kind-field">
-                      保存为
-                      <select
-                        value={assetKind}
-                        onChange={(event) => setAssetKind(event.target.value as typeof assetKind)}
-                        disabled={busy}
-                      >
-                        <option value="generated-image">普通素材</option>
-                        <option value="character">角色</option>
-                        <option value="scene">场景</option>
-                        <option value="first-frame">首帧</option>
-                        <option value="last-frame">尾帧</option>
-                      </select>
-                    </label>
-                    <label className="auto-save-toggle">
-                      <input
-                        type="checkbox"
-                        checked={autoSaveLocal}
-                        onChange={(event) => setAutoSaveLocal(event.target.checked)}
-                        disabled={busy}
-                      />
-                      自动保存到本地素材库
-                    </label>
-                  </>
-                )}
-                {generationStatus && <span className="credential-message">{generationStatus}</span>}
-              </div>
-              {isVideoCapability(adapter.capability) && (
-                <section className="video-task-center" aria-label="视频任务">
-                  <header>
-                    <strong>视频任务</strong>
-                    <span>{videoJobs.length}</span>
-                  </header>
-                  {videoJobs.map((job) => {
-                    const resultAsset = job.results[0]?.asset;
-                    return (
-                      <div className="video-task-row" key={job.id}>
-                        <div className="video-task-summary">
-                          <strong>{videoStatusLabel(job.status)}</strong>
-                          <span>{formatElapsed(job.elapsedMs)}</span>
-                          <small>
-                            {formatVideoCost(job.metadata.cost)}
-                            {' · '}
-                            查询 {job.metadata.pollAttempts} 次
-                          </small>
-                          {job.error && <small className="error-copy">{job.error}</small>}
-                        </div>
-                        <div className="video-task-actions">
-                          {job.status === 'polling' && (
-                            <button
-                              className="icon-button subtle"
-                              type="button"
-                              title="暂停查询"
-                              onClick={() => void pauseVideo(job)}
-                            >
-                              <Pause size={13} />
-                            </button>
-                          )}
-                          {job.status === 'paused' && (
-                            <button
-                              className="icon-button subtle"
-                              type="button"
-                              title="继续查询"
-                              onClick={() => void resumeVideo(job)}
-                            >
-                              <Play size={13} />
-                            </button>
-                          )}
-                          {['pending', 'polling', 'downloading', 'paused'].includes(job.status) && (
-                            <button
-                              className="icon-button danger"
-                              type="button"
-                              title="取消任务"
-                              onClick={() => void cancelVideo(job)}
-                            >
-                              <Square size={13} />
-                            </button>
-                          )}
-                          {resultAsset && (
-                            <button
-                              className="icon-button subtle"
-                              type="button"
-                              title="播放视频"
-                              onClick={() => void openAsset(resultAsset)}
-                            >
-                              <Play size={13} />
-                            </button>
-                          )}
-                          {resultAsset && (
-                            <button
-                              className="icon-button subtle"
-                              type="button"
-                              title="打开视频位置"
-                              onClick={() => void revealAsset(resultAsset)}
-                            >
-                              <FolderOpen size={13} />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {videoJobs.length === 0 && <span className="video-task-empty">暂无视频任务</span>}
-                </section>
-              )}
-              {(preview || selectedImageAsset) && (
-                <div className="asset-preview-card" aria-label="图片预览">
-                  <div className="asset-preview-frame">
-                    {preview ? (
-                      <img
-                        src={preview.dataUrl}
-                        alt={selectedImageAsset?.relativePath ?? '生成图片预览'}
-                      />
+                  </div>
+                  <div className="draft-options-row">
+                    {isVideoCapability(adapter.capability) ? (
+                      <label className="asset-kind-field">
+                        保存为
+                        <select
+                          value={videoAssetKind}
+                          onChange={(event) =>
+                            setVideoAssetKind(event.target.value as VideoAssetKind)
+                          }
+                          disabled={busy}
+                        >
+                          <option value="shot-video">镜头视频</option>
+                          <option value="generated-video">普通视频素材</option>
+                        </select>
+                      </label>
                     ) : (
-                      <span>正在读取预览</span>
+                      <>
+                        <label className="asset-kind-field">
+                          保存为
+                          <select
+                            value={assetKind}
+                            onChange={(event) =>
+                              setAssetKind(event.target.value as typeof assetKind)
+                            }
+                            disabled={busy}
+                          >
+                            <option value="generated-image">普通素材</option>
+                            <option value="character">角色</option>
+                            <option value="scene">场景</option>
+                            <option value="first-frame">首帧</option>
+                            <option value="last-frame">尾帧</option>
+                          </select>
+                        </label>
+                        <label className="auto-save-toggle">
+                          <input
+                            type="checkbox"
+                            checked={autoSaveLocal}
+                            onChange={(event) => setAutoSaveLocal(event.target.checked)}
+                            disabled={busy}
+                          />
+                          自动保存到本地素材库
+                        </label>
+                      </>
                     )}
                   </div>
-                  <div className="asset-preview-meta">
-                    <strong>{selectedImageAsset?.relativePath ?? '本次生成预览'}</strong>
-                    {selectedImageAsset && <small>{localAssetPath(selectedImageAsset)}</small>}
-                  </div>
-                  {selectedImageAsset && (
-                    <div className="asset-actions">
-                      <button
-                        className="button"
-                        type="button"
-                        onClick={() => void revealAsset(selectedImageAsset)}
-                      >
-                        <FolderOpen size={14} />
-                        打开位置
-                      </button>
-                      <button
-                        className="button"
-                        type="button"
-                        onClick={() => onOpenAssetLibrary?.(selectedImageAsset.id)}
-                      >
-                        <Eye size={14} />
-                        查看素材库
-                      </button>
-                    </div>
+                  {message && (
+                    <span className={errors.length > 0 ? 'validation-error' : 'validation-ok'}>
+                      {errors.length > 0 ? <CircleAlert size={13} /> : <CircleCheck size={13} />}
+                      {message}
+                    </span>
                   )}
-                  {preview?.jobId && !preview.assetId && !selectedImageAsset && (
-                    <div className="asset-actions single">
-                      <button
-                        className="button primary"
-                        type="button"
-                        onClick={() => void savePreviewToAssetLibrary()}
-                        disabled={!writable || savingPreview}
-                      >
-                        <Save size={14} />
-                        保存到素材库
-                      </button>
-                    </div>
+                  {generationStatus && (
+                    <span className="production-status-message">{generationStatus}</span>
                   )}
                 </div>
-              )}
-              {assets.length > 0 && (
-                <div className="asset-list" aria-label="素材列表">
-                  {assets.map((asset) => (
-                    <div
-                      className={`asset-row${asset.id === selectedAssetId ? ' selected' : ''}`}
-                      key={asset.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelectedAssetId(asset.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ')
-                          setSelectedAssetId(asset.id);
+                {isVideoCapability(adapter.capability) && (
+                  <section className="video-task-center" aria-label="视频任务">
+                    <header>
+                      <strong>视频任务</strong>
+                      <span>{videoJobs.length}</span>
+                    </header>
+                    {videoJobs.map((job) => {
+                      const resultAsset = job.results[0]?.asset;
+                      return (
+                        <div className="video-task-row" key={job.id}>
+                          <div className="video-task-summary">
+                            <strong>{videoStatusLabel(job.status)}</strong>
+                            <span>{formatElapsed(job.elapsedMs)}</span>
+                            <small>
+                              {formatVideoCost(job.metadata.cost)}
+                              {' · '}
+                              查询 {job.metadata.pollAttempts} 次
+                            </small>
+                            {job.error && <small className="error-copy">{job.error}</small>}
+                          </div>
+                          <div className="video-task-actions">
+                            {job.status === 'polling' && (
+                              <button
+                                className="icon-button subtle"
+                                type="button"
+                                title="暂停查询"
+                                onClick={() => void pauseVideo(job)}
+                              >
+                                <Pause size={13} />
+                              </button>
+                            )}
+                            {job.status === 'paused' && (
+                              <button
+                                className="icon-button subtle"
+                                type="button"
+                                title="继续查询"
+                                onClick={() => void resumeVideo(job)}
+                              >
+                                <Play size={13} />
+                              </button>
+                            )}
+                            {['pending', 'polling', 'downloading', 'paused'].includes(
+                              job.status,
+                            ) && (
+                              <button
+                                className="icon-button danger"
+                                type="button"
+                                title="取消任务"
+                                onClick={() => void cancelVideo(job)}
+                              >
+                                <Square size={13} />
+                              </button>
+                            )}
+                            {resultAsset && (
+                              <button
+                                className="icon-button subtle"
+                                type="button"
+                                title="预览结果"
+                                onClick={() => setSelectedAssetId(resultAsset.id)}
+                              >
+                                <Eye size={13} />
+                              </button>
+                            )}
+                            {resultAsset && (
+                              <button
+                                className="icon-button subtle"
+                                type="button"
+                                title="播放视频"
+                                onClick={() => void openAsset(resultAsset)}
+                              >
+                                <Play size={13} />
+                              </button>
+                            )}
+                            {resultAsset && (
+                              <button
+                                className="icon-button subtle"
+                                type="button"
+                                title="打开视频位置"
+                                onClick={() => void revealAsset(resultAsset)}
+                              >
+                                <FolderOpen size={13} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {videoJobs.length === 0 && (
+                      <span className="video-task-empty">暂无视频任务</span>
+                    )}
+                  </section>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="production-panel-result" aria-label="生成结果">
+            <header className="production-result-header">
+              <strong>生成结果</strong>
+              {showResultPreview && <span>自动预览</span>}
+            </header>
+            {showResultPreview ? (
+              <div className="asset-preview-card result-preview-card">
+                <div className="asset-preview-frame">
+                  {selectedVideoAsset ? (
+                    videoPreviewUrl ? (
+                      <video
+                        key={selectedVideoAsset.id}
+                        src={videoPreviewUrl}
+                        controls
+                        autoPlay
+                        playsInline
+                        aria-label={selectedVideoAsset.relativePath}
+                      />
+                    ) : (
+                      <div className="video-result-fallback">
+                        <Video size={36} />
+                        <span>视频已就绪</span>
+                        <button
+                          className="button primary"
+                          type="button"
+                          onClick={() => void openAsset(selectedVideoAsset)}
+                        >
+                          <Play size={14} />
+                          播放视频
+                        </button>
+                      </div>
+                    )
+                  ) : preview ? (
+                    <img
+                      src={preview.dataUrl}
+                      alt={selectedImageAsset?.relativePath ?? '生成图片预览'}
+                    />
+                  ) : (
+                    <span>正在读取预览</span>
+                  )}
+                </div>
+                <div className="asset-preview-meta">
+                  <strong>
+                    {selectedVideoAsset?.relativePath ??
+                      selectedImageAsset?.relativePath ??
+                      '本次生成预览'}
+                  </strong>
+                  {(selectedVideoAsset || selectedImageAsset) && (
+                    <small>{localAssetPath(selectedVideoAsset ?? selectedImageAsset!)}</small>
+                  )}
+                </div>
+                {(selectedImageAsset || selectedVideoAsset) && (
+                  <div className="asset-actions">
+                    <button
+                      className="button"
+                      type="button"
+                      onClick={() => void revealAsset(selectedVideoAsset ?? selectedImageAsset)}
+                    >
+                      <FolderOpen size={14} />
+                      打开位置
+                    </button>
+                    <button
+                      className="button"
+                      type="button"
+                      onClick={() =>
+                        onOpenAssetLibrary?.((selectedVideoAsset ?? selectedImageAsset)!.id)
+                      }
+                    >
+                      <Eye size={14} />
+                      查看素材库
+                    </button>
+                  </div>
+                )}
+                {unsavedPreview && !selectedImageAsset && !selectedVideoAsset && (
+                  <div className="asset-actions single">
+                    <button
+                      className="button primary"
+                      type="button"
+                      onClick={() => void savePreviewToAssetLibrary()}
+                      disabled={!writable || savingPreview}
+                    >
+                      <Save size={14} />
+                      保存到素材库
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="production-result-empty">
+                <ImagePlus size={28} />
+                <strong>生成完成后将在此自动预览</strong>
+                <span>图片直接显示；视频完成后自动选中并尝试内嵌播放。</span>
+              </div>
+            )}
+            {assets.length > 0 && (
+              <div className="asset-list" aria-label="素材列表">
+                {assets.map((asset) => (
+                  <div
+                    className={`asset-row${asset.id === selectedAssetId ? ' selected' : ''}`}
+                    key={asset.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelectedAssetId(asset.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') setSelectedAssetId(asset.id);
+                    }}
+                  >
+                    <span title={asset.sourceUrl}>{asset.relativePath}</span>
+                    <small title={localAssetPath(asset)}>
+                      {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
+                    </small>
+                    <button
+                      className="icon-button subtle"
+                      type="button"
+                      title="打开位置"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void revealAsset(asset);
                       }}
                     >
-                      <span title={asset.sourceUrl}>{asset.relativePath}</span>
-                      <small title={localAssetPath(asset)}>
-                        {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
-                      </small>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="打开位置"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void revealAsset(asset);
-                        }}
-                      >
-                        <FolderOpen size={13} />
-                      </button>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="重命名素材"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void renameAsset(asset);
-                        }}
-                      >
-                        <Save size={13} />
-                      </button>
-                      <button
-                        className="icon-button danger"
-                        type="button"
-                        title="删除素材"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void removeAsset(asset);
-                        }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </>
+                      <FolderOpen size={13} />
+                    </button>
+                    <button
+                      className="icon-button subtle"
+                      type="button"
+                      title="重命名素材"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void renameAsset(asset);
+                      }}
+                    >
+                      <Save size={13} />
+                    </button>
+                    <button
+                      className="icon-button danger"
+                      type="button"
+                      title="删除素材"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void removeAsset(asset);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </aside>
   );

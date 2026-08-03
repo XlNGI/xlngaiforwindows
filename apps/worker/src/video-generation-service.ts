@@ -26,7 +26,11 @@ import type {
   VideoProviderRegion,
 } from '@ai-video/contracts';
 import type { AssetRecord, GenerationResultRecord, JobRecord } from '@ai-video/domain';
-import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
+import {
+  extractVideoCost,
+  getAdapter,
+  validateAdapterParameters,
+} from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
@@ -207,7 +211,7 @@ export class VideoGenerationService {
     });
     if (job.status !== 'polling') return this.get(job.id);
 
-    const metadata = observedMetadata(this.metadata(job), params.providerBody);
+    const metadata = observedMetadata(this.metadata(job), job.adapterKey, params.providerBody);
     if (params.providerStatus === 429 || params.providerStatus >= 500) {
       return this.persistObservation(job.id, providerTaskId, {
         ...metadata,
@@ -815,8 +819,14 @@ function cloneParameters(parameters: AdapterParameters): AdapterParameters {
   );
 }
 
-function observedMetadata(metadata: VideoJobMetadata, body: unknown): VideoJobMetadata {
-  const cost = providerCost(body) ?? metadata.cost;
+function observedMetadata(
+  metadata: VideoJobMetadata,
+  adapterKey: string,
+  body: unknown,
+): VideoJobMetadata {
+  const provider = getAdapter(adapterKey)?.provider;
+  const cost =
+    (provider ? extractVideoCost(provider, body) : undefined) ?? metadata.cost;
   return {
     ...metadata,
     pollAttempts: metadata.pollAttempts + 1,
@@ -860,40 +870,6 @@ function providerState(body: unknown): string | undefined {
   if (typeof direct === 'string' && direct.trim()) return direct.trim().toLowerCase();
   const data = object.data;
   return data && typeof data === 'object' && !Array.isArray(data) ? providerState(data) : undefined;
-}
-
-function providerCost(body: unknown): VideoGenerationMetadataInfo['cost'] | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  if (Array.isArray(body)) {
-    for (const item of body) {
-      const found = providerCost(item);
-      if (found) return found;
-    }
-    return undefined;
-  }
-  const object = body as Record<string, unknown>;
-  for (const [key, unit] of [
-    ['credits_used', 'credits'],
-    ['creditsUsed', 'credits'],
-    ['credits', 'credits'],
-    ['cost', 'unknown'],
-  ] as const) {
-    const value = object[key];
-    const amount =
-      typeof value === 'number'
-        ? value
-        : typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())
-          ? Number(value)
-          : undefined;
-    if (amount !== undefined && Number.isFinite(amount) && amount >= 0) {
-      return { amount, unit };
-    }
-  }
-  for (const value of Object.values(object)) {
-    const found = providerCost(value);
-    if (found) return found;
-  }
-  return undefined;
 }
 
 function providerFailureMessage(body: unknown): string {

@@ -1,5 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { getAdapterCatalog, resolveAdapter, validateAdapterParameters } from './index.js';
+import { extractVideoCost, getAdapterCatalog, resolveAdapter, validateAdapterParameters } from './index.js';
+
+describe('extractVideoCost', () => {
+  it('extracts credits from Vidu poll bodies', () => {
+    expect(
+      extractVideoCost('vidu', {
+        state: 'success',
+        credits: '4',
+      }),
+    ).toEqual({ amount: 4, unit: 'credits' });
+    expect(
+      extractVideoCost('vidu', {
+        state: 'success',
+        data: { credits_used: 2 },
+      }),
+    ).toEqual({ amount: 2, unit: 'credits' });
+    expect(
+      extractVideoCost('vidu', {
+        state: 'success',
+        creditsUsed: 3,
+      }),
+    ).toEqual({ amount: 3, unit: 'credits' });
+    expect(
+      extractVideoCost('vidu', {
+        state: 'success',
+        cost: 1.5,
+      }),
+    ).toEqual({ amount: 1.5, unit: 'unknown' });
+  });
+
+  it('returns undefined when the body has no usable cost fields', () => {
+    expect(extractVideoCost('vidu', undefined)).toBeUndefined();
+    expect(extractVideoCost('vidu', null)).toBeUndefined();
+    expect(extractVideoCost('vidu', { state: 'success' })).toBeUndefined();
+    expect(extractVideoCost('unknown-provider', { credits: 4 })).toBeUndefined();
+  });
+});
 
 describe('adapter registry', () => {
   it('resolves every capability/provider/model tuple to exactly one adapter', () => {

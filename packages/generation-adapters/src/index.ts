@@ -603,6 +603,8 @@ export function resolveAdapter(selection: AdapterResolveParams): AdapterDescript
   return matches[0]!;
 }
 
+export { extractVideoCost, type VideoGenerationCostInfo } from './extract-video-cost.js';
+
 export function validateAdapterParameters(
   adapterKey: string,
   parameters: AdapterParameters,

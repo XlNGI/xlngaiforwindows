@@ -24,6 +24,9 @@ vi.mock('./provider-client', () => ({
   pollVideoProviderTask: vi.fn(),
   cancelVideoProviderTask: vi.fn(),
 }));
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
+}));
 const providerProfile: ProviderProfileInfo = {
   id: '11111111-1111-4111-8111-111111111111',
   name: 'Vidu 中国站 A',
@@ -603,6 +606,88 @@ describe('ProductionPanel', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: '查看素材库' }));
     expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedAsset.id);
+  });
+
+  it('keeps an unsaved preview after clearing a previously selected asset', async () => {
+    const priorAsset: AssetInfo = {
+      ...savedAsset,
+      id: 'asset-prior',
+      relativePath: 'assets/images/prior.png',
+    };
+    vi.mocked(submitProviderRequest).mockResolvedValueOnce({
+      status: 200,
+      body: { images: [{ url: 'https://example.test/generated.png' }] },
+    });
+    mockWorker((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'running',
+          request: (params as { parameters: Record<string, unknown> }).parameters,
+          results: [],
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:00.000Z',
+        });
+      }
+      if (method === 'image.generate.complete') {
+        return Promise.resolve({
+          id: 'job',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          status: 'succeeded',
+          request: { prompt: '电影画面', resolution: '1080p' },
+          results: [],
+          preview: {
+            jobId: 'job',
+            dataUrl: 'data:image/png;base64,preview-only',
+            contentType: 'image/png',
+          },
+          createdAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:01.000Z',
+        });
+      }
+      if (method === 'asset.list') return Promise.resolve([priorAsset]);
+      if (method === 'asset.preview') {
+        return Promise.resolve({
+          assetId: priorAsset.id,
+          dataUrl: 'data:image/png;base64,prior',
+          contentType: 'image/png',
+        });
+      }
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(
+      <ProductionPanel projectId="project" shotId="shot" writable assets={[priorAsset]} />,
+    );
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
+      target: { value: '电影画面' },
+    });
+    fireEvent.click(await screen.findByText(priorAsset.relativePath));
+    expect(await screen.findByRole('img', { name: priorAsset.relativePath })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('自动保存到本地素材库'));
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+
+    expect(await screen.findByText('图片已生成，仅预览，未保存到素材库。')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
+      'src',
+      'data:image/png;base64,preview-only',
+    );
+    expect(screen.getByRole('button', { name: '保存到素材库' })).toBeInTheDocument();
+  });
+
+  it('explains why draft save is blocked when no shot is selected', async () => {
+    render(<ProductionPanel writable />);
+    fireEvent.click(await screen.findByRole('button', { name: '保存草稿' }));
+    expect(await screen.findByText('请先在左侧选择镜头后再保存草稿。')).toBeInTheDocument();
   });
 
   it('can generate a preview without saving to the local asset library', async () => {

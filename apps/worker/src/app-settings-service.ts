@@ -378,16 +378,11 @@ export class AppSettingsService {
   ): { currency: string; creditPrice: string } | undefined {
     const repositories = this.repositories();
     const profile = repositories.providerProfiles.get(requireUuid(providerProfileId));
-    const model = repositories.providerModels.get(requireUuid(modelId));
-    if (
-      !profile ||
-      profile.archivedAt ||
-      profile.providerType !== 'vidu' ||
-      !model ||
-      model.providerProfileId !== profile.id
-    ) {
+    if (!profile || profile.archivedAt || profile.providerType !== 'vidu') {
       return undefined;
     }
+    const model = resolveProviderModel(repositories.providerModels, profile.id, modelId);
+    if (!model) return undefined;
     const pricing = repositories.modelPricing.get(profile.id, model.id);
     return pricing?.creditPrice
       ? { currency: pricing.currency, creditPrice: pricing.creditPrice }
@@ -623,12 +618,37 @@ export function normalizeBaseUrl(value: string): string {
   return url.toString().replace(/\/$/, '');
 }
 
+const UUID_V4_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 export function requireUuid(value: string): string {
   const normalized = value.toLowerCase();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
+  if (!UUID_V4_PATTERN.test(normalized)) {
     throw new ProviderProfileValidationError('Provider profile ID is invalid.');
   }
   return normalized;
+}
+
+function tryUuid(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase();
+  return UUID_V4_PATTERN.test(normalized) ? normalized : undefined;
+}
+
+function resolveProviderModel(
+  models: ReturnType<AppSettingsService['repositories']>['providerModels'],
+  profileId: string,
+  modelId: string,
+): { id: string; providerProfileId: string } | undefined {
+  const asUuid = tryUuid(modelId);
+  if (asUuid) {
+    const byId = models.get(asUuid);
+    if (byId?.providerProfileId === profileId) return byId;
+  }
+  try {
+    return models.getByRemoteId(profileId, normalizeModelId(modelId));
+  } catch {
+    return undefined;
+  }
 }
 
 function toProfileInfo(record: ProviderProfileInfo): ProviderProfileInfo {

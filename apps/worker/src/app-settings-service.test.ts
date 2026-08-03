@@ -352,6 +352,11 @@ describe('AppSettingsService', () => {
       currency: 'CNY',
       creditPrice: '0.03125',
     });
+    expect(service.resolveCreditPricing(profile.id, 'viduq3')).toEqual({
+      currency: 'CNY',
+      creditPrice: '0.03125',
+    });
+    expect(service.resolveCreditPricing(profile.id, 'missing-model')).toBeUndefined();
     service.close();
   });
 
