@@ -2,7 +2,12 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import type { IntegrityReport } from '@ai-video/domain';
-import { APP_MIGRATION_V1, APP_MIGRATION_V2, CURRENT_APP_SCHEMA_VERSION } from './app-schema.js';
+import {
+  APP_MIGRATION_V1,
+  APP_MIGRATION_V2,
+  APP_MIGRATION_V3,
+  CURRENT_APP_SCHEMA_VERSION,
+} from './app-schema.js';
 import type { OpenDatabaseOptions } from './database.js';
 
 export function openAppDatabase(
@@ -70,6 +75,14 @@ export function migrateAppDatabase(
       database
         .prepare('INSERT INTO app_schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(2, now);
+    })();
+  }
+  if (getAppSchemaVersion(database) === 2) {
+    database.transaction(() => {
+      database.exec(APP_MIGRATION_V3);
+      database
+        .prepare('INSERT INTO app_schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(3, now);
     })();
   }
   return getAppSchemaVersion(database);

@@ -33,11 +33,11 @@ describe('app settings database', () => {
     const projectDatabase = openProjectDatabase(join(directory, 'project.sqlite'));
 
     expect(getAppSchemaVersion(appDatabase)).toBe(0);
-    expect(migrateAppDatabase(appDatabase)).toBe(2);
-    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 2 });
+    expect(migrateAppDatabase(appDatabase)).toBe(3);
+    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 3 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
     expect(migrateDatabase(projectDatabase)).toBe(7);
-    expect(getAppSchemaVersion(appDatabase)).toBe(2);
+    expect(getAppSchemaVersion(appDatabase)).toBe(3);
 
     const providerColumns = appDatabase
       .prepare("SELECT name FROM pragma_table_info('provider_profiles')")
@@ -78,7 +78,7 @@ describe('app settings database', () => {
         '2026-08-03T00:00:00.000Z',
       );
 
-    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(2);
+    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(3);
     expect(createAppRepositories(database).providerProfiles.list()).toMatchObject([
       { name: 'Existing Vidu', migrationSource: undefined },
     ]);
@@ -124,6 +124,7 @@ describe('app settings database', () => {
       inputPrice: '8.00',
       cachedInputPrice: '2.00',
       outputPrice: '32.00',
+      creditPrice: '0.03125',
       updatedAt: '2026-08-03T00:00:00.000Z',
     });
     repositories.providerDefaults.save({
@@ -178,7 +179,12 @@ describe('app settings database', () => {
     ).toMatchObject({ displayName: 'Quality Model', enabled: true });
     expect(
       repositories.modelPricing.get('11111111-1111-4111-8111-111111111111', 'model-record'),
-    ).toMatchObject({ currency: 'CNY', inputPrice: '8.00', outputPrice: '32.00' });
+    ).toMatchObject({
+      currency: 'CNY',
+      inputPrice: '8.00',
+      outputPrice: '32.00',
+      creditPrice: '0.03125',
+    });
     expect(repositories.providerDefaults.get('balanced')).toMatchObject({
       modelId: 'model-record',
     });

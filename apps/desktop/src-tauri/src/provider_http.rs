@@ -222,12 +222,16 @@ pub(crate) fn request_json(
     let body = if response.is_empty() {
         serde_json::Value::Null
     } else {
-        serde_json::from_slice(&response).map_err(|_| {
-            JsonHttpError::new(
-                JsonHttpErrorKind::InvalidResponse,
-                "Provider returned a non-JSON response",
-            )
-        })?
+        match serde_json::from_slice(&response) {
+            Ok(body) => body,
+            Err(_) if !(200..=299).contains(&status) => serde_json::Value::Null,
+            Err(_) => {
+                return Err(JsonHttpError::new(
+                    JsonHttpErrorKind::InvalidResponse,
+                    "Provider returned a non-JSON success response",
+                ));
+            }
+        }
     };
     Ok(JsonHttpResponse { status, body })
 }
@@ -373,5 +377,40 @@ mod tests {
         })
         .expect_err("oversized requests must fail before transport");
         assert_eq!(error.kind(), JsonHttpErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn preserves_non_json_error_statuses_for_provider_classification() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider should bind");
+        let port = listener.local_addr().expect("mock address").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock request should connect");
+            let mut request = [0_u8; 4096];
+            stream
+                .read(&mut request)
+                .expect("mock request should be readable");
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                )
+                .expect("mock response should be written");
+        });
+
+        let response = request_json(JsonHttpRequest {
+            host: "127.0.0.1",
+            port,
+            secure: false,
+            method: "GET",
+            path: "/ent/v2/models",
+            authorization_scheme: "Token",
+            secret: "local-test-key",
+            body: None,
+            request_body_limit: 1,
+            response_body_limit: 1024,
+        })
+        .expect("non-JSON error response should preserve its status");
+        server.join().expect("mock provider should finish");
+        assert_eq!(response.status, 404);
+        assert!(response.body.is_null());
     }
 }

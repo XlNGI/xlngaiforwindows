@@ -30,6 +30,7 @@ import type {
   ProviderProfileInfo,
   VideoAssetKind,
   VideoGenerationJobInfo,
+  VideoGenerationMetadataInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import {
@@ -49,6 +50,7 @@ import {
 } from './local-image-input';
 
 interface ProductionPanelProps {
+  expanded?: boolean;
   capability?: GenerationCapability;
   projectId?: string;
   projectRootPath?: string;
@@ -133,6 +135,15 @@ function formatBytes(bytes: number): string {
   return `${(kibibytes / 1024).toFixed(1)} MiB`;
 }
 
+function formatVideoCost(cost: VideoGenerationMetadataInfo['cost'] | undefined): string {
+  if (!cost) return '费用未返回';
+  if (cost.unit !== 'credits') return `${cost.amount} ${cost.unit}`;
+  const credits = `${cost.amount} 积分`;
+  return cost.estimatedAmount && cost.currency
+    ? `${credits} · ${cost.currency} ${cost.estimatedAmount}（${cost.unitPrice}/积分）`
+    : `${credits} · 未配置每积分单价`;
+}
+
 function upsertVideoJob(
   jobs: VideoGenerationJobInfo[],
   next: VideoGenerationJobInfo,
@@ -155,6 +166,7 @@ function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
 }
 
 export function ProductionPanel({
+  expanded = false,
   capability,
   projectId,
   projectRootPath,
@@ -816,7 +828,7 @@ export function ProductionPanel({
   const advancedFields = fields.filter((field) => field.group === 'advanced');
 
   return (
-    <aside className="production-panel panel-border">
+    <aside className={`production-panel panel-border${expanded ? ' expanded' : ''}`}>
       <div className="panel-heading">
         <span>生产参数</span>
         {adapter && <small>Schema {adapter.schemaVersion}</small>}
@@ -1027,9 +1039,7 @@ export function ProductionPanel({
                           <strong>{videoStatusLabel(job.status)}</strong>
                           <span>{formatElapsed(job.elapsedMs)}</span>
                           <small>
-                            {job.metadata.cost
-                              ? `${job.metadata.cost.amount} ${job.metadata.cost.unit}`
-                              : '费用未返回'}
+                            {formatVideoCost(job.metadata.cost)}
                             {' · '}
                             查询 {job.metadata.pollAttempts} 次
                           </small>

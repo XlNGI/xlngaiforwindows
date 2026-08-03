@@ -59,6 +59,12 @@ export function addDecimalStrings(values: string[]): string {
   return formatScaled(total, scale);
 }
 
+export function multiplyDecimalStrings(left: string, right: string): string {
+  const first = parseDecimal(left);
+  const second = parseDecimal(right);
+  return formatScaled(first.coefficient * second.coefficient, first.scale + second.scale);
+}
+
 function safeTokenCount(value: number | undefined): number {
   if (value === undefined) return 0;
   if (!Number.isSafeInteger(value) || value < 0) {

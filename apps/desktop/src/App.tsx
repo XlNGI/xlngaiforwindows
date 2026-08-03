@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   Aperture,
   ChevronLeft,
@@ -6,16 +8,19 @@ import {
   CircleAlert,
   CircleCheck,
   Clapperboard,
+  Copy,
   FilePlus2,
   FileText,
   FolderOpen,
   Image,
+  Minus,
   PanelLeftClose,
   Play,
   Plus,
   RotateCcw,
   Save,
   Settings2,
+  Square,
   Video,
   WandSparkles,
   X,
@@ -129,6 +134,7 @@ export function mergeGenerationMessage(
 
 export function App() {
   const [health, setHealth] = useState<HealthResult>();
+  const [windowMaximized, setWindowMaximized] = useState(false);
   const [sqlite, setSqlite] = useState<SqliteProbeResult>();
   const [state, setState] = useState<CheckState>('checking');
   const [error, setError] = useState('');
@@ -415,6 +421,22 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const window = getCurrentWindow();
+    let active = true;
+    const updateMaximized = () => {
+      void window.isMaximized().then((maximized) => {
+        if (active) setWindowMaximized(maximized);
+      });
+    };
+    updateMaximized();
+    const unlisten = window.onResized(updateMaximized);
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  useEffect(() => {
     try {
       window.localStorage.setItem(PRODUCTION_CAPABILITY_STORAGE_KEY, productionCapability);
     } catch {
@@ -602,6 +624,21 @@ export function App() {
     const rootPath = normalizeProjectPath(requestedPath ?? projectPath);
     if (!rootPath) return;
     return runProjectAction(() => callWorker('project.open', { rootPath }));
+  };
+  const selectProjectDirectory = async (openAfterSelection = false) => {
+    setProjectMessage('');
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: openAfterSelection ? '选择要打开的项目目录' : '选择项目目录',
+      });
+      if (typeof selected !== 'string') return;
+      setProjectPath(selected);
+      if (openAfterSelection) await openProject(selected);
+    } catch (reason) {
+      setProjectMessage(reason instanceof Error ? reason.message : '无法打开目录选择器');
+    }
   };
   const closeProject = () =>
     runProjectAction(async () => {
@@ -1020,22 +1057,34 @@ export function App() {
   };
 
   return (
-    <div className="app-shell" data-left-open={leftOpen} data-right-open={rightOpen}>
-      <header className="topbar">
-        <div className="brand-mark" aria-hidden="true">
+    <div
+      className="app-shell"
+      data-left-open={leftOpen}
+      data-right-open={rightOpen}
+      data-navigation-mode={navigationMode}
+    >
+      <header
+        className="topbar"
+        data-tauri-drag-region
+        onDoubleClick={(event) => {
+          if ((event.target as HTMLElement).closest('button')) return;
+          void getCurrentWindow().toggleMaximize();
+        }}
+      >
+        <div className="brand-mark" aria-hidden="true" data-tauri-drag-region>
           <Clapperboard size={17} />
         </div>
-        <div className="project-title">
-          <strong>AI 影像工作台</strong>
-          <span>{project?.name ?? '未打开项目'}</span>
+        <div className="project-title" data-tauri-drag-region>
+          <strong data-tauri-drag-region>AI 影像工作台</strong>
+          <span data-tauri-drag-region>{project?.name ?? '未打开项目'}</span>
         </div>
         <div className="topbar-actions">
           <button
             className="icon-button"
             type="button"
             title="打开项目"
-            onClick={() => void openProject()}
-            disabled={projectBusy || !projectPath.trim()}
+            onClick={() => void selectProjectDirectory(true)}
+            disabled={projectBusy}
           >
             <FolderOpen size={17} />
           </button>
@@ -1065,6 +1114,33 @@ export function App() {
             onClick={() => setProductionMenuOpen((open) => !open)}
           >
             <WandSparkles size={17} />
+          </button>
+        </div>
+        <div className="window-controls" aria-label="窗口控制">
+          <button
+            type="button"
+            title="最小化"
+            aria-label="最小化窗口"
+            onClick={() => void getCurrentWindow().minimize()}
+          >
+            <Minus size={15} />
+          </button>
+          <button
+            type="button"
+            title={windowMaximized ? '还原' : '最大化'}
+            aria-label={windowMaximized ? '还原窗口' : '最大化窗口'}
+            onClick={() => void getCurrentWindow().toggleMaximize()}
+          >
+            {windowMaximized ? <Copy size={13} /> : <Square size={13} />}
+          </button>
+          <button
+            className="window-close"
+            type="button"
+            title="关闭"
+            aria-label="关闭窗口"
+            onClick={() => void getCurrentWindow().close()}
+          >
+            <X size={16} />
           </button>
         </div>
       </header>
@@ -1366,12 +1442,23 @@ export function App() {
                 onChange={(event) => setProjectName(event.target.value)}
               />
               <label htmlFor="project-path">项目绝对目录</label>
-              <input
-                id="project-path"
-                value={projectPath}
-                onChange={(event) => setProjectPath(event.target.value)}
-                placeholder="D:\Projects\my-drama"
-              />
+              <div className="project-path-row">
+                <input
+                  id="project-path"
+                  value={projectPath}
+                  onChange={(event) => setProjectPath(event.target.value)}
+                  placeholder="D:\Projects\my-drama"
+                />
+                <button
+                  type="button"
+                  aria-label="选择项目目录"
+                  title="选择项目目录"
+                  onClick={() => void selectProjectDirectory()}
+                  disabled={projectBusy}
+                >
+                  <FolderOpen size={14} />
+                </button>
+              </div>
               <div className="project-actions">
                 <button
                   type="button"
@@ -1635,6 +1722,7 @@ export function App() {
       </main>
 
       <ProductionPanel
+        expanded={navigationMode === 'production'}
         capability={productionCapability}
         projectId={project?.id}
         projectRootPath={project?.rootPath}

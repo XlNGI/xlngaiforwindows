@@ -236,17 +236,18 @@ class SqliteModelPricingRepository implements ModelPricingRepository {
   save(record: ModelPricingRecord): void {
     this.database
       .prepare(
-        `INSERT INTO model_pricing
+         `INSERT INTO model_pricing
          (provider_profile_id, model_id, currency, unit_tokens, input_price,
-          cached_input_price, output_price, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           cached_input_price, output_price, credit_price, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(provider_profile_id, model_id) DO UPDATE SET
            currency = excluded.currency,
            unit_tokens = excluded.unit_tokens,
            input_price = excluded.input_price,
-           cached_input_price = excluded.cached_input_price,
-           output_price = excluded.output_price,
-           updated_at = excluded.updated_at`,
+            cached_input_price = excluded.cached_input_price,
+            output_price = excluded.output_price,
+            credit_price = excluded.credit_price,
+            updated_at = excluded.updated_at`,
       )
       .run(
         record.providerProfileId,
@@ -256,6 +257,7 @@ class SqliteModelPricingRepository implements ModelPricingRepository {
         record.inputPrice,
         record.cachedInputPrice ?? null,
         record.outputPrice,
+        record.creditPrice ?? null,
         record.updatedAt,
       );
   }
@@ -284,6 +286,7 @@ interface ModelPricingRow {
   input_price: string;
   cached_input_price: string | null;
   output_price: string;
+  credit_price: string | null;
   updated_at: string;
 }
 
@@ -296,6 +299,7 @@ function mapModelPricing(row: ModelPricingRow): ModelPricingRecord {
     inputPrice: row.input_price,
     cachedInputPrice: row.cached_input_price ?? undefined,
     outputPrice: row.output_price,
+    creditPrice: row.credit_price ?? undefined,
     updatedAt: row.updated_at,
   };
 }

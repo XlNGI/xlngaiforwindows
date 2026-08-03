@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -8,8 +8,8 @@ const require = createRequire(import.meta.url);
 const workerDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 const sidecarDirectory = join(workerDirectory, 'dist-sidecar');
 const sqliteDirectory = dirname(require.resolve('better-sqlite3/package.json'));
-const sqliteBinding = join(sqliteDirectory, 'build', 'Release', 'better_sqlite3.node');
-const developmentBindingBackup = join(sidecarDirectory, 'better_sqlite3.development.node');
+const sidecarNodeModules = join(sidecarDirectory, 'node_modules');
+const sidecarSqliteDirectory = join(sidecarNodeModules, 'better-sqlite3');
 const prebuildInstall = join(dirname(require.resolve('prebuild-install/package.json')), 'bin.js');
 const esbuild = join(dirname(require.resolve('esbuild/package.json')), 'bin', 'esbuild');
 const pkg = join(dirname(require.resolve('@yao-pkg/pkg/package.json')), 'lib-es5', 'bin.js');
@@ -33,13 +33,15 @@ function run(script, args, cwd = workerDirectory) {
 }
 
 mkdirSync(sidecarDirectory, { recursive: true });
-copyFileSync(sqliteBinding, developmentBindingBackup);
+mkdirSync(sidecarNodeModules, { recursive: true });
+rmSync(sidecarSqliteDirectory, { recursive: true, force: true });
+cpSync(sqliteDirectory, sidecarSqliteDirectory, { recursive: true, dereference: true });
 
 try {
   run(
     prebuildInstall,
     ['--target', '22.23.2', '--runtime', 'node', '--platform', 'win32', '--arch', 'x64', '--force'],
-    sqliteDirectory,
+    sidecarSqliteDirectory,
   );
   run(esbuild, [
     'src/index.ts',
@@ -52,6 +54,5 @@ try {
   ]);
   run(pkg, ['dist-sidecar/index.cjs', '--target', 'node22-win-x64', '--output', output]);
 } finally {
-  copyFileSync(developmentBindingBackup, sqliteBinding);
-  rmSync(developmentBindingBackup, { force: true });
+  rmSync(sidecarSqliteDirectory, { recursive: true, force: true });
 }

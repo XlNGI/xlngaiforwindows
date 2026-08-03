@@ -1,4 +1,4 @@
-export const CURRENT_APP_SCHEMA_VERSION = 2;
+export const CURRENT_APP_SCHEMA_VERSION = 3;
 
 export const APP_MIGRATION_V1 = `
 CREATE TABLE app_schema_migrations (
@@ -96,4 +96,9 @@ ALTER TABLE provider_profiles ADD COLUMN migration_source TEXT
 CREATE UNIQUE INDEX idx_provider_profiles_migration_source
   ON provider_profiles(migration_source)
   WHERE migration_source IS NOT NULL;
+`;
+
+export const APP_MIGRATION_V3 = `
+ALTER TABLE model_pricing ADD COLUMN credit_price TEXT
+  CHECK (credit_price IS NULL OR length(trim(credit_price)) > 0);
 `;

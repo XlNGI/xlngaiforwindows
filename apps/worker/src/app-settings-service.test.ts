@@ -323,6 +323,38 @@ describe('AppSettingsService', () => {
     service.close();
   });
 
+  it('stores a user-defined Vidu price per credit', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'Vidu 中国站',
+      category: 'multi',
+      providerType: 'vidu',
+      accessType: 'official',
+      protocol: 'vidu-v2',
+      baseUrl: 'https://api.vidu.cn',
+    });
+    const model = service.listModels(profile.id).find((item) => item.remoteModelId === 'viduq3')!;
+
+    const pricing = service.updateModelPricing({
+      providerProfileId: profile.id,
+      modelId: model.id,
+      currency: 'cny',
+      creditPrice: '0.0312500',
+    });
+
+    expect(pricing).toMatchObject({
+      currency: 'CNY',
+      inputPrice: '0',
+      outputPrice: '0',
+      creditPrice: '0.03125',
+    });
+    expect(service.resolveCreditPricing(profile.id, model.id)).toEqual({
+      currency: 'CNY',
+      creditPrice: '0.03125',
+    });
+    service.close();
+  });
+
   it('creates one idempotent migration profile per legacy Vidu credential source', async () => {
     const service = await createService();
     const first = service.migrateLegacyProfile({ source: 'vidu-cn' });

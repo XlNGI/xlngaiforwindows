@@ -42,24 +42,51 @@ button {
   --chat-width: 300px;
   display: grid;
   grid-template:
-    'topbar topbar topbar topbar' 48px
-    'project workspace parameters chat' minmax(0, 1fr) /
-    var(--left-width) minmax(360px, 1fr) var(--parameters-width) var(--chat-width);
+    'topbar topbar topbar' 48px
+    'project workspace chat' minmax(0, 1fr) /
+    var(--left-width) minmax(360px, 1fr) var(--chat-width);
   width: 100%;
   height: 100%;
   background: #17191b;
 }
 
 .app-shell[data-left-open='false'] {
-  grid-template-columns: 0 minmax(360px, 1fr) var(--parameters-width) var(--chat-width);
+  grid-template-columns: 0 minmax(360px, 1fr) var(--chat-width);
 }
 
 .app-shell[data-right-open='false'] {
-  grid-template-columns: var(--left-width) minmax(360px, 1fr) var(--parameters-width) 0;
+  grid-template-columns: var(--left-width) minmax(360px, 1fr) 0;
 }
 
 .app-shell[data-left-open='false'][data-right-open='false'] {
-  grid-template-columns: 0 minmax(360px, 1fr) var(--parameters-width) 0;
+  grid-template-columns: 0 minmax(360px, 1fr) 0;
+}
+
+.app-shell[data-navigation-mode='project'] .production-panel {
+  display: none;
+}
+
+.app-shell[data-navigation-mode='production'] {
+  grid-template:
+    'topbar topbar topbar' 48px
+    'project parameters chat' minmax(0, 1fr) /
+    var(--left-width) minmax(600px, 1fr) var(--chat-width);
+}
+
+.app-shell[data-navigation-mode='production'][data-left-open='false'] {
+  grid-template-columns: 0 minmax(600px, 1fr) var(--chat-width);
+}
+
+.app-shell[data-navigation-mode='production'][data-right-open='false'] {
+  grid-template-columns: var(--left-width) minmax(600px, 1fr) 0;
+}
+
+.app-shell[data-navigation-mode='production'][data-left-open='false'][data-right-open='false'] {
+  grid-template-columns: 0 minmax(600px, 1fr) 0;
+}
+
+.app-shell[data-navigation-mode='production'] .workspace {
+  display: none;
 }
 
 .topbar {
@@ -71,6 +98,7 @@ button {
   padding: 0 12px;
   border-bottom: 1px solid #2a2e31;
   background: #141618;
+  user-select: none;
 }
 
 .brand-mark {
@@ -107,6 +135,35 @@ button {
   display: flex;
   gap: 3px;
   margin-left: auto;
+}
+
+.window-controls {
+  display: flex;
+  align-self: stretch;
+  margin-left: 6px;
+  margin-right: -12px;
+}
+
+.window-controls button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  color: #aeb4b8;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.window-controls button:hover {
+  color: #f2f4f5;
+  background: #292d30;
+}
+
+.window-controls .window-close:hover {
+  color: #fff;
+  background: #c42b1c;
 }
 
 .mobile-production-toggle,
@@ -201,6 +258,12 @@ button {
   border-color: #8f7535;
 }
 
+.project-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 5px;
+}
+
 .open-project-card {
   display: grid;
   gap: 4px;
@@ -225,6 +288,7 @@ button {
 }
 
 .project-actions button,
+.project-path-row button,
 .recent-projects button {
   display: flex;
   align-items: center;
@@ -240,6 +304,15 @@ button {
 }
 
 .project-actions button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.project-path-row button {
+  padding: 0;
+}
+
+.project-path-row button:disabled {
   cursor: default;
   opacity: 0.4;
 }
@@ -1730,6 +1803,11 @@ button {
   background: #191c1e;
 }
 
+.production-panel.expanded {
+  min-width: 0;
+  border-right: 1px solid #2a2e31;
+}
+
 .field-group {
   display: grid;
   gap: 6px;
@@ -2733,12 +2811,26 @@ button {
     grid-template:
       'topbar topbar' 48px
       'project workspace' minmax(420px, 1fr)
-      'project parameters' 245px
       'project chat' 245px /
       var(--left-width) minmax(0, 1fr);
   }
 
   .app-shell[data-left-open='false'] {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .app-shell[data-navigation-mode='production'],
+  .app-shell[data-navigation-mode='production'][data-left-open='false'],
+  .app-shell[data-navigation-mode='production'][data-right-open='false'],
+  .app-shell[data-navigation-mode='production'][data-left-open='false'][data-right-open='false'] {
+    grid-template:
+      'topbar topbar' 48px
+      'project parameters' minmax(420px, 1fr)
+      'project chat' 245px /
+      var(--left-width) minmax(0, 1fr);
+  }
+
+  .app-shell[data-navigation-mode='production'][data-left-open='false'] {
     grid-template-columns: 0 minmax(0, 1fr);
   }
 
@@ -2805,7 +2897,6 @@ button {
     grid-template:
       'topbar' 48px
       'workspace' minmax(430px, 1fr)
-      'parameters' 245px
       'chat' 245px /
       minmax(0, 1fr);
   }
@@ -2813,6 +2904,17 @@ button {
   .project-rail,
   .edge-toggle-left {
     display: none;
+  }
+
+  .app-shell[data-navigation-mode='production'],
+  .app-shell[data-navigation-mode='production'][data-left-open='false'],
+  .app-shell[data-navigation-mode='production'][data-right-open='false'],
+  .app-shell[data-navigation-mode='production'][data-left-open='false'][data-right-open='false'] {
+    grid-template:
+      'topbar' 48px
+      'parameters' minmax(430px, 1fr)
+      'chat' 245px /
+      minmax(0, 1fr);
   }
 
   .mobile-production-toggle {

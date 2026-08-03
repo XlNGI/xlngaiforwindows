@@ -178,7 +178,11 @@ const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqlit
 const contentService = new ContentService(projectService);
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
-const videoGenerationService = new VideoGenerationService(projectService);
+const videoGenerationService = new VideoGenerationService(
+  projectService,
+  undefined,
+  appSettingsService,
+);
 const maintenanceService = new MaintenanceService(projectService);
 const sampleProjectService = new SampleProjectService(projectService);
 const contextService = new ContextService(projectService);

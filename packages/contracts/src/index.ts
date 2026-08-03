@@ -147,6 +147,7 @@ export interface ModelPricingInfo {
   inputPrice: string;
   cachedInputPrice?: string;
   outputPrice: string;
+  creditPrice?: string;
   updatedAt: string;
 }
 
@@ -154,9 +155,10 @@ export interface ModelPricingUpdateParams {
   providerProfileId: string;
   modelId: string;
   currency: string;
-  inputPrice: string;
+  inputPrice?: string;
   cachedInputPrice?: string;
-  outputPrice: string;
+  outputPrice?: string;
+  creditPrice?: string;
 }
 
 export type ProviderDefaultRole = 'quality' | 'balanced' | 'fast' | 'vision' | 'embedding';
@@ -883,6 +885,9 @@ export type VideoProviderRegion = 'global' | 'cn';
 export interface VideoGenerationCostInfo {
   amount: number;
   unit: 'credits' | 'unknown';
+  unitPrice?: string;
+  estimatedAmount?: string;
+  currency?: string;
 }
 
 export interface VideoGenerationMetadataInfo {

@@ -6,7 +6,10 @@ import { createRepositories } from '@ai-video/persistence';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
-import { VideoGenerationService } from './video-generation-service.js';
+import {
+  VideoGenerationService,
+  type VideoCreditPricingResolver,
+} from './video-generation-service.js';
 
 const roots: string[] = [];
 const projects: ProjectService[] = [];
@@ -19,13 +22,17 @@ afterEach(async () => {
 
 async function setup(
   storageCapacityCheck?: (directoryPath: string, requiredBytes: number) => void,
+  pricingResolver?: VideoCreditPricingResolver,
 ) {
   const base = await mkdtemp(join(tmpdir(), 'ai-video-video-'));
   roots.push(base);
   const project = new ProjectService({ recentProjectsPath: join(base, 'recent.json') });
   projects.push(project);
   project.create(join(base, 'project'), 'Video Project');
-  return { project, service: new VideoGenerationService(project, storageCapacityCheck) };
+  return {
+    project,
+    service: new VideoGenerationService(project, storageCapacityCheck, pricingResolver),
+  };
 }
 
 function prepare(service: VideoGenerationService) {
@@ -160,7 +167,9 @@ describe('VideoGenerationService', () => {
   });
 
   it('downloads only creation video output and commits one local asset and terminal job', async () => {
-    const { project, service } = await setup();
+    const { project, service } = await setup(undefined, {
+      resolveCreditPricing: () => ({ currency: 'CNY', creditPrice: '0.03125' }),
+    });
     const signedOutput = 'https://cdn.example.invalid/output.mp4?signature=must-not-persist';
     const fetchMock = vi.fn(() => Promise.resolve(mp4Response()));
     vi.stubGlobal('fetch', fetchMock);
@@ -185,14 +194,32 @@ describe('VideoGenerationService', () => {
     );
     expect(downloading).toMatchObject({
       status: 'downloading',
-      metadata: { pollAttempts: 1, cost: { amount: 4, unit: 'credits' } },
+      metadata: {
+        pollAttempts: 1,
+        cost: {
+          amount: 4,
+          unit: 'credits',
+          unitPrice: '0.03125',
+          estimatedAmount: '0.125',
+          currency: 'CNY',
+        },
+      },
       results: [],
     });
     await vi.waitFor(() => expect(service.get(job.id).status).toBe('succeeded'));
     const completed = service.get(job.id);
     expect(completed).toMatchObject({
       status: 'succeeded',
-      metadata: { pollAttempts: 1, cost: { amount: 4, unit: 'credits' } },
+      metadata: {
+        pollAttempts: 1,
+        cost: {
+          amount: 4,
+          unit: 'credits',
+          unitPrice: '0.03125',
+          estimatedAmount: '0.125',
+          currency: 'CNY',
+        },
+      },
       results: [{ asset: { kind: 'shot-video' } }],
     });
     const asset = completed.results[0]!.asset;

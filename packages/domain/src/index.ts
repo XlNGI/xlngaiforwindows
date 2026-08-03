@@ -218,6 +218,7 @@ export interface ModelPricingRecord {
   inputPrice: string;
   cachedInputPrice?: string;
   outputPrice: string;
+  creditPrice?: string;
   updatedAt: string;
 }
 

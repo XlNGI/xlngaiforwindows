@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addDecimalStrings,
   calculateEstimatedCost,
+  multiplyDecimalStrings,
   normalizeCurrency,
   normalizeDecimalPrice,
 } from './usage-cost.js';
@@ -66,5 +67,10 @@ describe('usage cost', () => {
     expect(() => normalizeDecimalPrice('1.2345678901234', 'Input price')).toThrow(
       'fractional digits',
     );
+  });
+
+  it('multiplies provider credits by the configured per-credit price exactly', () => {
+    expect(multiplyDecimalStrings('4', '0.03125')).toBe('0.125');
+    expect(multiplyDecimalStrings('1.5', '0.03125')).toBe('0.046875');
   });
 });

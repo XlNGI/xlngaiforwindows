@@ -3,6 +3,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
 import { App, mergeGenerationMessage } from './App';
 import { callWorker } from './worker-client';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+
+const windowApi = vi.hoisted(() => ({
+  close: vi.fn().mockResolvedValue(undefined),
+  isMaximized: vi.fn().mockResolvedValue(false),
+  minimize: vi.fn().mockResolvedValue(undefined),
+  onResized: vi.fn().mockResolvedValue(() => undefined),
+  toggleMaximize: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => windowApi,
+}));
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
 
 vi.mock('./worker-client', () => ({
   callWorker: vi.fn((method: string) =>
@@ -34,6 +51,9 @@ describe('App', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(openDialog).mockResolvedValue(null);
+    windowApi.isMaximized.mockResolvedValue(false);
+    windowApi.onResized.mockResolvedValue(() => undefined);
   });
 
   it('renders the M2 workspace areas and runtime health', async () => {
@@ -45,6 +65,18 @@ describe('App', () => {
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
   });
 
+  it('provides custom titlebar window controls', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: '最小化窗口' }));
+    fireEvent.click(screen.getByRole('button', { name: '最大化窗口' }));
+    fireEvent.click(screen.getByRole('button', { name: '关闭窗口' }));
+
+    expect(windowApi.minimize).toHaveBeenCalledOnce();
+    expect(windowApi.toggleMaximize).toHaveBeenCalledOnce();
+    expect(windowApi.close).toHaveBeenCalledOnce();
+  });
+
   it('disables project actions until an absolute path is entered', () => {
     render(<App />);
     const manager = screen.getByRole('region', { name: '项目管理' });
@@ -52,6 +84,46 @@ describe('App', () => {
     expect(within(manager).getByRole('button', { name: '打开' })).toBeDisabled();
     expect(callWorker).not.toHaveBeenCalledWith('project.create', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('project.open', expect.anything());
+  });
+
+  it('selects a project directory with the native folder dialog before opening', async () => {
+    vi.mocked(openDialog).mockResolvedValue('D:\\Projects\\existing-project');
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: '选择项目目录' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('项目绝对目录')).toHaveValue(
+        'D:\\Projects\\existing-project',
+      ),
+    );
+    expect(openDialog).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      title: '选择项目目录',
+    });
+
+    const manager = screen.getByRole('region', { name: '项目管理' });
+    fireEvent.click(within(manager).getByRole('button', { name: '打开' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('project.open', {
+        rootPath: 'D:\\Projects\\existing-project',
+      }),
+    );
+  });
+
+  it('expands production UI across the central workspace when a production mode is selected', () => {
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: '文生图' }));
+
+    expect(container.querySelector('.app-shell')).toHaveAttribute(
+      'data-navigation-mode',
+      'production',
+    );
+    expect(container.querySelector('.production-panel')).toHaveClass('expanded');
+
+    fireEvent.click(screen.getByRole('button', { name: /项目文档/ }));
+    expect(container.querySelector('.app-shell')).toHaveAttribute('data-navigation-mode', 'project');
+    expect(container.querySelector('.production-panel')).not.toHaveClass('expanded');
   });
 
   it('offers a sample project on first use and sends the selected absolute path', async () => {

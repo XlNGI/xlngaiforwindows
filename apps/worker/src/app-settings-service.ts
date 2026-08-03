@@ -348,20 +348,50 @@ export class AppSettingsService {
     if (!model || model.providerProfileId !== profile.id) {
       throw new Error('Provider model was not found.');
     }
+    const creditBased = profile.providerType === 'vidu';
     const pricing: ModelPricingInfo = {
       providerProfileId: profile.id,
       modelId: model.id,
       currency: normalizeCurrency(params.currency),
       unitTokens: 1_000_000,
-      inputPrice: normalizeDecimalPrice(params.inputPrice, 'Input price'),
-      cachedInputPrice: params.cachedInputPrice?.trim()
+      inputPrice: creditBased
+        ? '0'
+        : normalizeDecimalPrice(params.inputPrice ?? '', 'Input price'),
+      cachedInputPrice: !creditBased && params.cachedInputPrice?.trim()
         ? normalizeDecimalPrice(params.cachedInputPrice, 'Cached input price')
         : undefined,
-      outputPrice: normalizeDecimalPrice(params.outputPrice, 'Output price'),
+      outputPrice: creditBased
+        ? '0'
+        : normalizeDecimalPrice(params.outputPrice ?? '', 'Output price'),
+      creditPrice: creditBased
+        ? normalizeDecimalPrice(params.creditPrice ?? '', 'Credit price')
+        : undefined,
       updatedAt: this.now(),
     };
     repositories.modelPricing.save(pricing);
     return pricing;
+  }
+
+  resolveCreditPricing(
+    providerProfileId: string,
+    modelId: string,
+  ): { currency: string; creditPrice: string } | undefined {
+    const repositories = this.repositories();
+    const profile = repositories.providerProfiles.get(requireUuid(providerProfileId));
+    const model = repositories.providerModels.get(requireUuid(modelId));
+    if (
+      !profile ||
+      profile.archivedAt ||
+      profile.providerType !== 'vidu' ||
+      !model ||
+      model.providerProfileId !== profile.id
+    ) {
+      return undefined;
+    }
+    const pricing = repositories.modelPricing.get(profile.id, model.id);
+    return pricing?.creditPrice
+      ? { currency: pricing.currency, creditPrice: pricing.creditPrice }
+      : undefined;
   }
 
   listProviderDefaults(): ProviderDefaultInfo[] {

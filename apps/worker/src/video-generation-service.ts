@@ -30,6 +30,7 @@ import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adap
 import { createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
+import { multiplyDecimalStrings } from './usage-cost.js';
 
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const OFF_PEAK_POLL_TIMEOUT_MS = 48 * 60 * 60 * 1000;
@@ -54,7 +55,20 @@ const VIDEO_CAPABILITIES = new Set([
 
 interface VideoJobMetadata extends VideoGenerationMetadataInfo {
   assetKind: VideoAssetKind;
+  pricingSnapshot?: CreditPricingSnapshot;
   pausedAt?: string;
+}
+
+interface CreditPricingSnapshot {
+  currency: string;
+  creditPrice: string;
+}
+
+export interface VideoCreditPricingResolver {
+  resolveCreditPricing(
+    providerProfileId: string,
+    modelId: string,
+  ): CreditPricingSnapshot | undefined;
 }
 
 interface DownloadedVideo {
@@ -72,6 +86,7 @@ export class VideoGenerationService {
   constructor(
     private readonly projects: ProjectService,
     private readonly storageCapacityCheck: StorageCapacityCheck = assertStorageCapacity,
+    private readonly pricingResolver?: VideoCreditPricingResolver,
   ) {}
 
   prepare(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
@@ -93,6 +108,10 @@ export class VideoGenerationService {
     if (Boolean(providerProfileId) !== Boolean(modelId)) {
       throw new Error('Provider profile and model must be supplied together.');
     }
+    const pricingSnapshot =
+      providerProfileId && modelId
+        ? this.pricingResolver?.resolveCreditPricing(providerProfileId, modelId)
+        : undefined;
 
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -116,6 +135,7 @@ export class VideoGenerationService {
           providerRegion,
           providerProfileId,
           modelId,
+          pricingSnapshot,
           pollAttempts: 0,
         } satisfies VideoJobMetadata),
         createdAt: now,
@@ -659,6 +679,7 @@ export class VideoGenerationService {
       pollDeadlineAt: parsed.pollDeadlineAt,
       failureKind: parsed.failureKind,
       cost: parsed.cost,
+      pricingSnapshot: normalizeCreditPricingSnapshot(parsed.pricingSnapshot),
       pausedAt: parsed.pausedAt,
     };
   }
@@ -795,11 +816,40 @@ function cloneParameters(parameters: AdapterParameters): AdapterParameters {
 }
 
 function observedMetadata(metadata: VideoJobMetadata, body: unknown): VideoJobMetadata {
+  const cost = providerCost(body) ?? metadata.cost;
   return {
     ...metadata,
     pollAttempts: metadata.pollAttempts + 1,
     lastPolledAt: new Date().toISOString(),
-    cost: providerCost(body) ?? metadata.cost,
+    cost: priceProviderCost(cost, metadata.pricingSnapshot),
+  };
+}
+
+function normalizeCreditPricingSnapshot(value: unknown): CreditPricingSnapshot | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<CreditPricingSnapshot>;
+  if (
+    typeof candidate.currency !== 'string' ||
+    !/^[A-Z]{3,8}$/.test(candidate.currency) ||
+    typeof candidate.creditPrice !== 'string' ||
+    !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(candidate.creditPrice)
+  ) {
+    return undefined;
+  }
+  return { currency: candidate.currency, creditPrice: candidate.creditPrice };
+}
+
+function priceProviderCost(
+  cost: VideoGenerationMetadataInfo['cost'] | undefined,
+  pricing: CreditPricingSnapshot | undefined,
+): VideoGenerationMetadataInfo['cost'] | undefined {
+  if (!cost || cost.unit !== 'credits' || !pricing) return cost;
+  const credits = cost.amount.toFixed(12).replace(/\.?0+$/, '');
+  return {
+    ...cost,
+    unitPrice: pricing.creditPrice,
+    estimatedAmount: multiplyDecimalStrings(credits || '0', pricing.creditPrice),
+    currency: pricing.currency,
   };
 }
 

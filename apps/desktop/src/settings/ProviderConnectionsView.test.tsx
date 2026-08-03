@@ -292,6 +292,65 @@ describe('ModelManagementView', () => {
         inputPrice: '10',
         cachedInputPrice: '2.5',
         outputPrice: '30',
+        creditPrice: undefined,
+      }),
+    );
+  });
+
+  it('lets Vidu users configure a price per returned credit', async () => {
+    const onUpdatePricing = vi.fn().mockResolvedValue(undefined);
+    const viduProfile: ProviderProfileInfo = {
+      ...profile,
+      name: 'Vidu 中国站',
+      category: 'multi',
+      providerType: 'vidu',
+      protocol: 'vidu-v2',
+      baseUrl: 'https://api.vidu.cn',
+    };
+    const model = {
+      id: '123e4567-e89b-42d3-a456-426614174002',
+      providerProfileId: viduProfile.id,
+      remoteModelId: 'viduq3-pro',
+      displayName: 'Vidu Q3 Pro',
+      capabilities: capabilities({ videoGeneration: true }),
+      source: 'built-in' as const,
+      enabled: true,
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+    render(
+      <ModelManagementView
+        profile={viduProfile}
+        models={[model]}
+        pricing={[]}
+        defaults={[]}
+        busy={false}
+        onSynchronize={vi.fn()}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdatePricing={onUpdatePricing}
+        onUpdateDefault={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('每积分单价')).toBeInTheDocument();
+    const save = screen.getByRole('button', { name: '保存单价' });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('viduq3-pro 币种'), { target: { value: 'cny' } });
+    fireEvent.change(screen.getByLabelText('viduq3-pro 每积分单价'), {
+      target: { value: '0.03125' },
+    });
+    fireEvent.click(save);
+
+    await waitFor(() =>
+      expect(onUpdatePricing).toHaveBeenCalledWith({
+        providerProfileId: viduProfile.id,
+        modelId: model.id,
+        currency: 'CNY',
+        inputPrice: undefined,
+        cachedInputPrice: undefined,
+        outputPrice: undefined,
+        creditPrice: '0.03125',
       }),
     );
   });

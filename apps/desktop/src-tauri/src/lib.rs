@@ -1054,6 +1054,7 @@ fn provider_legacy_migration_status(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             create_dir_all(&app_data_dir)?;

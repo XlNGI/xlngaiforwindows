@@ -225,6 +225,7 @@ export function ModelManagementView({
               <ModelPricingEditor
                 profileId={profile.id}
                 model={model}
+                creditBased={profile.providerType === 'vidu'}
                 pricing={pricing.find((item) => item.modelId === model.id)}
                 disabled={busy}
                 onSave={onUpdatePricing}
@@ -306,41 +307,47 @@ function supportsDefaultRole(
 function ModelPricingEditor({
   profileId,
   model,
+  creditBased,
   pricing,
   disabled,
   onSave,
 }: {
   profileId: string;
   model: ProviderModelInfo;
+  creditBased: boolean;
   pricing?: ModelPricingInfo;
   disabled: boolean;
   onSave: (params: ModelPricingUpdateParams) => Promise<void>;
 }) {
-  const [currency, setCurrency] = useState(pricing?.currency ?? 'USD');
+  const [currency, setCurrency] = useState(pricing?.currency ?? (creditBased ? 'CNY' : 'USD'));
   const [inputPrice, setInputPrice] = useState(pricing?.inputPrice ?? '');
   const [cachedInputPrice, setCachedInputPrice] = useState(pricing?.cachedInputPrice ?? '');
   const [outputPrice, setOutputPrice] = useState(pricing?.outputPrice ?? '');
+  const [creditPrice, setCreditPrice] = useState(pricing?.creditPrice ?? '');
 
   useEffect(() => {
-    setCurrency(pricing?.currency ?? 'USD');
+    setCurrency(pricing?.currency ?? (creditBased ? 'CNY' : 'USD'));
     setInputPrice(pricing?.inputPrice ?? '');
     setCachedInputPrice(pricing?.cachedInputPrice ?? '');
     setOutputPrice(pricing?.outputPrice ?? '');
-  }, [pricing]);
+    setCreditPrice(pricing?.creditPrice ?? '');
+  }, [creditBased, pricing]);
 
   const decimalPattern = /^(?:0|[1-9]\d{0,11})(?:\.\d{1,12})?$/;
   const valid =
     /^[A-Za-z]{3,8}$/.test(currency.trim()) &&
-    decimalPattern.test(inputPrice.trim()) &&
-    (!cachedInputPrice.trim() || decimalPattern.test(cachedInputPrice.trim())) &&
-    decimalPattern.test(outputPrice.trim());
+    (creditBased
+      ? decimalPattern.test(creditPrice.trim())
+      : decimalPattern.test(inputPrice.trim()) &&
+        (!cachedInputPrice.trim() || decimalPattern.test(cachedInputPrice.trim())) &&
+        decimalPattern.test(outputPrice.trim()));
 
   return (
     <div className="model-pricing-editor">
       <div className="model-pricing-heading">
         <span>
           <CircleDollarSign size={13} />
-          单价 / 100 万 Token
+          {creditBased ? '每积分单价' : '单价 / 100 万 Token'}
         </span>
         <small>{pricing ? `更新于 ${pricing.updatedAt}` : '尚未配置，费用将显示为未知'}</small>
       </div>
@@ -354,34 +361,49 @@ function ModelPricingEditor({
             onChange={(event) => setCurrency(event.target.value.toUpperCase())}
           />
         </label>
-        <label>
-          输入
-          <input
-            aria-label={`${model.remoteModelId} 输入单价`}
-            inputMode="decimal"
-            value={inputPrice}
-            onChange={(event) => setInputPrice(event.target.value)}
-          />
-        </label>
-        <label>
-          缓存输入
-          <input
-            aria-label={`${model.remoteModelId} 缓存输入单价`}
-            inputMode="decimal"
-            placeholder="默认同输入"
-            value={cachedInputPrice}
-            onChange={(event) => setCachedInputPrice(event.target.value)}
-          />
-        </label>
-        <label>
-          输出
-          <input
-            aria-label={`${model.remoteModelId} 输出单价`}
-            inputMode="decimal"
-            value={outputPrice}
-            onChange={(event) => setOutputPrice(event.target.value)}
-          />
-        </label>
+        {creditBased ? (
+          <label>
+            每积分
+            <input
+              aria-label={`${model.remoteModelId} 每积分单价`}
+              inputMode="decimal"
+              placeholder="例如 0.03125"
+              value={creditPrice}
+              onChange={(event) => setCreditPrice(event.target.value)}
+            />
+          </label>
+        ) : (
+          <>
+            <label>
+              输入
+              <input
+                aria-label={`${model.remoteModelId} 输入单价`}
+                inputMode="decimal"
+                value={inputPrice}
+                onChange={(event) => setInputPrice(event.target.value)}
+              />
+            </label>
+            <label>
+              缓存输入
+              <input
+                aria-label={`${model.remoteModelId} 缓存输入单价`}
+                inputMode="decimal"
+                placeholder="默认同输入"
+                value={cachedInputPrice}
+                onChange={(event) => setCachedInputPrice(event.target.value)}
+              />
+            </label>
+            <label>
+              输出
+              <input
+                aria-label={`${model.remoteModelId} 输出单价`}
+                inputMode="decimal"
+                value={outputPrice}
+                onChange={(event) => setOutputPrice(event.target.value)}
+              />
+            </label>
+          </>
+        )}
         <button
           className="button secondary"
           type="button"
@@ -391,9 +413,11 @@ function ModelPricingEditor({
               providerProfileId: profileId,
               modelId: model.id,
               currency: currency.trim(),
-              inputPrice: inputPrice.trim(),
-              cachedInputPrice: cachedInputPrice.trim() || undefined,
-              outputPrice: outputPrice.trim(),
+              inputPrice: creditBased ? undefined : inputPrice.trim(),
+              cachedInputPrice:
+                creditBased || !cachedInputPrice.trim() ? undefined : cachedInputPrice.trim(),
+              outputPrice: creditBased ? undefined : outputPrice.trim(),
+              creditPrice: creditBased ? creditPrice.trim() : undefined,
             })
           }
         >
