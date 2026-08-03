@@ -1,6 +1,7 @@
 use std::{
+    fs::create_dir_all,
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError},
@@ -10,27 +11,26 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(any(not(debug_assertions), test))]
-use std::path::Path;
-
 use serde::Serialize;
-use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_NOT_FOUND},
-    Networking::WinHttp::{
-        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-        WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
-        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
-    },
-    Security::Credentials::{
-        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_MAX_CREDENTIAL_BLOB_SIZE,
-        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-    },
-};
+use tauri::Manager;
 
-const CREDENTIAL_SERVICE: &str = "com.ai-video.workspace";
-const SUPPORTED_CREDENTIAL_PROVIDERS: &[&str] = &["vidu", "vidu-cn"];
+mod credential_store;
+mod llm_stream;
+mod provider_connector;
+mod provider_http;
+
+use credential_store::{
+    credential_copy, credential_delete, credential_exists, credential_read, credential_set,
+    credential_status, is_profile_id, CredentialSecret,
+};
+#[cfg(test)]
+use credential_store::{
+    credential_target, ensure_credential_subject, validate_credential_provider,
+};
+use llm_stream::{llm_stream, llm_stream_cancel, LlmStreamState};
+use provider_connector::provider_test_connection;
+use provider_http::{request_json, JsonHttpRequest};
+
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_REQUEST_BODY_LIMIT: usize = 32 * 1024 * 1024;
@@ -164,6 +164,117 @@ fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderT
     Ok(target)
 }
 
+struct MediaCredentialSelection {
+    credential_subject: String,
+    provider_region: String,
+}
+
+fn resolve_media_selection(
+    adapter_key: &str,
+    provider_profile_id: Option<&str>,
+    provider_region: Option<&str>,
+    state: &WorkerState,
+) -> Result<MediaCredentialSelection, String> {
+    let Some(profile_id) = provider_profile_id.filter(|value| !value.is_empty()) else {
+        let region = provider_region.ok_or("A provider profile is required")?;
+        let (credential_subject, _) = provider_region_target(region)?;
+        return Ok(MediaCredentialSelection {
+            credential_subject: credential_subject.to_string(),
+            provider_region: region.to_string(),
+        });
+    };
+    if !is_profile_id(profile_id) {
+        return Err("Provider profile ID is invalid".to_string());
+    }
+    let normalized_profile_id = profile_id.to_ascii_lowercase();
+    let profile_response = state.request(&serde_json::json!({
+        "id": format!("media-profile-{normalized_profile_id}"),
+        "protocolVersion": 1,
+        "method": "provider.profile.get",
+        "params": { "profileId": normalized_profile_id }
+    }))?;
+    let profile = worker_response_result(&profile_response)?;
+    if profile.is_null() {
+        return Err("Provider profile does not exist or is archived".to_string());
+    }
+    if profile.get("id").and_then(serde_json::Value::as_str) != Some(normalized_profile_id.as_str())
+    {
+        return Err("Worker returned a mismatched provider profile".to_string());
+    }
+    if profile
+        .get("providerType")
+        .and_then(serde_json::Value::as_str)
+        != Some("vidu")
+        || profile.get("protocol").and_then(serde_json::Value::as_str) != Some("vidu-v2")
+    {
+        return Err("Provider profile is not a supported Vidu media connection".to_string());
+    }
+    if profile.get("enabled").and_then(serde_json::Value::as_bool) != Some(true)
+        || profile
+            .get("connectionStatus")
+            .and_then(serde_json::Value::as_str)
+            != Some("ready")
+    {
+        return Err("Provider profile is not ready for media generation".to_string());
+    }
+    let region = match profile.get("baseUrl").and_then(serde_json::Value::as_str) {
+        Some("https://api.vidu.com") => "global",
+        Some("https://api.vidu.cn") => "cn",
+        _ => return Err("Provider profile uses an unsupported Vidu Base URL".to_string()),
+    };
+    let target = provider_target(adapter_key, region)?;
+    let models_response = state.request(&serde_json::json!({
+        "id": format!("media-models-{normalized_profile_id}"),
+        "protocolVersion": 1,
+        "method": "provider.model.list",
+        "params": { "profileId": normalized_profile_id }
+    }))?;
+    let models = worker_response_result(&models_response)?
+        .as_array()
+        .ok_or("Worker returned an invalid provider model list")?;
+    let required_capability = if ensure_video_adapter(adapter_key).is_ok() {
+        "videoGeneration"
+    } else {
+        "imageGeneration"
+    };
+    let matching_model = models.iter().any(|model| {
+        model
+            .get("remoteModelId")
+            .and_then(serde_json::Value::as_str)
+            == Some(target.model)
+            && model.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+            && model
+                .get("unavailableAt")
+                .is_none_or(serde_json::Value::is_null)
+            && model
+                .pointer(&format!("/capabilities/{required_capability}"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    });
+    if !matching_model {
+        return Err("Selected provider profile has no enabled model for this adapter".to_string());
+    }
+    Ok(MediaCredentialSelection {
+        credential_subject: normalized_profile_id,
+        provider_region: region.to_string(),
+    })
+}
+
+fn worker_response_result(response: &serde_json::Value) -> Result<&serde_json::Value, String> {
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return response
+            .get("result")
+            .ok_or("Worker response did not contain a result".to_string());
+    }
+    Err(response
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Worker rejected the provider operation")
+        .chars()
+        .take(500)
+        .collect())
+}
+
 fn provider_payload(target: ProviderTarget, payload: serde_json::Value) -> Result<Vec<u8>, String> {
     let mut object = payload
         .as_object()
@@ -195,143 +306,6 @@ fn provider_payload(target: ProviderTarget, payload: serde_json::Value) -> Resul
         return Err("Provider payload exceeds the native transport limit".to_string());
     }
     Ok(encoded)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CredentialStatus {
-    provider: String,
-    configured: bool,
-}
-
-fn validate_credential_provider(provider: &str) -> Result<(), String> {
-    if SUPPORTED_CREDENTIAL_PROVIDERS.contains(&provider) {
-        Ok(())
-    } else {
-        Err("Unsupported credential provider".to_string())
-    }
-}
-
-fn credential_target(provider: &str) -> Result<Vec<u16>, String> {
-    validate_credential_provider(provider)?;
-    Ok(format!("{CREDENTIAL_SERVICE}:{provider}\0")
-        .encode_utf16()
-        .collect())
-}
-
-#[tauri::command]
-fn credential_status(provider: String) -> Result<CredentialStatus, String> {
-    let target = credential_target(&provider)?;
-    let mut credential = std::ptr::null_mut::<CREDENTIALW>();
-    let configured = unsafe {
-        if CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) != 0 {
-            CredFree(credential.cast());
-            true
-        } else if GetLastError() == ERROR_NOT_FOUND {
-            false
-        } else {
-            return Err("Unable to read Windows secure credential status".to_string());
-        }
-    };
-    Ok(CredentialStatus {
-        provider,
-        configured,
-    })
-}
-
-#[tauri::command]
-fn credential_set(provider: String, secret: String) -> Result<CredentialStatus, String> {
-    let value = secret.trim();
-    if value.is_empty()
-        || value.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE as usize
-        || !value.is_ascii()
-        || value.bytes().any(|byte| byte.is_ascii_control())
-    {
-        return Err("Credential length is outside the Windows secure storage limit".to_string());
-    }
-    if (value.len() >= 6 && value[..6].eq_ignore_ascii_case("token "))
-        || (value.len() >= 7 && value[..7].eq_ignore_ascii_case("bearer "))
-    {
-        return Err("Enter the raw API key without a Token or Bearer prefix".to_string());
-    }
-    let mut target = credential_target(&provider)?;
-    let mut username: Vec<u16> = provider.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut credential_blob = value.as_bytes().to_vec();
-    let credential = CREDENTIALW {
-        Type: CRED_TYPE_GENERIC,
-        TargetName: target.as_mut_ptr(),
-        CredentialBlobSize: credential_blob.len() as u32,
-        CredentialBlob: credential_blob.as_mut_ptr(),
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        UserName: username.as_mut_ptr(),
-        ..Default::default()
-    };
-    let written = unsafe { CredWriteW(&credential, 0) } != 0;
-    credential_blob.fill(0);
-    if !written {
-        return Err("Unable to write Windows secure credential".to_string());
-    }
-    Ok(CredentialStatus {
-        provider,
-        configured: true,
-    })
-}
-
-struct CredentialSecret(Vec<u8>);
-
-impl CredentialSecret {
-    fn as_str(&self) -> Result<&str, String> {
-        std::str::from_utf8(&self.0).map_err(|_| "Stored credential is not valid UTF-8".to_string())
-    }
-}
-
-impl Drop for CredentialSecret {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
-
-fn credential_read(provider: &str) -> Result<CredentialSecret, String> {
-    let target = credential_target(provider)?;
-    let mut credential = std::ptr::null_mut::<CREDENTIALW>();
-    let read = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } != 0;
-    if !read {
-        return if unsafe { GetLastError() } == ERROR_NOT_FOUND {
-            Err("Provider credential is not configured".to_string())
-        } else {
-            Err("Unable to read Windows secure credential".to_string())
-        };
-    }
-    let value = unsafe { &*credential };
-    if value.CredentialBlob.is_null() || value.CredentialBlobSize == 0 {
-        unsafe { CredFree(credential.cast()) };
-        return Err("Stored provider credential is empty".to_string());
-    }
-    let secret = unsafe {
-        std::slice::from_raw_parts(value.CredentialBlob, value.CredentialBlobSize as usize).to_vec()
-    };
-    unsafe { CredFree(credential.cast()) };
-    Ok(CredentialSecret(secret))
-}
-
-struct WinHttpHandle(*mut core::ffi::c_void);
-
-impl WinHttpHandle {
-    fn new(handle: *mut core::ffi::c_void, operation: &str) -> Result<Self, String> {
-        if handle.is_null() {
-            Err(winhttp_error(operation))
-        } else {
-            Ok(Self(handle))
-        }
-    }
-}
-
-impl Drop for WinHttpHandle {
-    fn drop(&mut self) {
-        unsafe {
-            WinHttpCloseHandle(self.0);
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -470,11 +444,24 @@ fn provider_task_error(body: &serde_json::Value) -> String {
 #[tauri::command]
 async fn provider_submit(
     adapter_key: String,
-    provider_region: String,
     payload: serde_json::Value,
+    provider_profile_id: Option<String>,
+    provider_region: Option<String>,
+    state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderHttpResponse, String> {
+    let selection = resolve_media_selection(
+        &adapter_key,
+        provider_profile_id.as_deref(),
+        provider_region.as_deref(),
+        &state,
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
-        provider_submit_blocking(&adapter_key, &provider_region, payload)
+        provider_submit_blocking(
+            &adapter_key,
+            &selection.provider_region,
+            &selection.credential_subject,
+            payload,
+        )
     })
     .await
     .map_err(|error| format!("Native provider task failed: {error}"))?
@@ -483,11 +470,24 @@ async fn provider_submit(
 #[tauri::command]
 async fn provider_submit_task(
     adapter_key: String,
-    provider_region: String,
     payload: serde_json::Value,
+    provider_profile_id: Option<String>,
+    provider_region: Option<String>,
+    state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderTaskSubmitResponse, String> {
+    let selection = resolve_media_selection(
+        &adapter_key,
+        provider_profile_id.as_deref(),
+        provider_region.as_deref(),
+        &state,
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
-        provider_submit_task_blocking(&adapter_key, &provider_region, payload)
+        provider_submit_task_blocking(
+            &adapter_key,
+            &selection.provider_region,
+            &selection.credential_subject,
+            payload,
+        )
     })
     .await
     .map_err(|error| format!("Native provider task submission failed: {error}"))?
@@ -496,12 +496,13 @@ async fn provider_submit_task(
 fn provider_submit_task_blocking(
     adapter_key: &str,
     provider_region: &str,
+    credential_subject: &str,
     payload: serde_json::Value,
 ) -> Result<ProviderTaskSubmitResponse, String> {
     ensure_video_adapter(adapter_key)?;
     let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
-    let secret = credential_read(target.credential_provider)?;
+    let secret = credential_read(credential_subject)?;
     let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
     if response.status < 200 || response.status >= 300 {
         return Ok(ProviderTaskSubmitResponse {
@@ -523,11 +524,24 @@ fn provider_submit_task_blocking(
 #[tauri::command]
 async fn provider_poll_task(
     adapter_key: String,
-    provider_region: String,
     task_id: String,
+    provider_profile_id: Option<String>,
+    provider_region: Option<String>,
+    state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderHttpResponse, String> {
+    let selection = resolve_media_selection(
+        &adapter_key,
+        provider_profile_id.as_deref(),
+        provider_region.as_deref(),
+        &state,
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
-        provider_poll_task_blocking(&adapter_key, &provider_region, &task_id)
+        provider_poll_task_blocking(
+            &adapter_key,
+            &selection.provider_region,
+            &selection.credential_subject,
+            &task_id,
+        )
     })
     .await
     .map_err(|error| format!("Native provider task query failed: {error}"))?
@@ -536,23 +550,37 @@ async fn provider_poll_task(
 fn provider_poll_task_blocking(
     adapter_key: &str,
     provider_region: &str,
+    credential_subject: &str,
     task_id: &str,
 ) -> Result<ProviderHttpResponse, String> {
     ensure_video_adapter(adapter_key)?;
     let target = provider_target(adapter_key, provider_region)?;
     let path = provider_task_path(task_id)?;
-    let secret = credential_read(target.credential_provider)?;
+    let secret = credential_read(credential_subject)?;
     request_provider_json(target, &secret, "GET", &path, None)
 }
 
 #[tauri::command]
 async fn provider_cancel_task(
     adapter_key: String,
-    provider_region: String,
     task_id: String,
+    provider_profile_id: Option<String>,
+    provider_region: Option<String>,
+    state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderCancelResponse, String> {
+    let selection = resolve_media_selection(
+        &adapter_key,
+        provider_profile_id.as_deref(),
+        provider_region.as_deref(),
+        &state,
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
-        provider_cancel_task_blocking(&adapter_key, &provider_region, &task_id)
+        provider_cancel_task_blocking(
+            &adapter_key,
+            &selection.provider_region,
+            &selection.credential_subject,
+            &task_id,
+        )
     })
     .await
     .map_err(|error| format!("Native provider task cancellation failed: {error}"))?
@@ -561,6 +589,7 @@ async fn provider_cancel_task(
 fn provider_cancel_task_blocking(
     adapter_key: &str,
     provider_region: &str,
+    credential_subject: &str,
     task_id: &str,
 ) -> Result<ProviderCancelResponse, String> {
     ensure_video_adapter(adapter_key)?;
@@ -568,7 +597,7 @@ fn provider_cancel_task_blocking(
     let path = provider_cancel_path(task_id)?;
     let body = serde_json::to_vec(&serde_json::json!({ "id": task_id }))
         .map_err(|error| format!("Unable to serialize provider cancellation: {error}"))?;
-    let secret = credential_read(target.credential_provider)?;
+    let secret = credential_read(credential_subject)?;
     let response = request_provider_json(target, &secret, "POST", &path, Some(&body))?;
     Ok(ProviderCancelResponse {
         supported: true,
@@ -580,6 +609,7 @@ fn provider_cancel_task_blocking(
 fn provider_submit_blocking(
     adapter_key: &str,
     provider_region: &str,
+    credential_subject: &str,
     payload: serde_json::Value,
 ) -> Result<ProviderHttpResponse, String> {
     if ensure_video_adapter(adapter_key).is_ok() {
@@ -587,7 +617,7 @@ fn provider_submit_blocking(
     }
     let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
-    let secret = credential_read(target.credential_provider)?;
+    let secret = credential_read(credential_subject)?;
     let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
     if response.status < 200 || response.status >= 300 {
         return Ok(response);
@@ -644,152 +674,22 @@ fn request_provider_json(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<ProviderHttpResponse, String> {
-    let agent = wide("AI Video Workspace/0.1");
-    let host = wide(target.host);
-    let verb = wide(method);
-    let path = wide(path);
-    let session = WinHttpHandle::new(
-        unsafe {
-            WinHttpOpen(
-                agent.as_ptr(),
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            )
-        },
-        "Unable to initialize provider transport",
-    )?;
-    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) } == 0 {
-        return Err(winhttp_error("Unable to configure provider timeouts"));
-    }
-    let connection = WinHttpHandle::new(
-        unsafe { WinHttpConnect(session.0, host.as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0) },
-        "Unable to connect provider transport",
-    )?;
-    let request = WinHttpHandle::new(
-        unsafe {
-            WinHttpOpenRequest(
-                connection.0,
-                verb.as_ptr(),
-                path.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            )
-        },
-        "Unable to create provider request",
-    )?;
-    let disabled_features = WINHTTP_DISABLE_REDIRECTS;
-    if unsafe {
-        WinHttpSetOption(
-            request.0,
-            WINHTTP_OPTION_DISABLE_FEATURE,
-            (&disabled_features as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        )
-    } == 0
-    {
-        return Err(winhttp_error("Unable to disable provider redirects"));
-    }
-
-    let mut headers: Vec<u16> = "Content-Type: application/json\r\nAuthorization: Token "
-        .encode_utf16()
-        .collect();
-    headers.extend(secret.as_str()?.encode_utf16());
-    headers.extend("\r\n".encode_utf16());
-    let sent = unsafe {
-        WinHttpSendRequest(
-            request.0,
-            headers.as_ptr(),
-            headers.len() as u32,
-            body.map(|value| value.as_ptr().cast())
-                .unwrap_or(std::ptr::null()),
-            body.map_or(0, |value| value.len() as u32),
-            body.map_or(0, |value| value.len() as u32),
-            0,
-        )
-    };
-    headers.fill(0);
-    if sent == 0 {
-        return Err(winhttp_error("Provider request could not be sent"));
-    }
-    if unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) } == 0 {
-        return Err(winhttp_error("Provider response could not be received"));
-    }
-
-    let mut status = 0_u32;
-    let mut status_size = std::mem::size_of::<u32>() as u32;
-    let mut header_index = 0_u32;
-    if unsafe {
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            std::ptr::null(),
-            (&mut status as *mut u32).cast(),
-            &mut status_size,
-            &mut header_index,
-        )
-    } == 0
-    {
-        return Err(winhttp_error("Provider status could not be read"));
-    }
-
-    let mut response = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 8192];
-        let mut read = 0_u32;
-        if unsafe {
-            WinHttpReadData(
-                request.0,
-                chunk.as_mut_ptr().cast(),
-                chunk.len() as u32,
-                &mut read,
-            )
-        } == 0
-        {
-            return Err(winhttp_error("Provider response body could not be read"));
-        }
-        if read == 0 {
-            break;
-        }
-        response.extend_from_slice(&chunk[..read as usize]);
-        if response.len() > PROVIDER_RESPONSE_BODY_LIMIT {
-            return Err("Provider response exceeds the native transport limit".to_string());
-        }
-    }
-    let parsed = if response.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_slice(&response)
-            .map_err(|_| "Provider returned a non-JSON response".to_string())?
-    };
-    Ok(ProviderHttpResponse {
-        status,
-        body: parsed,
+    let response = request_json(JsonHttpRequest {
+        host: target.host,
+        port: 443,
+        secure: true,
+        method,
+        path,
+        authorization_scheme: "Token",
+        secret: secret.as_str()?,
+        body,
+        request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+        response_body_limit: PROVIDER_RESPONSE_BODY_LIMIT,
     })
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn winhttp_error(operation: &str) -> String {
-    format!("{operation} (Windows error {})", unsafe { GetLastError() })
-}
-
-#[tauri::command]
-fn credential_delete(provider: String) -> Result<CredentialStatus, String> {
-    let target = credential_target(&provider)?;
-    let deleted = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0;
-    let missing = !deleted && unsafe { GetLastError() } == ERROR_NOT_FOUND;
-    if !deleted && !missing {
-        return Err("Unable to delete Windows secure credential".to_string());
-    }
-    Ok(CredentialStatus {
-        provider,
-        configured: false,
+    .map_err(|error| error.to_string())?;
+    Ok(ProviderHttpResponse {
+        status: response.status,
+        body: response.body,
     })
 }
 
@@ -801,8 +701,15 @@ struct WorkerProcess {
 }
 
 impl WorkerProcess {
+    #[cfg(test)]
     fn spawn() -> Result<Self, String> {
         Self::spawn_command(worker_command()?)
+    }
+
+    fn spawn_for_app(app_data_dir: &Path) -> Result<Self, String> {
+        let mut command = worker_command()?;
+        command.env("AI_VIDEO_APP_DATA_DIR", app_data_dir);
+        Self::spawn_command(command)
     }
 
     fn spawn_command(mut command: Command) -> Result<Self, String> {
@@ -951,38 +858,221 @@ fn bundled_worker_path(application_dir: &Path) -> PathBuf {
     application_dir.join(BUNDLED_WORKER_FILENAME)
 }
 
-struct WorkerState(Mutex<Option<WorkerProcess>>);
+struct WorkerState {
+    process: Mutex<Option<WorkerProcess>>,
+    app_data_dir: PathBuf,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyProviderMigrationEntry {
+    source: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyProviderMigrationReport {
+    entries: Vec<LegacyProviderMigrationEntry>,
+}
+
+struct LegacyProviderMigrationState(LegacyProviderMigrationReport);
+
+impl WorkerState {
+    fn new(app_data_dir: PathBuf) -> Self {
+        Self {
+            process: Mutex::new(None),
+            app_data_dir,
+        }
+    }
+
+    fn request(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut guard = self.process.lock().map_err(|_| "Worker lock is poisoned")?;
+        if guard.is_none() {
+            *guard = Some(WorkerProcess::spawn_for_app(&self.app_data_dir)?);
+        }
+        let result = guard
+            .as_mut()
+            .ok_or("Worker failed to start")?
+            .request(request);
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+}
 
 #[tauri::command]
 fn worker_request(
     request: serde_json::Value,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<serde_json::Value, String> {
-    let mut guard = state.0.lock().map_err(|_| "Worker lock is poisoned")?;
-    if guard.is_none() {
-        *guard = Some(WorkerProcess::spawn()?);
-    }
+    state.request(&request)
+}
 
-    let result = guard
-        .as_mut()
-        .ok_or("Worker failed to start")?
-        .request(&request);
-
-    if result.is_err() {
-        *guard = None;
+fn migrate_legacy_provider_credentials(state: &WorkerState) -> LegacyProviderMigrationReport {
+    LegacyProviderMigrationReport {
+        entries: ["vidu", "vidu-cn"]
+            .into_iter()
+            .map(|source| migrate_legacy_provider_credential(state, source))
+            .collect(),
     }
-    result
+}
+
+fn migrate_legacy_provider_credential(
+    state: &WorkerState,
+    source: &str,
+) -> LegacyProviderMigrationEntry {
+    let legacy_exists = match credential_exists(source) {
+        Ok(value) => value,
+        Err(error) => return migration_failure(source, None, error),
+    };
+    if !legacy_exists {
+        return LegacyProviderMigrationEntry {
+            source: source.to_string(),
+            status: "not-found".to_string(),
+            profile_id: None,
+            message: None,
+        };
+    }
+    let response = match state.request(&serde_json::json!({
+        "id": format!("legacy-profile-migration-{source}"),
+        "protocolVersion": 1,
+        "method": "provider.profile.migrateLegacy",
+        "params": { "source": source }
+    })) {
+        Ok(value) => value,
+        Err(error) => return migration_failure(source, None, error),
+    };
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let message = response
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Worker rejected the legacy provider migration")
+            .to_string();
+        return migration_failure(source, None, message);
+    }
+    let result = &response["result"];
+    if result.get("state").and_then(serde_json::Value::as_str) == Some("archived") {
+        return LegacyProviderMigrationEntry {
+            source: source.to_string(),
+            status: "archived".to_string(),
+            profile_id: None,
+            message: Some(
+                "The prior migrated profile was deleted; the legacy credential remains available."
+                    .to_string(),
+            ),
+        };
+    }
+    let Some(profile_id) = result
+        .pointer("/profile/id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    else {
+        return migration_failure(source, None, "Migrated provider profile is missing an ID");
+    };
+    let profile_status = result
+        .pointer("/profile/connectionStatus")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let target_exists = match credential_exists(&profile_id) {
+        Ok(value) => value,
+        Err(error) => return migration_failure(source, Some(profile_id), error),
+    };
+    if !target_exists {
+        match credential_copy(source, &profile_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return migration_failure(
+                    source,
+                    Some(profile_id),
+                    "Legacy credential disappeared during migration",
+                );
+            }
+            Err(error) => return migration_failure(source, Some(profile_id), error),
+        }
+    }
+    if result.get("state").and_then(serde_json::Value::as_str) == Some("created")
+        || profile_status == "draft"
+    {
+        let completion = state.request(&serde_json::json!({
+            "id": format!("legacy-profile-ready-{source}"),
+            "protocolVersion": 1,
+            "method": "provider.connection.complete",
+            "params": { "profileId": profile_id, "status": "ready" }
+        }));
+        match completion {
+            Ok(value) if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) => {}
+            Ok(value) => {
+                let message = value
+                    .pointer("/error/message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Migrated profile could not be activated")
+                    .to_string();
+                return migration_failure(source, Some(profile_id), message);
+            }
+            Err(error) => return migration_failure(source, Some(profile_id), error),
+        }
+    }
+    LegacyProviderMigrationEntry {
+        source: source.to_string(),
+        status: if target_exists {
+            "existing"
+        } else {
+            "migrated"
+        }
+        .to_string(),
+        profile_id: Some(profile_id),
+        message: Some("The legacy credential was retained for rollback.".to_string()),
+    }
+}
+
+fn migration_failure(
+    source: &str,
+    profile_id: Option<String>,
+    message: impl Into<String>,
+) -> LegacyProviderMigrationEntry {
+    LegacyProviderMigrationEntry {
+        source: source.to_string(),
+        status: "failed".to_string(),
+        profile_id,
+        message: Some(message.into()),
+    }
+}
+
+#[tauri::command]
+fn provider_legacy_migration_status(
+    state: tauri::State<'_, LegacyProviderMigrationState>,
+) -> LegacyProviderMigrationReport {
+    state.0.clone()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(WorkerState(Mutex::new(None)))
+        .setup(|app| {
+            let app_data_dir = app.path().app_data_dir()?;
+            create_dir_all(&app_data_dir)?;
+            let worker_state = WorkerState::new(app_data_dir);
+            let migration_report = migrate_legacy_provider_credentials(&worker_state);
+            app.manage(LegacyProviderMigrationState(migration_report));
+            app.manage(worker_state);
+            app.manage(LlmStreamState::default());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             worker_request,
             credential_status,
             credential_set,
             credential_delete,
+            provider_legacy_migration_status,
+            provider_test_connection,
+            llm_stream,
+            llm_stream_cancel,
             provider_submit,
             provider_submit_task,
             provider_poll_task,
@@ -995,13 +1085,19 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_worker_path, contains_image_source, ensure_video_adapter, provider_cancel_path,
-        provider_payload, provider_state, provider_target, provider_task_error, provider_task_id,
-        provider_task_path, validate_credential_provider, WorkerProcess, BUNDLED_WORKER_FILENAME,
-        PROVIDER_REQUEST_BODY_LIMIT,
+        bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
+        ensure_video_adapter, is_profile_id, provider_cancel_path, provider_payload,
+        provider_state, provider_target, provider_task_error, provider_task_id, provider_task_path,
+        resolve_media_selection, validate_credential_provider, WorkerProcess, WorkerState,
+        BUNDLED_WORKER_FILENAME, PROVIDER_REQUEST_BODY_LIMIT,
     };
     use serde_json::json;
-    use std::{path::Path, process::Command, time::Duration};
+    use std::{
+        fs::{create_dir_all, remove_dir_all},
+        path::Path,
+        process::Command,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn release_worker_filename_matches_tauri_external_binary() {
@@ -1053,7 +1149,218 @@ mod tests {
     fn credential_provider_allowlist_rejects_unknown_targets() {
         assert!(validate_credential_provider("vidu").is_ok());
         assert!(validate_credential_provider("vidu-cn").is_ok());
+        assert!(validate_credential_provider("123e4567-e89b-42d3-a456-426614174000").is_ok());
+        assert!(is_profile_id("123e4567-e89b-42d3-a456-426614174000"));
+        assert!(!is_profile_id("123e4567-e89b-12d3-a456-426614174000"));
         assert!(validate_credential_provider("../../project.sqlite").is_err());
+    }
+
+    #[test]
+    fn profile_credentials_use_an_isolated_target_namespace() {
+        let profile_id = "123e4567-e89b-42d3-a456-426614174000";
+        let profile_target =
+            String::from_utf16(&credential_target(profile_id).expect("valid UUID"))
+                .expect("target should be UTF-16");
+        let legacy_target = String::from_utf16(&credential_target("vidu").expect("legacy target"))
+            .expect("target should be UTF-16");
+
+        assert_eq!(
+            profile_target,
+            format!("com.ai-video.workspace:provider-profile:{profile_id}\0")
+        );
+        assert_eq!(legacy_target, "com.ai-video.workspace:vidu\0");
+    }
+
+    #[test]
+    fn credential_subject_requires_an_active_registered_profile() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let app_data_dir = std::env::temp_dir().join(format!(
+            "ai-video-rust-profile-{}-{nonce}",
+            std::process::id()
+        ));
+        create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
+
+        {
+            let state = WorkerState::new(app_data_dir.clone());
+            let missing_id = "123e4567-e89b-42d3-a456-426614174000";
+            assert!(ensure_credential_subject("vidu", &state).is_ok());
+            assert!(ensure_credential_subject(missing_id, &state).is_err());
+
+            let created = state
+                .request(&json!({
+                    "id": "rust-profile-create",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.create",
+                    "params": {
+                        "name": "Rust credential bridge",
+                        "category": "llm",
+                        "providerType": "openai",
+                        "accessType": "official",
+                        "protocol": "openai-responses",
+                        "baseUrl": "https://api.openai.com/v1"
+                    }
+                }))
+                .expect("profile create response should be valid");
+            assert_eq!(created["ok"], true);
+            let profile_id = created["result"]["id"]
+                .as_str()
+                .expect("created profile should have an ID");
+            assert!(ensure_credential_subject(profile_id, &state).is_ok());
+            assert!(ensure_credential_subject(&profile_id.to_uppercase(), &state).is_ok());
+
+            let archived = state
+                .request(&json!({
+                    "id": "rust-profile-archive",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.archive",
+                    "params": { "profileId": profile_id }
+                }))
+                .expect("profile archive response should be valid");
+            assert_eq!(archived["ok"], true);
+            assert!(ensure_credential_subject(profile_id, &state).is_err());
+        }
+
+        remove_dir_all(&app_data_dir).expect("temporary app data directory should be removed");
+    }
+
+    #[test]
+    fn legacy_profile_migration_worker_method_is_idempotent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let app_data_dir = std::env::temp_dir().join(format!(
+            "ai-video-rust-legacy-profile-{}-{nonce}",
+            std::process::id()
+        ));
+        create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
+
+        {
+            let state = WorkerState::new(app_data_dir.clone());
+            let first = state
+                .request(&json!({
+                    "id": "rust-legacy-profile-first",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.migrateLegacy",
+                    "params": { "source": "vidu-cn" }
+                }))
+                .expect("first migration response should be valid");
+            assert_eq!(first["ok"], true);
+            assert_eq!(first["result"]["state"], "created");
+            assert_eq!(first["result"]["profile"]["migrationSource"], "vidu-cn");
+            let profile_id = first["result"]["profile"]["id"]
+                .as_str()
+                .expect("migrated profile should have an ID");
+
+            let second = state
+                .request(&json!({
+                    "id": "rust-legacy-profile-second",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.migrateLegacy",
+                    "params": { "source": "vidu-cn" }
+                }))
+                .expect("second migration response should be valid");
+            assert_eq!(second["ok"], true);
+            assert_eq!(second["result"]["state"], "existing");
+            assert_eq!(second["result"]["profile"]["id"], profile_id);
+        }
+
+        remove_dir_all(&app_data_dir).expect("temporary app data directory should be removed");
+    }
+
+    #[test]
+    fn media_profile_resolution_requires_a_ready_vidu_profile_and_enabled_model() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let app_data_dir = std::env::temp_dir().join(format!(
+            "ai-video-rust-media-profile-{}-{nonce}",
+            std::process::id()
+        ));
+        create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
+
+        {
+            let state = WorkerState::new(app_data_dir.clone());
+            let created = state
+                .request(&json!({
+                    "id": "rust-media-profile-create",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.create",
+                    "params": {
+                        "name": "Vidu China A",
+                        "category": "multi",
+                        "providerType": "vidu",
+                        "accessType": "official",
+                        "protocol": "vidu-v2",
+                        "baseUrl": "https://api.vidu.cn"
+                    }
+                }))
+                .expect("profile create response should be valid");
+            let profile_id = created["result"]["id"]
+                .as_str()
+                .expect("created profile should have an ID");
+            assert!(resolve_media_selection(
+                "TEXT_TO_IMAGE:vidu:viduq2:v2",
+                Some(profile_id),
+                None,
+                &state
+            )
+            .is_err());
+
+            let completed = state
+                .request(&json!({
+                    "id": "rust-media-profile-ready",
+                    "protocolVersion": 1,
+                    "method": "provider.connection.complete",
+                    "params": { "profileId": profile_id, "status": "ready" }
+                }))
+                .expect("profile completion response should be valid");
+            assert_eq!(completed["ok"], true);
+            let selection = resolve_media_selection(
+                "TEXT_TO_IMAGE:vidu:viduq2:v2",
+                Some(profile_id),
+                None,
+                &state,
+            )
+            .expect("ready Vidu profile should resolve");
+            assert_eq!(selection.credential_subject, profile_id);
+            assert_eq!(selection.provider_region, "cn");
+
+            let q2 = completed["result"]["models"]
+                .as_array()
+                .expect("built-in model list")
+                .iter()
+                .find(|model| model["remoteModelId"] == "viduq2")
+                .expect("Vidu Q2 model");
+            let disabled = state
+                .request(&json!({
+                    "id": "rust-media-model-disable",
+                    "protocolVersion": 1,
+                    "method": "provider.model.update",
+                    "params": {
+                        "profileId": profile_id,
+                        "modelId": q2["id"],
+                        "displayName": q2["displayName"],
+                        "capabilities": q2["capabilities"],
+                        "enabled": false
+                    }
+                }))
+                .expect("model update response should be valid");
+            assert_eq!(disabled["ok"], true);
+            assert!(resolve_media_selection(
+                "TEXT_TO_IMAGE:vidu:viduq2:v2",
+                Some(profile_id),
+                None,
+                &state
+            )
+            .is_err());
+        }
+
+        remove_dir_all(&app_data_dir).expect("temporary app data directory should be removed");
     }
 
     #[test]

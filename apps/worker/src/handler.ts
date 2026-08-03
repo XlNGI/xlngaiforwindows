@@ -33,11 +33,26 @@ import {
   type ProjectExportParams,
   type ProjectOpenParams,
   type ProjectRestoreParams,
+  type ProviderProfileCreateParams,
+  type ProviderLegacyMigrationParams,
+  type ProviderProfileUpdateParams,
+  type ProviderConnectionCompleteParams,
+  type ProviderModelCreateParams,
+  type ProviderModelUpdateParams,
   type MessageConstraintParams,
   type MessageDocumentParams,
+  type LlmGenerationCompleteParams,
+  type LlmGenerationFailParams,
+  type LlmGenerationIdentity,
+  type LlmGenerationObserveParams,
+  type LlmGenerationPrepareParams,
+  type LlmGenerationRetryPrepareParams,
+  type ModelPricingUpdateParams,
+  type ProviderDefaultUpdateParams,
   type SceneSaveParams,
   type ShotSaveParams,
   type SqliteProbeResult,
+  type UsageQueryParams,
   type WorkerError,
   type WorkerMethod,
   type WorkerRequest,
@@ -57,6 +72,8 @@ import { ImageGenerationService } from './image-generation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { MaintenanceService } from './maintenance-service.js';
 import { SampleProjectService } from './sample-project-service.js';
+import { AppSettingsService, ProviderProfileValidationError } from './app-settings-service.js';
+import { UsageService } from './usage-service.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -72,6 +89,24 @@ const methods = new Set<WorkerMethod>([
   'project.backup',
   'project.export',
   'project.restore',
+  'provider.profile.list',
+  'provider.profile.get',
+  'provider.profile.create',
+  'provider.profile.update',
+  'provider.profile.archive',
+  'provider.profile.migrateLegacy',
+  'provider.definition.list',
+  'provider.connection.begin',
+  'provider.connection.complete',
+  'provider.model.list',
+  'provider.model.createManual',
+  'provider.model.update',
+  'provider.model.pricing.list',
+  'provider.model.pricing.update',
+  'provider.default.list',
+  'provider.default.update',
+  'usage.list',
+  'usage.rebuild',
   'maintenance.cache.inspect',
   'maintenance.cache.clear',
   'maintenance.diagnostics.export',
@@ -95,9 +130,15 @@ const methods = new Set<WorkerMethod>([
   'context.preview',
   'llm.status',
   'llm.generate',
+  'llm.generation.prepare',
+  'llm.generation.runtime',
+  'llm.generation.observe',
+  'llm.generation.complete',
+  'llm.generation.fail',
   'llm.generation.get',
   'llm.generation.cancel',
   'llm.generation.retry',
+  'llm.generation.retryPrepare',
   'adapter.catalog',
   'adapter.resolve',
   'adapter.validate',
@@ -133,6 +174,7 @@ const packagedSqliteBinding = isPackaged
     (require('better-sqlite3/build/Release/better_sqlite3.node') as object)
   : undefined;
 const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding });
+const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqliteBinding });
 const contentService = new ContentService(projectService);
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
@@ -140,6 +182,9 @@ const videoGenerationService = new VideoGenerationService(projectService);
 const maintenanceService = new MaintenanceService(projectService);
 const sampleProjectService = new SampleProjectService(projectService);
 const contextService = new ContextService(projectService);
+const usageService = new UsageService(projectService, appSettingsService, {
+  nativeBinding: packagedSqliteBinding,
+});
 const llmProvider = new OpenAIResponsesProvider({
   apiKey: process.env.OPENAI_API_KEY,
   baseUrl: process.env.OPENAI_BASE_URL,
@@ -150,6 +195,7 @@ const generationService = new GenerationService(
   contentService,
   contextService,
   llmProvider,
+  { selectionResolver: appSettingsService, usageIndexer: appSettingsService },
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
@@ -399,6 +445,70 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         videoGenerationService.recoverInterrupted();
         break;
       }
+      case 'provider.profile.list':
+        result = appSettingsService.listProfiles(params.includeArchived === true);
+        break;
+      case 'provider.profile.get':
+        result = appSettingsService.getProfile(requireString(params, 'profileId'));
+        break;
+      case 'provider.profile.create':
+        result = appSettingsService.createProfile(params as unknown as ProviderProfileCreateParams);
+        break;
+      case 'provider.profile.update':
+        result = appSettingsService.updateProfile(params as unknown as ProviderProfileUpdateParams);
+        break;
+      case 'provider.profile.archive':
+        result = appSettingsService.archiveProfile(requireString(params, 'profileId'));
+        break;
+      case 'provider.profile.migrateLegacy':
+        result = appSettingsService.migrateLegacyProfile(
+          params as unknown as ProviderLegacyMigrationParams,
+        );
+        break;
+      case 'provider.definition.list':
+        result = appSettingsService.listProviderDefinitions();
+        break;
+      case 'provider.connection.begin':
+        result = appSettingsService.beginConnectionTest(requireString(params, 'profileId'));
+        break;
+      case 'provider.connection.complete':
+        result = appSettingsService.completeConnectionTest(
+          params as unknown as ProviderConnectionCompleteParams,
+        );
+        break;
+      case 'provider.model.list':
+        result = appSettingsService.listModels(requireString(params, 'profileId'));
+        break;
+      case 'provider.model.createManual':
+        result = appSettingsService.createManualModel(
+          params as unknown as ProviderModelCreateParams,
+        );
+        break;
+      case 'provider.model.update':
+        result = appSettingsService.updateModel(params as unknown as ProviderModelUpdateParams);
+        break;
+      case 'provider.model.pricing.list':
+        result = appSettingsService.listModelPricing(requireString(params, 'profileId'));
+        break;
+      case 'provider.model.pricing.update':
+        result = appSettingsService.updateModelPricing(
+          params as unknown as ModelPricingUpdateParams,
+        );
+        break;
+      case 'provider.default.list':
+        result = appSettingsService.listProviderDefaults();
+        break;
+      case 'provider.default.update':
+        result = appSettingsService.updateProviderDefault(
+          params as unknown as ProviderDefaultUpdateParams,
+        );
+        break;
+      case 'usage.list':
+        result = usageService.list(params as unknown as UsageQueryParams);
+        break;
+      case 'usage.rebuild':
+        result = usageService.rebuild();
+        break;
       case 'maintenance.cache.inspect':
         result = maintenanceService.inspectCache();
         break;
@@ -486,6 +596,21 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
           optionalNumber(params, 'budgetTokens'),
         );
         break;
+      case 'llm.generation.prepare':
+        result = generationService.prepare(params as unknown as LlmGenerationPrepareParams);
+        break;
+      case 'llm.generation.runtime':
+        result = generationService.runtime(params as unknown as LlmGenerationIdentity);
+        break;
+      case 'llm.generation.observe':
+        result = generationService.observe(params as unknown as LlmGenerationObserveParams);
+        break;
+      case 'llm.generation.complete':
+        result = generationService.complete(params as unknown as LlmGenerationCompleteParams);
+        break;
+      case 'llm.generation.fail':
+        result = generationService.failNative(params as unknown as LlmGenerationFailParams);
+        break;
       case 'llm.generation.get':
         result = generationService.get(requireString(params, 'generationId'));
         break;
@@ -497,6 +622,11 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
           assistantMessageId: requireString(params, 'assistantMessageId'),
           budgetTokens: optionalNumber(params, 'budgetTokens'),
         });
+        break;
+      case 'llm.generation.retryPrepare':
+        result = generationService.retryPrepare(
+          params as unknown as LlmGenerationRetryPrepareParams,
+        );
         break;
       case 'adapter.catalog':
         result = adapterService.catalog();
@@ -638,7 +768,9 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
               ? error.code === 'NOT_CONFIGURED'
                 ? 'LLM_NOT_CONFIGURED'
                 : 'LLM_REQUEST_FAILED'
-              : 'INTERNAL_ERROR',
+              : error instanceof ProviderProfileValidationError
+                ? 'INVALID_PARAMETERS'
+                : 'INTERNAL_ERROR',
       message: error instanceof Error ? error.message : 'Unexpected worker error.',
       details: error instanceof InvalidAdapterParametersError ? error.validation.errors : undefined,
     });

@@ -72,13 +72,15 @@ describe('App', () => {
     );
   });
 
-  it('opens the project maintenance dialog with restore controls when no project is open', async () => {
+  it('opens the settings center with restore controls when no project is open', async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: '项目维护' }));
+    fireEvent.click(screen.getByRole('button', { name: '设置中心' }));
 
     expect(await screen.findByRole('dialog', { name: '项目维护' })).toBeInTheDocument();
     expect(screen.getByText('从 SQLite 备份恢复')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '恢复并打开项目' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '供应商与模型' }));
+    expect(await screen.findByRole('button', { name: /添加第一个供应商/ })).toBeInTheDocument();
   });
 
   it('does not merge a streaming message into another conversation', () => {
@@ -187,11 +189,17 @@ describe('App', () => {
       }
       if (method === 'shot.list') return Promise.resolve([]);
       if (method === 'llm.status') {
-        return Promise.resolve({ provider: 'OpenAI', model: 'test', configured: false });
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
       }
       if (method === 'adapter.catalog') {
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
       }
+      if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'conversation.list') {
         return (params as { scopeType: string }).scopeType === 'project'
@@ -334,8 +342,14 @@ describe('App', () => {
       if (method === 'adapter.catalog') {
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
       }
+      if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'llm.status') {
-        return Promise.resolve({ provider: 'OpenAI', model: 'test', configured: true });
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: true,
+          configurationSource: 'environment',
+        });
       }
       if (method === 'conversation.list') return Promise.resolve([conversationA, conversationB]);
       if (method === 'chat.message.list') {

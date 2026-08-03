@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmProvider, LlmStreamRequest } from '@ai-video/llm';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
-import { GenerationService } from './generation-service.js';
+import {
+  GenerationService,
+  type LlmSelectionResolver,
+  type LlmUsageIndexer,
+} from './generation-service.js';
 import { ProjectService } from './project-service.js';
 
 const directories: string[] = [];
@@ -16,7 +20,11 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
 
-async function setup(provider: LlmProvider) {
+async function setup(
+  provider: LlmProvider,
+  selectionResolver?: LlmSelectionResolver,
+  usageIndexer?: LlmUsageIndexer,
+) {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-generation-'));
   directories.push(directory);
   const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
@@ -30,11 +38,28 @@ async function setup(provider: LlmProvider) {
     conversation,
     projectRoot,
     projects,
-    generations: new GenerationService(projects, content, new ContextService(projects), provider),
+    generations: new GenerationService(projects, content, new ContextService(projects), provider, {
+      selectionResolver,
+      usageIndexer,
+    }),
   };
 }
 
 describe('GenerationService', () => {
+  it('labels the environment-variable provider as a legacy configuration source', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'OpenAI', model: 'gpt-test', configured: true }),
+      stream: () => Promise.reject(new Error('not used')),
+    };
+    const { generations } = await setup(provider);
+    expect(generations.status()).toEqual({
+      provider: 'OpenAI',
+      model: 'gpt-test',
+      configured: true,
+      configurationSource: 'environment',
+    });
+  });
+
   it('streams and persists an assistant response', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
@@ -67,13 +92,13 @@ describe('GenerationService', () => {
         return Promise.resolve({ model: 'test-model', content: '字'.repeat(300) });
       },
     };
-    const { content, conversation, generations } = await setup(provider);
-    const save = vi.spyOn(content, 'saveMessage');
+    const { conversation, generations, projects } = await setup(provider);
+    const access = vi.spyOn(projects, 'access');
 
     const started = generations.generate(conversation.id, '批量写入');
     await expect.poll(() => generations.get(started.generationId).status).toBe('complete');
 
-    expect(save).toHaveBeenCalledTimes(3);
+    expect(access.mock.calls.filter(([writable]) => writable)).toHaveLength(2);
     expect(generations.get(started.generationId).assistantMessage.content).toHaveLength(300);
   });
 
@@ -206,5 +231,293 @@ describe('GenerationService', () => {
         .listMessages({ conversationId: conversation.id })
         .items.find((message) => message.id === assistant.id),
     ).toMatchObject({ status: 'failed', content: '生成因 Worker 重启而中断。' });
+  });
+
+  it('prepares, observes, and completes a managed native generation without a credential', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses',
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    };
+    const { content, conversation, generations } = await setup(provider, selectionResolver);
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Native prompt',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    expect(prepared.generation).toMatchObject({
+      status: 'prepared',
+      executionMode: 'native',
+      attemptId: prepared.stream.attemptId,
+    });
+    const runtime = generations.runtime(prepared.stream);
+    expect(runtime).toMatchObject({
+      protocol: 'openai-responses',
+      remoteModelId: 'mock-model',
+      prompt: 'Native prompt',
+    });
+    expect(JSON.stringify(runtime)).not.toMatch(/apiKey|credential|secret/i);
+
+    expect(generations.observe({ ...prepared.stream, content: 'First' })).toMatchObject({
+      status: 'streaming',
+      assistantMessage: { content: 'First' },
+    });
+    expect(() =>
+      generations.observe({
+        ...prepared.stream,
+        conversationId: 'stale-conversation',
+        content: 'First stale',
+      }),
+    ).toThrow('Stale LLM generation callback');
+    expect(
+      generations.complete({
+        ...prepared.stream,
+        content: 'First second',
+        providerResponseId: 'response-1',
+        finishReason: 'completed',
+      }),
+    ).toMatchObject({
+      status: 'complete',
+      providerResponseId: 'response-1',
+      assistantMessage: { content: 'First second', status: 'complete' },
+    });
+    expect(
+      generations.observe({ ...prepared.stream, content: 'First second ignored' }),
+    ).toMatchObject({ status: 'complete', assistantMessage: { content: 'First second' } });
+    expect(content.listMessages({ conversationId: conversation.id }).items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'user', content: 'Native prompt' }),
+        expect.objectContaining({ role: 'assistant', content: 'First second', status: 'complete' }),
+      ]),
+    );
+  });
+
+  it('cancels and retries managed generations without duplicating the user message', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    };
+    const { content, conversation, generations } = await setup(provider, selectionResolver);
+    const first = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Retry native prompt',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    generations.observe({ ...first.stream, content: 'Partial' });
+    await generations.cancel(first.generation.generationId);
+    expect(generations.get(first.generation.generationId)).toMatchObject({
+      status: 'cancelled',
+      assistantMessage: { content: 'Partial', status: 'failed' },
+    });
+
+    const retry = generations.retryPrepare({
+      assistantMessageId: first.generation.assistantMessage.id,
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    expect(retry.stream.attemptId).not.toBe(first.stream.attemptId);
+    expect(retry.generation.userMessage.id).toBe(first.generation.userMessage.id);
+    expect(
+      content
+        .listMessages({ conversationId: conversation.id })
+        .items.filter((message) => message.content === 'Retry native prompt'),
+    ).toHaveLength(1);
+  });
+
+  it('persists normalized usage, pricing snapshots, and exact estimated cost', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses',
+        baseUrl: 'https://mock.invalid/v1',
+        pricingSnapshot: {
+          currency: 'CNY',
+          unitTokens: 1_000_000,
+          inputPrice: '10',
+          cachedInputPrice: '2.5',
+          outputPrice: '30',
+          configuredAt: '2026-08-03T00:00:00.000Z',
+        },
+      }),
+    };
+    const indexLlmAttempt = vi.fn();
+    const { content, conversation, generations } = await setup(provider, selectionResolver, {
+      indexLlmAttempt,
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Cost prompt',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    const completed = generations.complete({
+      ...prepared.stream,
+      content: 'Cost response',
+      usage: {
+        inputTokens: 12_480,
+        cachedInputTokens: 8_000,
+        outputTokens: 2_160,
+        reasoningTokens: 500,
+        totalTokens: 14_640,
+        providerReportedCost: { amount: '0.13', currency: 'cny' },
+      },
+    });
+
+    expect(completed.assistantMessage.attempt).toMatchObject({
+      id: prepared.stream.attemptId,
+      status: 'complete',
+      usage: {
+        inputTokens: 12_480,
+        cachedInputTokens: 8_000,
+        outputTokens: 2_160,
+        reasoningTokens: 500,
+        providerReportedCost: { amount: '0.13', currency: 'CNY' },
+      },
+      estimatedCost: '0.1296',
+      currency: 'CNY',
+      pricingSnapshot: { inputPrice: '10', outputPrice: '30' },
+      providerReportedCost: { amount: '0.13', currency: 'CNY' },
+    });
+    expect(
+      content
+        .listMessages({ conversationId: conversation.id })
+        .items.find((message) => message.id === completed.assistantMessage.id)?.attempt,
+    ).toMatchObject({
+      estimatedCost: '0.1296',
+      currency: 'CNY',
+      providerReportedCost: { amount: '0.13', currency: 'CNY' },
+    });
+    expect(indexLlmAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('charges retries as independent attempts and preserves failure usage', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://mock.invalid/v1',
+        pricingSnapshot: {
+          currency: 'USD',
+          unitTokens: 1_000_000,
+          inputPrice: '10',
+          outputPrice: '30',
+          configuredAt: '2026-08-03T00:00:00.000Z',
+        },
+      }),
+    };
+    const { content, conversation, generations } = await setup(provider, selectionResolver);
+    const first = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Retry cost prompt',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    generations.failNative({
+      ...first.stream,
+      content: 'Partial failure',
+      error: 'Mock failure',
+      retryable: true,
+      usage: { inputTokens: 1_000_000 },
+    });
+    const retry = generations.retryPrepare({
+      assistantMessageId: first.generation.assistantMessage.id,
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    generations.complete({
+      ...retry.stream,
+      content: 'Retry completed',
+      usage: { outputTokens: 1_000_000 },
+    });
+
+    const assistantAttempts = content
+      .listMessages({ conversationId: conversation.id })
+      .items.filter((message) => message.role === 'assistant')
+      .map((message) => message.attempt);
+    expect(assistantAttempts).toHaveLength(2);
+    const attemptsById = new Map(assistantAttempts.map((attempt) => [attempt?.id, attempt]));
+    expect(attemptsById.get(first.stream.attemptId)).toMatchObject({
+      status: 'failed',
+      usage: { inputTokens: 1_000_000 },
+      estimatedCost: '10',
+    });
+    expect(attemptsById.get(retry.stream.attemptId)).toMatchObject({
+      status: 'complete',
+      usage: { outputTokens: 1_000_000 },
+      estimatedCost: '30',
+    });
+  });
+
+  it('keeps a completed generation successful when the rebuildable usage index fails', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses',
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    };
+    const { conversation, generations } = await setup(provider, selectionResolver, {
+      indexLlmAttempt: () => {
+        throw new Error('Mock index failure');
+      },
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Index failure prompt',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+
+    expect(generations.complete({ ...prepared.stream, content: 'Still complete' })).toMatchObject({
+      status: 'complete',
+      assistantMessage: { content: 'Still complete', status: 'complete' },
+    });
   });
 });

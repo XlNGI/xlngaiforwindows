@@ -50,7 +50,7 @@ describe('ProjectService', () => {
     const recent = join(base, 'recent.json');
     const first = service(recent);
     const created = first.create(root, 'First Project');
-    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 6 });
+    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 7 });
     for (const path of [
       'project.sqlite',
       'assets/images',
@@ -167,7 +167,7 @@ describe('ProjectService', () => {
     writer.close();
     expect(service(recent).open(exported)).toMatchObject({
       name: 'Portable Project',
-      schemaVersion: 6,
+      schemaVersion: 7,
     });
   });
 

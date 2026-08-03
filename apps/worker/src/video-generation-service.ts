@@ -86,6 +86,13 @@ export class VideoGenerationService {
       throw new Error('Video asset kind is invalid.');
     }
     const providerRegion = requireProviderRegion(params.providerRegion);
+    const providerProfileId = params.providerProfileId
+      ? requireProviderProfileId(params.providerProfileId)
+      : undefined;
+    const modelId = params.modelId ? requireModelId(params.modelId) : undefined;
+    if (Boolean(providerProfileId) !== Boolean(modelId)) {
+      throw new Error('Provider profile and model must be supplied together.');
+    }
 
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -107,6 +114,8 @@ export class VideoGenerationService {
         metadataJson: JSON.stringify({
           assetKind,
           providerRegion,
+          providerProfileId,
+          modelId,
           pollAttempts: 0,
         } satisfies VideoJobMetadata),
         createdAt: now,
@@ -637,6 +646,10 @@ export class VideoGenerationService {
           ? parsed.assetKind
           : 'shot-video',
       providerRegion: requireProviderRegion(parsed.providerRegion ?? 'global'),
+      providerProfileId: parsed.providerProfileId
+        ? requireProviderProfileId(parsed.providerProfileId)
+        : undefined,
+      modelId: parsed.modelId ? requireModelId(parsed.modelId) : undefined,
       pollAttempts:
         typeof parsed.pollAttempts === 'number' && Number.isFinite(parsed.pollAttempts)
           ? Math.max(0, Math.floor(parsed.pollAttempts))
@@ -683,6 +696,8 @@ export class VideoGenerationService {
       request: JSON.parse(job.requestJson) as AdapterParameters,
       metadata: {
         providerRegion: metadata.providerRegion,
+        providerProfileId: metadata.providerProfileId,
+        modelId: metadata.modelId,
         providerState: metadata.providerState,
         pollAttempts: metadata.pollAttempts,
         lastPolledAt: metadata.lastPolledAt,
@@ -742,6 +757,26 @@ function requireProviderTaskId(value: string): string {
 function requireProviderRegion(value: string): VideoProviderRegion {
   if (value !== 'global' && value !== 'cn') throw new Error('Provider region is invalid.');
   return value;
+}
+
+function requireProviderProfileId(value: string): string {
+  const normalized = value.toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new Error('Provider profile ID is invalid.');
+  }
+  return normalized;
+}
+
+function requireModelId(value: string): string {
+  const normalized = value.trim();
+  if (
+    !normalized ||
+    normalized.length > 200 ||
+    [...normalized].some((character) => character.charCodeAt(0) < 32)
+  ) {
+    throw new Error('Provider model ID is invalid.');
+  }
+  return normalized;
 }
 
 function cloneParameters(parameters: AdapterParameters): AdapterParameters {

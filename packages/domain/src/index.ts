@@ -95,6 +95,40 @@ export interface ChatMessageRecord {
   createdAt: string;
 }
 
+export type LlmAttemptStatus =
+  'prepared' | 'streaming' | 'complete' | 'failed' | 'cancelled' | 'interrupted';
+
+export interface LlmGenerationAttemptRecord {
+  id: string;
+  generationId: string;
+  conversationId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  contextSnapshotId: string;
+  providerProfileId?: string;
+  providerNameSnapshot: string;
+  modelId?: string;
+  modelNameSnapshot: string;
+  protocol: string;
+  status: LlmAttemptStatus;
+  startedAt: string;
+  firstTokenAt?: string;
+  completedAt?: string;
+  providerResponseId?: string;
+  finishReason?: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  rawUsageJson?: string;
+  pricingSnapshotJson?: string;
+  estimatedCost?: string;
+  currency?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
 export interface MemoryRecord {
   id: string;
   projectId: string;
@@ -125,6 +159,91 @@ export interface GenerationResultRecord {
   jobId: string;
   assetId?: string;
   providerUrl?: string;
+  createdAt: string;
+}
+
+export type ProviderCategory = 'llm' | 'image' | 'video' | 'multi';
+export type ProviderAccessType = 'official' | 'custom';
+export type ProviderConnectionStatus =
+  | 'draft'
+  | 'testing'
+  | 'ready'
+  | 'auth-failed'
+  | 'network-failed'
+  | 'protocol-failed'
+  | 'sync-failed'
+  | 'disabled';
+export type ProviderModelSource = 'remote' | 'built-in' | 'manual';
+export type ProviderDefaultRole = 'quality' | 'balanced' | 'fast' | 'vision' | 'embedding';
+
+export interface ProviderProfileRecord {
+  id: string;
+  name: string;
+  category: ProviderCategory;
+  providerType: string;
+  accessType: ProviderAccessType;
+  protocol: string;
+  baseUrl: string;
+  enabled: boolean;
+  connectionStatus: ProviderConnectionStatus;
+  lastCheckedAt?: string;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+  migrationSource?: 'vidu' | 'vidu-cn';
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+}
+
+export interface ProviderModelRecord {
+  id: string;
+  providerProfileId: string;
+  remoteModelId: string;
+  displayName: string;
+  capabilitiesJson: string;
+  source: ProviderModelSource;
+  enabled: boolean;
+  lastSyncedAt?: string;
+  lastSeenAt?: string;
+  unavailableAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelPricingRecord {
+  providerProfileId: string;
+  modelId: string;
+  currency: string;
+  unitTokens: number;
+  inputPrice: string;
+  cachedInputPrice?: string;
+  outputPrice: string;
+  updatedAt: string;
+}
+
+export interface ProviderDefaultRecord {
+  role: ProviderDefaultRole;
+  providerProfileId: string;
+  modelId: string;
+  updatedAt: string;
+}
+
+export interface UsageIndexRecord {
+  attemptId: string;
+  projectId: string;
+  projectName: string;
+  providerProfileId: string;
+  providerName: string;
+  modelId: string;
+  modelName: string;
+  status: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  estimatedCost?: string;
+  currency?: string;
   createdAt: string;
 }
 
@@ -195,6 +314,14 @@ export interface ChatMessageRepository {
   failStreamingByProject(projectId: string, failureMessage: string): number;
 }
 
+export interface LlmGenerationAttemptRepository {
+  save(record: LlmGenerationAttemptRecord): void;
+  get(id: string): LlmGenerationAttemptRecord | undefined;
+  getByAssistantMessage(assistantMessageId: string): LlmGenerationAttemptRecord | undefined;
+  listByProject(projectId: string): LlmGenerationAttemptRecord[];
+  failActiveByProject(projectId: string, completedAt: string, errorMessage: string): number;
+}
+
 export interface MemoryRepository {
   save(record: MemoryRecord): void;
   get(id: string): MemoryRecord | undefined;
@@ -228,4 +355,38 @@ export interface JobRepository {
 export interface GenerationResultRepository {
   save(record: GenerationResultRecord): void;
   listByJob(jobId: string): GenerationResultRecord[];
+}
+
+export interface ProviderProfileRepository {
+  save(record: ProviderProfileRecord): void;
+  get(id: string): ProviderProfileRecord | undefined;
+  list(includeArchived?: boolean): ProviderProfileRecord[];
+  getByMigrationSource(source: 'vidu' | 'vidu-cn'): ProviderProfileRecord | undefined;
+  archive(id: string, archivedAt: string): void;
+}
+
+export interface ProviderModelRepository {
+  save(record: ProviderModelRecord): void;
+  get(id: string): ProviderModelRecord | undefined;
+  getByRemoteId(providerProfileId: string, remoteModelId: string): ProviderModelRecord | undefined;
+  listByProfile(providerProfileId: string): ProviderModelRecord[];
+}
+
+export interface ModelPricingRepository {
+  save(record: ModelPricingRecord): void;
+  get(providerProfileId: string, modelId: string): ModelPricingRecord | undefined;
+  listByProfile(providerProfileId: string): ModelPricingRecord[];
+}
+
+export interface ProviderDefaultRepository {
+  save(record: ProviderDefaultRecord): void;
+  get(role: ProviderDefaultRole): ProviderDefaultRecord | undefined;
+  list(): ProviderDefaultRecord[];
+  delete(role: ProviderDefaultRole): void;
+}
+
+export interface UsageIndexRepository {
+  save(record: UsageIndexRecord): void;
+  get(attemptId: string): UsageIndexRecord | undefined;
+  listByCreatedAt(startAt: string, endAt: string): UsageIndexRecord[];
 }

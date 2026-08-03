@@ -148,6 +148,23 @@ describe('repositories', () => {
       contentJson: '{"version":1}',
       createdAt: 'now',
     });
+    repositories.llmGenerationAttempts.save({
+      id: 'attempt',
+      generationId: 'generation',
+      conversationId: 'conversation',
+      userMessageId: 'message',
+      assistantMessageId: 'assistant-message',
+      contextSnapshotId: 'snapshot',
+      providerProfileId: 'profile',
+      providerNameSnapshot: 'Provider',
+      modelId: 'model',
+      modelNameSnapshot: 'Model',
+      protocol: 'openai-responses',
+      status: 'streaming',
+      startedAt: 'now',
+      pricingSnapshotJson:
+        '{"currency":"USD","unitTokens":1000000,"inputPrice":"1","outputPrice":"2","configuredAt":"now"}',
+    });
 
     expect(repositories.documents.get('document')).toMatchObject({ title: 'Outline' });
     expect(repositories.documents.listVersions('versioned-document')).toMatchObject([
@@ -177,6 +194,23 @@ describe('repositories', () => {
       contentJson: '{"version":1}',
     });
     expect(repositories.contextSnapshots.listByProject('project', 10)).toHaveLength(1);
+    expect(
+      repositories.llmGenerationAttempts.getByAssistantMessage('assistant-message'),
+    ).toMatchObject({
+      id: 'attempt',
+      status: 'streaming',
+      providerNameSnapshot: 'Provider',
+    });
+    expect(
+      repositories.llmGenerationAttempts.failActiveByProject(
+        'project',
+        'later',
+        'Worker restarted',
+      ),
+    ).toBe(1);
+    expect(repositories.llmGenerationAttempts.listByProject('project')).toMatchObject([
+      { id: 'attempt', status: 'failed', completedAt: 'later', errorCode: 'worker-restarted' },
+    ]);
     database.close();
   });
 

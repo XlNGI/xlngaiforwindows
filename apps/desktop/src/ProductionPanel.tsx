@@ -5,11 +5,11 @@ import {
   Eye,
   FolderOpen,
   ImagePlus,
-  KeyRound,
   Pause,
   Play,
   Plus,
   Save,
+  Settings2,
   Trash2,
   WandSparkles,
   Square,
@@ -26,23 +26,17 @@ import type {
   GenerationCapability,
   ImageAssetKind,
   ImagePreviewInfo,
+  ProviderModelInfo,
+  ProviderProfileInfo,
   VideoAssetKind,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
-import {
-  canUseSecureCredentials,
-  deleteCredential,
-  getCredentialStatus,
-  setCredential,
-  type CredentialStatus,
-} from './credential-client';
 import { callWorker } from './worker-client';
 import {
   cancelVideoProviderTask,
   pollVideoProviderTask,
   submitProviderRequest,
   submitVideoProviderTask,
-  type ProviderRegion,
 } from './provider-client';
 import { VideoPollingScheduler } from './video-polling-scheduler';
 import {
@@ -55,6 +49,7 @@ import {
 } from './local-image-input';
 
 interface ProductionPanelProps {
+  capability?: GenerationCapability;
   projectId?: string;
   projectRootPath?: string;
   shotId?: string;
@@ -62,20 +57,11 @@ interface ProductionPanelProps {
   assets?: AssetInfo[];
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
   onOpenAssetLibrary?: (assetId?: string) => void;
+  onOpenProviderSettings?: () => void;
 }
 
-const PROVIDER_REGION_STORAGE_KEY = 'ai-video.vidu-provider-region';
 const AUTO_SAVE_STORAGE_KEY = 'ai-video.image-auto-save-local';
-
-function initialProviderRegion(): ProviderRegion {
-  try {
-    const stored = window.localStorage.getItem(PROVIDER_REGION_STORAGE_KEY);
-    if (stored === 'global' || stored === 'cn') return stored;
-  } catch {
-    // The native WebView normally exposes localStorage; use the domestic default if it does not.
-  }
-  return 'cn';
-}
+const PROVIDER_PROFILE_STORAGE_KEY = 'ai-video.production-provider-profiles';
 
 function initialAutoSaveLocal(): boolean {
   try {
@@ -105,16 +91,6 @@ function errorMessage(reason: unknown, fallback: string): string {
     if (typeof message === 'string' && message.trim()) return message.trim();
   }
   return fallback;
-}
-
-function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
-  const seen = new Set<string>();
-  return items.filter((item) => {
-    const value = key(item);
-    if (seen.has(value)) return false;
-    seen.add(value);
-    return true;
-  });
 }
 
 function isVideoAsset(asset: AssetInfo | undefined): boolean {
@@ -179,6 +155,7 @@ function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
 }
 
 export function ProductionPanel({
+  capability,
   projectId,
   projectRootPath,
   shotId,
@@ -186,11 +163,12 @@ export function ProductionPanel({
   assets: controlledAssets,
   onAssetsChanged,
   onOpenAssetLibrary,
+  onOpenProviderSettings,
 }: ProductionPanelProps) {
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
-  const [capability, setCapability] = useState<GenerationCapability>();
-  const [provider, setProvider] = useState('');
-  const [providerRegion, setProviderRegion] = useState<ProviderRegion>(initialProviderRegion);
+  const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState('');
+  const [models, setModels] = useState<ProviderModelInfo[]>([]);
   const [adapterKey, setAdapterKey] = useState('');
   const [adapter, setAdapter] = useState<AdapterDescriptor>();
   const [parameters, setParameters] = useState<AdapterParameters>({});
@@ -198,10 +176,6 @@ export function ProductionPanel({
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const [credential, setCredentialState] = useState<CredentialStatus>();
-  const [credentialSecret, setCredentialSecret] = useState('');
-  const [credentialMessage, setCredentialMessage] = useState('');
-  const [credentialBusy, setCredentialBusy] = useState(false);
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
   const [assetKind, setAssetKind] = useState<ImageAssetKind>('generated-image');
@@ -219,23 +193,14 @@ export function ProductionPanel({
   const assets = controlledAssets ?? localAssets;
   const selectedAsset = assets.find((item) => item.id === selectedAssetId);
   const selectedImageAsset = isVideoAsset(selectedAsset) ? undefined : selectedAsset;
+  const effectiveCapability =
+    catalog?.capabilities.some((item) => item.key === capability) === true
+      ? capability!
+      : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
   onAssetsChangedRef.current = onAssetsChanged;
   controlledAssetsRef.current = controlledAssets;
   currentProjectIdRef.current = projectId;
-
-  const credentialProvider =
-    adapter?.provider === 'vidu' && providerRegion === 'cn'
-      ? `${adapter.credentialProvider}-cn`
-      : adapter?.credentialProvider;
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(PROVIDER_REGION_STORAGE_KEY, providerRegion);
-    } catch {
-      // Region remains valid for the current session when storage is unavailable.
-    }
-  }, [providerRegion]);
 
   useEffect(() => {
     try {
@@ -246,18 +211,69 @@ export function ProductionPanel({
   }, [autoSaveLocal]);
 
   useEffect(() => {
-    void callWorker('adapter.catalog', {})
-      .then((nextCatalog) => {
+    void Promise.all([callWorker('adapter.catalog', {}), callWorker('provider.profile.list', {})])
+      .then(([nextCatalog, nextProfiles]) => {
         setCatalog(nextCatalog);
-        const first = nextCatalog.adapters[0];
-        if (first) {
-          setCapability(first.capability);
-          setProvider(first.provider);
-          setAdapterKey(first.key);
-        }
+        setProfiles(nextProfiles ?? []);
       })
       .catch((reason) => setMessage(errorMessage(reason, '适配器目录读取失败')));
   }, []);
+
+  const eligibleProfiles = useMemo(
+    () =>
+      profiles.filter(
+        (profile) =>
+          profile.providerType === 'vidu' &&
+          profile.protocol === 'vidu-v2' &&
+          profile.enabled &&
+          profile.connectionStatus === 'ready' &&
+          (profile.category === 'multi' ||
+            (isVideoCapability(effectiveCapability)
+              ? profile.category === 'video'
+              : profile.category === 'image')),
+      ),
+    [effectiveCapability, profiles],
+  );
+  const selectedProfile = eligibleProfiles.find((profile) => profile.id === selectedProfileId);
+  const providerRegion = selectedProfile?.baseUrl === 'https://api.vidu.cn' ? 'cn' : 'global';
+
+  useEffect(() => {
+    let storedProfileId = '';
+    try {
+      const stored = JSON.parse(
+        window.localStorage.getItem(PROVIDER_PROFILE_STORAGE_KEY) ?? '{}',
+      ) as Record<string, unknown>;
+      if (typeof stored[effectiveCapability] === 'string') {
+        storedProfileId = stored[effectiveCapability];
+      }
+    } catch {
+      // Fall back to the first eligible profile when stored preferences are unavailable.
+    }
+    const nextProfileId = eligibleProfiles.some((profile) => profile.id === selectedProfileId)
+      ? selectedProfileId
+      : eligibleProfiles.some((profile) => profile.id === storedProfileId)
+        ? storedProfileId
+        : (eligibleProfiles[0]?.id ?? '');
+    if (nextProfileId !== selectedProfileId) setSelectedProfileId(nextProfileId);
+  }, [effectiveCapability, eligibleProfiles, selectedProfileId]);
+
+  useEffect(() => {
+    if (!selectedProfileId) {
+      setModels([]);
+      return;
+    }
+    let active = true;
+    void callWorker('provider.model.list', { profileId: selectedProfileId })
+      .then((items) => {
+        if (active) setModels(items);
+      })
+      .catch((reason) => {
+        if (active) setMessage(errorMessage(reason, '供应商模型读取失败'));
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedProfileId]);
 
   useEffect(() => {
     const selected = catalog?.adapters.find((item) => item.key === adapterKey);
@@ -283,9 +299,13 @@ export function ProductionPanel({
         if (!shotId) {
           return;
         }
+        const selectedModel = models.find((model) => model.remoteModelId === resolved.model);
+        if (!selectedProfile || !selectedModel) return;
         const draft = await callWorker('generation.draft.get', {
           shotId,
           adapterKey: resolved.key,
+          providerProfileId: selectedProfile.id,
+          modelId: selectedModel.remoteModelId,
         });
         if (active) setParameters(draft?.parameters ?? defaults);
       })
@@ -299,16 +319,7 @@ export function ProductionPanel({
     return () => {
       active = false;
     };
-  }, [adapterKey, catalog, projectId, shotId]);
-
-  useEffect(() => {
-    setCredentialState(undefined);
-    setCredentialMessage('');
-    if (!credentialProvider || !canUseSecureCredentials()) return;
-    void getCredentialStatus(credentialProvider)
-      .then(setCredentialState)
-      .catch((reason) => setCredentialMessage(errorMessage(reason, '凭据状态读取失败')));
-  }, [credentialProvider]);
+  }, [adapterKey, catalog, models, projectId, selectedProfile, shotId]);
 
   useEffect(() => {
     let active = true;
@@ -337,7 +348,12 @@ export function ProductionPanel({
     const scheduler = writable
       ? new VideoPollingScheduler({
           poll: (job) =>
-            pollVideoProviderTask(job.adapterKey, job.metadata.providerRegion, job.providerTaskId!),
+            pollVideoProviderTask(
+              job.adapterKey,
+              job.metadata.providerProfileId,
+              job.providerTaskId!,
+              job.metadata.providerRegion,
+            ),
           observe: (job, response) =>
             callWorker('video.generate.observe', {
               jobId: job.id,
@@ -408,37 +424,49 @@ export function ProductionPanel({
   }, [selectedAsset?.kind, selectedAssetId]);
 
   const capabilityAdapters = useMemo(
-    () => catalog?.adapters.filter((item) => item.capability === capability) ?? [],
-    [catalog, capability],
-  );
-  const providerOptions = useMemo(
-    () => uniqueBy(capabilityAdapters, (item) => item.provider),
-    [capabilityAdapters],
+    () => catalog?.adapters.filter((item) => item.capability === effectiveCapability) ?? [],
+    [catalog, effectiveCapability],
   );
   const modelOptions = useMemo(
-    () => capabilityAdapters.filter((item) => item.provider === provider),
-    [capabilityAdapters, provider],
+    () =>
+      capabilityAdapters.filter((item) =>
+        models.some(
+          (model) =>
+            model.remoteModelId === item.model &&
+            model.enabled &&
+            !model.unavailableAt &&
+            (isVideoCapability(effectiveCapability)
+              ? model.capabilities.videoGeneration
+              : model.capabilities.imageGeneration),
+        ),
+      ),
+    [capabilityAdapters, effectiveCapability, models],
   );
+  const selectedModel = models.find((model) => model.remoteModelId === adapter?.model);
 
-  const chooseCapability = (next: GenerationCapability) => {
-    const first = catalog?.adapters.find((item) => item.capability === next);
-    setCapability(next);
-    setProvider(first?.provider ?? '');
-    setAdapterKey(first?.key ?? '');
-  };
+  useEffect(() => {
+    const nextAdapterKey = modelOptions.some((item) => item.key === adapterKey)
+      ? adapterKey
+      : (modelOptions[0]?.key ?? '');
+    if (nextAdapterKey !== adapterKey) setAdapterKey(nextAdapterKey);
+  }, [adapterKey, modelOptions]);
 
-  const chooseProvider = (next: string) => {
-    const first = capabilityAdapters.find((item) => item.provider === next);
-    setProvider(next);
-    setAdapterKey(first?.key ?? '');
-  };
-
-  const chooseProviderRegion = (next: ProviderRegion) => {
-    setProviderRegion(next);
-    setCredentialState(undefined);
-    setCredentialSecret('');
-    setCredentialMessage('');
+  const chooseProfile = (profileId: string) => {
+    setSelectedProfileId(profileId);
+    setModels([]);
+    setAdapterKey('');
     setGenerationStatus('');
+    try {
+      const stored = JSON.parse(
+        window.localStorage.getItem(PROVIDER_PROFILE_STORAGE_KEY) ?? '{}',
+      ) as Record<string, unknown>;
+      window.localStorage.setItem(
+        PROVIDER_PROFILE_STORAGE_KEY,
+        JSON.stringify({ ...stored, [effectiveCapability]: profileId }),
+      );
+    } catch {
+      // Profile selection remains valid for the current session when storage is unavailable.
+    }
   };
 
   const updateParameter = (key: string, value: AdapterParameters[string] | undefined) => {
@@ -514,7 +542,7 @@ export function ProductionPanel({
   };
 
   const saveDraft = async () => {
-    if (!adapter || !shotId) return;
+    if (!adapter || !shotId || !selectedProfile || !selectedModel) return;
     if (hasLocalImageParameters(parameters)) {
       const localField = Object.entries(parameters).find(([, value]) =>
         Array.isArray(value) ? value.some(isLocalImageDataUrl) : isLocalImageDataUrl(value),
@@ -542,6 +570,8 @@ export function ProductionPanel({
       const saved = await callWorker('generation.draft.save', {
         shotId,
         adapterKey: adapter.key,
+        providerProfileId: selectedProfile.id,
+        modelId: selectedModel.remoteModelId,
         parameters,
       });
       setMessage(`草稿已保存 · ${new Date(saved.updatedAt).toLocaleTimeString()}`);
@@ -552,31 +582,8 @@ export function ProductionPanel({
     }
   };
 
-  const saveCredential = async () => {
-    if (!adapter || !credentialProvider || !credentialSecret) return;
-    setCredentialBusy(true);
-    setCredentialMessage('');
-    try {
-      setCredentialState(await setCredential(credentialProvider, credentialSecret));
-      setCredentialSecret('');
-      setCredentialMessage('凭据已保存到 Windows 凭据管理器');
-    } catch (reason) {
-      setCredentialMessage(errorMessage(reason, '凭据保存失败'));
-    } finally {
-      setCredentialBusy(false);
-    }
-  };
-
   const generateImage = async () => {
-    if (!adapter || !writable) return;
-    if (canUseSecureCredentials() && credential?.configured !== true) {
-      setGenerationStatus(
-        credential
-          ? '请先为当前 Vidu 服务区域保存 API Key。'
-          : '正在读取当前 Vidu 服务区域的凭据状态，请稍后重试。',
-      );
-      return;
-    }
+    if (!adapter || !selectedProfile || !selectedModel || !writable) return;
     let preparedJobId: string | undefined;
     setBusy(true);
     setGenerationStatus('');
@@ -598,7 +605,12 @@ export function ProductionPanel({
       preparedJobId = job.id;
       setGenerationJobId(job.id);
       setGenerationStatus('正在请求 Provider...');
-      const response = await submitProviderRequest(adapter.key, parameters, providerRegion);
+      const response = await submitProviderRequest(
+        adapter.key,
+        parameters,
+        selectedProfile.id,
+        providerRegion,
+      );
       const completed = await callWorker('image.generate.complete', {
         jobId: job.id,
         providerStatus: response.status,
@@ -640,15 +652,14 @@ export function ProductionPanel({
   };
 
   const generateVideo = async () => {
-    if (!adapter || !isVideoCapability(adapter.capability) || !writable) return;
-    if (canUseSecureCredentials() && credential?.configured !== true) {
-      setGenerationStatus(
-        credential
-          ? '请先为当前 Vidu 服务区域保存 API Key。'
-          : '正在读取当前 Vidu 服务区域的凭据状态，请稍后重试。',
-      );
+    if (
+      !adapter ||
+      !selectedProfile ||
+      !selectedModel ||
+      !isVideoCapability(adapter.capability) ||
+      !writable
+    )
       return;
-    }
     let preparedJobId: string | undefined;
     const submissionProjectId = projectId;
     setBusy(true);
@@ -668,6 +679,8 @@ export function ProductionPanel({
         adapterKey: adapter.key,
         parameters,
         providerRegion,
+        providerProfileId: selectedProfile.id,
+        modelId: selectedModel.remoteModelId,
         assetKind: videoAssetKind,
       });
       if (currentProjectIdRef.current !== submissionProjectId) return;
@@ -677,7 +690,12 @@ export function ProductionPanel({
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         void Notification.requestPermission().catch(() => undefined);
       }
-      const response = await submitVideoProviderTask(adapter.key, parameters, providerRegion);
+      const response = await submitVideoProviderTask(
+        adapter.key,
+        parameters,
+        selectedProfile.id,
+        providerRegion,
+      );
       if (currentProjectIdRef.current !== submissionProjectId) return;
       if (response.status < 200 || response.status >= 300 || !response.taskId) {
         const failed = await callWorker('video.generate.fail', {
@@ -744,8 +762,9 @@ export function ProductionPanel({
       if (job.providerTaskId) {
         void cancelVideoProviderTask(
           job.adapterKey,
-          job.metadata.providerRegion,
+          job.metadata.providerProfileId,
           job.providerTaskId,
+          job.metadata.providerRegion,
         ).catch(() => undefined);
       }
       setGenerationStatus('视频任务已取消，本地轮询已停止。');
@@ -790,21 +809,6 @@ export function ProductionPanel({
     }
   };
 
-  const removeCredential = async () => {
-    if (!credentialProvider) return;
-    if (!adapter || !window.confirm('删除此供应商的本机凭据？')) return;
-    setCredentialBusy(true);
-    setCredentialMessage('');
-    try {
-      setCredentialState(await deleteCredential(credentialProvider));
-      setCredentialMessage('凭据已删除');
-    } catch (reason) {
-      setCredentialMessage(errorMessage(reason, '凭据删除失败'));
-    } finally {
-      setCredentialBusy(false);
-    }
-  };
-
   const fields: AdapterUiField[] = [...(adapter?.uiSchema.fields ?? [])].sort(
     (a, b) => a.order - b.order,
   );
@@ -822,60 +826,56 @@ export function ProductionPanel({
       ) : (
         <>
           <div className="field-group">
-            <label htmlFor="capability">生产方式</label>
+            <label htmlFor="provider-profile">供应商连接</label>
             <select
-              id="capability"
-              value={capability ?? ''}
-              onChange={(event) => chooseCapability(event.target.value as GenerationCapability)}
+              id="provider-profile"
+              value={selectedProfileId}
+              onChange={(event) => chooseProfile(event.target.value)}
+              disabled={eligibleProfiles.length === 0 || busy}
             >
-              {catalog.capabilities.map((item) => (
-                <option key={item.key} value={item.key}>
-                  {item.label}
+              {eligibleProfiles.length === 0 && <option value="">没有可用连接</option>}
+              {eligibleProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name} · {profile.baseUrl === 'https://api.vidu.cn' ? '中国站' : '国际站'}
                 </option>
               ))}
             </select>
           </div>
-          <div className="field-group">
-            <label htmlFor="provider">供应商</label>
-            <select
-              id="provider"
-              value={provider}
-              onChange={(event) => chooseProvider(event.target.value)}
-            >
-              {providerOptions.map((item) => (
-                <option key={item.provider} value={item.provider}>
-                  {item.providerLabel}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field-group">
-            <label htmlFor="model">模型</label>
-            <select
-              id="model"
-              value={adapterKey}
-              onChange={(event) => setAdapterKey(event.target.value)}
-            >
-              {modelOptions.map((item) => (
-                <option key={item.key} value={item.key}>
-                  {item.modelLabel}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {provider === 'vidu' && (
+          {eligibleProfiles.length === 0 ? (
+            <div className="provider-required-state">
+              <Settings2 size={20} />
+              <strong>还没有可用于制作的供应商连接</strong>
+              <span>请在设置中心添加并测试 Vidu 中国站或国际站连接。</span>
+              <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
+                前往供应商与模型
+              </button>
+            </div>
+          ) : (
             <div className="field-group">
-              <label htmlFor="provider-region">Vidu 服务区域</label>
+              <label htmlFor="model">模型</label>
               <select
-                id="provider-region"
-                value={providerRegion}
-                onChange={(event) => chooseProviderRegion(event.target.value as ProviderRegion)}
-                disabled={busy || credentialBusy}
+                id="model"
+                value={adapterKey}
+                onChange={(event) => setAdapterKey(event.target.value)}
+                disabled={modelOptions.length === 0 || busy}
               >
-                <option value="cn">中国站 (api.vidu.cn)</option>
-                <option value="global">国际站 (api.vidu.com)</option>
+                {modelOptions.length === 0 && <option value="">没有已启用的兼容模型</option>}
+                {modelOptions.map((item) => (
+                  <option key={item.key} value={item.key}>
+                    {item.modelLabel}
+                  </option>
+                ))}
               </select>
+            </div>
+          )}
+
+          {selectedProfile && modelOptions.length === 0 && (
+            <div className="provider-required-state compact">
+              <strong>当前连接没有兼容模型</strong>
+              <span>请在设置中心启用支持当前制作方式的模型。</span>
+              <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
+                管理模型
+              </button>
             </div>
           )}
 
@@ -884,7 +884,7 @@ export function ProductionPanel({
               <div className="adapter-meta">
                 <strong>{adapter.modelLabel}</strong>
                 <span>
-                  {adapter.providerLabel} · API {adapter.apiVersion}
+                  {selectedProfile?.name} · {adapter.providerLabel} · API {adapter.apiVersion}
                 </span>
               </div>
               <div className="parameter-fields">
@@ -1199,47 +1199,6 @@ export function ProductionPanel({
                   ))}
                 </div>
               )}
-
-              <details className="credential-section">
-                <summary>
-                  <KeyRound size={14} />
-                  供应商凭据
-                  <span className={credential?.configured ? 'configured' : ''}>
-                    {credential?.configured ? '已配置' : '未配置'}
-                  </span>
-                </summary>
-                <div className="credential-controls">
-                  <input
-                    type="password"
-                    value={credentialSecret}
-                    onChange={(event) => setCredentialSecret(event.target.value)}
-                    placeholder={`${adapter.providerLabel} API Key`}
-                    autoComplete="new-password"
-                    disabled={!canUseSecureCredentials() || credentialBusy}
-                  />
-                  <button
-                    className="icon-button"
-                    type="button"
-                    title="保存凭据"
-                    onClick={() => void saveCredential()}
-                    disabled={!credentialSecret || !canUseSecureCredentials() || credentialBusy}
-                  >
-                    <Save size={15} />
-                  </button>
-                  <button
-                    className="icon-button danger"
-                    type="button"
-                    title="删除凭据"
-                    onClick={() => void removeCredential()}
-                    disabled={!credential?.configured || credentialBusy}
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-                {credentialMessage && (
-                  <span className="credential-message">{credentialMessage}</span>
-                )}
-              </details>
             </>
           )}
         </>

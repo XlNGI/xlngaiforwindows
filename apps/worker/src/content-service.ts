@@ -14,6 +14,9 @@ import type {
   DocumentSaveParams,
   DocumentSummary,
   DocumentVersionInfo,
+  LlmAttemptInfo,
+  LlmPricingSnapshotInfo,
+  NormalizedLlmUsage,
   MessageConstraintParams,
   MessageDocumentParams,
   SceneInfo,
@@ -21,7 +24,11 @@ import type {
   ShotInfo,
   ShotSaveParams,
 } from '@ai-video/contracts';
-import type { ConversationRecord, DocumentRecord } from '@ai-video/domain';
+import type {
+  ConversationRecord,
+  DocumentRecord,
+  LlmGenerationAttemptRecord,
+} from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
@@ -272,7 +279,13 @@ export class ContentService {
         params.before,
       );
       const hasMore = descending.length > limit;
-      const items = descending.slice(0, limit).reverse();
+      const items = descending
+        .slice(0, limit)
+        .reverse()
+        .map((message) => {
+          const attempt = repositories.llmGenerationAttempts.getByAssistantMessage(message.id);
+          return attempt ? { ...message, attempt: toAttemptInfo(attempt) } : message;
+        });
       return { items, nextCursor: hasMore ? items[0]?.id : undefined };
     });
   }
@@ -412,4 +425,61 @@ export class ContentService {
     const scene = shot ? repositories.scenes.get(shot.sceneId) : undefined;
     if (!shot || scene?.projectId !== projectId) throw new Error('Shot was not found.');
   }
+}
+
+function toAttemptInfo(attempt: LlmGenerationAttemptRecord): LlmAttemptInfo {
+  let persistedUsage: NormalizedLlmUsage | undefined;
+  if (attempt.rawUsageJson) {
+    try {
+      persistedUsage = JSON.parse(attempt.rawUsageJson) as NormalizedLlmUsage;
+    } catch {
+      persistedUsage = undefined;
+    }
+  }
+  const usage =
+    attempt.inputTokens !== undefined ||
+    attempt.cachedInputTokens !== undefined ||
+    attempt.outputTokens !== undefined ||
+    attempt.reasoningTokens !== undefined ||
+    attempt.totalTokens !== undefined ||
+    persistedUsage?.providerReportedCost !== undefined
+      ? {
+          inputTokens: attempt.inputTokens,
+          cachedInputTokens: attempt.cachedInputTokens,
+          outputTokens: attempt.outputTokens,
+          reasoningTokens: attempt.reasoningTokens,
+          totalTokens: attempt.totalTokens,
+          providerReportedCost: persistedUsage?.providerReportedCost,
+        }
+      : undefined;
+  let pricingSnapshot: LlmPricingSnapshotInfo | undefined;
+  if (attempt.pricingSnapshotJson) {
+    try {
+      pricingSnapshot = JSON.parse(attempt.pricingSnapshotJson) as LlmPricingSnapshotInfo;
+    } catch {
+      pricingSnapshot = undefined;
+    }
+  }
+  return {
+    id: attempt.id,
+    generationId: attempt.generationId,
+    providerProfileId: attempt.providerProfileId,
+    providerName: attempt.providerNameSnapshot,
+    modelId: attempt.modelId,
+    modelName: attempt.modelNameSnapshot,
+    protocol: attempt.protocol,
+    status: attempt.status,
+    startedAt: attempt.startedAt,
+    firstTokenAt: attempt.firstTokenAt,
+    completedAt: attempt.completedAt,
+    providerResponseId: attempt.providerResponseId,
+    finishReason: attempt.finishReason,
+    usage,
+    pricingSnapshot,
+    estimatedCost: attempt.estimatedCost,
+    currency: attempt.currency,
+    providerReportedCost: usage?.providerReportedCost,
+    errorCode: attempt.errorCode,
+    errorMessage: attempt.errorMessage,
+  };
 }

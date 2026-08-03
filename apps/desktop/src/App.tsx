@@ -1,31 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Aperture,
-  Bot,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
   CircleCheck,
   Clapperboard,
-  Copy,
-  Database,
   FilePlus2,
   FileText,
   FolderOpen,
-  HardDrive,
   Image,
-  MessageSquarePlus,
   PanelLeftClose,
-  PanelRightClose,
   Play,
   Plus,
   RotateCcw,
-  RefreshCw,
   Save,
   Settings2,
-  Square,
-  Trash2,
   Video,
+  WandSparkles,
   X,
 } from 'lucide-react';
 import type {
@@ -41,7 +33,10 @@ import type {
   DiagnosticExportResult,
   HealthResult,
   LlmGenerationInfo,
+  LlmGenerationPrepareResult,
   LlmStatusResult,
+  ProviderModelInfo,
+  ProviderProfileInfo,
   ProductionContextInfo,
   ProjectInfo,
   RecentProjectInfo,
@@ -49,12 +44,63 @@ import type {
   ShotInfo,
   SqliteProbeResult,
   ImagePreviewInfo,
+  GenerationCapability,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { ProductionPanel } from './ProductionPanel';
+import { MaintenanceDialog } from './MaintenanceDialog';
+import { ChatPanel } from './ChatPanel';
+import { SettingsCenter } from './SettingsCenter';
+import { ProductionNavigation } from './ProductionNavigation';
+import { providerProfileClient } from './provider-profile-client';
+import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 
 type CheckState = 'checking' | 'ready' | 'error';
 type WorkspaceView = 'documents' | 'shots' | 'assets';
+type NavigationMode = 'project' | 'production';
+type SettingsPage = 'providers' | 'usage' | 'maintenance';
+
+const PRODUCTION_CAPABILITY_STORAGE_KEY = 'ai-video.production-capability';
+const LLM_SELECTION_STORAGE_KEY = 'ai-video.llm-selection';
+const productionCapabilities = new Set<GenerationCapability>([
+  'TEXT_TO_IMAGE',
+  'REFERENCE_TO_IMAGE',
+  'TEXT_TO_VIDEO',
+  'IMAGE_TO_VIDEO',
+  'REFERENCE_TO_VIDEO',
+  'START_END_TO_VIDEO',
+]);
+
+function initialProductionCapability(): GenerationCapability {
+  try {
+    const stored = window.localStorage.getItem(PRODUCTION_CAPABILITY_STORAGE_KEY);
+    if (stored && productionCapabilities.has(stored as GenerationCapability)) {
+      return stored as GenerationCapability;
+    }
+  } catch {
+    // The selection remains available for the current session when storage is unavailable.
+  }
+  return 'TEXT_TO_IMAGE';
+}
+
+function initialLlmSelection(): { providerProfileId?: string; modelId?: string } {
+  try {
+    const stored = window.localStorage.getItem(LLM_SELECTION_STORAGE_KEY);
+    if (!stored) return {};
+    const value = JSON.parse(stored) as { providerProfileId?: unknown; modelId?: unknown };
+    return {
+      providerProfileId:
+        typeof value.providerProfileId === 'string' ? value.providerProfileId : undefined,
+      modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function isGenerationActive(generation: LlmGenerationInfo | undefined): boolean {
+  return generation?.status === 'prepared' || generation?.status === 'streaming';
+}
 
 const documentKinds: { value: DocumentKind; label: string }[] = [
   { value: 'outline', label: '项目大纲' },
@@ -64,10 +110,6 @@ const documentKinds: { value: DocumentKind; label: string }[] = [
   { value: 'storyboard', label: '分镜文档' },
   { value: 'note', label: '创作笔记' },
 ];
-
-function scopeLabel(scope: ConversationScopeType): string {
-  return scope === 'project' ? '项目' : scope === 'scene' ? '场次' : '镜头';
-}
 
 function isVideoAsset(asset: AssetInfo | undefined): boolean {
   return asset?.kind === 'generated-video' || asset?.kind === 'shot-video';
@@ -100,6 +142,12 @@ export function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [startupLoaded, setStartupLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
+  const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
+  const [productionCapability, setProductionCapability] = useState<GenerationCapability>(
+    initialProductionCapability,
+  );
+  const [productionMenuOpen, setProductionMenuOpen] = useState(false);
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState('');
   const [cacheInspection, setCacheInspection] = useState<CacheInspectionResult>();
@@ -135,6 +183,15 @@ export function App() {
   const [composer, setComposer] = useState('');
   const [chatMessage, setChatMessage] = useState('');
   const [llmStatus, setLlmStatus] = useState<LlmStatusResult>();
+  const [initialLlmSelectionValue] = useState(initialLlmSelection);
+  const [llmProfiles, setLlmProfiles] = useState<ProviderProfileInfo[]>([]);
+  const [llmModels, setLlmModels] = useState<ProviderModelInfo[]>([]);
+  const [selectedLlmProfileId, setSelectedLlmProfileId] = useState(
+    initialLlmSelectionValue.providerProfileId ?? '',
+  );
+  const [selectedLlmModelId, setSelectedLlmModelId] = useState(
+    initialLlmSelectionValue.modelId ?? '',
+  );
   const [contextPreview, setContextPreview] = useState<ProductionContextInfo>();
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const projectActionRequest = useRef(0);
@@ -146,6 +203,7 @@ export function App() {
     conversationId: undefined as string | undefined,
     generationId: undefined as string | undefined,
   });
+  const nativeLlmRun = useRef<LlmStreamRun | undefined>(undefined);
   const documentRequest = useRef(0);
   const sceneRequest = useRef(0);
 
@@ -158,6 +216,145 @@ export function App() {
   const writable = project?.mode === 'read-write';
   const scopeId = scopeType === 'scene' ? scene?.id : scopeType === 'shot' ? shot?.id : undefined;
   const scopeAvailable = scopeType === 'project' || Boolean(scopeId);
+  const selectedLlmProfile = llmProfiles.find((profile) => profile.id === selectedLlmProfileId);
+  const selectedLlmModel = llmModels.find(
+    (model) => model.id === selectedLlmModelId && model.providerProfileId === selectedLlmProfileId,
+  );
+  const managedLlmConfigured = Boolean(selectedLlmProfile && selectedLlmModel);
+  const displayedLlmStatus: LlmStatusResult | undefined = managedLlmConfigured
+    ? {
+        provider: selectedLlmProfile?.name ?? 'LLM',
+        model: selectedLlmModel?.displayName ?? '',
+        configured: true,
+        configurationSource: 'managed',
+      }
+    : llmStatus;
+
+  const loadLlmCatalog = async () => {
+    try {
+      const profiles = (await providerProfileClient.listProfiles()).filter(
+        (profile) =>
+          profile.enabled &&
+          profile.connectionStatus === 'ready' &&
+          (profile.category === 'llm' || profile.category === 'multi') &&
+          (profile.protocol === 'openai-responses' ||
+            profile.protocol === 'openai-chat-completions'),
+      );
+      const models = (
+        await Promise.all(
+          profiles.map((profile) =>
+            providerProfileClient.listModels(profile.id).catch(() => [] as ProviderModelInfo[]),
+          ),
+        )
+      )
+        .flat()
+        .filter(
+          (model) =>
+            model.enabled &&
+            !model.unavailableAt &&
+            model.capabilities.text &&
+            model.capabilities.streaming,
+        );
+      const currentProfile = profiles.find((profile) => profile.id === selectedLlmProfileId);
+      const currentModel = models.find(
+        (model) =>
+          model.id === selectedLlmModelId && model.providerProfileId === currentProfile?.id,
+      );
+      const nextProfile =
+        currentProfile && currentModel
+          ? currentProfile
+          : profiles.find((profile) =>
+              models.some((model) => model.providerProfileId === profile.id),
+            );
+      const nextModel =
+        currentModel ?? models.find((model) => model.providerProfileId === nextProfile?.id);
+      setLlmProfiles(profiles);
+      setLlmModels(models);
+      setSelectedLlmProfileId(nextProfile?.id ?? '');
+      setSelectedLlmModelId(nextModel?.id ?? '');
+    } catch {
+      setLlmProfiles([]);
+      setLlmModels([]);
+      setSelectedLlmProfileId('');
+      setSelectedLlmModelId('');
+    }
+  };
+
+  const nativeRunIsCurrent = (run: LlmStreamRun): boolean => {
+    const owner = generationPollOwner.current;
+    return (
+      nativeLlmRun.current?.identity.attemptId === run.identity.attemptId &&
+      owner.projectId === run.identity.projectId &&
+      owner.conversationId === run.identity.conversationId
+    );
+  };
+
+  const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
+    setGeneration(prepared.generation);
+    setMessages((current) => {
+      const withoutAssistant = current.filter(
+        (message) => message.id !== prepared.generation.assistantMessage.id,
+      );
+      return [
+        ...withoutAssistant,
+        ...(withoutAssistant.some((message) => message.id === prepared.generation.userMessage.id)
+          ? []
+          : [prepared.generation.userMessage]),
+        prepared.generation.assistantMessage,
+      ];
+    });
+    const run = streamPreparedLlmGeneration(prepared, {
+      onDelta(content) {
+        if (!nativeRunIsCurrent(run)) return;
+        const next: LlmGenerationInfo = {
+          ...prepared.generation,
+          status: 'streaming',
+          assistantMessage: {
+            ...prepared.generation.assistantMessage,
+            content,
+            status: 'streaming',
+          },
+        };
+        setGeneration((current) =>
+          current?.generationId === next.generationId ? { ...current, ...next } : current,
+        );
+        setMessages((current) =>
+          mergeGenerationMessage(current, run.identity.conversationId, next),
+        );
+      },
+      onState(next) {
+        if (!nativeRunIsCurrent(run)) return;
+        setGeneration(next);
+        setMessages((current) =>
+          mergeGenerationMessage(current, run.identity.conversationId, next),
+        );
+        if (!isGenerationActive(next)) {
+          setChatMessage(next.error ?? '生成完成');
+        }
+      },
+    });
+    nativeLlmRun.current = run;
+    void run.completion
+      .catch((reason: unknown) => {
+        if (nativeRunIsCurrent(run)) {
+          setChatMessage(reason instanceof Error ? reason.message : '原生 LLM 流处理失败');
+        }
+      })
+      .finally(() => {
+        if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
+          nativeLlmRun.current = undefined;
+        }
+      });
+  };
+
+  const cancelNativeLlmRun = async () => {
+    const run = nativeLlmRun.current;
+    if (!run) return;
+    await run.cancel().catch(() => undefined);
+    if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
+      nativeLlmRun.current = undefined;
+    }
+  };
 
   const checkRuntime = async () => {
     setState('checking');
@@ -203,6 +400,7 @@ export function App() {
 
   useEffect(() => {
     void checkRuntime();
+    void loadLlmCatalog();
     void callWorker('llm.status', {})
       .then(setLlmStatus)
       .catch(() => undefined);
@@ -215,6 +413,50 @@ export function App() {
       .catch(() => undefined)
       .finally(() => setStartupLoaded(true));
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PRODUCTION_CAPABILITY_STORAGE_KEY, productionCapability);
+    } catch {
+      // The selection remains available for the current session when storage is unavailable.
+    }
+  }, [productionCapability]);
+
+  useEffect(() => {
+    if (settingsOpen) return;
+    void loadLlmCatalog();
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        LLM_SELECTION_STORAGE_KEY,
+        JSON.stringify({
+          providerProfileId: selectedLlmProfileId || undefined,
+          modelId: selectedLlmModelId || undefined,
+        }),
+      );
+    } catch {
+      // The selection remains available for the current session when storage is unavailable.
+    }
+  }, [selectedLlmProfileId, selectedLlmModelId]);
+
+  useEffect(
+    () => () => {
+      void nativeLlmRun.current?.cancel();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const run = nativeLlmRun.current;
+    if (
+      run &&
+      (run.identity.projectId !== project?.id || run.identity.conversationId !== conversation?.id)
+    ) {
+      void cancelNativeLlmRun();
+    }
+  }, [project?.id, conversation?.id]);
 
   useEffect(() => {
     const requestId = ++conversationRequest.current;
@@ -255,7 +497,8 @@ export function App() {
   }, [project?.id, scopeType, scopeId]);
 
   useEffect(() => {
-    if (!generation || generation.status !== 'streaming') return;
+    if (!generation || generation.executionMode === 'native' || generation.status !== 'streaming')
+      return;
     const projectId = project?.id;
     const conversationId = conversation?.id;
     const generationId = generation.generationId;
@@ -306,6 +549,7 @@ export function App() {
     conversationRequest.current += 1;
     documentRequest.current += 1;
     sceneRequest.current += 1;
+    await cancelNativeLlmRun();
     setProjectBusy(true);
     setProjectMessage('');
     try {
@@ -444,11 +688,26 @@ export function App() {
     return runProjectAction(() => callWorker('project.restore', { backupPath, destinationRoot }));
   };
 
-  const openSettings = () => {
+  const openSettings = (page: SettingsPage = project ? 'providers' : 'maintenance') => {
+    setSettingsInitialPage(page);
     setSettingsOpen(true);
     setMaintenanceMessage('');
     if (project) void inspectCache();
   };
+
+  const checkIntegrity = () =>
+    runMaintenanceAction(async () => {
+      const result = await callWorker('project.integrity', {});
+      return result.ok
+        ? `完整性检查通过 · Schema v${result.schemaVersion}`
+        : result.messages.join('; ');
+    });
+
+  const backupProject = () =>
+    runMaintenanceAction(async () => {
+      const result = await callWorker('project.backup', {});
+      return `备份完成：${result.path}`;
+    });
 
   const selectDocument = async (summary: DocumentSummary) => {
     const requestId = ++documentRequest.current;
@@ -636,7 +895,12 @@ export function App() {
     generationPollVersion.current += 1;
     setChatMessage('');
     try {
-      if (generation?.status === 'streaming' && generation.conversationId !== selected.id) {
+      if (
+        generation &&
+        isGenerationActive(generation) &&
+        generation.conversationId !== selected.id
+      ) {
+        if (generation.executionMode === 'native') await cancelNativeLlmRun();
         const cancelled = await callWorker('llm.generation.cancel', {
           generationId: generation.generationId,
         });
@@ -662,6 +926,22 @@ export function App() {
     if (!composer.trim() || !conversation) return;
     const prompt = composer;
     setComposer('');
+    if (selectedLlmProfile && selectedLlmModel) {
+      try {
+        const prepared = await callWorker('llm.generation.prepare', {
+          conversationId: conversation.id,
+          prompt,
+          providerProfileId: selectedLlmProfile.id,
+          modelId: selectedLlmModel.id,
+        });
+        launchPreparedGeneration(prepared);
+      } catch (reason) {
+        setComposer(prompt);
+        setChatMessage(reason instanceof Error ? reason.message : '生成启动失败');
+        void loadLlmCatalog();
+      }
+      return;
+    }
     if (llmStatus?.configured) {
       try {
         const started = await callWorker('llm.generate', {
@@ -682,17 +962,29 @@ export function App() {
       content: prompt,
     });
     setMessages((current) => [...current, saved]);
-    setChatMessage('消息已保存；配置 OPENAI_API_KEY 后可生成回复');
+    setChatMessage('消息已保存；在供应商与模型中添加 LLM 连接后可生成回复');
   };
 
   const cancelGeneration = async () => {
     if (!generation) return;
+    if (generation.executionMode === 'native') {
+      await cancelNativeLlmRun();
+    }
     setGeneration(
       await callWorker('llm.generation.cancel', { generationId: generation.generationId }),
     );
   };
 
   const retryGeneration = async (assistantMessageId: string) => {
+    if (selectedLlmProfile && selectedLlmModel) {
+      const prepared = await callWorker('llm.generation.retryPrepare', {
+        assistantMessageId,
+        providerProfileId: selectedLlmProfile.id,
+        modelId: selectedLlmModel.id,
+      });
+      launchPreparedGeneration(prepared);
+      return;
+    }
     const retried = await callWorker('llm.generation.retry', { assistantMessageId });
     setGeneration(retried);
     setMessages((current) => [...current, retried.assistantMessage]);
@@ -759,199 +1051,82 @@ export function App() {
           <button
             className="icon-button"
             type="button"
-            title="项目维护"
+            title="设置中心"
             aria-expanded={settingsOpen}
-            onClick={openSettings}
+            onClick={() => openSettings()}
           >
             <Settings2 size={17} />
+          </button>
+          <button
+            className="icon-button mobile-production-toggle"
+            type="button"
+            title="选择制作方式"
+            aria-expanded={productionMenuOpen}
+            onClick={() => setProductionMenuOpen((open) => !open)}
+          >
+            <WandSparkles size={17} />
           </button>
         </div>
       </header>
 
+      {productionMenuOpen && (
+        <section className="mobile-production-menu" aria-label="窄屏制作方式">
+          <header>
+            <strong>选择制作方式</strong>
+            <button
+              className="icon-button subtle"
+              type="button"
+              title="关闭制作方式"
+              onClick={() => setProductionMenuOpen(false)}
+            >
+              <X size={15} />
+            </button>
+          </header>
+          <ProductionNavigation
+            compact
+            capability={productionCapability}
+            onCapabilityChange={(capability) => {
+              setProductionCapability(capability);
+              setNavigationMode('production');
+              setProductionMenuOpen(false);
+            }}
+          />
+        </section>
+      )}
+
       {settingsOpen && (
-        <div className="dialog-backdrop" role="presentation">
-          <section
-            className="maintenance-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="maintenance-title"
-          >
-            <header>
-              <div>
-                <span className="eyebrow">本地项目工具</span>
-                <h2 id="maintenance-title">项目维护</h2>
-              </div>
-              <button
-                className="icon-button subtle"
-                type="button"
-                title="关闭项目维护"
-                onClick={() => setSettingsOpen(false)}
-              >
-                <X size={16} />
-              </button>
-            </header>
-
-            {project ? (
-              <>
-                <section className="maintenance-section">
-                  <div className="maintenance-section-title">
-                    <Database size={15} />
-                    <strong>备份与迁移</strong>
-                  </div>
-                  <div className="maintenance-actions">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void runMaintenanceAction(async () => {
-                          const result = await callWorker('project.integrity', {});
-                          return result.ok
-                            ? `完整性检查通过 · Schema v${result.schemaVersion}`
-                            : result.messages.join('; ');
-                        })
-                      }
-                      disabled={maintenanceBusy}
-                    >
-                      检查
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void runMaintenanceAction(async () => {
-                          const result = await callWorker('project.backup', {});
-                          return `备份完成：${result.path}`;
-                        })
-                      }
-                      disabled={maintenanceBusy || !writable}
-                    >
-                      <Save size={13} />
-                      备份
-                    </button>
-                  </div>
-                  <label>
-                    项目导出目录
-                    <input
-                      value={exportDestination}
-                      onChange={(event) => setExportDestination(event.target.value)}
-                      placeholder="D:\Projects\exported-drama"
-                    />
-                  </label>
-                  <button
-                    className="maintenance-command"
-                    type="button"
-                    onClick={() => void exportProject()}
-                    disabled={maintenanceBusy || !writable || !exportDestination.trim()}
-                  >
-                    <FolderOpen size={14} />
-                    导出项目副本
-                  </button>
-                </section>
-
-                <section className="maintenance-section">
-                  <div className="maintenance-section-title">
-                    <HardDrive size={15} />
-                    <strong>媒体缓存</strong>
-                    {cacheInspection && (
-                      <span>
-                        {cacheInspection.fileCount} 个文件 ·{' '}
-                        {(cacheInspection.sizeBytes / 1024 / 1024).toFixed(2)} MiB
-                      </span>
-                    )}
-                  </div>
-                  <div className="maintenance-actions">
-                    <button
-                      type="button"
-                      onClick={() => void inspectCache()}
-                      disabled={maintenanceBusy}
-                    >
-                      检查占用
-                    </button>
-                    <button
-                      className="danger-command"
-                      type="button"
-                      onClick={() => void clearCache()}
-                      disabled={maintenanceBusy || !writable}
-                    >
-                      <Trash2 size={13} />
-                      清理缓存
-                    </button>
-                  </div>
-                </section>
-
-                <section className="maintenance-section">
-                  <div className="maintenance-section-title">
-                    <HardDrive size={15} />
-                    <strong>脱敏诊断</strong>
-                  </div>
-                  <label>
-                    导出目录（留空则保存到项目 exports）
-                    <input
-                      value={diagnosticDestination}
-                      onChange={(event) => setDiagnosticDestination(event.target.value)}
-                      placeholder="D:\Support"
-                    />
-                  </label>
-                  <div className="maintenance-actions">
-                    <button
-                      type="button"
-                      onClick={() => void exportDiagnostics()}
-                      disabled={maintenanceBusy}
-                    >
-                      导出诊断包
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void revealDiagnostics()}
-                      disabled={maintenanceBusy || !diagnosticExport}
-                    >
-                      <FolderOpen size={13} />
-                      打开位置
-                    </button>
-                  </div>
-                  {diagnosticExport && (
-                    <small className="maintenance-path" title={diagnosticExport.path}>
-                      {diagnosticExport.path}
-                    </small>
-                  )}
-                </section>
-              </>
-            ) : (
-              <section className="maintenance-section restore-section">
-                <div className="maintenance-section-title">
-                  <Database size={15} />
-                  <strong>从 SQLite 备份恢复</strong>
-                </div>
-                <label>
-                  备份文件
-                  <input
-                    value={restoreBackupPath}
-                    onChange={(event) => setRestoreBackupPath(event.target.value)}
-                    placeholder="D:\Backups\project.sqlite"
-                  />
-                </label>
-                <label>
-                  恢复目标目录
-                  <input
-                    value={restoreDestination}
-                    onChange={(event) => setRestoreDestination(event.target.value)}
-                    placeholder="D:\Projects\restored-drama"
-                  />
-                </label>
-                <button
-                  className="maintenance-command"
-                  type="button"
-                  onClick={() => void restoreProject()}
-                  disabled={
-                    maintenanceBusy || !restoreBackupPath.trim() || !restoreDestination.trim()
-                  }
-                >
-                  恢复并打开项目
-                </button>
-              </section>
-            )}
-
-            {maintenanceMessage && <div className="maintenance-message">{maintenanceMessage}</div>}
-          </section>
-        </div>
+        <SettingsCenter
+          initialPage={settingsInitialPage}
+          onClose={() => setSettingsOpen(false)}
+          maintenance={
+            <MaintenanceDialog
+              embedded
+              hasProject={Boolean(project)}
+              writable={writable}
+              busy={maintenanceBusy}
+              message={maintenanceMessage}
+              cacheInspection={cacheInspection}
+              diagnosticExport={diagnosticExport}
+              exportDestination={exportDestination}
+              diagnosticDestination={diagnosticDestination}
+              restoreBackupPath={restoreBackupPath}
+              restoreDestination={restoreDestination}
+              onClose={() => setSettingsOpen(false)}
+              onIntegrity={() => void checkIntegrity()}
+              onBackup={() => void backupProject()}
+              onExportDestinationChange={setExportDestination}
+              onExportProject={() => void exportProject()}
+              onInspectCache={() => void inspectCache()}
+              onClearCache={() => void clearCache()}
+              onDiagnosticDestinationChange={setDiagnosticDestination}
+              onExportDiagnostics={() => void exportDiagnostics()}
+              onRevealDiagnostics={() => void revealDiagnostics()}
+              onRestoreBackupPathChange={setRestoreBackupPath}
+              onRestoreDestinationChange={setRestoreDestination}
+              onRestoreProject={() => void restoreProject()}
+            />
+          }
+        />
       )}
 
       <aside className="project-rail panel-border">
@@ -968,18 +1143,24 @@ export function App() {
         </div>
         <nav className="project-nav" aria-label="项目导航">
           <button
-            className={`nav-item ${view === 'documents' ? 'active' : ''}`}
+            className={`nav-item ${navigationMode === 'project' && view === 'documents' ? 'active' : ''}`}
             type="button"
-            onClick={() => setView('documents')}
+            onClick={() => {
+              setNavigationMode('project');
+              setView('documents');
+            }}
           >
             <FileText size={16} />
             <span>项目文档</span>
             <span className="count">{documents.length}</span>
           </button>
           <button
-            className={`nav-item ${view === 'shots' ? 'active' : ''}`}
+            className={`nav-item ${navigationMode === 'project' && view === 'shots' ? 'active' : ''}`}
             type="button"
-            onClick={() => setView('shots')}
+            onClick={() => {
+              setNavigationMode('project');
+              setView('shots');
+            }}
           >
             <Clapperboard size={16} />
             <span>场次与镜头</span>
@@ -991,15 +1172,26 @@ export function App() {
             <span className="count">0</span>
           </button>
           <button
-            className={`nav-item ${view === 'assets' ? 'active' : ''}`}
+            className={`nav-item ${navigationMode === 'project' && view === 'assets' ? 'active' : ''}`}
             type="button"
-            onClick={() => setView('assets')}
+            onClick={() => {
+              setNavigationMode('project');
+              setView('assets');
+            }}
           >
             <Image size={16} />
             <span>素材库</span>
             <span className="count">{assets.length}</span>
           </button>
         </nav>
+
+        <ProductionNavigation
+          capability={productionCapability}
+          onCapabilityChange={(capability) => {
+            setProductionCapability(capability);
+            setNavigationMode('production');
+          }}
+        />
 
         {project && (
           <div className="content-tree">
@@ -1443,6 +1635,7 @@ export function App() {
       </main>
 
       <ProductionPanel
+        capability={productionCapability}
         projectId={project?.id}
         projectRootPath={project?.rootPath}
         shotId={shot?.id}
@@ -1451,175 +1644,57 @@ export function App() {
         onAssetsChanged={updateAssets}
         onOpenAssetLibrary={(assetId) => {
           updateAssets(assets, assetId);
+          setNavigationMode('project');
           setView('assets');
         }}
+        onOpenProviderSettings={() => openSettings('providers')}
       />
 
-      <aside className="chat-panel panel-border">
-        <div className="panel-heading">
-          <span>{scopeLabel(scopeType)}会话</span>
-          <button
-            className="icon-button subtle"
-            type="button"
-            title="收起会话"
-            onClick={() => setRightOpen(false)}
-          >
-            <PanelRightClose size={16} />
-          </button>
-        </div>
-        <div className="scope-tabs">
-          {(['project', 'scene', 'shot'] as const).map((scope) => (
-            <button
-              type="button"
-              key={scope}
-              className={scopeType === scope ? 'active' : ''}
-              onClick={() => {
-                conversationRequest.current += 1;
-                generationPollVersion.current += 1;
-                setScopeType(scope);
-              }}
-            >
-              {scopeLabel(scope)}
-            </button>
-          ))}
-        </div>
-        <div className="conversation-bar">
-          <select
-            value={conversation?.id ?? ''}
-            onChange={(event) => {
-              const selected = conversations.find((item) => item.id === event.target.value);
-              if (selected) void selectConversation(selected);
-            }}
-            disabled={!scopeAvailable}
-          >
-            <option value="">
-              {scopeAvailable ? '选择会话' : `请先选择${scopeLabel(scopeType)}`}
-            </option>
-            {conversations.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.title}
-              </option>
-            ))}
-          </select>
-          <button
-            className="icon-button"
-            type="button"
-            title="新建会话"
-            onClick={() => void createConversation()}
-            disabled={!writable || !scopeAvailable}
-          >
-            <MessageSquarePlus size={16} />
-          </button>
-        </div>
-        <div className="llm-context-bar">
-          <div>
-            <span>{llmStatus?.provider ?? 'LLM'}</span>
-            <small>{llmStatus?.configured ? llmStatus.model : '未配置 OPENAI_API_KEY'}</small>
-          </div>
-          {contextPreview && (
-            <details>
-              <summary>
-                上下文 {contextPreview.sources.length} 项 · 约 {contextPreview.estimatedTokens}{' '}
-                tokens
-              </summary>
-              <div className="context-source-list">
-                {contextPreview.sources.map((source) => (
-                  <span key={`${source.type}-${source.id}`} title={source.scopeType}>
-                    {source.label}
-                    {source.version ? ` v${source.version}` : ''}
-                    {source.truncated ? ' · 已裁剪' : ''}
-                  </span>
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-        <div className="message-list">
-          {messages.length === 0 ? (
-            <div className="chat-empty">
-              <Bot size={22} />
-              <strong>创作助手</strong>
-              <span>会话内容与正式项目文档相互独立。</span>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
-                <header>
-                  <span>
-                    {message.role === 'user'
-                      ? '你'
-                      : message.role === 'assistant'
-                        ? '助手'
-                        : message.role}
-                  </span>
-                  <button
-                    className="icon-button subtle"
-                    type="button"
-                    title="复制"
-                    onClick={() => void navigator.clipboard.writeText(message.content)}
-                  >
-                    <Copy size={12} />
-                  </button>
-                </header>
-                <p>{message.content}</p>
-                {message.role === 'assistant' && (
-                  <footer>
-                    <button type="button" onClick={() => void promoteMessage(message, 'document')}>
-                      保存为文档
-                    </button>
-                    <button type="button" onClick={() => void promoteMessage(message, 'memory')}>
-                      加入记忆
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void promoteMessage(message, 'constraint')}
-                    >
-                      添加约束
-                    </button>
-                    {message.status === 'failed' && llmStatus?.configured && (
-                      <button type="button" onClick={() => void retryGeneration(message.id)}>
-                        <RefreshCw size={11} />
-                        重试
-                      </button>
-                    )}
-                  </footer>
-                )}
-              </article>
-            ))
-          )}
-        </div>
-        {chatMessage && <small className="chat-status">{chatMessage}</small>}
-        <div className="composer">
-          <textarea
-            aria-label="会话消息"
-            placeholder={conversation ? '输入消息…' : '请先新建会话'}
-            rows={3}
-            value={composer}
-            onChange={(event) => setComposer(event.target.value)}
-            disabled={!conversation || !writable}
-          />
-          {generation?.status === 'streaming' ? (
-            <button
-              className="icon-button send-button"
-              type="button"
-              title="停止生成"
-              onClick={() => void cancelGeneration()}
-            >
-              <Square size={14} fill="currentColor" />
-            </button>
-          ) : (
-            <button
-              className="icon-button send-button"
-              type="button"
-              title="发送消息"
-              onClick={() => void sendMessage()}
-              disabled={!composer.trim() || !conversation}
-            >
-              <ChevronRight size={18} />
-            </button>
-          )}
-        </div>
-      </aside>
+      <ChatPanel
+        scopeType={scopeType}
+        scopeAvailable={scopeAvailable}
+        writable={writable}
+        conversations={conversations}
+        conversation={conversation}
+        messages={messages}
+        composer={composer}
+        statusMessage={chatMessage}
+        llmStatus={displayedLlmStatus}
+        legacyLlmConfigured={llmStatus?.configurationSource === 'environment'}
+        llmProfiles={llmProfiles}
+        llmModels={llmModels}
+        selectedLlmProfileId={selectedLlmProfileId}
+        selectedLlmModelId={selectedLlmModelId}
+        contextPreview={contextPreview}
+        generation={generation}
+        onCollapse={() => setRightOpen(false)}
+        onScopeChange={(scope) => {
+          void (async () => {
+            await cancelNativeLlmRun();
+            conversationRequest.current += 1;
+            generationPollVersion.current += 1;
+            setScopeType(scope);
+          })();
+        }}
+        onSelectConversation={(selected) => void selectConversation(selected)}
+        onCreateConversation={() => void createConversation()}
+        onPromoteMessage={(message, target) => void promoteMessage(message, target)}
+        onRetryGeneration={(messageId) => void retryGeneration(messageId)}
+        onLlmProfileChange={(profileId) => {
+          setSelectedLlmProfileId(profileId);
+          setSelectedLlmModelId(
+            llmModels.find((model) => model.providerProfileId === profileId)?.id ?? '',
+          );
+        }}
+        onLlmModelChange={setSelectedLlmModelId}
+        onOpenProviderSettings={() => {
+          setSettingsInitialPage('providers');
+          setSettingsOpen(true);
+        }}
+        onComposerChange={setComposer}
+        onCancelGeneration={() => void cancelGeneration()}
+        onSendMessage={() => void sendMessage()}
+      />
 
       {!rightOpen && (
         <button

@@ -4,6 +4,8 @@ import type {
   AdapterCatalogResult,
   AdapterDescriptor,
   AssetInfo,
+  ProviderModelInfo,
+  ProviderProfileInfo,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
@@ -14,7 +16,6 @@ import {
   submitVideoProviderTask,
 } from './provider-client';
 import { callWorker } from './worker-client';
-import { canUseSecureCredentials, getCredentialStatus } from './credential-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('./provider-client', () => ({
@@ -23,12 +24,74 @@ vi.mock('./provider-client', () => ({
   pollVideoProviderTask: vi.fn(),
   cancelVideoProviderTask: vi.fn(),
 }));
-vi.mock('./credential-client', () => ({
-  canUseSecureCredentials: vi.fn(() => false),
-  getCredentialStatus: vi.fn(),
-  setCredential: vi.fn(),
-  deleteCredential: vi.fn(),
-}));
+const providerProfile: ProviderProfileInfo = {
+  id: '11111111-1111-4111-8111-111111111111',
+  name: 'Vidu 中国站 A',
+  category: 'multi',
+  providerType: 'vidu',
+  accessType: 'official',
+  protocol: 'vidu-v2',
+  baseUrl: 'https://api.vidu.cn',
+  enabled: true,
+  connectionStatus: 'ready',
+  createdAt: '2026-08-01T00:00:00.000Z',
+  updatedAt: '2026-08-01T00:00:00.000Z',
+};
+
+const globalProviderProfile: ProviderProfileInfo = {
+  ...providerProfile,
+  id: '11111111-1111-4111-8111-111111111112',
+  name: 'Vidu 国际站 B',
+  baseUrl: 'https://api.vidu.com',
+};
+
+function providerModel(
+  id: string,
+  remoteModelId: string,
+  displayName: string,
+  kind: 'image' | 'video',
+): ProviderModelInfo {
+  return {
+    id,
+    providerProfileId: providerProfile.id,
+    remoteModelId,
+    displayName,
+    capabilities: {
+      text: false,
+      vision: false,
+      streaming: false,
+      reasoning: false,
+      tools: false,
+      structuredOutput: false,
+      embeddings: false,
+      imageGeneration: kind === 'image',
+      videoGeneration: kind === 'video',
+    },
+    source: 'built-in',
+    enabled: true,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  };
+}
+
+const providerModels: ProviderModelInfo[] = [
+  providerModel('21111111-1111-4111-8111-111111111111', 'viduq1', 'Vidu Q1', 'image'),
+  providerModel('21111111-1111-4111-8111-111111111112', 'viduq2', 'Vidu Q2', 'image'),
+  providerModel('21111111-1111-4111-8111-111111111113', 'viduq3', 'Vidu Q3', 'video'),
+  providerModel('21111111-1111-4111-8111-111111111114', 'viduq3-pro', 'Vidu Q3 Pro', 'video'),
+  providerModel('21111111-1111-4111-8111-111111111115', 'viduq3-drama', 'Vidu Q3-Drama', 'video'),
+  providerModel('21111111-1111-4111-8111-111111111116', 'vidu2.0', 'Vidu 2.0', 'video'),
+];
+
+function mockWorker(
+  implementation: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+): void {
+  vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+    if (method === 'provider.profile.list') return Promise.resolve([providerProfile]);
+    if (method === 'provider.model.list') return Promise.resolve(providerModels);
+    return implementation(method, params);
+  }) as typeof callWorker);
+}
 
 const descriptor: AdapterDescriptor = {
   key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
@@ -183,6 +246,8 @@ function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobI
     },
     metadata: {
       providerRegion: 'cn',
+      providerProfileId: providerProfile.id,
+      modelId: 'viduq3-pro',
       pollAttempts: 0,
       pollDeadlineAt: '2099-01-01T00:00:00.000Z',
     },
@@ -207,8 +272,7 @@ describe('ProductionPanel', () => {
   beforeEach(() => {
     cleanup();
     vi.resetAllMocks();
-    vi.mocked(canUseSecureCredentials).mockReturnValue(false);
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -240,7 +304,7 @@ describe('ProductionPanel', () => {
   it('renders schema fields and saves a validated per-shot draft', async () => {
     render(<ProductionPanel shotId="shot" writable />);
     const prompt = await screen.findByLabelText(/画面提示词/);
-    expect(screen.getByLabelText('Vidu 服务区域')).toHaveValue('cn');
+    expect(screen.getByLabelText('供应商连接')).toHaveValue(providerProfile.id);
     expect(screen.getByLabelText('分辨率*')).toBeInTheDocument();
     expect(screen.getByText('专业参数')).toBeInTheDocument();
 
@@ -251,6 +315,8 @@ describe('ProductionPanel', () => {
       expect(callWorker).toHaveBeenCalledWith('generation.draft.save', {
         shotId: 'shot',
         adapterKey: descriptor.key,
+        providerProfileId: providerProfile.id,
+        modelId: 'viduq2',
         parameters: { prompt: '电影画面', resolution: '1080p' },
       }),
     );
@@ -260,25 +326,34 @@ describe('ProductionPanel', () => {
     expect(screen.getByLabelText('自动保存到本地素材库')).toBeChecked();
   });
 
-  it('shows every supported production mode as a distinct option', async () => {
-    vi.mocked(callWorker).mockImplementation((method) => {
+  it('uses the controlled production capability and removes the right-side mode selector', async () => {
+    mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(completeModeCatalog);
-      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'adapter.resolve') {
+        const selection = params as { capability: string; model: string; apiVersion?: string };
+        return Promise.resolve(
+          completeModeCatalog.adapters.find(
+            (item) =>
+              item.capability === selection.capability &&
+              item.model === selection.model &&
+              item.apiVersion === selection.apiVersion,
+          ) ?? descriptor,
+        );
+      }
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(<ProductionPanel shotId="shot" writable />);
+    render(<ProductionPanel capability="REFERENCE_TO_VIDEO" shotId="shot" writable />);
 
-    const productionMode = await screen.findByLabelText('生产方式');
-    expect(
-      Array.from(productionMode.querySelectorAll('option'), (option) => option.textContent),
-    ).toEqual(['文生图', '参考生图', '文生视频', '图生视频', '参考生视频', '首尾帧生视频']);
+    expect(screen.queryByLabelText('生产方式')).not.toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Vidu Q3 Pro' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Vidu Q2' })).not.toBeInTheDocument();
   });
 
   it('does not persist a draft when adapter validation fails', async () => {
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -298,23 +373,71 @@ describe('ProductionPanel', () => {
     expect(callWorker).not.toHaveBeenCalledWith('generation.draft.save', expect.anything());
   });
 
-  it('does not create a generation job until the selected region credential is configured', async () => {
-    vi.mocked(canUseSecureCredentials).mockReturnValue(true);
-    vi.mocked(getCredentialStatus).mockResolvedValue({ provider: 'vidu-cn', configured: false });
-    render(<ProductionPanel writable />);
+  it('shows an actionable settings entry when no media profile is ready', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'provider.profile.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const onOpenProviderSettings = vi.fn();
+    render(<ProductionPanel writable onOpenProviderSettings={onOpenProviderSettings} />);
 
-    expect(await screen.findByText('未配置')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
-
-    await waitFor(() =>
-      expect(screen.getByText(/Vidu 服务区域.*凭据|API Key/)).toBeInTheDocument(),
-    );
+    expect(await screen.findByText('还没有可用于制作的供应商连接')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '前往供应商与模型' }));
+    expect(onOpenProviderSettings).toHaveBeenCalledTimes(1);
     expect(callWorker).not.toHaveBeenCalledWith('image.generate.prepare', expect.anything());
+  });
+
+  it('keeps multiple Vidu connections independently selectable', async () => {
+    const globalModel = {
+      ...providerModels.find((model) => model.remoteModelId === 'viduq2')!,
+      id: '31111111-1111-4111-8111-111111111111',
+      providerProfileId: globalProviderProfile.id,
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'provider.profile.list') {
+        return Promise.resolve([providerProfile, globalProviderProfile]);
+      }
+      if (method === 'provider.model.list') {
+        return Promise.resolve(
+          (params as { profileId: string }).profileId === globalProviderProfile.id
+            ? [globalModel]
+            : providerModels,
+        );
+      }
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel shotId="shot" writable />);
+    const profileSelect = await screen.findByLabelText('供应商连接');
+    expect(screen.getByRole('option', { name: /Vidu 中国站 A/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Vidu 国际站 B/ })).toBeInTheDocument();
+
+    fireEvent.change(profileSelect, { target: { value: globalProviderProfile.id } });
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('provider.model.list', {
+        profileId: globalProviderProfile.id,
+      }),
+    );
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('generation.draft.get', {
+        shotId: 'shot',
+        adapterKey: descriptor.key,
+        providerProfileId: globalProviderProfile.id,
+        modelId: 'viduq2',
+      }),
+    );
+    expect(profileSelect).toHaveValue(globalProviderProfile.id);
   });
 
   it('uses the full adapter key and locks the API version during resolution', async () => {
     const v3 = { ...descriptor, key: 'TEXT_TO_IMAGE:vidu:viduq2:v3', apiVersion: 'v3' };
-    vi.mocked(callWorker).mockImplementation((method, params) => {
+    mockWorker((method, params) => {
       if (method === 'adapter.catalog') {
         return Promise.resolve({ ...catalog, adapters: [descriptor, v3] });
       }
@@ -330,11 +453,12 @@ describe('ProductionPanel', () => {
     render(<ProductionPanel shotId="shot" writable />);
     const model = await screen.findByLabelText('模型');
 
-    expect(Array.from((model as HTMLSelectElement).options).map((option) => option.text)).toEqual([
-      'Vidu Q2',
-      'Vidu Q2',
-    ]);
-    expect(await screen.findByText('Vidu · API v2')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(Array.from((model as HTMLSelectElement).options).map((option) => option.text)).toEqual(
+        ['Vidu Q2', 'Vidu Q2'],
+      ),
+    );
+    expect(await screen.findByText(`${providerProfile.name} · Vidu · API v2`)).toBeInTheDocument();
 
     fireEvent.change(model, { target: { value: v3.key } });
 
@@ -347,11 +471,11 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(model).toHaveValue(v3.key);
-    expect(await screen.findByText('Vidu · API v3')).toBeInTheDocument();
+    expect(await screen.findByText(`${providerProfile.name} · Vidu · API v3`)).toBeInTheDocument();
   });
 
   it('loads persisted assets when a project opens', async () => {
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -387,7 +511,7 @@ describe('ProductionPanel', () => {
       status: 200,
       body: { images: [{ url: 'https://example.test/generated.png' }] },
     });
-    vi.mocked(callWorker).mockImplementation((method, params) => {
+    mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -487,7 +611,7 @@ describe('ProductionPanel', () => {
       status: 200,
       body: { images: [{ url: 'https://example.test/generated.png' }] },
     });
-    vi.mocked(callWorker).mockImplementation((method, params) => {
+    mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -597,7 +721,7 @@ describe('ProductionPanel', () => {
 
   it('terminalizes a prepared job when the native provider transport fails', async () => {
     vi.mocked(submitProviderRequest).mockRejectedValueOnce('Provider credential is not configured');
-    vi.mocked(callWorker).mockImplementation((method, params) => {
+    mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -649,7 +773,7 @@ describe('ProductionPanel', () => {
       state: 'created',
     });
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
-    vi.mocked(callWorker).mockImplementation((method, params) => {
+    mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -681,6 +805,8 @@ describe('ProductionPanel', () => {
           shotId: 'shot',
           adapterKey: videoDescriptor.key,
           providerRegion: 'cn',
+          providerProfileId: providerProfile.id,
+          modelId: 'viduq3-pro',
           assetKind: 'shot-video',
         }),
       ),
@@ -690,6 +816,7 @@ describe('ProductionPanel', () => {
       expect.objectContaining({
         images: ['https://example.invalid/start.png', 'https://example.invalid/end.png'],
       }),
+      providerProfile.id,
       'cn',
     );
     expect(callWorker).toHaveBeenCalledWith('video.generate.attachTask', {
@@ -706,7 +833,7 @@ describe('ProductionPanel', () => {
       state: 'created',
     });
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -741,12 +868,13 @@ describe('ProductionPanel', () => {
           expect.stringMatching(/^data:image\/jpeg;base64,/),
         ],
       }),
+      providerProfile.id,
       'cn',
     );
   });
 
   it('keeps the existing URL after cancellation or an invalid local file selection', async () => {
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -769,7 +897,7 @@ describe('ProductionPanel', () => {
   });
 
   it('does not persist a draft containing a selected local image', async () => {
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -795,7 +923,7 @@ describe('ProductionPanel', () => {
     const polling = videoJob('polling');
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     vi.mocked(cancelVideoProviderTask).mockRejectedValue(new Error('offline'));
-    vi.mocked(callWorker).mockImplementation((method) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -812,8 +940,9 @@ describe('ProductionPanel', () => {
     await waitFor(() =>
       expect(pollVideoProviderTask).toHaveBeenCalledWith(
         videoDescriptor.key,
-        'cn',
+        providerProfile.id,
         'provider-task',
+        'cn',
       ),
     );
     expect(submitVideoProviderTask).not.toHaveBeenCalled();
@@ -823,8 +952,9 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('视频任务已取消，本地轮询已停止。')).toBeInTheDocument();
     expect(cancelVideoProviderTask).toHaveBeenCalledWith(
       videoDescriptor.key,
-      'cn',
+      providerProfile.id,
       'provider-task',
+      'cn',
     );
   });
 });

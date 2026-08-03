@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   AdapterCatalogResult,
   AdapterDescriptor,
@@ -47,15 +47,16 @@ export class AdapterService {
 
   getDraft(params: GenerationDraftGetParams): GenerationDraftInfo | null {
     this.requireAdapter(params.adapterKey);
+    const storageKey = draftStorageKey(params);
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
       this.requireProjectShot(repositories, project.id, params.shotId);
-      const draft = repositories.generationDrafts.get(params.shotId, params.adapterKey);
+      const draft = repositories.generationDrafts.get(params.shotId, storageKey);
       return draft
         ? {
             id: draft.id,
             shotId: draft.shotId,
-            adapterKey: draft.adapterKey,
+            adapterKey: params.adapterKey,
             parameters: JSON.parse(draft.parametersJson) as GenerationDraftInfo['parameters'],
             updatedAt: draft.updatedAt,
           }
@@ -65,6 +66,7 @@ export class AdapterService {
 
   saveDraft(params: GenerationDraftSaveParams): GenerationDraftInfo {
     this.requireAdapter(params.adapterKey);
+    const storageKey = draftStorageKey(params);
     const validation = validateAdapterParameters(params.adapterKey, params.parameters);
     if (!validation.valid) throw new InvalidAdapterParametersError(validation);
     if (containsLocalImageData(params.parameters)) {
@@ -77,11 +79,11 @@ export class AdapterService {
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       this.requireProjectShot(repositories, project.id, params.shotId);
-      const existing = repositories.generationDrafts.get(params.shotId, params.adapterKey);
+      const existing = repositories.generationDrafts.get(params.shotId, storageKey);
       const saved = {
         id: existing?.id ?? randomUUID(),
         shotId: params.shotId,
-        adapterKey: params.adapterKey,
+        adapterKey: storageKey,
         parametersJson: JSON.stringify(params.parameters),
         updatedAt: new Date().toISOString(),
       };
@@ -89,7 +91,7 @@ export class AdapterService {
       return {
         id: saved.id,
         shotId: saved.shotId,
-        adapterKey: saved.adapterKey,
+        adapterKey: params.adapterKey,
         parameters: params.parameters,
         updatedAt: saved.updatedAt,
       };
@@ -111,6 +113,33 @@ export class AdapterService {
       throw new Error('镜头不属于当前项目。');
     }
   }
+}
+
+function draftStorageKey(params: GenerationDraftGetParams): string {
+  if (params.providerProfileId === undefined && params.modelId === undefined) {
+    return params.adapterKey;
+  }
+  if (!params.providerProfileId || !params.modelId) {
+    throw new Error('Provider profile and model are both required for a scoped draft.');
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      params.providerProfileId,
+    )
+  ) {
+    throw new Error('Provider profile ID is invalid.');
+  }
+  const modelId = params.modelId.trim();
+  if (!modelId || modelId.length > 200 || [...modelId].some((value) => value.charCodeAt(0) < 32)) {
+    throw new Error('Provider model ID is invalid.');
+  }
+  const scope = createHash('sha256')
+    .update(params.providerProfileId.toLowerCase())
+    .update('\0')
+    .update(modelId)
+    .digest('hex')
+    .slice(0, 24);
+  return `${params.adapterKey}::${scope}`;
 }
 
 function containsLocalImageData(parameters: GenerationDraftSaveParams['parameters']): boolean {

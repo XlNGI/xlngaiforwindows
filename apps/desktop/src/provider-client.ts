@@ -29,33 +29,43 @@ function requireDesktopTransport(): void {
 export async function submitProviderRequest(
   adapterKey: string,
   payload: AdapterParameters,
-  providerRegion: ProviderRegion,
+  providerProfileId: string,
+  providerRegion?: ProviderRegion,
 ): Promise<NativeProviderResponse> {
   requireDesktopTransport();
-  return invoke<NativeProviderResponse>('provider_submit', { adapterKey, payload, providerRegion });
+  return invoke<NativeProviderResponse>('provider_submit', {
+    adapterKey,
+    payload,
+    providerProfileId,
+    providerRegion,
+  });
 }
 
 export async function submitVideoProviderTask(
   adapterKey: string,
   payload: AdapterParameters,
-  providerRegion: ProviderRegion,
+  providerProfileId: string,
+  providerRegion?: ProviderRegion,
 ): Promise<NativeProviderTaskSubmitResponse> {
   requireDesktopTransport();
   return invoke<NativeProviderTaskSubmitResponse>('provider_submit_task', {
     adapterKey,
     payload,
+    providerProfileId,
     providerRegion,
   });
 }
 
 export async function pollVideoProviderTask(
   adapterKey: string,
-  providerRegion: ProviderRegion,
+  providerProfileId: string | undefined,
   taskId: string,
+  providerRegion?: ProviderRegion,
 ): Promise<NativeProviderResponse> {
   requireDesktopTransport();
   return invoke<NativeProviderResponse>('provider_poll_task', {
     adapterKey,
+    providerProfileId,
     providerRegion,
     taskId,
   });
@@ -63,12 +73,14 @@ export async function pollVideoProviderTask(
 
 export async function cancelVideoProviderTask(
   adapterKey: string,
-  providerRegion: ProviderRegion,
+  providerProfileId: string | undefined,
   taskId: string,
+  providerRegion?: ProviderRegion,
 ): Promise<NativeProviderCancelResponse> {
   requireDesktopTransport();
   return invoke<NativeProviderCancelResponse>('provider_cancel_task', {
     adapterKey,
+    providerProfileId,
     providerRegion,
     taskId,
   });

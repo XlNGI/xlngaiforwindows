@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -195,4 +195,46 @@ SET provider_url = CASE
   ELSE provider_url
 END
 WHERE provider_url LIKE 'http://%' OR provider_url LIKE 'https://%';
+`;
+
+export const MIGRATION_V7 = `
+CREATE TABLE llm_generation_attempts (
+  id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  assistant_message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  context_snapshot_id TEXT NOT NULL REFERENCES context_snapshots(id) ON DELETE CASCADE,
+  provider_profile_id TEXT,
+  provider_name_snapshot TEXT NOT NULL,
+  model_id TEXT,
+  model_name_snapshot TEXT NOT NULL,
+  protocol TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('prepared', 'streaming', 'complete', 'failed', 'cancelled', 'interrupted')
+  ),
+  started_at TEXT NOT NULL,
+  first_token_at TEXT,
+  completed_at TEXT,
+  provider_response_id TEXT,
+  finish_reason TEXT,
+  input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  cached_input_tokens INTEGER CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+  output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+  total_tokens INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0),
+  raw_usage_json TEXT CHECK (raw_usage_json IS NULL OR json_valid(raw_usage_json)),
+  pricing_snapshot_json TEXT CHECK (
+    pricing_snapshot_json IS NULL OR json_valid(pricing_snapshot_json)
+  ),
+  estimated_cost TEXT,
+  currency TEXT,
+  error_code TEXT,
+  error_message TEXT
+);
+
+CREATE INDEX idx_llm_attempts_project ON llm_generation_attempts(conversation_id, started_at, id);
+CREATE INDEX idx_llm_attempts_assistant ON llm_generation_attempts(assistant_message_id, started_at);
+CREATE INDEX idx_llm_attempts_generation ON llm_generation_attempts(generation_id, started_at);
+CREATE INDEX idx_llm_attempts_status ON llm_generation_attempts(status, started_at);
 `;

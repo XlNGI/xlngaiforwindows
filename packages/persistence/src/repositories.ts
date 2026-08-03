@@ -19,6 +19,8 @@ import type {
   GenerationResultRepository,
   JobRecord,
   JobRepository,
+  LlmGenerationAttemptRecord,
+  LlmGenerationAttemptRepository,
   MemoryRecord,
   MemoryRepository,
   ProjectRecord,
@@ -461,6 +463,177 @@ function mapChatMessage(row: ChatMessageRow): ChatMessageRecord {
   };
 }
 
+class SqliteLlmGenerationAttemptRepository
+  extends ProjectScopedRepository
+  implements LlmGenerationAttemptRepository
+{
+  save(record: LlmGenerationAttemptRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO llm_generation_attempts
+         (id, generation_id, conversation_id, user_message_id, assistant_message_id,
+          context_snapshot_id, provider_profile_id, provider_name_snapshot, model_id,
+          model_name_snapshot, protocol, status, started_at, first_token_at, completed_at,
+          provider_response_id, finish_reason, input_tokens, cached_input_tokens, output_tokens,
+          reasoning_tokens, total_tokens, raw_usage_json, pricing_snapshot_json, estimated_cost,
+          currency, error_code, error_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status,
+           first_token_at = excluded.first_token_at,
+           completed_at = excluded.completed_at,
+           provider_response_id = excluded.provider_response_id,
+           finish_reason = excluded.finish_reason,
+           input_tokens = excluded.input_tokens,
+           cached_input_tokens = excluded.cached_input_tokens,
+           output_tokens = excluded.output_tokens,
+           reasoning_tokens = excluded.reasoning_tokens,
+           total_tokens = excluded.total_tokens,
+           raw_usage_json = excluded.raw_usage_json,
+           pricing_snapshot_json = excluded.pricing_snapshot_json,
+           estimated_cost = excluded.estimated_cost,
+           currency = excluded.currency,
+           error_code = excluded.error_code,
+           error_message = excluded.error_message`,
+      )
+      .run(
+        record.id,
+        record.generationId,
+        record.conversationId,
+        record.userMessageId,
+        record.assistantMessageId,
+        record.contextSnapshotId,
+        record.providerProfileId ?? null,
+        record.providerNameSnapshot,
+        record.modelId ?? null,
+        record.modelNameSnapshot,
+        record.protocol,
+        record.status,
+        record.startedAt,
+        record.firstTokenAt ?? null,
+        record.completedAt ?? null,
+        record.providerResponseId ?? null,
+        record.finishReason ?? null,
+        record.inputTokens ?? null,
+        record.cachedInputTokens ?? null,
+        record.outputTokens ?? null,
+        record.reasoningTokens ?? null,
+        record.totalTokens ?? null,
+        record.rawUsageJson ?? null,
+        record.pricingSnapshotJson ?? null,
+        record.estimatedCost ?? null,
+        record.currency ?? null,
+        record.errorCode ?? null,
+        record.errorMessage ?? null,
+      );
+  }
+
+  get(id: string): LlmGenerationAttemptRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM llm_generation_attempts WHERE id = ?')
+      .get(id) as LlmGenerationAttemptRow | undefined;
+    return row ? mapLlmGenerationAttempt(row) : undefined;
+  }
+
+  getByAssistantMessage(assistantMessageId: string): LlmGenerationAttemptRecord | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM llm_generation_attempts
+         WHERE assistant_message_id = ? ORDER BY started_at DESC, id DESC LIMIT 1`,
+      )
+      .get(assistantMessageId) as LlmGenerationAttemptRow | undefined;
+    return row ? mapLlmGenerationAttempt(row) : undefined;
+  }
+
+  listByProject(projectId: string): LlmGenerationAttemptRecord[] {
+    return (
+      this.database
+        .prepare(
+          `SELECT attempts.* FROM llm_generation_attempts attempts
+           INNER JOIN conversations ON conversations.id = attempts.conversation_id
+           WHERE conversations.project_id = ?
+           ORDER BY attempts.started_at, attempts.id`,
+        )
+        .all(projectId) as LlmGenerationAttemptRow[]
+    ).map(mapLlmGenerationAttempt);
+  }
+
+  failActiveByProject(projectId: string, completedAt: string, errorMessage: string): number {
+    return this.database
+      .prepare(
+        `UPDATE llm_generation_attempts
+         SET status = 'failed', completed_at = ?, error_code = 'worker-restarted', error_message = ?
+         WHERE status IN ('prepared', 'streaming', 'interrupted')
+           AND conversation_id IN (SELECT id FROM conversations WHERE project_id = ?)`,
+      )
+      .run(completedAt, errorMessage, projectId).changes;
+  }
+}
+
+interface LlmGenerationAttemptRow {
+  id: string;
+  generation_id: string;
+  conversation_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  context_snapshot_id: string;
+  provider_profile_id: string | null;
+  provider_name_snapshot: string;
+  model_id: string | null;
+  model_name_snapshot: string;
+  protocol: string;
+  status: LlmGenerationAttemptRecord['status'];
+  started_at: string;
+  first_token_at: string | null;
+  completed_at: string | null;
+  provider_response_id: string | null;
+  finish_reason: string | null;
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_tokens: number | null;
+  total_tokens: number | null;
+  raw_usage_json: string | null;
+  pricing_snapshot_json: string | null;
+  estimated_cost: string | null;
+  currency: string | null;
+  error_code: string | null;
+  error_message: string | null;
+}
+
+function mapLlmGenerationAttempt(row: LlmGenerationAttemptRow): LlmGenerationAttemptRecord {
+  return {
+    id: row.id,
+    generationId: row.generation_id,
+    conversationId: row.conversation_id,
+    userMessageId: row.user_message_id,
+    assistantMessageId: row.assistant_message_id,
+    contextSnapshotId: row.context_snapshot_id,
+    providerProfileId: row.provider_profile_id ?? undefined,
+    providerNameSnapshot: row.provider_name_snapshot,
+    modelId: row.model_id ?? undefined,
+    modelNameSnapshot: row.model_name_snapshot,
+    protocol: row.protocol,
+    status: row.status,
+    startedAt: row.started_at,
+    firstTokenAt: row.first_token_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    providerResponseId: row.provider_response_id ?? undefined,
+    finishReason: row.finish_reason ?? undefined,
+    inputTokens: row.input_tokens ?? undefined,
+    cachedInputTokens: row.cached_input_tokens ?? undefined,
+    outputTokens: row.output_tokens ?? undefined,
+    reasoningTokens: row.reasoning_tokens ?? undefined,
+    totalTokens: row.total_tokens ?? undefined,
+    rawUsageJson: row.raw_usage_json ?? undefined,
+    pricingSnapshotJson: row.pricing_snapshot_json ?? undefined,
+    estimatedCost: row.estimated_cost ?? undefined,
+    currency: row.currency ?? undefined,
+    errorCode: row.error_code ?? undefined,
+    errorMessage: row.error_message ?? undefined,
+  };
+}
+
 class SqliteContextSnapshotRepository
   extends ProjectScopedRepository
   implements ContextSnapshotRepository
@@ -839,6 +1012,7 @@ export function createRepositories(database: Database.Database): {
   shots: ShotRepository;
   conversations: ConversationRepository;
   chatMessages: ChatMessageRepository;
+  llmGenerationAttempts: LlmGenerationAttemptRepository;
   contextSnapshots: ContextSnapshotRepository;
   memories: MemoryRepository;
   constraints: ConstraintRepository;
@@ -854,6 +1028,7 @@ export function createRepositories(database: Database.Database): {
     shots: new SqliteShotRepository(database),
     conversations: new SqliteConversationRepository(database),
     chatMessages: new SqliteChatMessageRepository(database),
+    llmGenerationAttempts: new SqliteLlmGenerationAttemptRepository(database),
     contextSnapshots: new SqliteContextSnapshotRepository(database),
     memories: new ScopedContentRepository<MemoryRecord>(database, 'memories'),
     constraints: new ScopedContentRepository<ConstraintRecord>(database, 'constraints'),

@@ -40,6 +40,8 @@ function prepare(service: VideoGenerationService) {
     },
     assetKind: 'shot-video',
     providerRegion: 'global',
+    providerProfileId: '11111111-1111-4111-8111-111111111111',
+    modelId: 'viduq3-pro',
   });
 }
 
@@ -113,7 +115,12 @@ describe('VideoGenerationService', () => {
     expect(attached).toMatchObject({
       status: 'polling',
       providerTaskId: 'provider-task-1',
-      metadata: { pollAttempts: 0, providerState: 'submitted' },
+      metadata: {
+        providerProfileId: '11111111-1111-4111-8111-111111111111',
+        modelId: 'viduq3-pro',
+        pollAttempts: 0,
+        providerState: 'submitted',
+      },
     });
     expect(service.attachTask({ jobId: job.id, providerTaskId: 'provider-task-1' })).toMatchObject({
       id: attached.id,

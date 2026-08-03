@@ -38,6 +38,187 @@ export interface RecentProjectInfo {
   lastOpenedAt: string;
 }
 
+export type ProviderCategory = 'llm' | 'image' | 'video' | 'multi';
+export type ProviderAccessType = 'official' | 'custom';
+export type ProviderConnectionStatus =
+  | 'draft'
+  | 'testing'
+  | 'ready'
+  | 'auth-failed'
+  | 'network-failed'
+  | 'protocol-failed'
+  | 'sync-failed'
+  | 'disabled';
+
+export interface ProviderProfileInfo {
+  id: string;
+  name: string;
+  category: ProviderCategory;
+  providerType: string;
+  accessType: ProviderAccessType;
+  protocol: string;
+  baseUrl: string;
+  enabled: boolean;
+  connectionStatus: ProviderConnectionStatus;
+  lastCheckedAt?: string;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+  migrationSource?: 'vidu' | 'vidu-cn';
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+}
+
+export interface ProviderLegacyMigrationParams {
+  source: 'vidu' | 'vidu-cn';
+}
+
+export interface ProviderLegacyMigrationResult {
+  state: 'created' | 'existing' | 'archived';
+  profile?: ProviderProfileInfo;
+}
+
+export interface ProviderProfileListParams {
+  includeArchived?: boolean;
+}
+
+export interface ProviderProfileGetParams {
+  profileId: string;
+}
+
+export interface ProviderProfileCreateParams {
+  name: string;
+  category: ProviderCategory;
+  providerType: string;
+  accessType: ProviderAccessType;
+  protocol: string;
+  baseUrl: string;
+}
+
+export interface ProviderProfileUpdateParams extends ProviderProfileCreateParams {
+  profileId: string;
+  enabled: boolean;
+}
+
+export interface ProviderDefinitionInfo {
+  id: string;
+  name: string;
+  category: ProviderCategory;
+  providerType: string;
+  protocol: string;
+  baseUrl: string;
+  accessType: 'official';
+}
+
+export interface ProviderModelCapabilities {
+  text: boolean;
+  vision: boolean;
+  streaming: boolean;
+  reasoning: boolean;
+  tools: boolean;
+  structuredOutput: boolean;
+  embeddings: boolean;
+  imageGeneration: boolean;
+  videoGeneration: boolean;
+}
+
+export type ProviderModelSource = 'remote' | 'built-in' | 'manual';
+
+export interface ProviderModelInfo {
+  id: string;
+  providerProfileId: string;
+  remoteModelId: string;
+  displayName: string;
+  capabilities: ProviderModelCapabilities;
+  source: ProviderModelSource;
+  enabled: boolean;
+  lastSyncedAt?: string;
+  lastSeenAt?: string;
+  unavailableAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelPricingInfo {
+  providerProfileId: string;
+  modelId: string;
+  currency: string;
+  unitTokens: number;
+  inputPrice: string;
+  cachedInputPrice?: string;
+  outputPrice: string;
+  updatedAt: string;
+}
+
+export interface ModelPricingUpdateParams {
+  providerProfileId: string;
+  modelId: string;
+  currency: string;
+  inputPrice: string;
+  cachedInputPrice?: string;
+  outputPrice: string;
+}
+
+export type ProviderDefaultRole = 'quality' | 'balanced' | 'fast' | 'vision' | 'embedding';
+
+export interface ProviderDefaultInfo {
+  role: ProviderDefaultRole;
+  providerProfileId: string;
+  modelId: string;
+  updatedAt: string;
+}
+
+export interface ProviderDefaultUpdateParams {
+  role: ProviderDefaultRole;
+  providerProfileId?: string;
+  modelId?: string;
+}
+
+export interface ProviderRuntimeProfile {
+  profileId: string;
+  providerType: string;
+  protocol: string;
+  baseUrl: string;
+}
+
+export interface RemoteProviderModelInfo {
+  id: string;
+  displayName?: string;
+}
+
+export type ProviderConnectionFailureStatus =
+  'auth-failed' | 'network-failed' | 'protocol-failed' | 'sync-failed';
+
+export interface ProviderConnectionCompleteParams {
+  profileId: string;
+  status: 'ready' | ProviderConnectionFailureStatus;
+  errorCode?: string;
+  errorMessage?: string;
+  models?: RemoteProviderModelInfo[];
+}
+
+export interface ProviderConnectionResult {
+  profile: ProviderProfileInfo;
+  models: ProviderModelInfo[];
+  modelSyncStatus: 'synced' | 'unsupported' | 'failed' | 'not-attempted';
+}
+
+export interface ProviderModelCreateParams {
+  profileId: string;
+  remoteModelId: string;
+  displayName?: string;
+  capabilities: ProviderModelCapabilities;
+  enabled?: boolean;
+}
+
+export interface ProviderModelUpdateParams {
+  profileId: string;
+  modelId: string;
+  displayName: string;
+  capabilities: ProviderModelCapabilities;
+  enabled: boolean;
+}
+
 export interface ProjectCreateParams {
   name: string;
   rootPath: string;
@@ -221,6 +402,7 @@ export interface ChatMessageInfo {
   content: string;
   status: ChatMessageStatus;
   createdAt: string;
+  attempt?: LlmAttemptInfo;
 }
 
 export interface ChatMessageListParams {
@@ -292,9 +474,12 @@ export interface LlmStatusResult {
   provider: string;
   model: string;
   configured: boolean;
+  configurationSource: 'environment' | 'none' | 'managed';
 }
 
-export type LlmGenerationStatus = 'streaming' | 'complete' | 'failed' | 'cancelled';
+export type LlmGenerationStatus = 'prepared' | 'streaming' | 'complete' | 'failed' | 'cancelled';
+
+export type LlmExecutionMode = 'legacy' | 'native';
 
 export interface LlmGenerateParams extends ContextPreviewParams {
   prompt: string;
@@ -302,9 +487,16 @@ export interface LlmGenerateParams extends ContextPreviewParams {
 
 export interface LlmGenerationInfo {
   generationId: string;
+  attemptId?: string;
+  projectId?: string;
   conversationId: string;
   snapshotId: string;
   status: LlmGenerationStatus;
+  executionMode?: LlmExecutionMode;
+  providerProfileId?: string;
+  modelId?: string;
+  providerResponseId?: string;
+  finishReason?: string;
   userMessage: ChatMessageInfo;
   assistantMessage: ChatMessageInfo;
   sources: ContextSourceInfo[];
@@ -319,6 +511,165 @@ export interface LlmGenerationGetParams {
 export interface LlmGenerationRetryParams {
   assistantMessageId: string;
   budgetTokens?: number;
+}
+
+export interface LlmGenerationIdentity {
+  generationId: string;
+  attemptId: string;
+  projectId: string;
+  conversationId: string;
+}
+
+export interface LlmGenerationPrepareParams extends ContextPreviewParams {
+  prompt: string;
+  providerProfileId: string;
+  modelId: string;
+}
+
+export interface LlmGenerationRetryPrepareParams extends LlmGenerationRetryParams {
+  providerProfileId: string;
+  modelId: string;
+}
+
+export interface LlmGenerationPrepareResult {
+  generation: LlmGenerationInfo;
+  stream: LlmGenerationIdentity;
+}
+
+export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
+  providerProfileId: string;
+  modelId: string;
+  remoteModelId: string;
+  protocol: 'openai-responses' | 'openai-chat-completions';
+  baseUrl: string;
+  systemInstruction: string;
+  context: string;
+  prompt: string;
+}
+
+export interface LlmGenerationObserveParams extends LlmGenerationIdentity {
+  content: string;
+}
+
+export interface NormalizedLlmUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  providerReportedCost?: ProviderReportedCostInfo;
+  raw?: Record<string, unknown>;
+}
+
+export interface ProviderReportedCostInfo {
+  amount: string;
+  currency?: string;
+}
+
+export interface LlmPricingSnapshotInfo {
+  currency: string;
+  unitTokens: number;
+  inputPrice: string;
+  cachedInputPrice?: string;
+  outputPrice: string;
+  configuredAt: string;
+}
+
+export interface LlmAttemptInfo {
+  id: string;
+  generationId: string;
+  providerProfileId?: string;
+  providerName: string;
+  modelId?: string;
+  modelName: string;
+  protocol: string;
+  status: LlmGenerationStatus | 'interrupted';
+  startedAt: string;
+  firstTokenAt?: string;
+  completedAt?: string;
+  providerResponseId?: string;
+  finishReason?: string;
+  usage?: NormalizedLlmUsage;
+  pricingSnapshot?: LlmPricingSnapshotInfo;
+  estimatedCost?: string;
+  currency?: string;
+  providerReportedCost?: ProviderReportedCostInfo;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface LlmGenerationCompleteParams extends LlmGenerationObserveParams {
+  providerResponseId?: string;
+  finishReason?: string;
+  usage?: NormalizedLlmUsage;
+}
+
+export interface LlmGenerationFailParams extends LlmGenerationObserveParams {
+  error: string;
+  retryable: boolean;
+  usage?: NormalizedLlmUsage;
+}
+
+export type LlmNativeStreamEvent =
+  | { type: 'started' }
+  | { type: 'delta'; delta: string }
+  | {
+      type: 'complete';
+      providerResponseId?: string;
+      finishReason?: string;
+      usage?: NormalizedLlmUsage;
+    }
+  | { type: 'failed'; error: string; retryable: boolean; usage?: NormalizedLlmUsage }
+  | { type: 'cancelled'; usage?: NormalizedLlmUsage };
+
+export interface UsageQueryParams {
+  startAt: string;
+  endAt: string;
+  providerProfileId?: string;
+  modelId?: string;
+  projectId?: string;
+  status?: 'complete' | 'failed' | 'cancelled';
+}
+
+export interface UsageEntryInfo {
+  attemptId: string;
+  projectId: string;
+  projectName: string;
+  providerProfileId: string;
+  providerName: string;
+  modelId: string;
+  modelName: string;
+  status: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  estimatedCost?: string;
+  currency?: string;
+  createdAt: string;
+}
+
+export interface UsageCurrencySummary {
+  currency: string;
+  attempts: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  estimatedCost: string;
+}
+
+export interface UsageQueryResult {
+  entries: UsageEntryInfo[];
+  summaries: UsageCurrencySummary[];
+}
+
+export interface UsageRebuildResult {
+  projectsScanned: number;
+  projectsSkipped: number;
+  attemptsIndexed: number;
 }
 
 export type GenerationCapability =
@@ -430,6 +781,8 @@ export interface GenerationDraftInfo {
 export interface GenerationDraftGetParams {
   shotId: string;
   adapterKey: string;
+  providerProfileId?: string;
+  modelId?: string;
 }
 
 export interface GenerationDraftSaveParams extends GenerationDraftGetParams {
@@ -534,6 +887,8 @@ export interface VideoGenerationCostInfo {
 
 export interface VideoGenerationMetadataInfo {
   providerRegion: VideoProviderRegion;
+  providerProfileId?: string;
+  modelId?: string;
   providerState?: string;
   pollAttempts: number;
   lastPolledAt?: string;
@@ -571,6 +926,8 @@ export interface VideoGenerationPrepareParams {
   adapterKey: string;
   parameters: AdapterParameters;
   providerRegion: VideoProviderRegion;
+  providerProfileId?: string;
+  modelId?: string;
   assetKind?: VideoAssetKind;
 }
 
@@ -638,6 +995,72 @@ export interface WorkerMethodMap {
   'project.backup': { params: ProjectBackupParams; result: PathResult };
   'project.export': { params: ProjectExportParams; result: PathResult };
   'project.restore': { params: ProjectRestoreParams; result: ProjectInfo };
+  'provider.profile.list': {
+    params: ProviderProfileListParams;
+    result: ProviderProfileInfo[];
+  };
+  'provider.profile.get': {
+    params: ProviderProfileGetParams;
+    result: ProviderProfileInfo | null;
+  };
+  'provider.profile.create': {
+    params: ProviderProfileCreateParams;
+    result: ProviderProfileInfo;
+  };
+  'provider.profile.update': {
+    params: ProviderProfileUpdateParams;
+    result: ProviderProfileInfo;
+  };
+  'provider.profile.archive': {
+    params: ProviderProfileGetParams;
+    result: ProviderProfileInfo;
+  };
+  'provider.profile.migrateLegacy': {
+    params: ProviderLegacyMigrationParams;
+    result: ProviderLegacyMigrationResult;
+  };
+  'provider.definition.list': {
+    params: Record<string, never>;
+    result: ProviderDefinitionInfo[];
+  };
+  'provider.connection.begin': {
+    params: ProviderProfileGetParams;
+    result: ProviderRuntimeProfile;
+  };
+  'provider.connection.complete': {
+    params: ProviderConnectionCompleteParams;
+    result: ProviderConnectionResult;
+  };
+  'provider.model.list': {
+    params: ProviderProfileGetParams;
+    result: ProviderModelInfo[];
+  };
+  'provider.model.createManual': {
+    params: ProviderModelCreateParams;
+    result: ProviderModelInfo;
+  };
+  'provider.model.update': {
+    params: ProviderModelUpdateParams;
+    result: ProviderModelInfo;
+  };
+  'provider.model.pricing.list': {
+    params: ProviderProfileGetParams;
+    result: ModelPricingInfo[];
+  };
+  'provider.model.pricing.update': {
+    params: ModelPricingUpdateParams;
+    result: ModelPricingInfo;
+  };
+  'provider.default.list': {
+    params: Record<string, never>;
+    result: ProviderDefaultInfo[];
+  };
+  'provider.default.update': {
+    params: ProviderDefaultUpdateParams;
+    result: ProviderDefaultInfo | null;
+  };
+  'usage.list': { params: UsageQueryParams; result: UsageQueryResult };
+  'usage.rebuild': { params: Record<string, never>; result: UsageRebuildResult };
   'maintenance.cache.inspect': {
     params: Record<string, never>;
     result: CacheInspectionResult;
@@ -670,9 +1093,33 @@ export interface WorkerMethodMap {
   'context.preview': { params: ContextPreviewParams; result: ProductionContextInfo };
   'llm.status': { params: Record<string, never>; result: LlmStatusResult };
   'llm.generate': { params: LlmGenerateParams; result: LlmGenerationInfo };
+  'llm.generation.prepare': {
+    params: LlmGenerationPrepareParams;
+    result: LlmGenerationPrepareResult;
+  };
+  'llm.generation.runtime': {
+    params: LlmGenerationIdentity;
+    result: LlmGenerationRuntimeRequest;
+  };
+  'llm.generation.observe': {
+    params: LlmGenerationObserveParams;
+    result: LlmGenerationInfo;
+  };
+  'llm.generation.complete': {
+    params: LlmGenerationCompleteParams;
+    result: LlmGenerationInfo;
+  };
+  'llm.generation.fail': {
+    params: LlmGenerationFailParams;
+    result: LlmGenerationInfo;
+  };
   'llm.generation.get': { params: LlmGenerationGetParams; result: LlmGenerationInfo };
   'llm.generation.cancel': { params: LlmGenerationGetParams; result: LlmGenerationInfo };
   'llm.generation.retry': { params: LlmGenerationRetryParams; result: LlmGenerationInfo };
+  'llm.generation.retryPrepare': {
+    params: LlmGenerationRetryPrepareParams;
+    result: LlmGenerationPrepareResult;
+  };
   'adapter.catalog': { params: Record<string, never>; result: AdapterCatalogResult };
   'adapter.resolve': { params: AdapterResolveParams; result: AdapterDescriptor };
   'adapter.validate': { params: AdapterValidateParams; result: AdapterValidationResult };

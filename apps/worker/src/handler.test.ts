@@ -207,6 +207,65 @@ describe('worker handler', () => {
       params: { shotId: createdShot.id, adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2' },
     });
     expect(loaded).toMatchObject({ ok: true, result: { parameters } });
+
+    const scopedA = {
+      providerProfileId: '11111111-1111-4111-8111-111111111111',
+      modelId: 'viduq2',
+    };
+    const scopedB = {
+      providerProfileId: '22222222-2222-4222-8222-222222222222',
+      modelId: 'viduq2',
+    };
+    await handleRequest({
+      id: 'scoped-draft-a',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'generation.draft.save',
+      params: {
+        shotId: createdShot.id,
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        ...scopedA,
+        parameters: { prompt: 'Profile A', aspect_ratio: '16:9', resolution: '2K' },
+      },
+    });
+    await handleRequest({
+      id: 'scoped-draft-b',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'generation.draft.save',
+      params: {
+        shotId: createdShot.id,
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        ...scopedB,
+        parameters: { prompt: 'Profile B', aspect_ratio: '16:9', resolution: '2K' },
+      },
+    });
+    const loadedScopedA = await handleRequest({
+      id: 'load-scoped-draft-a',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'generation.draft.get',
+      params: {
+        shotId: createdShot.id,
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        ...scopedA,
+      },
+    });
+    const loadedScopedB = await handleRequest({
+      id: 'load-scoped-draft-b',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'generation.draft.get',
+      params: {
+        shotId: createdShot.id,
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        ...scopedB,
+      },
+    });
+    expect(loadedScopedA).toMatchObject({
+      ok: true,
+      result: { parameters: { prompt: 'Profile A' } },
+    });
+    expect(loadedScopedB).toMatchObject({
+      ok: true,
+      result: { parameters: { prompt: 'Profile B' } },
+    });
     await handleRequest({
       id: 'close',
       protocolVersion: IPC_PROTOCOL_VERSION,
