@@ -119,6 +119,8 @@ export interface ProviderModelCapabilities {
   structuredOutput: boolean;
   embeddings: boolean;
   imageGeneration: boolean;
+  /** True when the model accepts an input image through an image-edit route. */
+  imageEditing?: boolean;
   videoGeneration: boolean;
 }
 

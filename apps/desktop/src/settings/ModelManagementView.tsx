@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CircleDollarSign, Plus, RefreshCw, TriangleAlert } from 'lucide-react';
 import type {
   ModelPricingInfo,
@@ -23,6 +23,7 @@ const capabilityOptions: Array<{ key: keyof ProviderModelCapabilities; label: st
   { key: 'embeddings', label: '向量' },
   { key: 'imageGeneration', label: '图片生成' },
   { key: 'videoGeneration', label: '视频生成' },
+  { key: 'imageEditing', label: '图片编辑' },
 ];
 
 const defaultRoleOptions: Array<{ role: ProviderDefaultRole; label: string }> = [
@@ -43,6 +44,7 @@ function emptyCapabilities(): ProviderModelCapabilities {
     structuredOutput: false,
     embeddings: false,
     imageGeneration: false,
+    imageEditing: false,
     videoGeneration: false,
   };
 }
@@ -76,6 +78,15 @@ export function ModelManagementView({
   const [remoteModelId, setRemoteModelId] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [manualCapabilities, setManualCapabilities] = useState(emptyCapabilities);
+  const [search, setSearch] = useState('');
+
+  const filteredModels = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    if (!query) return models;
+    return models.filter((model) =>
+      `${model.remoteModelId} ${model.displayName}`.toLocaleLowerCase().includes(query),
+    );
+  }, [models, search]);
 
   if (!profile) {
     return (
@@ -167,14 +178,29 @@ export function ModelManagementView({
         </div>
       )}
 
+      <label className="model-search-field">
+        <span>搜索模型</span>
+        <input
+          type="search"
+          value={search}
+          placeholder="按模型 ID 或显示名称搜索"
+          onChange={(event) => setSearch(event.target.value)}
+        />
+      </label>
+
       <div className="model-list">
         {models.length === 0 ? (
           <div className="empty-settings-state compact">
             <strong>还没有模型</strong>
             <span>运行模型同步，或手动添加中转站提供的模型 ID。</span>
           </div>
+        ) : filteredModels.length === 0 ? (
+          <div className="empty-settings-state compact">
+            <strong>没有匹配的模型</strong>
+            <span>请尝试搜索其他模型 ID 或显示名称。</span>
+          </div>
         ) : (
-          models.map((model) => (
+          filteredModels.map((model) => (
             <article
               className="model-card"
               data-unavailable={Boolean(model.unavailableAt)}
@@ -193,6 +219,7 @@ export function ModelManagementView({
                     }}
                   />
                   <small>{model.remoteModelId}</small>
+                  <CapabilitySummary capabilities={model.capabilities} />
                 </div>
                 <label className="model-enabled-toggle">
                   <input
@@ -245,6 +272,17 @@ export function ModelManagementView({
         )}
       </div>
     </section>
+  );
+}
+
+function CapabilitySummary({ capabilities }: { capabilities: ProviderModelCapabilities }) {
+  const labels = capabilityOptions
+    .filter((option) => capabilities[option.key])
+    .map((option) => option.label);
+  return (
+    <div className="model-capability-summary" aria-label="模型能力">
+      {labels.length > 0 ? labels.map((label) => <span key={label}>{label}</span>) : <span>能力未确认</span>}
+    </div>
   );
 }
 

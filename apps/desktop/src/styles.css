@@ -973,6 +973,21 @@ button {
   padding: 0;
 }
 
+.model-search-field {
+  display: grid;
+  gap: 5px;
+  margin: 0 14px 10px;
+}
+
+.model-search-field span {
+  color: #aab4b8;
+  font-size: 12px;
+}
+
+.model-search-field input {
+  width: 100%;
+}
+
 .model-list {
   display: grid;
   align-content: start;
@@ -1005,6 +1020,20 @@ button {
   display: grid;
   min-width: 0;
   gap: 3px;
+}
+
+.model-capability-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.model-capability-summary span {
+  padding: 2px 6px;
+  border: 1px solid #465156;
+  border-radius: 999px;
+  color: #c5d0d3;
+  font-size: 11px;
 }
 
 .model-card small,

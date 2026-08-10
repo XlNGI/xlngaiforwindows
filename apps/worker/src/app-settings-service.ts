@@ -705,6 +705,7 @@ function normalizeModelCapabilities(
     structuredOutput: capabilities.structuredOutput,
     embeddings: capabilities.embeddings,
     imageGeneration: capabilities.imageGeneration,
+    imageEditing: capabilities.imageEditing ?? false,
     videoGeneration: capabilities.videoGeneration,
   };
   if (Object.values(normalized).some((value) => typeof value !== 'boolean')) {

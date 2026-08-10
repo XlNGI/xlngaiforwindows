@@ -11,6 +11,7 @@ describe('provider registry', () => {
   it('locks official provider configuration to a built-in definition', () => {
     expect(listProviderDefinitions().map((definition) => definition.id)).toEqual([
       'openai',
+      'unicompapi',
       'vidu-global',
       'vidu-china',
     ]);
@@ -62,5 +63,32 @@ describe('provider registry', () => {
     expect(hasAnyModelCapability(unknown)).toBe(false);
     expect(inferKnownModelCapabilities('openai', 'gpt-5').reasoning).toBe(true);
     expect(inferKnownModelCapabilities('openai', 'text-embedding-3-large').embeddings).toBe(true);
+  });
+
+  it('infers conservative UniCompAPI capabilities and leaves unknown models disabled', () => {
+    expect(inferKnownModelCapabilities('unicompapi', 'qwen-image')).toMatchObject({
+      imageGeneration: true,
+      text: false,
+    });
+    expect(inferKnownModelCapabilities('unicompapi', 'qwen-image-edit-2509')).toMatchObject({
+      imageEditing: true,
+      imageGeneration: false,
+    });
+    expect(inferKnownModelCapabilities('unicompapi', 'doubao-seedance-2-0-260128')).toMatchObject({
+      videoGeneration: true,
+      text: false,
+    });
+    expect(inferKnownModelCapabilities('unicompapi', 'vendor-experimental-model')).toEqual({
+      text: false,
+      vision: false,
+      streaming: false,
+      reasoning: false,
+      tools: false,
+      structuredOutput: false,
+      embeddings: false,
+      imageGeneration: false,
+      imageEditing: false,
+      videoGeneration: false,
+    });
   });
 });

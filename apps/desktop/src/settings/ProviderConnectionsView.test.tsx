@@ -76,6 +76,7 @@ function capabilities(change: Partial<ProviderModelCapabilities> = {}): Provider
     structuredOutput: false,
     embeddings: false,
     imageGeneration: false,
+    imageEditing: false,
     videoGeneration: false,
     ...change,
   };
@@ -214,6 +215,53 @@ describe('ProviderConnectionsView', () => {
 });
 
 describe('ModelManagementView', () => {
+  it('filters the flat model list by remote ID or display name', () => {
+    const models = [
+      {
+        id: '123e4567-e89b-42d3-a456-426614174001',
+        providerProfileId: profile.id,
+        remoteModelId: 'qwen-image-plus',
+        displayName: 'Qwen Image Plus',
+        capabilities: capabilities({ imageGeneration: true }),
+        source: 'remote' as const,
+        enabled: false,
+        createdAt: profile.createdAt,
+        updatedAt: profile.updatedAt,
+      },
+      {
+        id: '123e4567-e89b-42d3-a456-426614174002',
+        providerProfileId: profile.id,
+        remoteModelId: 'deepseek-chat',
+        displayName: 'DeepSeek Chat',
+        capabilities: capabilities({ text: true, streaming: true }),
+        source: 'remote' as const,
+        enabled: false,
+        createdAt: profile.createdAt,
+        updatedAt: profile.updatedAt,
+      },
+    ];
+    render(
+      <ModelManagementView
+        profile={profile}
+        models={models}
+        pricing={[]}
+        defaults={[]}
+        busy={false}
+        onSynchronize={vi.fn()}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdatePricing={vi.fn()}
+        onUpdateDefault={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByDisplayValue('Qwen Image Plus')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('DeepSeek Chat')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'deepseek' } });
+    expect(screen.queryByDisplayValue('Qwen Image Plus')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('DeepSeek Chat')).toBeInTheDocument();
+  });
+
   it('creates a manual model with user-selected capabilities and leaves it disabled', async () => {
     const onCreate = vi.fn().mockResolvedValue(undefined);
     render(
