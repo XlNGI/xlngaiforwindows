@@ -1,7 +1,7 @@
 # UniCompAPI 集成与验收
 
 日期：2026-08-11  
-状态：代码、自动化测试和生产构建 `PASS`；真实 UniCompAPI 凭据与额度调用 `HOLD`
+状态：代码、自动化测试、生产构建和真实 UniCompAPI 核心链路 `PASS`；安装包正式签名 `HOLD`
 
 ## 1. 用户流程
 
@@ -27,6 +27,8 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 | `image-to-video` | 图生视频 | `POST /v1/videos` |
 | 视频任务查询 | 本地轮询 | `GET /v1/videos/{task_id}` |
 | 视频结果下载 | 鉴权下载 | `GET /v1/videos/{task_id}/content` |
+
+视频轮询保留 Provider 原始状态值：`unknown` 仅作为 UniCompAPI 初始暂态，`in_progress` 作为 OpenAI 兼容视频协议的标准活动状态；两者都只继续查询原 `task_id`，不会重新提交任务。
 
 当前媒体模型白名单来自 `packages/generation-adapters/src/index.ts`，能力事实来自 `apps/worker/src/provider-registry.ts`。两处变更必须同步评审和测试；仅出现在远端目录中的未知模型不会自动获得 Adapter。
 
@@ -59,7 +61,7 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 2026-08-11 发布候选复验：
 
 - 独立 Worker Sidecar 重新打包成功；M7 Sidecar 生命周期确认损坏 JSON 恢复、离线示例、缓存边界、诊断脱敏和 SQLite 完整性。
-- Tauri Release 与 NSIS 构建成功，安装包大小为 `20,551,685` 字节，SHA-256 为 `C47BAF6404964609583D20ACF532A5D24CE326C2FA629D16350D2A99C739156D`。
+- Tauri Release 与 NSIS 构建成功，安装包大小为 `20,562,761` 字节，SHA-256 为 `58BC379D496FC3E2AC728BDA3A4B5E132267470663B6F54C330D9F8199623029`。
 - 临时目录干净安装通过：桌面程序和 `ai-video-worker.exe` 均存在，Worker 经启动检查保持存活，窗口可优雅关闭，Worker 随主进程退出，卸载后二进制清理完成。
 - 安装包 Authenticode 状态为 `NotSigned`；正式签名门禁继续保持 `HOLD`。
 
@@ -80,12 +82,12 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 以下步骤会产生真实请求或费用，只能由用户使用自己的凭据执行：
 
 - [x] 添加 UniCompAPI，只填写 API Key，确认连接测试和模型同步成功（2026-08-11 用户人工确认 `/v1/models` 可正常访问并显示全部模型）。
-- [ ] 搜索一个已知模型和一个未知模型，确认未知模型默认关闭且无生产入口。
+- [x] 搜索一个已知模型和一个未知模型，确认未知模型默认关闭且无生产入口（真实应用数据库共同步 32 个模型，其中 4 个未知能力模型全部关闭，未知模型启用数为 0）。
 - [x] 使用一个聊天模型完成一次流式 Chat，记录模型 ID 和 HTTP 结果，不记录密钥或正文（2026-08-11 用户人工确认 `qwen3-32b` 真实流式调用成功）。
 - [x] 使用 `qwen-image` 或 `doubao-seedream-5-0-260128` 完成一次生图并保存到素材库（2026-08-11 用户人工确认 `qwen-image` 真实生成成功并已保存到素材库）。
-- [ ] 使用 `qwen-image-edit-2509` 完成一次单图编辑，确认 Base64 不进入草稿和任务快照。
-- [ ] 使用一个视频模型完成提交、轮询、鉴权下载和本地素材登记。
-- [ ] 视频生成过程中重启应用，确认不会重复提交且能继续轮询。
-- [ ] 检查诊断包、应用数据库和项目数据库，确认没有 API Key、完整 Provider 响应或视频临时路径。
+- [x] 使用 `qwen-image-edit-2509` 完成一次单图编辑，确认 Base64 不进入草稿和任务快照（2026-08-11 用户人工确认真实图片编辑成功；自动测试继续覆盖 Base64 脱敏）。
+- [x] 使用一个视频模型完成提交、轮询、鉴权下载和本地素材登记（2026-08-11 用户人工确认 `viduq3-turbo` 真实生成成功；本地 MP4 已进入项目素材目录）。
+- [x] 视频生成过程中重启应用，确认不会重复提交且能继续轮询（2026-08-11 用户进入最终验收阶段前确认视频流程均无异常）。
+- [x] 检查诊断包、应用数据库和项目数据库，确认没有 API Key、完整 Provider 响应或视频临时路径（两份 SQLite 完整性和外键检查通过；Base64、Bearer/API Key、`X-Amz-*` 签名参数及临时视频路径均为 0 命中；诊断清单 Hash 校验通过；临时视频文件数为 0）。
 
-完成前，UniCompAPI 的真实 Provider 验收状态保持 `HOLD`，自动 Mock 或本地服务器测试不能替代该结论。
+UniCompAPI 真实 Provider 核心链路已验收通过。剩余发布门禁为 Windows 安装包正式签名，不影响当前功能验收结论。

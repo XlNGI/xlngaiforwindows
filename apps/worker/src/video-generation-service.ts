@@ -46,6 +46,7 @@ const ACTIVE_STATES = new Set([
   'created',
   'queueing',
   'queued',
+  'in_progress',
   'processing',
   'running',
   'pending',
@@ -229,7 +230,7 @@ export class VideoGenerationService {
     }
 
     const state = providerState(params.providerBody);
-    if (state && ACTIVE_STATES.has(state)) {
+    if (state && isActiveProviderState(state, metadata.providerRegion)) {
       return this.persistObservation(job.id, providerTaskId, { ...metadata, providerState: state });
     }
     if (state === 'failed' || state === 'error') {
@@ -876,6 +877,12 @@ function providerState(body: unknown): string | undefined {
   if (typeof direct === 'string' && direct.trim()) return direct.trim().toLowerCase();
   const data = object.data;
   return data && typeof data === 'object' && !Array.isArray(data) ? providerState(data) : undefined;
+}
+
+function isActiveProviderState(state: string, providerRegion: VideoProviderRegion): boolean {
+  return (
+    ACTIVE_STATES.has(state) || (providerRegion === 'unicompapi' && state === 'unknown')
+  );
 }
 
 function providerFailureMessage(body: unknown): string {

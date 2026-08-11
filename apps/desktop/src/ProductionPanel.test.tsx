@@ -1074,6 +1074,7 @@ describe('ProductionPanel', () => {
       providerProfile.id,
       'cn',
     );
+    expect(submitVideoProviderTask).toHaveBeenCalledTimes(1);
     expect(callWorker).toHaveBeenCalledWith('video.generate.attachTask', {
       jobId: 'video-job',
       providerTaskId: 'provider-task',

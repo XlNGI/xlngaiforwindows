@@ -179,6 +179,62 @@ describe('VideoGenerationService', () => {
     expect(JSON.stringify(retrying)).not.toContain('must-not-persist');
   });
 
+  it('keeps standard in_progress video states active', async () => {
+    const { service } = await setup();
+    const job = prepare(service);
+    service.attachTask({ jobId: job.id, providerTaskId: 'provider-task' });
+
+    const retrying = service.observe({
+      jobId: job.id,
+      providerTaskId: 'provider-task',
+      providerStatus: 200,
+      providerBody: { status: 'in_progress' },
+    });
+
+    expect(retrying).toMatchObject({
+      status: 'polling',
+      providerTaskId: 'provider-task',
+      metadata: { pollAttempts: 1, providerState: 'in_progress' },
+    });
+  });
+
+  it('keeps UniCompAPI unknown video states active while other providers fail closed', async () => {
+    const { service } = await setup();
+    const unicompJob = service.prepare({
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      parameters: { prompt: 'slow camera move', duration: 5, ratio: '16:9' },
+      providerRegion: 'unicompapi',
+      providerProfileId: '11111111-1111-4111-8111-111111111111',
+      modelId: 'kling-v3-turbo',
+    });
+    service.attachTask({ jobId: unicompJob.id, providerTaskId: 'unicomp-task' });
+
+    const retrying = service.observe({
+      jobId: unicompJob.id,
+      providerTaskId: 'unicomp-task',
+      providerStatus: 200,
+      providerBody: { status: 'unknown' },
+    });
+
+    expect(retrying).toMatchObject({
+      status: 'polling',
+      providerTaskId: 'unicomp-task',
+      metadata: { pollAttempts: 1, providerState: 'unknown' },
+    });
+
+    const otherJob = prepare(service);
+    service.attachTask({ jobId: otherJob.id, providerTaskId: 'vidu-task' });
+    const failed = service.observe({
+      jobId: otherJob.id,
+      providerTaskId: 'vidu-task',
+      providerStatus: 200,
+      providerBody: { status: 'unknown' },
+    });
+
+    expect(failed).toMatchObject({ status: 'failed', metadata: { failureKind: 'provider' } });
+    expect(failed.error).toBe('Provider returned unsupported video task state: unknown.');
+  });
+
   it('downloads only creation video output and commits one local asset and terminal job', async () => {
     const { project, service } = await setup(undefined, {
       resolveCreditPricing: () => ({ currency: 'CNY', creditPrice: '0.03125' }),
