@@ -331,6 +331,27 @@ describe('ProductionPanel', () => {
     expect(screen.getByLabelText('自动保存到本地素材库')).toBeChecked();
   });
 
+  it('merges current schema defaults into an older saved draft', async () => {
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') {
+        return Promise.resolve({
+          id: 'legacy-draft',
+          shotId: 'shot',
+          adapterKey: descriptor.key,
+          parameters: { prompt: '旧草稿' },
+          updatedAt: '2026-08-01T12:00:00.000Z',
+        });
+      }
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel shotId="shot" writable />);
+    expect(await screen.findByLabelText('分辨率*')).toHaveValue('1080p');
+  });
+
   it('uses the controlled production capability and removes the right-side mode selector', async () => {
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(completeModeCatalog);

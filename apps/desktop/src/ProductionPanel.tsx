@@ -356,7 +356,7 @@ export function ProductionPanel({
           providerProfileId: selectedProfile.id,
           modelId: selectedModel.remoteModelId,
         });
-        if (active) setParameters(draft?.parameters ?? defaults);
+        if (active) setParameters({ ...defaults, ...(draft?.parameters ?? {}) });
       })
       .catch((reason) => {
         if (active) {

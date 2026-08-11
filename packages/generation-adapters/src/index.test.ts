@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { extractVideoCost, getAdapterCatalog, resolveAdapter, validateAdapterParameters } from './index.js';
+import {
+  extractVideoCost,
+  getAdapter,
+  getAdapterCatalog,
+  resolveAdapter,
+  validateAdapterParameters,
+} from './index.js';
 
 describe('extractVideoCost', () => {
   it('extracts credits from Vidu poll bodies', () => {
@@ -274,5 +280,27 @@ describe('adapter registry', () => {
         apiKey: 'must-not-persist',
       }),
     ).toMatchObject({ valid: false });
+  });
+
+  it('requires a defaulted size only for the qwen-image model family', () => {
+    const qwen = getAdapter('TEXT_TO_IMAGE:unicompapi:qwen-image:v1');
+    const seedream = getAdapter(
+      'TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1',
+    );
+    expect(qwen?.parameterSchema.required).toContain('size');
+    expect(qwen?.parameterSchema.properties.size?.default).toBe('1024x1024');
+    expect(seedream?.parameterSchema.required).not.toContain('size');
+    expect(seedream?.parameterSchema.properties.size?.default).toBeUndefined();
+    expect(
+      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:qwen-image:v1', {
+        prompt: 'frame',
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:qwen-image:v1', {
+        prompt: 'frame',
+        size: '1024x1024',
+      }),
+    ).toMatchObject({ valid: true });
   });
 });

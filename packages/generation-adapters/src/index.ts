@@ -558,14 +558,19 @@ const UNICOMPAPI_MEDIA_MODELS: readonly {
   { model: 'viduq3-turbo', textToVideo: true, imageToVideo: true },
 ];
 
-const unicompTextToImageSchema: AdapterParameterSchema = {
+const unicompTextToImageSchema = (model: string): AdapterParameterSchema => ({
   $schema: schemaUri,
   type: 'object',
   additionalProperties: false,
-  required: ['prompt'],
+  required: model === 'qwen-image' ? ['prompt', 'size'] : ['prompt'],
   properties: {
     prompt: { type: 'string', title: '提示词', minLength: 1, maxLength: 5000 },
-    size: { type: 'string', title: '尺寸', maxLength: 32 },
+    size: {
+      type: 'string',
+      title: '尺寸',
+      maxLength: 32,
+      ...(model === 'qwen-image' ? { default: '1024x1024' } : {}),
+    },
     n: { type: 'integer', title: '数量', minimum: 1, maximum: 4, default: 1 },
     response_format: {
       type: 'string',
@@ -575,7 +580,7 @@ const unicompTextToImageSchema: AdapterParameterSchema = {
     },
     watermark: { type: 'boolean', title: '添加水印' },
   },
-};
+});
 
 const unicompImageEditSchema: AdapterParameterSchema = {
   $schema: schemaUri,
@@ -649,7 +654,7 @@ function unicompApiAdapters(): AdapterDescriptor[] {
         capability: 'TEXT_TO_IMAGE',
         capabilityLabel: '文生图',
         endpoint: 'https://unicompapi.com/v1/images/generations',
-        parameterSchema: unicompTextToImageSchema,
+        parameterSchema: unicompTextToImageSchema(model.model),
         uiSchema: {
           fields: [
             { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },

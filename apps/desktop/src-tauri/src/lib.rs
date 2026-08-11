@@ -429,6 +429,16 @@ fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<V
     };
     validate_payload_fields(&object, allowed_fields)?;
 
+    if capability == "TEXT_TO_IMAGE"
+        && model == "qwen-image"
+        && !object
+            .get("size")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err("UniCompAPI qwen-image requires a size".to_string());
+    }
+
     if capability == "TEXT_TO_VIDEO" && object.contains_key("images") {
         return Err("UniCompAPI text-to-video does not accept an input image".to_string());
     }
@@ -1937,6 +1947,20 @@ mod tests {
         assert_eq!(parsed["prompt"], "frame");
         assert_eq!(UNICOMPAPI_HOST, "unicompapi.com");
         assert_eq!(UNICOMPAPI_AUTHORIZATION_SCHEME, "Bearer");
+    }
+
+    #[test]
+    fn unicompapi_qwen_image_requires_size_at_the_native_boundary() {
+        let adapter_key = "TEXT_TO_IMAGE:unicompapi:qwen-image:v1";
+        assert!(unicompapi_payload(adapter_key, json!({"prompt": "frame"})).is_err());
+        let body = unicompapi_payload(
+            adapter_key,
+            json!({"prompt": "frame", "size": "1024x1024", "n": 1}),
+        )
+        .expect("qwen image request with size should serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(parsed["model"], "qwen-image");
+        assert_eq!(parsed["size"], "1024x1024");
     }
 
     #[test]
