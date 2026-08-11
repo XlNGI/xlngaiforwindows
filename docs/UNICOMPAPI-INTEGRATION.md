@@ -54,6 +54,13 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 - 视频二进制临时文件的目录约束、MP4 签名、512 MiB 上限、资产提交和源文件清理。
 - Vidu 原有 Adapter、Token 鉴权和路径白名单保持通过。
 
+2026-08-11 发布候选复验：
+
+- 独立 Worker Sidecar 重新打包成功；M7 Sidecar 生命周期确认损坏 JSON 恢复、离线示例、缓存边界、诊断脱敏和 SQLite 完整性。
+- Tauri Release 与 NSIS 构建成功，安装包大小为 `20,551,685` 字节，SHA-256 为 `C47BAF6404964609583D20ACF532A5D24CE326C2FA629D16350D2A99C739156D`。
+- 临时目录干净安装通过：桌面程序和 `ai-video-worker.exe` 均存在，Worker 经启动检查保持存活，窗口可优雅关闭，Worker 随主进程退出，卸载后二进制清理完成。
+- 安装包 Authenticode 状态为 `NotSigned`；正式签名门禁继续保持 `HOLD`。
+
 推荐复验命令：
 
 ```powershell

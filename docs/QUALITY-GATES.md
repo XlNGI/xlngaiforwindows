@@ -166,6 +166,7 @@ created -> streaming -> complete
 - 当前硬化提交 `a8ddaa261c117b32d6f60fdafad2df45da97260d` 的 GitHub Hosted Windows CI run `30757944779` 通过，`validate` job 的 22 个步骤全部成功，包括 146 项测试、M7 Sidecar、Tauri/NSIS、干净安装和覆盖安装保留验证。
 - 本轮 M7 未验证：真实 OpenAI/Vidu 发布候选成功请求、正式签名、上一正式版本升级、干净 Windows 虚拟机、断网/联网切换和真实系统休眠恢复。既有 M6 真实参考生视频证据不替代当前发布候选验证。
 - UniCompAPI 自动门禁：官方单卡片、搜索式平铺模型列表、未知模型默认关闭、精确能力合同、聊天/图片/编辑/视频固定路由、Bearer 原生桥、鉴权视频下载、Base64 脱敏和 Vidu 回归均有自动测试。模型同步到启用再到原生路由的 Worker/Rust 集成测试通过；真实 UniCompAPI 凭据与额度请求尚未执行，状态保持 `HOLD`。
+- UniCompAPI 发布候选本机门禁：2026-08-11 重新打包 Worker Sidecar、M7 Sidecar 生命周期、Tauri Release、NSIS 和临时目录干净安装均通过；候选安装包为 `20,551,685` 字节，SHA-256 `C47BAF6404964609583D20ACF532A5D24CE326C2FA629D16350D2A99C739156D`。安装包仍为 `NotSigned`，本次结果不替代 Hosted Windows、正式签名或真实 UniCompAPI 请求。
 
 因此本轮已知代码级 `P1/P2` 已清零，当前硬化提交的本地与 Hosted Windows 自动门禁均通过。最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
 
