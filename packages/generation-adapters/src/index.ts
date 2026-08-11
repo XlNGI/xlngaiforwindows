@@ -600,7 +600,7 @@ const unicompImageEditSchema: AdapterParameterSchema = {
     response_format: {
       type: 'string',
       title: '返回格式',
-      enum: ['url', 'b64_json'],
+      enum: ['url'],
       default: 'url',
     },
   },
@@ -672,7 +672,7 @@ function unicompApiAdapters(): AdapterDescriptor[] {
         key: `REFERENCE_TO_IMAGE:unicompapi:${model.model}:v1`,
         capability: 'REFERENCE_TO_IMAGE',
         capabilityLabel: '图片编辑',
-        endpoint: 'https://unicompapi.com/v1/images/edits/',
+        endpoint: 'https://unicompapi.com/v1/images/edits',
         parameterSchema: unicompImageEditSchema,
         uiSchema: {
           fields: [
@@ -685,7 +685,6 @@ function unicompApiAdapters(): AdapterDescriptor[] {
             },
             { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
             { key: 'size', control: 'text', group: 'basic', order: 30 },
-            { key: 'response_format', control: 'select', group: 'advanced', order: 40 },
           ],
         },
       });

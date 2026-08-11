@@ -22,7 +22,7 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 | --- | --- | --- |
 | `text-chat` / `text-reasoning` / `vision` | Chat | `POST /v1/chat/completions` |
 | `text-to-image` | 文生图 | `POST /v1/images/generations` |
-| `image-edit` | 图片编辑 | `POST /v1/images/edits/`（`multipart/form-data`） |
+| `image-edit` | 图片编辑 | `POST /v1/images/edits`（通义千问 JSON 格式） |
 | `text-to-video` | 文生视频 | `POST /v1/videos` |
 | `image-to-video` | 图生视频 | `POST /v1/videos` |
 | 视频任务查询 | 本地轮询 | `GET /v1/videos/{task_id}` |
@@ -36,7 +36,7 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 - Rust 固定请求主机、Bearer 鉴权、路径和每种能力的字段白名单。
 - Adapter Key 必须为四段，供应商、版本、能力和模型组合都必须命中静态合同。
 - WebView 不能提交 `model`、API Key、Host、Endpoint 或任意附加字段。
-- 图片编辑和图生视频只接受一张参考图；图片编辑在原生层校验并解码 Data URL，以受限 multipart 二进制 `image` 文件字段发送，图生视频投影为 JSON `image` 字段。
+- 图片编辑和图生视频只接受一张参考图；图片编辑在原生层校验 HTTPS URL 或 Data URL，并投影为通义千问 `input.messages[].content` JSON，图生视频投影为 JSON `image` 字段。
 - 视频内容由原生层鉴权下载到系统临时目录；Worker 只接受该目录中的 MP4，校验大小、签名和 Hash 后移动到项目资产目录并删除临时源文件。
 - Base64 图片会在任务快照中替换为 `local-image://omitted`；完整 Provider 响应、API Key 和视频临时路径不写入项目快照或诊断日志。
 - UniCompAPI 未公开取消接口，应用只停止本地轮询并明确返回远端取消不受支持。

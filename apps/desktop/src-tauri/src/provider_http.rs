@@ -93,14 +93,6 @@ impl Drop for WinHttpHandle {
 pub(crate) fn request_bytes(
     request: JsonHttpRequest<'_>,
 ) -> Result<RawHttpResponse, JsonHttpError> {
-    let content_type = request.body.map(|_| "application/json");
-    request_bytes_with_content_type(request, content_type)
-}
-
-fn request_bytes_with_content_type(
-    request: JsonHttpRequest<'_>,
-    content_type: Option<&str>,
-) -> Result<RawHttpResponse, JsonHttpError> {
     validate_request(&request)?;
     let agent = wide("AI Video Workspace/0.1");
     let host = wide(request.host);
@@ -165,8 +157,8 @@ fn request_bytes_with_content_type(
     .collect();
     headers.extend(request.secret.encode_utf16());
     headers.extend("\r\n".encode_utf16());
-    if let Some(content_type) = content_type {
-        headers.extend(format!("Content-Type: {content_type}\r\n").encode_utf16());
+    if request.body.is_some() {
+        headers.extend("Content-Type: application/json\r\n".encode_utf16());
     }
     let sent = unsafe {
         WinHttpSendRequest(
@@ -243,29 +235,6 @@ pub(crate) fn request_json(
     request: JsonHttpRequest<'_>,
 ) -> Result<JsonHttpResponse, JsonHttpError> {
     parse_json_response(request_bytes(request)?)
-}
-
-pub(crate) fn request_multipart_json(
-    request: JsonHttpRequest<'_>,
-    boundary: &str,
-) -> Result<JsonHttpResponse, JsonHttpError> {
-    if request.body.is_none()
-        || boundary.is_empty()
-        || boundary.len() > 70
-        || boundary
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'-'))
-    {
-        return Err(JsonHttpError::new(
-            JsonHttpErrorKind::InvalidRequest,
-            "Provider multipart boundary is invalid",
-        ));
-    }
-    let content_type = format!("multipart/form-data; boundary={boundary}");
-    parse_json_response(request_bytes_with_content_type(
-        request,
-        Some(&content_type),
-    )?)
 }
 
 fn parse_json_response(response: RawHttpResponse) -> Result<JsonHttpResponse, JsonHttpError> {
@@ -374,9 +343,7 @@ fn winhttp_error(operation: &str) -> JsonHttpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        request_bytes, request_json, request_multipart_json, JsonHttpErrorKind, JsonHttpRequest,
-    };
+    use super::{request_bytes, request_json, JsonHttpErrorKind, JsonHttpRequest};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -460,52 +427,6 @@ mod tests {
         server.join().expect("mock provider should finish");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"ftyp");
-    }
-
-    #[test]
-    fn sends_bounded_multipart_requests_with_an_internal_content_type() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider should bind");
-        let port = listener.local_addr().expect("mock address").port();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("mock request should connect");
-            let mut request = [0_u8; 4096];
-            let read = stream
-                .read(&mut request)
-                .expect("mock request should be readable");
-            let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.starts_with("POST /v1/images/edits/ HTTP/1.1"));
-            assert!(
-                request.contains("Content-Type: multipart/form-data; boundary=safe-test-boundary")
-            );
-            assert!(request.contains("Authorization: Bearer local-test-key"));
-            assert!(!request.contains("Content-Length: 0"));
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}",
-                )
-                .expect("mock response should be written");
-        });
-        let body = b"--safe-test-boundary\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nedit\r\n--safe-test-boundary--\r\n";
-        let response = request_multipart_json(
-            JsonHttpRequest {
-                host: "127.0.0.1",
-                port,
-                secure: false,
-                method: "POST",
-                path: "/v1/images/edits/",
-                authorization_scheme: "Bearer",
-                accept: "application/json",
-                secret: "local-test-key",
-                body: Some(body),
-                request_body_limit: 1024,
-                response_body_limit: 1024,
-            },
-            "safe-test-boundary",
-        )
-        .expect("mock multipart request should succeed");
-        server.join().expect("mock provider should finish");
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body["data"], serde_json::json!([]));
     }
 
     #[test]

@@ -30,7 +30,7 @@ use credential_store::{
 };
 use llm_stream::{llm_stream, llm_stream_cancel, LlmStreamState};
 use provider_connector::provider_test_connection;
-use provider_http::{request_bytes, request_json, request_multipart_json, JsonHttpRequest};
+use provider_http::{request_bytes, request_json, JsonHttpRequest};
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
@@ -419,15 +419,15 @@ fn validate_payload_fields(
 
 fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<Vec<u8>, String> {
     let (capability, model) = unicompapi_adapter_parts(adapter_key)?;
+    if capability == "REFERENCE_TO_IMAGE" {
+        return unicompapi_qwen_image_edit_payload(model, payload);
+    }
     let mut object = payload
         .as_object()
         .cloned()
         .ok_or("Provider payload must be a JSON object")?;
     let allowed_fields = match capability {
         "TEXT_TO_IMAGE" => UNICOMPAPI_IMAGE_FIELDS,
-        "REFERENCE_TO_IMAGE" => {
-            return Err("UniCompAPI image editing requires multipart transport".to_string())
-        }
         "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" => UNICOMPAPI_VIDEO_FIELDS,
         _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
     };
@@ -476,14 +476,10 @@ fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<V
     Ok(encoded)
 }
 
-fn unicompapi_image_edit_multipart(
-    adapter_key: &str,
+fn unicompapi_qwen_image_edit_payload(
+    model: &str,
     payload: serde_json::Value,
-) -> Result<(Vec<u8>, String), String> {
-    let (capability, model) = unicompapi_adapter_parts(adapter_key)?;
-    if capability != "REFERENCE_TO_IMAGE" {
-        return Err("UniCompAPI multipart transport requires an image-edit adapter".to_string());
-    }
+) -> Result<Vec<u8>, String> {
     let mut object = payload
         .as_object()
         .cloned()
@@ -496,62 +492,70 @@ fn unicompapi_image_edit_multipart(
     if images.len() != 1 {
         return Err("UniCompAPI image editing requires one input image".to_string());
     }
-    let image_data_url = images[0]
+    let image_source = images[0]
         .as_str()
         .filter(|value| !value.is_empty())
         .ok_or("UniCompAPI image editing requires one input image")?;
-    let (media_type, filename, image) = decode_image_data_url(image_data_url)?;
+    validate_image_edit_source(image_source)?;
     let prompt = object
         .get("prompt")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or("UniCompAPI image editing requires a prompt")?;
-    let mut fields = vec![("model", model), ("prompt", prompt)];
-    for key in ["size", "response_format"] {
-        if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
-            if !value.is_empty() {
-                fields.push((key, value));
-            }
-        }
-    }
-    let boundary = multipart_boundary(
-        fields
-            .iter()
-            .map(|(_, value)| value.as_bytes())
-            .chain(std::iter::once(image.as_slice())),
-    )?;
-    let mut body = Vec::with_capacity(image.len() + 2048);
-    for (name, value) in fields {
-        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+    let mut parameters = serde_json::Map::new();
+    if let Some(size) = object
+        .get("size")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        parameters.insert(
+            "size".to_string(),
+            serde_json::Value::String(size.to_string()),
         );
-        body.extend_from_slice(value.as_bytes());
-        body.extend_from_slice(b"\r\n");
     }
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"image\"; filename=\"{filename}\"\r\nContent-Type: {media_type}\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(&image);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    if body.len() > PROVIDER_REQUEST_BODY_LIMIT {
+    let mut request = serde_json::json!({
+        "model": model,
+        "input": {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "image": image_source },
+                    { "text": prompt }
+                ]
+            }]
+        }
+    });
+    if !parameters.is_empty() {
+        request
+            .as_object_mut()
+            .expect("image edit request is an object")
+            .insert(
+                "parameters".to_string(),
+                serde_json::Value::Object(parameters),
+            );
+    }
+    let encoded = serde_json::to_vec(&request)
+        .map_err(|error| format!("Unable to serialize provider payload: {error}"))?;
+    if encoded.len() > PROVIDER_REQUEST_BODY_LIMIT {
         return Err("Provider payload exceeds the native transport limit".to_string());
     }
-    Ok((body, boundary))
+    Ok(encoded)
 }
 
-fn decode_image_data_url(value: &str) -> Result<(&'static str, &'static str, Vec<u8>), String> {
+fn validate_image_edit_source(value: &str) -> Result<(), String> {
+    if value.starts_with("https://") {
+        if value.len() > 4096 || value.trim() != value || value.chars().any(char::is_control) {
+            return Err("UniCompAPI image editing received an invalid HTTPS image URL".to_string());
+        }
+        return Ok(());
+    }
     let (header, encoded) = value
         .split_once(',')
         .ok_or("UniCompAPI image editing requires a valid image Data URL")?;
-    let (media_type, filename) = match header {
-        "data:image/png;base64" => ("image/png", "image.png"),
-        "data:image/jpeg;base64" | "data:image/jpg;base64" => ("image/jpeg", "image.jpg"),
-        "data:image/webp;base64" => ("image/webp", "image.webp"),
+    let media_type = match header {
+        "data:image/png;base64" => "image/png",
+        "data:image/jpeg;base64" | "data:image/jpg;base64" => "image/jpeg",
+        "data:image/webp;base64" => "image/webp",
         _ => return Err("UniCompAPI image editing received an unsupported image type".to_string()),
     };
     if encoded.is_empty() || encoded.len() > (UNICOMPAPI_IMAGE_INPUT_LIMIT * 4 / 3) + 4 {
@@ -572,29 +576,7 @@ fn decode_image_data_url(value: &str) -> Result<(&'static str, &'static str, Vec
     if !valid_signature {
         return Err("UniCompAPI image editing image signature is invalid".to_string());
     }
-    Ok((media_type, filename, image))
-}
-
-fn multipart_boundary<'a>(values: impl Iterator<Item = &'a [u8]>) -> Result<String, String> {
-    let values = values.collect::<Vec<_>>();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for attempt in 0..100_u32 {
-        let boundary = format!(
-            "ai-video-workspace-{nonce:x}-{:x}-{attempt:x}",
-            std::process::id()
-        );
-        let bytes = boundary.as_bytes();
-        if values
-            .iter()
-            .all(|value| !value.windows(bytes.len()).any(|window| window == bytes))
-        {
-            return Ok(boundary);
-        }
-    }
-    Err("Unable to construct a safe multipart boundary".to_string())
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1036,8 +1018,8 @@ fn provider_submit_blocking(
                 request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))
             }
             "REFERENCE_TO_IMAGE" => {
-                let (body, boundary) = unicompapi_image_edit_multipart(adapter_key, payload)?;
-                request_unicompapi_multipart_json(&secret, "/v1/images/edits/", &body, &boundary)
+                let body = unicompapi_payload(adapter_key, payload)?;
+                request_unicompapi_json(&secret, "POST", "/v1/images/edits", Some(&body))
             }
             _ => Err("UniCompAPI adapter must use the matching media bridge".to_string()),
         };
@@ -1127,10 +1109,12 @@ fn request_unicompapi_json(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<ProviderHttpResponse, String> {
-    if !matches!(path, "/v1/images/generations" | "/v1/videos")
-        && !path
-            .strip_prefix("/v1/videos/")
-            .is_some_and(|task_id| unicompapi_video_task_path(task_id).as_deref() == Ok(path))
+    if !matches!(
+        path,
+        "/v1/images/generations" | "/v1/images/edits" | "/v1/videos"
+    ) && !path
+        .strip_prefix("/v1/videos/")
+        .is_some_and(|task_id| unicompapi_video_task_path(task_id).as_deref() == Ok(path))
     {
         return Err("UniCompAPI request path is not allowed".to_string());
     }
@@ -1147,38 +1131,6 @@ fn request_unicompapi_json(
         request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
         response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
     })
-    .map_err(|error| error.to_string())?;
-    Ok(ProviderHttpResponse {
-        status: response.status,
-        body: response.body,
-    })
-}
-
-fn request_unicompapi_multipart_json(
-    secret: &CredentialSecret,
-    path: &str,
-    body: &[u8],
-    boundary: &str,
-) -> Result<ProviderHttpResponse, String> {
-    if path != "/v1/images/edits/" {
-        return Err("UniCompAPI multipart request path is not allowed".to_string());
-    }
-    let response = request_multipart_json(
-        JsonHttpRequest {
-            host: UNICOMPAPI_HOST,
-            port: 443,
-            secure: true,
-            method: "POST",
-            path,
-            authorization_scheme: UNICOMPAPI_AUTHORIZATION_SCHEME,
-            accept: "application/json",
-            secret: secret.as_str()?,
-            body: Some(body),
-            request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
-            response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
-        },
-        boundary,
-    )
     .map_err(|error| error.to_string())?;
     Ok(ProviderHttpResponse {
         status: response.status,
@@ -1610,10 +1562,10 @@ mod tests {
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
         ensure_video_adapter, is_profile_id, provider_cancel_path, provider_payload,
         provider_state, provider_target, provider_task_error, provider_task_id, provider_task_path,
-        resolve_media_selection, unicompapi_adapter_model, unicompapi_image_edit_multipart,
-        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
-        validate_credential_provider, WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME,
-        PROVIDER_REQUEST_BODY_LIMIT, UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
+        resolve_media_selection, unicompapi_adapter_model, unicompapi_payload,
+        unicompapi_video_content_path, unicompapi_video_task_path, validate_credential_provider,
+        WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME, PROVIDER_REQUEST_BODY_LIMIT,
+        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
     };
     use serde_json::json;
     use std::{
@@ -2125,7 +2077,7 @@ mod tests {
     #[test]
     fn unicompapi_bridge_projects_one_reference_image() {
         let image = "data:image/png;base64,iVBORw0KGgo=";
-        let (edit, boundary) = unicompapi_image_edit_multipart(
+        let edit = unicompapi_payload(
             "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
             json!({
                 "images": [image],
@@ -2134,23 +2086,21 @@ mod tests {
                 "response_format": "url"
             }),
         )
-        .expect("image edit request should serialize as multipart");
-        let multipart = String::from_utf8_lossy(&edit);
-        assert!(multipart.contains(&format!("--{boundary}\r\n")));
-        assert!(multipart.contains("name=\"model\"\r\n\r\nqwen-image-edit-2509"));
-        assert!(multipart.contains("name=\"prompt\"\r\n\r\nremove the sign"));
-        assert!(multipart.contains("name=\"size\"\r\n\r\n1024x1024"));
-        assert!(multipart.contains("name=\"image\"; filename=\"image.png\""));
-        assert!(multipart.contains("Content-Type: image/png"));
-        assert!(!multipart.contains("base64"));
-        assert!(edit
-            .windows(8)
-            .any(|window| window == [137, 80, 78, 71, 13, 10, 26, 10]));
-        assert!(unicompapi_payload(
-            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
-            json!({"images": [image], "prompt": "remove the sign"})
-        )
-        .is_err());
+        .expect("image edit request should serialize as Qwen JSON");
+        let parsed_edit: serde_json::Value =
+            serde_json::from_slice(&edit).expect("valid Qwen image edit JSON");
+        assert_eq!(parsed_edit["model"], "qwen-image-edit-2509");
+        assert_eq!(parsed_edit["input"]["messages"][0]["role"], "user");
+        assert_eq!(
+            parsed_edit["input"]["messages"][0]["content"][0]["image"],
+            image
+        );
+        assert_eq!(
+            parsed_edit["input"]["messages"][0]["content"][1]["text"],
+            "remove the sign"
+        );
+        assert_eq!(parsed_edit["parameters"]["size"], "1024x1024");
+        assert!(parsed_edit.get("response_format").is_none());
 
         let video = unicompapi_payload(
             "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
@@ -2165,19 +2115,19 @@ mod tests {
     }
 
     #[test]
-    fn unicompapi_image_edit_multipart_rejects_invalid_images_and_fields() {
+    fn unicompapi_qwen_image_edit_rejects_invalid_images_and_fields() {
         let adapter_key = "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1";
-        assert!(unicompapi_image_edit_multipart(
+        assert!(unicompapi_payload(
             adapter_key,
-            json!({"images": ["https://example.invalid/image.png"], "prompt": "edit"})
+            json!({"images": ["http://example.invalid/image.png"], "prompt": "edit"})
         )
         .is_err());
-        assert!(unicompapi_image_edit_multipart(
+        assert!(unicompapi_payload(
             adapter_key,
             json!({"images": ["data:image/png;base64,bm90LXBuZw=="], "prompt": "edit"})
         )
         .is_err());
-        assert!(unicompapi_image_edit_multipart(
+        assert!(unicompapi_payload(
             adapter_key,
             json!({
                 "images": ["data:image/png;base64,iVBORw0KGgo="],
@@ -2186,6 +2136,16 @@ mod tests {
             })
         )
         .is_err());
+        let remote = unicompapi_payload(
+            adapter_key,
+            json!({"images": ["https://example.com/image.png"], "prompt": "edit"}),
+        )
+        .expect("public HTTPS images should be preserved");
+        let parsed: serde_json::Value = serde_json::from_slice(&remote).expect("valid JSON");
+        assert_eq!(
+            parsed["input"]["messages"][0]["content"][0]["image"],
+            "https://example.com/image.png"
+        );
     }
 
     #[test]
