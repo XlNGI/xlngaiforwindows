@@ -501,37 +501,35 @@ fn unicompapi_qwen_image_edit_payload(
         .get("prompt")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or("UniCompAPI image editing requires a prompt")?;
-    let mut parameters = serde_json::Map::new();
+        .ok_or("UniCompAPI image editing requires a prompt")?
+        .to_string();
+    if let Some(response_format) = object
+        .remove("response_format")
+        .and_then(|value| value.as_str().map(str::to_string))
+    {
+        if response_format != "b64_json" {
+            return Err(
+                "UniCompAPI qwen image editing only supports b64_json responses".to_string(),
+            );
+        }
+    }
+    let mut request = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "image": image_source,
+        "response_format": "b64_json"
+    });
     if let Some(size) = object
         .get("size")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
     {
-        parameters.insert(
-            "size".to_string(),
-            serde_json::Value::String(size.to_string()),
-        );
-    }
-    let mut request = serde_json::json!({
-        "model": model,
-        "input": {
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "image": image_source },
-                    { "text": prompt }
-                ]
-            }]
-        }
-    });
-    if !parameters.is_empty() {
         request
             .as_object_mut()
             .expect("image edit request is an object")
             .insert(
-                "parameters".to_string(),
-                serde_json::Value::Object(parameters),
+                "size".to_string(),
+                serde_json::Value::String(size.to_string()),
             );
     }
     let encoded = serde_json::to_vec(&request)
@@ -1019,7 +1017,7 @@ fn provider_submit_blocking(
             }
             "REFERENCE_TO_IMAGE" => {
                 let body = unicompapi_payload(adapter_key, payload)?;
-                request_unicompapi_json(&secret, "POST", "/v1/images/edits", Some(&body))
+                request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))
             }
             _ => Err("UniCompAPI adapter must use the matching media bridge".to_string()),
         };
@@ -1109,12 +1107,10 @@ fn request_unicompapi_json(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<ProviderHttpResponse, String> {
-    if !matches!(
-        path,
-        "/v1/images/generations" | "/v1/images/edits" | "/v1/videos"
-    ) && !path
-        .strip_prefix("/v1/videos/")
-        .is_some_and(|task_id| unicompapi_video_task_path(task_id).as_deref() == Ok(path))
+    if !matches!(path, "/v1/images/generations" | "/v1/videos")
+        && !path
+            .strip_prefix("/v1/videos/")
+            .is_some_and(|task_id| unicompapi_video_task_path(task_id).as_deref() == Ok(path))
     {
         return Err("UniCompAPI request path is not allowed".to_string());
     }
@@ -2083,24 +2079,18 @@ mod tests {
                 "images": [image],
                 "prompt": "remove the sign",
                 "size": "1024x1024",
-                "response_format": "url"
+                "response_format": "b64_json"
             }),
         )
-        .expect("image edit request should serialize as Qwen JSON");
+        .expect("image edit request should serialize as ModelArts MaaS JSON");
         let parsed_edit: serde_json::Value =
-            serde_json::from_slice(&edit).expect("valid Qwen image edit JSON");
+            serde_json::from_slice(&edit).expect("valid ModelArts MaaS image edit JSON");
         assert_eq!(parsed_edit["model"], "qwen-image-edit-2509");
-        assert_eq!(parsed_edit["input"]["messages"][0]["role"], "user");
-        assert_eq!(
-            parsed_edit["input"]["messages"][0]["content"][0]["image"],
-            image
-        );
-        assert_eq!(
-            parsed_edit["input"]["messages"][0]["content"][1]["text"],
-            "remove the sign"
-        );
-        assert_eq!(parsed_edit["parameters"]["size"], "1024x1024");
-        assert!(parsed_edit.get("response_format").is_none());
+        assert_eq!(parsed_edit["image"], image);
+        assert_eq!(parsed_edit["prompt"], "remove the sign");
+        assert_eq!(parsed_edit["size"], "1024x1024");
+        assert_eq!(parsed_edit["response_format"], "b64_json");
+        assert!(parsed_edit.get("input").is_none());
 
         let video = unicompapi_payload(
             "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
@@ -2136,16 +2126,22 @@ mod tests {
             })
         )
         .is_err());
+        assert!(unicompapi_payload(
+            adapter_key,
+            json!({
+                "images": ["data:image/png;base64,iVBORw0KGgo="],
+                "prompt": "edit",
+                "response_format": "url"
+            })
+        )
+        .is_err());
         let remote = unicompapi_payload(
             adapter_key,
             json!({"images": ["https://example.com/image.png"], "prompt": "edit"}),
         )
         .expect("public HTTPS images should be preserved");
         let parsed: serde_json::Value = serde_json::from_slice(&remote).expect("valid JSON");
-        assert_eq!(
-            parsed["input"]["messages"][0]["content"][0]["image"],
-            "https://example.com/image.png"
-        );
+        assert_eq!(parsed["image"], "https://example.com/image.png");
     }
 
     #[test]

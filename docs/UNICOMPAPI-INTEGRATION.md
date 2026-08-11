@@ -22,7 +22,7 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 | --- | --- | --- |
 | `text-chat` / `text-reasoning` / `vision` | Chat | `POST /v1/chat/completions` |
 | `text-to-image` | 文生图 | `POST /v1/images/generations` |
-| `image-edit` | 图片编辑 | `POST /v1/images/edits`（通义千问 JSON 格式） |
+| `image-edit` | 图片编辑 | `POST /v1/images/generations`（华为云 ModelArts MaaS 图生图格式） |
 | `text-to-video` | 文生视频 | `POST /v1/videos` |
 | `image-to-video` | 图生视频 | `POST /v1/videos` |
 | 视频任务查询 | 本地轮询 | `GET /v1/videos/{task_id}` |
@@ -30,13 +30,15 @@ API Key 只保存在 Windows Credential Manager。模型 ID 在同步、Adapter 
 
 当前媒体模型白名单来自 `packages/generation-adapters/src/index.ts`，能力事实来自 `apps/worker/src/provider-registry.ts`。两处变更必须同步评审和测试；仅出现在远端目录中的未知模型不会自动获得 Adapter。
 
+`qwen-image-edit-2509` 的端点和请求体以该 UniCompAPI 渠道实际绑定的华为云 ModelArts MaaS 合同为准；该上游把图片编辑发布在 `/v1/images/generations`，而不是 OpenAI 的 `/v1/images/edits`。
+
 ## 3. 原生安全边界
 
 - 官方配置必须精确匹配 `unicompapi`、`openai-chat-completions` 和 `https://unicompapi.com/v1`。
 - Rust 固定请求主机、Bearer 鉴权、路径和每种能力的字段白名单。
 - Adapter Key 必须为四段，供应商、版本、能力和模型组合都必须命中静态合同。
 - WebView 不能提交 `model`、API Key、Host、Endpoint 或任意附加字段。
-- 图片编辑和图生视频只接受一张参考图；图片编辑在原生层校验 HTTPS URL 或 Data URL，并投影为通义千问 `input.messages[].content` JSON，图生视频投影为 JSON `image` 字段。
+- 图片编辑和图生视频只接受一张参考图；`qwen-image-edit-2509` 在原生层校验 HTTPS URL 或 Data URL，并投影为华为云 ModelArts MaaS 的平铺 `model / prompt / image / size / response_format` JSON，图生视频投影为 JSON `image` 字段。
 - 视频内容由原生层鉴权下载到系统临时目录；Worker 只接受该目录中的 MP4，校验大小、签名和 Hash 后移动到项目资产目录并删除临时源文件。
 - Base64 图片会在任务快照中替换为 `local-image://omitted`；完整 Provider 响应、API Key 和视频临时路径不写入项目快照或诊断日志。
 - UniCompAPI 未公开取消接口，应用只停止本地轮询并明确返回远端取消不受支持。
