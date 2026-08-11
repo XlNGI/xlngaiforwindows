@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AdapterParameters } from '@ai-video/contracts';
 
-export type ProviderRegion = 'global' | 'cn';
+export type ProviderRegion = 'global' | 'cn' | 'unicompapi';
 
 export interface NativeProviderResponse {
   status: number;
@@ -18,6 +18,11 @@ export interface NativeProviderCancelResponse {
   supported: boolean;
   cancelled: boolean;
   status: number;
+}
+
+export interface NativeProviderBinaryDownloadResponse {
+  path: string;
+  contentType?: string;
 }
 
 function requireDesktopTransport(): void {
@@ -64,6 +69,21 @@ export async function pollVideoProviderTask(
 ): Promise<NativeProviderResponse> {
   requireDesktopTransport();
   return invoke<NativeProviderResponse>('provider_poll_task', {
+    adapterKey,
+    providerProfileId,
+    providerRegion,
+    taskId,
+  });
+}
+
+export async function downloadVideoProviderTask(
+  adapterKey: string,
+  providerProfileId: string | undefined,
+  taskId: string,
+  providerRegion?: ProviderRegion,
+): Promise<NativeProviderBinaryDownloadResponse> {
+  requireDesktopTransport();
+  return invoke<NativeProviderBinaryDownloadResponse>('provider_download_task', {
     adapterKey,
     providerProfileId,
     providerRegion,

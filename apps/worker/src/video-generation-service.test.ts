@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -112,6 +112,19 @@ describe('VideoGenerationService', () => {
         providerRegion: 'cn',
       }),
     ).toMatchObject({ status: 'pending', adapterKey: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2' });
+    expect(
+      service.prepare({
+        adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+        parameters: { prompt: 'slow camera move', duration: 5, ratio: '16:9' },
+        providerRegion: 'unicompapi',
+        providerProfileId: '11111111-1111-4111-8111-111111111111',
+        modelId: 'kling-v3-turbo',
+      }),
+    ).toMatchObject({
+      status: 'pending',
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      metadata: { providerRegion: 'unicompapi', modelId: 'kling-v3-turbo' },
+    });
   });
 
   it('persists the provider task id and polling state atomically and idempotently', async () => {
@@ -255,6 +268,41 @@ describe('VideoGenerationService', () => {
     });
     expect(repeated.results[0]!.asset.relativePath).toMatch(/^assets[\\/]videos[\\/]edited\.mp4$/);
     expect(repeated.results).toHaveLength(1);
+  });
+
+  it('consumes and removes an authenticated native UniCompAPI video download', async () => {
+    const { service } = await setup();
+    const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    mkdirSync(nativeDirectory, { recursive: true });
+    const nativePath = join(nativeDirectory, `test-${process.pid}-${Date.now()}.mp4`);
+    writeFileSync(
+      nativePath,
+      new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0]),
+    );
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      parameters: { prompt: 'camera push', duration: 5 },
+      providerRegion: 'unicompapi',
+      providerProfileId: '11111111-1111-4111-8111-111111111111',
+      modelId: 'kling-v3-turbo',
+    });
+    service.attachTask({ jobId: job.id, providerTaskId: 'unicomp-task' });
+
+    const downloading = service.observe({
+      jobId: job.id,
+      providerTaskId: 'unicomp-task',
+      providerStatus: 200,
+      providerBody: { status: 'completed', nativeVideoFilePath: nativePath },
+    });
+
+    expect(downloading.status).toBe('downloading');
+    await vi.waitFor(() => expect(service.get(job.id).status).toBe('succeeded'));
+    expect(existsSync(nativePath)).toBe(false);
+    expect(service.get(job.id)).toMatchObject({
+      status: 'succeeded',
+      metadata: { providerRegion: 'unicompapi' },
+      results: [{ asset: { kind: 'shot-video' } }],
+    });
   });
 
   it('fails success without a video URL and never treats the input image as output', async () => {

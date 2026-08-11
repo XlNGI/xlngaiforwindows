@@ -11,7 +11,8 @@ import {
   writeSync,
 } from 'node:fs';
 import { isIP } from 'node:net';
-import { dirname, extname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import type {
   AdapterParameters,
   AssetInfo,
@@ -252,7 +253,10 @@ export class VideoGenerationService {
 
     let source: string;
     try {
-      source = extractVideoSource(params.providerBody);
+      source = extractVideoSource(
+        params.providerBody,
+        metadata.providerRegion === 'unicompapi',
+      );
     } catch (error) {
       return this.transitionFailure(
         job.id,
@@ -780,7 +784,9 @@ function requireProviderTaskId(value: string): string {
 }
 
 function requireProviderRegion(value: string): VideoProviderRegion {
-  if (value !== 'global' && value !== 'cn') throw new Error('Provider region is invalid.');
+  if (value !== 'global' && value !== 'cn' && value !== 'unicompapi') {
+    throw new Error('Provider region is invalid.');
+  }
   return value;
 }
 
@@ -891,7 +897,9 @@ function findNamedString(value: unknown, keys: string[]): string | undefined {
   return data && typeof data === 'object' ? findNamedString(data, keys) : undefined;
 }
 
-function extractVideoSource(value: unknown): string {
+function extractVideoSource(value: unknown, allowNativeFile = false): string {
+  const nativeFile = allowNativeFile ? nativeVideoFilePath(value) : undefined;
+  if (nativeFile) return `native-file:${nativeFile}`;
   const source = findVideoCreationSource(value);
   if (!source) throw new Error('Provider reported success without a video output URL.');
   const url = new URL(source);
@@ -904,6 +912,20 @@ function extractVideoSource(value: unknown): string {
     throw new Error('Provider returned an unsafe video output URL.');
   }
   return url.toString();
+}
+
+function nativeVideoFilePath(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = (value as Record<string, unknown>).nativeVideoFilePath;
+  if (typeof candidate !== 'string' || candidate.length < 1 || candidate.length > 32_767) {
+    return undefined;
+  }
+  const root = resolve(tmpdir(), 'ai-video-workspace-unicompapi');
+  const path = resolve(candidate);
+  if (!path.startsWith(`${root}${sep}`) || extname(path).toLowerCase() !== '.mp4') {
+    throw new Error('Provider returned an unsafe native video file path.');
+  }
+  return path;
 }
 
 function findVideoCreationSource(value: unknown): string | undefined {
@@ -965,6 +987,14 @@ async function downloadVideo(
   cancellationSignal: AbortSignal,
   storageCapacityCheck: StorageCapacityCheck,
 ): Promise<DownloadedVideo> {
+  if (source.startsWith('native-file:')) {
+    return copyNativeVideo(
+      source.slice('native-file:'.length),
+      temporaryPath,
+      cancellationSignal,
+      storageCapacityCheck,
+    );
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VIDEO_DOWNLOAD_TIMEOUT_MS);
   const signal = AbortSignal.any([controller.signal, cancellationSignal]);
@@ -1021,6 +1051,65 @@ async function downloadVideo(
     throw error;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function copyNativeVideo(
+  sourcePath: string,
+  temporaryPath: string,
+  cancellationSignal: AbortSignal,
+  storageCapacityCheck: StorageCapacityCheck,
+): DownloadedVideo {
+  let sourceDescriptor: number | undefined;
+  let destinationDescriptor: number | undefined;
+  try {
+    if (cancellationSignal.aborted) throw new Error('Video download was cancelled.');
+    const declaredSize = statSync(sourcePath).size;
+    if (!Number.isSafeInteger(declaredSize) || declaredSize < 1) {
+      throw new Error('Provider video download was empty or invalid.');
+    }
+    if (declaredSize > MAX_VIDEO_BYTES) {
+      throw new Error('Video download exceeds the 512 MiB limit.');
+    }
+    storageCapacityCheck(dirname(temporaryPath), declaredSize);
+    sourceDescriptor = openSync(sourcePath, 'r');
+    destinationDescriptor = openSync(temporaryPath, 'wx');
+    const hash = createHash('sha256');
+    const chunk = Buffer.alloc(64 * 1024);
+    let sizeBytes = 0;
+    while (true) {
+      if (cancellationSignal.aborted) throw new Error('Video download was cancelled.');
+      const length = readSync(sourceDescriptor, chunk, 0, chunk.length, null);
+      if (length === 0) break;
+      sizeBytes += length;
+      if (sizeBytes > MAX_VIDEO_BYTES) {
+        throw new Error('Video download exceeds the 512 MiB limit.');
+      }
+      const bytes = chunk.subarray(0, length);
+      hash.update(bytes);
+      writeSync(destinationDescriptor, bytes);
+    }
+    closeSync(sourceDescriptor);
+    sourceDescriptor = undefined;
+    closeSync(destinationDescriptor);
+    destinationDescriptor = undefined;
+    if (sizeBytes !== declaredSize || statSync(temporaryPath).size !== sizeBytes) {
+      throw new Error('Video download was empty or truncated.');
+    }
+    validateVideoSignature(temporaryPath, '.mp4');
+    return {
+      temporaryPath,
+      extension: '.mp4',
+      contentHash: hash.digest('hex'),
+      sizeBytes,
+    };
+  } catch (error) {
+    if (sourceDescriptor !== undefined) closeSync(sourceDescriptor);
+    if (destinationDescriptor !== undefined) closeSync(destinationDescriptor);
+    rmSync(temporaryPath, { force: true });
+    throw error;
+  } finally {
+    rmSync(sourcePath, { force: true });
   }
 }
 

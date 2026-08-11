@@ -1,5 +1,5 @@
 use std::{
-    fs::create_dir_all,
+    fs::{create_dir_all, write},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -8,7 +8,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -29,15 +29,18 @@ use credential_store::{
 };
 use llm_stream::{llm_stream, llm_stream_cancel, LlmStreamState};
 use provider_connector::provider_test_connection;
-use provider_http::{request_json, JsonHttpRequest};
+use provider_http::{request_bytes, request_json, JsonHttpRequest};
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_REQUEST_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const PROVIDER_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const UNICOMPAPI_RESPONSE_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_TASK_ID_LIMIT: usize = 256;
+const UNICOMPAPI_HOST: &str = "unicompapi.com";
+const UNICOMPAPI_AUTHORIZATION_SCHEME: &str = "Bearer";
 #[cfg(any(not(debug_assertions), test))]
 const BUNDLED_WORKER_FILENAME: &str = "ai-video-worker.exe";
 
@@ -89,6 +92,72 @@ const V2_VIDEO_FIELDS: &[&str] = &[
     "movement_amplitude",
     "seed",
 ];
+
+const UNICOMPAPI_TEXT_TO_IMAGE_MODELS: &[&str] = &["doubao-seedream-5-0-260128", "qwen-image"];
+const UNICOMPAPI_IMAGE_EDIT_MODELS: &[&str] = &["qwen-image-edit-2509"];
+const UNICOMPAPI_TEXT_TO_VIDEO_MODELS: &[&str] = &[
+    "doubao-seedance-2-0-260128",
+    "doubao-seedance-2-0-fast-260128",
+    "happyhorse-1.0-t2v",
+    "happyhorse-1.1-t2v",
+    "kling-v3-turbo",
+    "viduq3-pro",
+    "viduq3-turbo",
+];
+const UNICOMPAPI_IMAGE_TO_VIDEO_MODELS: &[&str] = &[
+    "doubao-seedance-2-0-260128",
+    "doubao-seedance-2-0-fast-260128",
+    "happyhorse-1.0-i2v",
+    "happyhorse-1.1-i2v",
+    "kling-v3-turbo",
+    "viduq3",
+    "viduq3-mix",
+    "viduq3-turbo",
+];
+const UNICOMPAPI_IMAGE_FIELDS: &[&str] = &["prompt", "size", "n", "response_format", "watermark"];
+const UNICOMPAPI_IMAGE_EDIT_FIELDS: &[&str] = &["images", "prompt", "size", "response_format"];
+const UNICOMPAPI_VIDEO_FIELDS: &[&str] = &[
+    "images",
+    "prompt",
+    "size",
+    "resolution",
+    "duration",
+    "seconds",
+    "ratio",
+    "generate_audio",
+    "watermark",
+];
+
+fn unicompapi_adapter_parts(adapter_key: &str) -> Result<(&str, &str), String> {
+    let parts = adapter_key.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[1] != "unicompapi" || parts[3] != "v1" {
+        return Err("UniCompAPI adapter key is invalid".to_string());
+    }
+    let capability = parts[0];
+    let model = parts[2];
+    if model.is_empty()
+        || model.len() > 256
+        || model.trim() != model
+        || model.chars().any(char::is_control)
+    {
+        return Err("UniCompAPI adapter model ID is invalid".to_string());
+    }
+    let models = match capability {
+        "TEXT_TO_IMAGE" => UNICOMPAPI_TEXT_TO_IMAGE_MODELS,
+        "REFERENCE_TO_IMAGE" => UNICOMPAPI_IMAGE_EDIT_MODELS,
+        "TEXT_TO_VIDEO" => UNICOMPAPI_TEXT_TO_VIDEO_MODELS,
+        "IMAGE_TO_VIDEO" => UNICOMPAPI_IMAGE_TO_VIDEO_MODELS,
+        _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
+    };
+    if !models.contains(&model) {
+        return Err("UniCompAPI model is not registered for this capability".to_string());
+    }
+    Ok((capability, model))
+}
+
+fn unicompapi_adapter_model(adapter_key: &str) -> Result<&str, String> {
+    unicompapi_adapter_parts(adapter_key).map(|(_, model)| model)
+}
 
 fn provider_region_target(provider_region: &str) -> Result<(&'static str, &'static str), String> {
     match provider_region {
@@ -201,13 +270,18 @@ fn resolve_media_selection(
     {
         return Err("Worker returned a mismatched provider profile".to_string());
     }
-    if profile
+    let provider_type = profile
         .get("providerType")
         .and_then(serde_json::Value::as_str)
-        != Some("vidu")
-        || profile.get("protocol").and_then(serde_json::Value::as_str) != Some("vidu-v2")
+        .ok_or("Provider profile is missing a provider type")?;
+    let protocol = profile
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Provider profile is missing a protocol")?;
+    if !((provider_type == "vidu" && protocol == "vidu-v2")
+        || (provider_type == "unicompapi" && protocol == "openai-chat-completions"))
     {
-        return Err("Provider profile is not a supported Vidu media connection".to_string());
+        return Err("Provider profile is not a supported media connection".to_string());
     }
     if profile.get("enabled").and_then(serde_json::Value::as_bool) != Some(true)
         || profile
@@ -217,12 +291,20 @@ fn resolve_media_selection(
     {
         return Err("Provider profile is not ready for media generation".to_string());
     }
-    let region = match profile.get("baseUrl").and_then(serde_json::Value::as_str) {
-        Some("https://api.vidu.com") => "global",
-        Some("https://api.vidu.cn") => "cn",
-        _ => return Err("Provider profile uses an unsupported Vidu Base URL".to_string()),
+    let region = match (
+        provider_type,
+        profile.get("baseUrl").and_then(serde_json::Value::as_str),
+    ) {
+        ("vidu", Some("https://api.vidu.com")) => "global",
+        ("vidu", Some("https://api.vidu.cn")) => "cn",
+        ("unicompapi", Some("https://unicompapi.com/v1")) => "unicompapi",
+        _ => return Err("Provider profile uses an unsupported media Base URL".to_string()),
     };
-    let target = provider_target(adapter_key, region)?;
+    let adapter_model = if provider_type == "unicompapi" {
+        unicompapi_adapter_model(adapter_key)?
+    } else {
+        provider_target(adapter_key, region)?.model
+    };
     let models_response = state.request(&serde_json::json!({
         "id": format!("media-models-{normalized_profile_id}"),
         "protocolVersion": 1,
@@ -234,6 +316,8 @@ fn resolve_media_selection(
         .ok_or("Worker returned an invalid provider model list")?;
     let required_capability = if ensure_video_adapter(adapter_key).is_ok() {
         "videoGeneration"
+    } else if adapter_key.starts_with("REFERENCE_TO_IMAGE:unicompapi:") {
+        "imageEditing"
     } else {
         "imageGeneration"
     };
@@ -241,7 +325,7 @@ fn resolve_media_selection(
         model
             .get("remoteModelId")
             .and_then(serde_json::Value::as_str)
-            == Some(target.model)
+            == Some(adapter_model)
             && model.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
             && model
                 .get("unavailableAt")
@@ -308,6 +392,76 @@ fn provider_payload(target: ProviderTarget, payload: serde_json::Value) -> Resul
     Ok(encoded)
 }
 
+fn validate_payload_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed_fields: &[&str],
+) -> Result<(), String> {
+    if object
+        .keys()
+        .any(|key| !allowed_fields.contains(&key.as_str()))
+    {
+        return Err("Provider payload contains a field not allowed by the adapter".to_string());
+    }
+    if object.values().any(|value| {
+        !(value.is_string()
+            || value.is_number()
+            || value.is_boolean()
+            || value
+                .as_array()
+                .is_some_and(|items| items.iter().all(serde_json::Value::is_string)))
+    }) {
+        return Err("Provider payload contains an unsupported value type".to_string());
+    }
+    Ok(())
+}
+
+fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<Vec<u8>, String> {
+    let (capability, model) = unicompapi_adapter_parts(adapter_key)?;
+    let mut object = payload
+        .as_object()
+        .cloned()
+        .ok_or("Provider payload must be a JSON object")?;
+    let allowed_fields = match capability {
+        "TEXT_TO_IMAGE" => UNICOMPAPI_IMAGE_FIELDS,
+        "REFERENCE_TO_IMAGE" => UNICOMPAPI_IMAGE_EDIT_FIELDS,
+        "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" => UNICOMPAPI_VIDEO_FIELDS,
+        _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
+    };
+    validate_payload_fields(&object, allowed_fields)?;
+
+    if capability == "TEXT_TO_VIDEO" && object.contains_key("images") {
+        return Err("UniCompAPI text-to-video does not accept an input image".to_string());
+    }
+
+    if matches!(capability, "REFERENCE_TO_IMAGE" | "IMAGE_TO_VIDEO") {
+        let images = object
+            .remove("images")
+            .and_then(|value| value.as_array().cloned())
+            .ok_or("UniCompAPI reference generation requires one input image")?;
+        if images.len() != 1 {
+            return Err("UniCompAPI reference generation requires one input image".to_string());
+        }
+        let image = images[0]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or("UniCompAPI reference generation requires one input image")?;
+        object.insert(
+            "image".to_string(),
+            serde_json::Value::String(image.to_string()),
+        );
+    }
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(model.to_string()),
+    );
+    let encoded = serde_json::to_vec(&object)
+        .map_err(|error| format!("Unable to serialize provider payload: {error}"))?;
+    if encoded.len() > PROVIDER_REQUEST_BODY_LIMIT {
+        return Err("Provider payload exceeds the native transport limit".to_string());
+    }
+    Ok(encoded)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderHttpResponse {
@@ -331,6 +485,13 @@ struct ProviderCancelResponse {
     status: u32,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderBinaryDownloadResponse {
+    path: String,
+    content_type: Option<String>,
+}
+
 fn provider_task_path(task_id: &str) -> Result<String, String> {
     if task_id.is_empty()
         || task_id.len() > PROVIDER_TASK_ID_LIMIT
@@ -348,6 +509,16 @@ fn provider_cancel_path(task_id: &str) -> Result<String, String> {
     Ok(format!("/ent/v2/tasks/{task_id}/cancel"))
 }
 
+fn unicompapi_video_task_path(task_id: &str) -> Result<String, String> {
+    provider_task_path(task_id)?;
+    Ok(format!("/v1/videos/{task_id}"))
+}
+
+fn unicompapi_video_content_path(task_id: &str) -> Result<String, String> {
+    provider_task_path(task_id)?;
+    Ok(format!("/v1/videos/{task_id}/content"))
+}
+
 fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
     match adapter_key {
         "TEXT_TO_VIDEO:vidu:viduq3-pro:v2"
@@ -357,16 +528,20 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
         | "IMAGE_TO_VIDEO:vidu:viduq3:v2"
         | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2"
         | "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => Ok(()),
-        _ => Err("Native video task commands require a registered video adapter".to_string()),
+        _ => match unicompapi_adapter_parts(adapter_key) {
+            Ok(("TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO", _)) => Ok(()),
+            _ => Err("Native video task commands require a registered video adapter".to_string()),
+        },
     }
 }
 
 fn provider_task_id(body: &serde_json::Value) -> Option<&str> {
     body.get("task_id")
         .and_then(serde_json::Value::as_str)
+        .or_else(|| body.get("id").and_then(serde_json::Value::as_str))
         .or_else(|| {
             body.get("data")
-                .and_then(|data| data.get("task_id"))
+                .and_then(|data| data.get("task_id").or_else(|| data.get("id")))
                 .and_then(serde_json::Value::as_str)
         })
 }
@@ -500,6 +675,26 @@ fn provider_submit_task_blocking(
     payload: serde_json::Value,
 ) -> Result<ProviderTaskSubmitResponse, String> {
     ensure_video_adapter(adapter_key)?;
+    if provider_region == "unicompapi" {
+        let body = unicompapi_payload(adapter_key, payload)?;
+        let secret = credential_read(credential_subject)?;
+        let response = request_unicompapi_json(&secret, "POST", "/v1/videos", Some(&body))?;
+        if response.status < 200 || response.status >= 300 {
+            return Ok(ProviderTaskSubmitResponse {
+                status: response.status,
+                task_id: None,
+                state: provider_state(&response.body).map(str::to_string),
+            });
+        }
+        let task_id = provider_task_id(&response.body)
+            .ok_or("Provider response did not contain a video task id")?;
+        unicompapi_video_task_path(task_id)?;
+        return Ok(ProviderTaskSubmitResponse {
+            status: response.status,
+            task_id: Some(task_id.to_string()),
+            state: provider_state(&response.body).map(str::to_string),
+        });
+    }
     let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
     let secret = credential_read(credential_subject)?;
@@ -554,10 +749,83 @@ fn provider_poll_task_blocking(
     task_id: &str,
 ) -> Result<ProviderHttpResponse, String> {
     ensure_video_adapter(adapter_key)?;
+    if provider_region == "unicompapi" {
+        unicompapi_adapter_model(adapter_key)?;
+        let path = unicompapi_video_task_path(task_id)?;
+        let secret = credential_read(credential_subject)?;
+        return request_unicompapi_json(&secret, "GET", &path, None);
+    }
     let target = provider_target(adapter_key, provider_region)?;
     let path = provider_task_path(task_id)?;
     let secret = credential_read(credential_subject)?;
     request_provider_json(target, &secret, "GET", &path, None)
+}
+
+#[tauri::command]
+async fn provider_download_task(
+    adapter_key: String,
+    task_id: String,
+    provider_profile_id: Option<String>,
+    provider_region: Option<String>,
+    state: tauri::State<'_, WorkerState>,
+) -> Result<ProviderBinaryDownloadResponse, String> {
+    let selection = resolve_media_selection(
+        &adapter_key,
+        provider_profile_id.as_deref(),
+        provider_region.as_deref(),
+        &state,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_download_task_blocking(
+            &adapter_key,
+            &selection.provider_region,
+            &selection.credential_subject,
+            &task_id,
+        )
+    })
+    .await
+    .map_err(|error| format!("Native provider video download failed: {error}"))?
+}
+
+fn provider_download_task_blocking(
+    adapter_key: &str,
+    provider_region: &str,
+    credential_subject: &str,
+    task_id: &str,
+) -> Result<ProviderBinaryDownloadResponse, String> {
+    ensure_video_adapter(adapter_key)?;
+    if provider_region != "unicompapi" {
+        return Err(
+            "This provider does not use the authenticated video download bridge".to_string(),
+        );
+    }
+    unicompapi_adapter_model(adapter_key)?;
+    let path = unicompapi_video_content_path(task_id)?;
+    let secret = credential_read(credential_subject)?;
+    let response = request_unicompapi_bytes(&secret, &path)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "Provider video download failed with HTTP {}",
+            response.status
+        ));
+    }
+    if response.body.is_empty() {
+        return Err("Provider video download returned an empty body".to_string());
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "System clock is invalid")?
+        .as_nanos();
+    let directory = std::env::temp_dir().join("ai-video-workspace-unicompapi");
+    create_dir_all(&directory)
+        .map_err(|error| format!("Unable to create provider download directory: {error}"))?;
+    let temporary_path = directory.join(format!("video-{}-{nonce}.mp4", std::process::id()));
+    write(&temporary_path, &response.body)
+        .map_err(|error| format!("Unable to store provider video download: {error}"))?;
+    Ok(ProviderBinaryDownloadResponse {
+        path: temporary_path.to_string_lossy().into_owned(),
+        content_type: Some("video/mp4".to_string()),
+    })
 }
 
 #[tauri::command]
@@ -593,6 +861,15 @@ fn provider_cancel_task_blocking(
     task_id: &str,
 ) -> Result<ProviderCancelResponse, String> {
     ensure_video_adapter(adapter_key)?;
+    if provider_region == "unicompapi" {
+        unicompapi_adapter_model(adapter_key)?;
+        unicompapi_video_task_path(task_id)?;
+        return Ok(ProviderCancelResponse {
+            supported: false,
+            cancelled: false,
+            status: 0,
+        });
+    }
     let target = provider_target(adapter_key, provider_region)?;
     let path = provider_cancel_path(task_id)?;
     let body = serde_json::to_vec(&serde_json::json!({ "id": task_id }))
@@ -614,6 +891,17 @@ fn provider_submit_blocking(
 ) -> Result<ProviderHttpResponse, String> {
     if ensure_video_adapter(adapter_key).is_ok() {
         return Err("Video adapters must use the asynchronous provider task bridge".to_string());
+    }
+    if provider_region == "unicompapi" {
+        let (capability, _) = unicompapi_adapter_parts(adapter_key)?;
+        let path = match capability {
+            "TEXT_TO_IMAGE" => "/v1/images/generations",
+            "REFERENCE_TO_IMAGE" => "/v1/images/edits",
+            _ => return Err("UniCompAPI adapter must use the matching media bridge".to_string()),
+        };
+        let body = unicompapi_payload(adapter_key, payload)?;
+        let secret = credential_read(credential_subject)?;
+        return request_unicompapi_json(&secret, "POST", path, Some(&body));
     }
     let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
@@ -681,6 +969,7 @@ fn request_provider_json(
         method,
         path,
         authorization_scheme: "Token",
+        accept: "application/json",
         secret: secret.as_str()?,
         body,
         request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
@@ -691,6 +980,68 @@ fn request_provider_json(
         status: response.status,
         body: response.body,
     })
+}
+
+fn request_unicompapi_json(
+    secret: &CredentialSecret,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<ProviderHttpResponse, String> {
+    if !matches!(
+        path,
+        "/v1/images/generations" | "/v1/images/edits" | "/v1/videos"
+    ) && !path
+        .strip_prefix("/v1/videos/")
+        .is_some_and(|task_id| unicompapi_video_task_path(task_id).as_deref() == Ok(path))
+    {
+        return Err("UniCompAPI request path is not allowed".to_string());
+    }
+    let response = request_json(JsonHttpRequest {
+        host: UNICOMPAPI_HOST,
+        port: 443,
+        secure: true,
+        method,
+        path,
+        authorization_scheme: UNICOMPAPI_AUTHORIZATION_SCHEME,
+        accept: "application/json",
+        secret: secret.as_str()?,
+        body,
+        request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+        response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(ProviderHttpResponse {
+        status: response.status,
+        body: response.body,
+    })
+}
+
+fn request_unicompapi_bytes(
+    secret: &CredentialSecret,
+    path: &str,
+) -> Result<provider_http::RawHttpResponse, String> {
+    let task_id = path
+        .strip_prefix("/v1/videos/")
+        .and_then(|value| value.strip_suffix("/content"))
+        .ok_or("UniCompAPI video content path is not allowed")?;
+    if unicompapi_video_content_path(task_id).as_deref() != Ok(path) {
+        return Err("UniCompAPI video content path is not allowed".to_string());
+    }
+    request_bytes(JsonHttpRequest {
+        host: UNICOMPAPI_HOST,
+        port: 443,
+        secure: true,
+        method: "GET",
+        path,
+        authorization_scheme: UNICOMPAPI_AUTHORIZATION_SCHEME,
+        accept: "video/mp4",
+        secret: secret.as_str()?,
+        body: None,
+        request_body_limit: 1,
+        response_body_limit: 512 * 1024 * 1024,
+    })
+    .map_err(|error| error.to_string())
 }
 
 struct WorkerProcess {
@@ -1077,6 +1428,7 @@ pub fn run() {
             provider_submit,
             provider_submit_task,
             provider_poll_task,
+            provider_download_task,
             provider_cancel_task
         ])
         .run(tauri::generate_context!())
@@ -1089,8 +1441,10 @@ mod tests {
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
         ensure_video_adapter, is_profile_id, provider_cancel_path, provider_payload,
         provider_state, provider_target, provider_task_error, provider_task_id, provider_task_path,
-        resolve_media_selection, validate_credential_provider, WorkerProcess, WorkerState,
-        BUNDLED_WORKER_FILENAME, PROVIDER_REQUEST_BODY_LIMIT,
+        resolve_media_selection, unicompapi_adapter_model, unicompapi_payload,
+        unicompapi_video_content_path, unicompapi_video_task_path, validate_credential_provider,
+        WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME, PROVIDER_REQUEST_BODY_LIMIT,
+        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
     };
     use serde_json::json;
     use std::{
@@ -1450,6 +1804,74 @@ mod tests {
     }
 
     #[test]
+    fn unicompapi_bridge_preserves_exact_registered_model_ids() {
+        let adapter_key = "TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1";
+        assert_eq!(
+            unicompapi_adapter_model(adapter_key).expect("registered model should resolve"),
+            "doubao-seedream-5-0-260128"
+        );
+        let body = unicompapi_payload(
+            adapter_key,
+            json!({"prompt": "frame", "size": "1024x1024", "n": 1}),
+        )
+        .expect("image request should serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(parsed["model"], "doubao-seedream-5-0-260128");
+        assert_eq!(parsed["prompt"], "frame");
+        assert_eq!(UNICOMPAPI_HOST, "unicompapi.com");
+        assert_eq!(UNICOMPAPI_AUTHORIZATION_SCHEME, "Bearer");
+    }
+
+    #[test]
+    fn unicompapi_bridge_projects_one_reference_image() {
+        let image = "data:image/png;base64,iVBORw0KGgo=";
+        let edit = unicompapi_payload(
+            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
+            json!({"images": [image], "prompt": "remove the sign"}),
+        )
+        .expect("image edit request should serialize");
+        let parsed_edit: serde_json::Value =
+            serde_json::from_slice(&edit).expect("valid image edit JSON");
+        assert_eq!(parsed_edit["image"], image);
+        assert!(parsed_edit.get("images").is_none());
+
+        let video = unicompapi_payload(
+            "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
+            json!({"images": [image], "prompt": "camera push", "duration": 5}),
+        )
+        .expect("image-to-video request should serialize");
+        let parsed_video: serde_json::Value =
+            serde_json::from_slice(&video).expect("valid video JSON");
+        assert_eq!(parsed_video["image"], image);
+        assert_eq!(parsed_video["model"], "kling-v3-turbo");
+        assert!(parsed_video.get("images").is_none());
+    }
+
+    #[test]
+    fn unicompapi_bridge_rejects_unknown_models_and_adapter_injection() {
+        assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:unknown:v1").is_err());
+        assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:evil:qwen-image:v1").is_err());
+        assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:qwen-image:v1:extra").is_err());
+        assert!(unicompapi_adapter_model("TEXT_TO_VIDEO:unicompapi:qwen-image:v1").is_err());
+        assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:qwen-image\n:v1").is_err());
+        assert!(unicompapi_payload(
+            "TEXT_TO_IMAGE:unicompapi:qwen-image:v1",
+            json!({"prompt": "frame", "apiKey": "secret"})
+        )
+        .is_err());
+        assert!(unicompapi_payload(
+            "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
+            json!({"images": ["one", "two"], "prompt": "frame"})
+        )
+        .is_err());
+        assert!(unicompapi_payload(
+            "TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
+            json!({"images": ["https://example.com/frame.png"], "prompt": "frame"})
+        )
+        .is_err());
+    }
+
+    #[test]
     fn provider_task_path_accepts_safe_ids_and_rejects_path_injection() {
         assert_eq!(
             provider_task_path("task-123.A").expect("safe task id"),
@@ -1463,6 +1885,16 @@ mod tests {
             "/ent/v2/tasks/task-123.A/cancel"
         );
         assert!(provider_cancel_path("../secrets").is_err());
+        assert_eq!(
+            unicompapi_video_task_path("video-123.A").expect("safe UniCompAPI video id"),
+            "/v1/videos/video-123.A"
+        );
+        assert!(unicompapi_video_task_path("../secrets").is_err());
+        assert_eq!(
+            unicompapi_video_content_path("video-123.A").expect("safe UniCompAPI video content id"),
+            "/v1/videos/video-123.A/content"
+        );
+        assert!(unicompapi_video_content_path("../secrets").is_err());
     }
 
     #[test]
@@ -1473,6 +1905,8 @@ mod tests {
         assert!(ensure_video_adapter("START_END_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
+        assert!(ensure_video_adapter("TEXT_TO_VIDEO:unicompapi:viduq3-pro:v1").is_ok());
+        assert!(ensure_video_adapter("IMAGE_TO_VIDEO:unicompapi:viduq3:v1").is_ok());
         assert!(ensure_video_adapter("TEXT_TO_IMAGE:vidu:viduq2:v2").is_err());
         assert_eq!(
             provider_task_id(&json!({"task_id": "task-direct"})),
@@ -1481,6 +1915,14 @@ mod tests {
         assert_eq!(
             provider_task_id(&json!({"data": {"task_id": "task-nested"}})),
             Some("task-nested")
+        );
+        assert_eq!(
+            provider_task_id(&json!({"id": "video-direct"})),
+            Some("video-direct")
+        );
+        assert_eq!(
+            provider_task_id(&json!({"data": {"id": "video-nested"}})),
+            Some("video-nested")
         );
         assert_eq!(
             provider_state(&json!({"data": {"status": "queueing"}})),

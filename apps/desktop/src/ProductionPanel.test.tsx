@@ -11,6 +11,7 @@ import type {
 import { ProductionPanel } from './ProductionPanel';
 import {
   cancelVideoProviderTask,
+  downloadVideoProviderTask,
   pollVideoProviderTask,
   submitProviderRequest,
   submitVideoProviderTask,
@@ -23,6 +24,7 @@ vi.mock('./provider-client', () => ({
   submitVideoProviderTask: vi.fn(),
   pollVideoProviderTask: vi.fn(),
   cancelVideoProviderTask: vi.fn(),
+  downloadVideoProviderTask: vi.fn(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
@@ -436,6 +438,80 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(profileSelect).toHaveValue(globalProviderProfile.id);
+  });
+
+  it('selects UniCompAPI media models without mixing Vidu adapters', async () => {
+    const unicompProfile: ProviderProfileInfo = {
+      ...providerProfile,
+      id: '11111111-1111-4111-8111-111111111113',
+      name: 'UniCompAPI A',
+      providerType: 'unicompapi',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    };
+    const unicompDescriptor: AdapterDescriptor = {
+      ...descriptor,
+      key: 'TEXT_TO_IMAGE:unicompapi:qwen-image:v1',
+      provider: 'unicompapi',
+      providerLabel: 'UniCompAPI',
+      model: 'qwen-image',
+      modelLabel: 'qwen-image',
+      apiVersion: 'v1',
+      endpoint: 'https://unicompapi.com/v1/images/generations',
+      credentialProvider: 'unicompapi',
+    };
+    const unicompModel: ProviderModelInfo = {
+      ...providerModels[0]!,
+      id: '31111111-1111-4111-8111-111111111113',
+      providerProfileId: unicompProfile.id,
+      remoteModelId: 'qwen-image',
+      displayName: 'Qwen Image',
+    };
+    const mixedCatalog: AdapterCatalogResult = {
+      ...catalog,
+      providers: [...catalog.providers, { key: 'unicompapi', label: 'UniCompAPI' }],
+      adapters: [descriptor, unicompDescriptor],
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(mixedCatalog);
+      if (method === 'provider.profile.list') {
+        return Promise.resolve([providerProfile, unicompProfile]);
+      }
+      if (method === 'provider.model.list') {
+        return Promise.resolve(
+          (params as { profileId: string }).profileId === unicompProfile.id
+            ? [unicompModel]
+            : providerModels,
+        );
+      }
+      if (method === 'adapter.resolve') {
+        return Promise.resolve(
+          (params as { provider: string }).provider === 'unicompapi'
+            ? unicompDescriptor
+            : descriptor,
+        );
+      }
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel shotId="shot" writable />);
+    const profileSelect = await screen.findByLabelText('供应商连接');
+    expect(screen.getByRole('option', { name: 'UniCompAPI A · UniCompAPI' })).toBeInTheDocument();
+
+    fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
+    expect(await screen.findByRole('option', { name: 'qwen-image' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Vidu Q2' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
+        capability: 'TEXT_TO_IMAGE',
+        provider: 'unicompapi',
+        model: 'qwen-image',
+        apiVersion: 'v1',
+      }),
+    );
+    expect(await screen.findByText('UniCompAPI A · UniCompAPI · API v1')).toBeInTheDocument();
   });
 
   it('uses the full adapter key and locks the API version during resolution', async () => {
@@ -1041,5 +1117,94 @@ describe('ProductionPanel', () => {
       'provider-task',
       'cn',
     );
+  });
+
+  it('downloads completed UniCompAPI video content through the native credential bridge', async () => {
+    const unicompProfile: ProviderProfileInfo = {
+      ...providerProfile,
+      id: '11111111-1111-4111-8111-111111111113',
+      name: 'UniCompAPI A',
+      providerType: 'unicompapi',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    };
+    const unicompDescriptor: AdapterDescriptor = {
+      ...videoDescriptor,
+      key: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      capability: 'TEXT_TO_VIDEO',
+      provider: 'unicompapi',
+      providerLabel: 'UniCompAPI',
+      model: 'kling-v3-turbo',
+      modelLabel: 'kling-v3-turbo',
+      apiVersion: 'v1',
+      endpoint: 'https://unicompapi.com/v1/videos',
+      credentialProvider: 'unicompapi',
+    };
+    const unicompModel: ProviderModelInfo = {
+      ...providerModels[2]!,
+      id: '31111111-1111-4111-8111-111111111113',
+      providerProfileId: unicompProfile.id,
+      remoteModelId: 'kling-v3-turbo',
+      displayName: 'Kling v3 Turbo',
+    };
+    const polling: VideoGenerationJobInfo = {
+      ...videoJob('polling'),
+      adapterKey: unicompDescriptor.key,
+      metadata: {
+        ...videoJob('polling').metadata,
+        providerRegion: 'unicompapi',
+        providerProfileId: unicompProfile.id,
+        modelId: 'kling-v3-turbo',
+      },
+    };
+    vi.mocked(pollVideoProviderTask).mockResolvedValue({
+      status: 200,
+      body: { id: 'provider-task', status: 'completed' },
+    });
+    vi.mocked(downloadVideoProviderTask).mockResolvedValue({
+      path: 'C:\\Temp\\ai-video-workspace-unicompapi\\video.mp4',
+      contentType: 'video/mp4',
+    });
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog') {
+        return Promise.resolve({
+          capabilities: [{ key: 'TEXT_TO_VIDEO', label: '文生视频' }],
+          providers: [{ key: 'unicompapi', label: 'UniCompAPI' }],
+          adapters: [unicompDescriptor],
+        });
+      }
+      if (method === 'provider.profile.list') return Promise.resolve([unicompProfile]);
+      if (method === 'provider.model.list') return Promise.resolve([unicompModel]);
+      if (method === 'adapter.resolve') return Promise.resolve(unicompDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([polling]);
+      if (method === 'video.generate.observe') {
+        return Promise.resolve({ ...polling, status: 'failed' as const, error: 'fixture terminal' });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+
+    await waitFor(() =>
+      expect(downloadVideoProviderTask).toHaveBeenCalledWith(
+        unicompDescriptor.key,
+        unicompProfile.id,
+        'provider-task',
+        'unicompapi',
+      ),
+    );
+    expect(callWorker).toHaveBeenCalledWith('video.generate.observe', {
+      jobId: polling.id,
+      providerTaskId: 'provider-task',
+      providerStatus: 200,
+      providerBody: {
+        status: 'completed',
+        data: { id: 'provider-task', status: 'completed' },
+        nativeVideoFilePath: 'C:\\Temp\\ai-video-workspace-unicompapi\\video.mp4',
+        contentType: 'video/mp4',
+      },
+    });
   });
 });

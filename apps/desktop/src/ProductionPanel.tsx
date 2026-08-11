@@ -36,6 +36,7 @@ import type {
 import { callWorker } from './worker-client';
 import {
   cancelVideoProviderTask,
+  downloadVideoProviderTask,
   pollVideoProviderTask,
   submitProviderRequest,
   submitVideoProviderTask,
@@ -121,6 +122,14 @@ function isVideoCapability(capability: GenerationCapability | undefined): boolea
     capability === 'REFERENCE_TO_VIDEO' ||
     capability === 'START_END_TO_VIDEO'
   );
+}
+
+function isProviderVideoCompleted(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const object = body as Record<string, unknown>;
+  const state = object.state ?? object.status;
+  if (typeof state === 'string' && state.trim().toLowerCase() === 'completed') return true;
+  return isProviderVideoCompleted(object.data);
 }
 
 function formatElapsed(elapsedMs: number): string {
@@ -248,8 +257,9 @@ export function ProductionPanel({
     () =>
       profiles.filter(
         (profile) =>
-          profile.providerType === 'vidu' &&
-          profile.protocol === 'vidu-v2' &&
+          ((profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
+            (profile.providerType === 'unicompapi' &&
+              profile.protocol === 'openai-chat-completions')) &&
           profile.enabled &&
           profile.connectionStatus === 'ready' &&
           (profile.category === 'multi' ||
@@ -260,7 +270,12 @@ export function ProductionPanel({
     [effectiveCapability, profiles],
   );
   const selectedProfile = eligibleProfiles.find((profile) => profile.id === selectedProfileId);
-  const providerRegion = selectedProfile?.baseUrl === 'https://api.vidu.cn' ? 'cn' : 'global';
+  const providerRegion =
+    selectedProfile?.providerType === 'unicompapi'
+      ? 'unicompapi'
+      : selectedProfile?.baseUrl === 'https://api.vidu.cn'
+        ? 'cn'
+        : 'global';
 
   useEffect(() => {
     let storedProfileId = '';
@@ -372,13 +387,35 @@ export function ProductionPanel({
     let active = true;
     const scheduler = writable
       ? new VideoPollingScheduler({
-          poll: (job) =>
-            pollVideoProviderTask(
+          poll: async (job) => {
+            const response = await pollVideoProviderTask(
               job.adapterKey,
               job.metadata.providerProfileId,
               job.providerTaskId!,
               job.metadata.providerRegion,
-            ),
+            );
+            if (
+              job.metadata.providerRegion !== 'unicompapi' ||
+              !isProviderVideoCompleted(response.body)
+            ) {
+              return response;
+            }
+            const download = await downloadVideoProviderTask(
+              job.adapterKey,
+              job.metadata.providerProfileId,
+              job.providerTaskId!,
+              job.metadata.providerRegion,
+            );
+            return {
+              ...response,
+              body: {
+                status: 'completed',
+                data: response.body,
+                nativeVideoFilePath: download.path,
+                contentType: download.contentType,
+              },
+            };
+          },
           observe: (job, response) =>
             callWorker('video.generate.observe', {
               jobId: job.id,
@@ -468,18 +505,22 @@ export function ProductionPanel({
   );
   const modelOptions = useMemo(
     () =>
-      capabilityAdapters.filter((item) =>
-        models.some(
-          (model) =>
-            model.remoteModelId === item.model &&
-            model.enabled &&
-            !model.unavailableAt &&
-            (isVideoCapability(effectiveCapability)
-              ? model.capabilities.videoGeneration
-              : model.capabilities.imageGeneration),
-        ),
+      capabilityAdapters.filter(
+        (item) =>
+          item.provider === selectedProfile?.providerType &&
+          models.some(
+            (model) =>
+              model.remoteModelId === item.model &&
+              model.enabled &&
+              !model.unavailableAt &&
+              (isVideoCapability(effectiveCapability)
+                ? model.capabilities.videoGeneration
+                : effectiveCapability === 'REFERENCE_TO_IMAGE'
+                  ? model.capabilities.imageEditing || model.capabilities.imageGeneration
+                  : model.capabilities.imageGeneration),
+          ),
       ),
-    [capabilityAdapters, effectiveCapability, models],
+    [capabilityAdapters, effectiveCapability, models, selectedProfile?.providerType],
   );
   const selectedModel = models.find((model) => model.remoteModelId === adapter?.model);
 
@@ -895,7 +936,11 @@ export function ProductionPanel({
                   {eligibleProfiles.map((profile) => (
                     <option key={profile.id} value={profile.id}>
                       {profile.name} ·{' '}
-                      {profile.baseUrl === 'https://api.vidu.cn' ? '中国站' : '国际站'}
+                      {profile.providerType === 'unicompapi'
+                        ? 'UniCompAPI'
+                        : profile.baseUrl === 'https://api.vidu.cn'
+                          ? '中国站'
+                          : '国际站'}
                     </option>
                   ))}
                 </select>
@@ -923,7 +968,7 @@ export function ProductionPanel({
               <div className="provider-required-state">
                 <Settings2 size={20} />
                 <strong>还没有可用于制作的供应商连接</strong>
-                <span>请在设置中心添加并测试 Vidu 中国站或国际站连接。</span>
+                <span>请在设置中心添加并测试 Vidu 或 UniCompAPI 连接。</span>
                 <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
                   前往供应商与模型
                 </button>

@@ -4,6 +4,7 @@ import addFormatsModule from 'ajv-formats';
 import type {
   AdapterCatalogResult,
   AdapterDescriptor,
+  AdapterParameterSchema,
   AdapterParameters,
   AdapterResolveParams,
   AdapterValidationError,
@@ -534,6 +535,204 @@ const adapters: AdapterDescriptor[] = [
   },
 ];
 
+const UNICOMPAPI_MEDIA_MODELS: readonly {
+  model: string;
+  textToImage?: boolean;
+  imageEdit?: boolean;
+  textToVideo?: boolean;
+  imageToVideo?: boolean;
+}[] = [
+  { model: 'doubao-seedream-5-0-260128', textToImage: true },
+  { model: 'qwen-image', textToImage: true },
+  { model: 'qwen-image-edit-2509', imageEdit: true },
+  { model: 'doubao-seedance-2-0-260128', textToVideo: true, imageToVideo: true },
+  { model: 'doubao-seedance-2-0-fast-260128', textToVideo: true, imageToVideo: true },
+  { model: 'happyhorse-1.0-i2v', imageToVideo: true },
+  { model: 'happyhorse-1.0-t2v', textToVideo: true },
+  { model: 'happyhorse-1.1-i2v', imageToVideo: true },
+  { model: 'happyhorse-1.1-t2v', textToVideo: true },
+  { model: 'kling-v3-turbo', textToVideo: true, imageToVideo: true },
+  { model: 'viduq3', imageToVideo: true },
+  { model: 'viduq3-mix', imageToVideo: true },
+  { model: 'viduq3-pro', textToVideo: true },
+  { model: 'viduq3-turbo', textToVideo: true, imageToVideo: true },
+];
+
+const unicompTextToImageSchema: AdapterParameterSchema = {
+  $schema: schemaUri,
+  type: 'object',
+  additionalProperties: false,
+  required: ['prompt'],
+  properties: {
+    prompt: { type: 'string', title: '提示词', minLength: 1, maxLength: 5000 },
+    size: { type: 'string', title: '尺寸', maxLength: 32 },
+    n: { type: 'integer', title: '数量', minimum: 1, maximum: 4, default: 1 },
+    response_format: {
+      type: 'string',
+      title: '返回格式',
+      enum: ['url', 'b64_json'],
+      default: 'url',
+    },
+    watermark: { type: 'boolean', title: '添加水印' },
+  },
+};
+
+const unicompImageEditSchema: AdapterParameterSchema = {
+  $schema: schemaUri,
+  type: 'object',
+  additionalProperties: false,
+  required: ['images', 'prompt'],
+  properties: {
+    images: {
+      type: 'array',
+      title: '输入图片',
+      minItems: 1,
+      maxItems: 1,
+      items: { type: 'string', format: 'uri' },
+    },
+    prompt: { type: 'string', title: '编辑提示词', minLength: 1, maxLength: 5000 },
+    size: { type: 'string', title: '尺寸', maxLength: 32 },
+    response_format: {
+      type: 'string',
+      title: '返回格式',
+      enum: ['url', 'b64_json'],
+      default: 'url',
+    },
+  },
+};
+
+const unicompVideoSchema = (imageRequired: boolean): AdapterParameterSchema => ({
+  $schema: schemaUri,
+  type: 'object',
+  additionalProperties: false,
+  required: imageRequired ? ['images', 'prompt'] : ['prompt'],
+  properties: {
+    ...(imageRequired
+      ? {
+          images: {
+            type: 'array' as const,
+            title: '参考图片',
+            minItems: 1,
+            maxItems: 1,
+            items: { type: 'string' as const, format: 'uri' },
+          },
+        }
+      : {}),
+    prompt: { type: 'string', title: '视频提示词', minLength: 1, maxLength: 5000 },
+    size: { type: 'string', title: '尺寸', maxLength: 32 },
+    resolution: { type: 'string', title: '分辨率', maxLength: 16 },
+    duration: { type: 'integer', title: '时长（秒）', minimum: 1, maximum: 60, default: 5 },
+    seconds: { type: 'string', title: '时长（兼容格式）', maxLength: 16 },
+    ratio: { type: 'string', title: '画幅比例', maxLength: 16 },
+    generate_audio: { type: 'boolean', title: '生成音频' },
+    watermark: { type: 'boolean', title: '添加水印' },
+  },
+});
+
+function unicompApiAdapters(): AdapterDescriptor[] {
+  const result: AdapterDescriptor[] = [];
+  for (const model of UNICOMPAPI_MEDIA_MODELS) {
+    const common = {
+      provider: 'unicompapi',
+      providerLabel: 'UniCompAPI',
+      model: model.model,
+      modelLabel: model.model,
+      apiVersion: 'v1',
+      schemaVersion: 1,
+      documentationUrl: 'https://unicompapi.com',
+      credentialProvider: 'unicompapi',
+    } as const;
+    if (model.textToImage) {
+      result.push({
+        ...common,
+        key: `TEXT_TO_IMAGE:unicompapi:${model.model}:v1`,
+        capability: 'TEXT_TO_IMAGE',
+        capabilityLabel: '文生图',
+        endpoint: 'https://unicompapi.com/v1/images/generations',
+        parameterSchema: unicompTextToImageSchema,
+        uiSchema: {
+          fields: [
+            { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+            { key: 'size', control: 'text', group: 'basic', order: 20 },
+            { key: 'n', control: 'number', group: 'basic', order: 30 },
+            { key: 'response_format', control: 'select', group: 'advanced', order: 40 },
+            { key: 'watermark', control: 'toggle', group: 'advanced', order: 50 },
+          ],
+        },
+      });
+    }
+    if (model.imageEdit) {
+      result.push({
+        ...common,
+        key: `REFERENCE_TO_IMAGE:unicompapi:${model.model}:v1`,
+        capability: 'REFERENCE_TO_IMAGE',
+        capabilityLabel: '图片编辑',
+        endpoint: 'https://unicompapi.com/v1/images/edits',
+        parameterSchema: unicompImageEditSchema,
+        uiSchema: {
+          fields: [
+            {
+              key: 'images',
+              control: 'url-list',
+              group: 'basic',
+              order: 10,
+              placeholder: '输入一张图片 URL 或选择本地图片',
+            },
+            { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
+            { key: 'size', control: 'text', group: 'basic', order: 30 },
+            { key: 'response_format', control: 'select', group: 'advanced', order: 40 },
+          ],
+        },
+      });
+    }
+    if (model.textToVideo) {
+      result.push(unicompVideoAdapter(common, model.model, 'TEXT_TO_VIDEO', false));
+    }
+    if (model.imageToVideo) {
+      result.push(unicompVideoAdapter(common, model.model, 'IMAGE_TO_VIDEO', true));
+    }
+  }
+  return result;
+}
+
+function unicompVideoAdapter(
+  common: Omit<AdapterDescriptor, 'key' | 'capability' | 'capabilityLabel' | 'endpoint' | 'parameterSchema' | 'uiSchema'>,
+  model: string,
+  capability: 'TEXT_TO_VIDEO' | 'IMAGE_TO_VIDEO',
+  imageRequired: boolean,
+): AdapterDescriptor {
+  return {
+    ...common,
+    key: `${capability}:unicompapi:${model}:v1`,
+    capability,
+    capabilityLabel: capability === 'TEXT_TO_VIDEO' ? '文生视频' : '图生视频',
+    endpoint: 'https://unicompapi.com/v1/videos',
+    parameterSchema: unicompVideoSchema(imageRequired),
+    uiSchema: {
+      fields: [
+        ...(imageRequired
+          ? [
+              {
+                key: 'images',
+                control: 'url-list' as const,
+                group: 'basic' as const,
+                order: 10,
+                placeholder: '输入一张参考图片 URL 或选择本地图片',
+              },
+            ]
+          : []),
+        { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
+        { key: 'duration', control: 'number', group: 'basic', order: 30 },
+        { key: 'size', control: 'text', group: 'basic', order: 40 },
+        { key: 'resolution', control: 'text', group: 'basic', order: 50 },
+        { key: 'ratio', control: 'text', group: 'advanced', order: 60 },
+        { key: 'generate_audio', control: 'toggle', group: 'advanced', order: 70 },
+        { key: 'watermark', control: 'toggle', group: 'advanced', order: 80 },
+      ],
+    },
+  };
+}
+
 function legacyVideoAdapter(currentKey: string, legacyKey: string): AdapterDescriptor {
   const current = adapters.find((adapter) => adapter.key === currentKey);
   if (!current) throw new Error(`Current adapter for legacy key ${legacyKey} was not found.`);
@@ -549,7 +748,9 @@ const legacyAdapters: AdapterDescriptor[] = [
   legacyVideoAdapter('REFERENCE_TO_VIDEO:vidu:viduq3:v2', 'IMAGE_TO_VIDEO:vidu:viduq3:v2'),
   legacyVideoAdapter('START_END_TO_VIDEO:vidu:viduq3-pro:v2', 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2'),
 ];
-const lookupAdapters = [...adapters, ...legacyAdapters];
+const unicompAdapters = unicompApiAdapters();
+const catalogAdapters = [...adapters, ...unicompAdapters];
+const lookupAdapters = [...catalogAdapters, ...legacyAdapters];
 const keySet = new Set(lookupAdapters.map((adapter) => adapter.key));
 if (keySet.size !== lookupAdapters.length) throw new Error('Adapter keys must be unique.');
 
@@ -568,7 +769,7 @@ function validationErrors(errors: ErrorObject[] | null | undefined): AdapterVali
 export function getAdapterCatalog(): AdapterCatalogResult {
   const capabilities = new Map<string, string>();
   const providers = new Map<string, string>();
-  for (const adapter of adapters) {
+  for (const adapter of catalogAdapters) {
     capabilities.set(adapter.capability, adapter.capabilityLabel);
     providers.set(adapter.provider, adapter.providerLabel);
   }
@@ -577,7 +778,7 @@ export function getAdapterCatalog(): AdapterCatalogResult {
       .filter((key) => capabilities.has(key))
       .map((key) => ({ key, label: capabilities.get(key)! })),
     providers: [...providers].map(([key, label]) => ({ key, label })),
-    adapters,
+    adapters: catalogAdapters,
   };
 }
 
@@ -586,7 +787,7 @@ export function getAdapter(adapterKey: string): AdapterDescriptor | undefined {
 }
 
 export function resolveAdapter(selection: AdapterResolveParams): AdapterDescriptor {
-  const matches = adapters.filter(
+  const matches = catalogAdapters.filter(
     (adapter) =>
       adapter.capability === selection.capability &&
       adapter.provider === selection.provider &&

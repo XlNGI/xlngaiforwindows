@@ -164,6 +164,7 @@ fn test_connection(
         method: "GET",
         path: models_path,
         authorization_scheme,
+        accept: "application/json",
         secret,
         body: None,
         request_body_limit: 1,

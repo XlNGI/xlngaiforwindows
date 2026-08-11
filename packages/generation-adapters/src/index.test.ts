@@ -226,4 +226,53 @@ describe('adapter registry', () => {
       ),
     ).toBe(false);
   });
+
+  it('publishes only explicitly contracted UniCompAPI media adapters', () => {
+    const catalog = getAdapterCatalog();
+    expect(
+      catalog.adapters.find(
+        (adapter) =>
+          adapter.key === 'TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1',
+      ),
+    ).toMatchObject({
+      provider: 'unicompapi',
+      model: 'doubao-seedream-5-0-260128',
+      endpoint: 'https://unicompapi.com/v1/images/generations',
+    });
+    expect(
+      catalog.adapters.find(
+        (adapter) => adapter.key === 'REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1',
+      ),
+    ).toMatchObject({ endpoint: 'https://unicompapi.com/v1/images/edits' });
+    expect(
+      catalog.adapters.some((adapter) => adapter.model === 'happyhorse-1.0-video-edit'),
+    ).toBe(false);
+    expect(() =>
+      resolveAdapter({ capability: 'TEXT_TO_VIDEO', provider: 'unicompapi', model: 'qwen-image' }),
+    ).toThrow('No adapter matches');
+  });
+
+  it('validates UniCompAPI reference input and rejects undeclared request fields', () => {
+    const key = 'IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1';
+    expect(
+      validateAdapterParameters(key, {
+        images: ['https://example.com/reference.png'],
+        prompt: 'camera push',
+        duration: 5,
+        ratio: '16:9',
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(key, {
+        images: ['https://example.com/one.png', 'https://example.com/two.png'],
+        prompt: 'camera push',
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:qwen-image:v1', {
+        prompt: 'frame',
+        apiKey: 'must-not-persist',
+      }),
+    ).toMatchObject({ valid: false });
+  });
 });

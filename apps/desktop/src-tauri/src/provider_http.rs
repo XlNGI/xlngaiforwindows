@@ -52,6 +52,7 @@ pub(crate) struct JsonHttpRequest<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub authorization_scheme: &'a str,
+    pub accept: &'a str,
     pub secret: &'a str,
     pub body: Option<&'a [u8]>,
     pub request_body_limit: usize,
@@ -62,6 +63,11 @@ pub(crate) struct JsonHttpRequest<'a> {
 pub(crate) struct JsonHttpResponse {
     pub status: u32,
     pub body: serde_json::Value,
+}
+
+pub(crate) struct RawHttpResponse {
+    pub status: u32,
+    pub body: Vec<u8>,
 }
 
 struct WinHttpHandle(*mut core::ffi::c_void);
@@ -84,9 +90,9 @@ impl Drop for WinHttpHandle {
     }
 }
 
-pub(crate) fn request_json(
+pub(crate) fn request_bytes(
     request: JsonHttpRequest<'_>,
-) -> Result<JsonHttpResponse, JsonHttpError> {
+) -> Result<RawHttpResponse, JsonHttpError> {
     validate_request(&request)?;
     let agent = wide("AI Video Workspace/0.1");
     let host = wide(request.host);
@@ -144,8 +150,8 @@ pub(crate) fn request_json(
     }
 
     let mut headers: Vec<u16> = format!(
-        "Accept: application/json\r\nAuthorization: {} ",
-        request.authorization_scheme
+        "Accept: {}\r\nAuthorization: {} ",
+        request.accept, request.authorization_scheme
     )
     .encode_utf16()
     .collect();
@@ -219,12 +225,22 @@ pub(crate) fn request_json(
             ));
         }
     }
-    let body = if response.is_empty() {
+    Ok(RawHttpResponse {
+        status,
+        body: response,
+    })
+}
+
+pub(crate) fn request_json(
+    request: JsonHttpRequest<'_>,
+) -> Result<JsonHttpResponse, JsonHttpError> {
+    let response = request_bytes(request)?;
+    let body = if response.body.is_empty() {
         serde_json::Value::Null
     } else {
-        match serde_json::from_slice(&response) {
+        match serde_json::from_slice(&response.body) {
             Ok(body) => body,
-            Err(_) if !(200..=299).contains(&status) => serde_json::Value::Null,
+            Err(_) if !(200..=299).contains(&response.status) => serde_json::Value::Null,
             Err(_) => {
                 return Err(JsonHttpError::new(
                     JsonHttpErrorKind::InvalidResponse,
@@ -233,7 +249,10 @@ pub(crate) fn request_json(
             }
         }
     };
-    Ok(JsonHttpResponse { status, body })
+    Ok(JsonHttpResponse {
+        status: response.status,
+        body,
+    })
 }
 
 fn validate_request(request: &JsonHttpRequest<'_>) -> Result<(), JsonHttpError> {
@@ -268,6 +287,12 @@ fn validate_request(request: &JsonHttpRequest<'_>) -> Result<(), JsonHttpError> 
         return Err(JsonHttpError::new(
             JsonHttpErrorKind::InvalidRequest,
             "Provider authorization scheme is unsupported",
+        ));
+    }
+    if !matches!(request.accept, "application/json" | "video/mp4") {
+        return Err(JsonHttpError::new(
+            JsonHttpErrorKind::InvalidRequest,
+            "Provider response media type is unsupported",
         ));
     }
     if request.secret.is_empty()
@@ -315,7 +340,7 @@ fn winhttp_error(operation: &str) -> JsonHttpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_json, JsonHttpErrorKind, JsonHttpRequest};
+    use super::{request_bytes, request_json, JsonHttpErrorKind, JsonHttpRequest};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -349,6 +374,7 @@ mod tests {
             method: "GET",
             path: "/v1/models",
             authorization_scheme: "Bearer",
+            accept: "application/json",
             secret: "local-test-key",
             body: None,
             request_body_limit: 1024,
@@ -361,6 +387,46 @@ mod tests {
     }
 
     #[test]
+    fn streams_authorized_binary_responses_without_json_parsing() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider should bind");
+        let port = listener.local_addr().expect("mock address").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock request should connect");
+            let mut request = [0_u8; 4096];
+            let read = stream
+                .read(&mut request)
+                .expect("mock request should be readable");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /v1/videos/task/content HTTP/1.1"));
+            assert!(request.contains("Accept: video/mp4"));
+            assert!(request.contains("Authorization: Bearer local-test-key"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nConnection: close\r\n\r\nftyp",
+                )
+                .expect("mock response should be written");
+        });
+
+        let response = request_bytes(JsonHttpRequest {
+            host: "127.0.0.1",
+            port,
+            secure: false,
+            method: "GET",
+            path: "/v1/videos/task/content",
+            authorization_scheme: "Bearer",
+            accept: "video/mp4",
+            secret: "local-test-key",
+            body: None,
+            request_body_limit: 1,
+            response_body_limit: 1024,
+        })
+        .expect("mock binary provider request should succeed");
+        server.join().expect("mock provider should finish");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ftyp");
+    }
+
+    #[test]
     fn rejects_request_bodies_over_the_explicit_transport_limit() {
         let body = [0_u8; 2];
         let error = request_json(JsonHttpRequest {
@@ -370,6 +436,7 @@ mod tests {
             method: "POST",
             path: "/v1/models",
             authorization_scheme: "Bearer",
+            accept: "application/json",
             secret: "local-test-key",
             body: Some(&body),
             request_body_limit: 1,
@@ -403,6 +470,7 @@ mod tests {
             method: "GET",
             path: "/ent/v2/models",
             authorization_scheme: "Token",
+            accept: "application/json",
             secret: "local-test-key",
             body: None,
             request_body_limit: 1,

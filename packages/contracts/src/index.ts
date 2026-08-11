@@ -882,7 +882,7 @@ export type VideoGenerationJobStatus =
 export type VideoGenerationFailureKind =
   'transport' | 'provider' | 'download' | 'interrupted' | 'timeout';
 export type VideoAssetKind = 'generated-video' | 'shot-video';
-export type VideoProviderRegion = 'global' | 'cn';
+export type VideoProviderRegion = 'global' | 'cn' | 'unicompapi';
 
 export interface VideoGenerationCostInfo {
   amount: number;
