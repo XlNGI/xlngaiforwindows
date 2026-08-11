@@ -1719,6 +1719,123 @@ mod tests {
     }
 
     #[test]
+    fn unicompapi_media_resolution_requires_synced_enabled_exact_capabilities() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let app_data_dir = std::env::temp_dir().join(format!(
+            "ai-video-rust-unicompapi-profile-{}-{nonce}",
+            std::process::id()
+        ));
+        create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
+
+        {
+            let state = WorkerState::new(app_data_dir.clone());
+            let created = state
+                .request(&json!({
+                    "id": "rust-unicompapi-profile-create",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.create",
+                    "params": {
+                        "name": "UniCompAPI Rust",
+                        "category": "multi",
+                        "providerType": "unicompapi",
+                        "accessType": "official",
+                        "protocol": "openai-chat-completions",
+                        "baseUrl": "https://unicompapi.com/v1"
+                    }
+                }))
+                .expect("profile create response should be valid");
+            let profile_id = created["result"]["id"]
+                .as_str()
+                .expect("created profile should have an ID");
+            let completed = state
+                .request(&json!({
+                    "id": "rust-unicompapi-profile-ready",
+                    "protocolVersion": 1,
+                    "method": "provider.connection.complete",
+                    "params": {
+                        "profileId": profile_id,
+                        "status": "ready",
+                        "models": [
+                            { "id": "qwen-image", "displayName": "Qwen Image" },
+                            { "id": "qwen-image-edit-2509", "displayName": "Qwen Image Edit" },
+                            { "id": "kling-v3-turbo", "displayName": "Kling v3 Turbo" },
+                            { "id": "vendor-experimental-model", "displayName": "Experimental" }
+                        ]
+                    }
+                }))
+                .expect("connection completion response should be valid");
+            assert_eq!(completed["ok"], true);
+            let models = completed["result"]["models"]
+                .as_array()
+                .expect("synced model list");
+            assert!(models.iter().all(|model| model["enabled"] == false));
+            let unknown = models
+                .iter()
+                .find(|model| model["remoteModelId"] == "vendor-experimental-model")
+                .expect("unknown model should be synchronized");
+            assert!(unknown["capabilities"]
+                .as_object()
+                .expect("capability object")
+                .values()
+                .all(|value| value.as_bool() == Some(false)));
+            assert!(resolve_media_selection(
+                "TEXT_TO_IMAGE:unicompapi:qwen-image:v1",
+                Some(profile_id),
+                None,
+                &state
+            )
+            .is_err());
+
+            for remote_model_id in ["qwen-image", "qwen-image-edit-2509", "kling-v3-turbo"] {
+                let model = models
+                    .iter()
+                    .find(|model| model["remoteModelId"] == remote_model_id)
+                    .expect("known model should be synchronized");
+                let updated = state
+                    .request(&json!({
+                        "id": format!("rust-unicompapi-enable-{remote_model_id}"),
+                        "protocolVersion": 1,
+                        "method": "provider.model.update",
+                        "params": {
+                            "profileId": profile_id,
+                            "modelId": model["id"],
+                            "displayName": model["displayName"],
+                            "capabilities": model["capabilities"],
+                            "enabled": true
+                        }
+                    }))
+                    .expect("model update response should be valid");
+                assert_eq!(updated["ok"], true);
+            }
+
+            for adapter_key in [
+                "TEXT_TO_IMAGE:unicompapi:qwen-image:v1",
+                "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
+                "TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
+                "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
+            ] {
+                let selection =
+                    resolve_media_selection(adapter_key, Some(profile_id), None, &state)
+                        .expect("enabled exact-capability model should resolve");
+                assert_eq!(selection.credential_subject, profile_id);
+                assert_eq!(selection.provider_region, "unicompapi");
+            }
+            assert!(resolve_media_selection(
+                "TEXT_TO_VIDEO:unicompapi:qwen-image:v1",
+                Some(profile_id),
+                None,
+                &state
+            )
+            .is_err());
+        }
+
+        remove_dir_all(&app_data_dir).expect("temporary app data directory should be removed");
+    }
+
+    #[test]
     fn provider_bridge_is_bound_to_an_exact_adapter_and_injects_its_model() {
         let target = provider_target("START_END_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("known adapter should resolve");

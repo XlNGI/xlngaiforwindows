@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-M0–M4 的代码与自动化修复门禁已通过，M5 尚未开始。当前包含 Tauri 桌面端、Node Worker、IPC v1、SQLite Schema v3、项目生命周期、版本化及分作用域文档、场次/镜头、三级会话、上下文来源追踪、带超时的 OpenAI Responses API 流式生成、Vidu Adapter Registry、Schema 动态表单、镜头参数草稿和 Windows Credential Manager 原生请求桥。
+M0–M7 的代码和自动化门禁已完成。当前包含 Tauri 桌面端、Node Worker、IPC v1、SQLite 项目容器、版本化及分作用域文档、场次/镜头、三级会话、上下文来源追踪、流式 LLM、Vidu 与 UniCompAPI Adapter Registry、搜索式模型管理、Schema 动态表单、图片/视频生成生命周期、本地素材归档和 Windows Credential Manager 原生请求桥。
 
-里程碑最终签收仍为 `HOLD`：NSIS 干净 Windows 安装、真实 OpenAI 和真实 Vidu 请求尚未验证。未配置真实凭据时不会自动发送外部请求。
+里程碑最终签收仍为 `HOLD`：正式签名、真实旧版本升级、当前发布候选的真实 OpenAI/UniCompAPI 请求和剩余人工发布检查尚未完成。未配置真实凭据时不会自动发送外部请求。
 
 已确认的核心边界：
 
@@ -15,7 +15,7 @@ M0–M4 的代码与自动化修复门禁已通过，M5 尚未开始。当前包
 - Node.js/TypeScript 本地 Worker 负责 LLM、厂商适配器和异步任务轮询。
 - LLM 不自动填写厂商 API 表单，也不直接提交生产任务。
 - 用户选择“生产方式 + 供应商 + 模型”后锁定适配器、API 版本和参数 Schema。
-- Vidu 密钥由 Rust 从 Windows Credential Manager 读取并直接用于固定白名单 HTTPS 请求，不返回 React，也不进入 Node Worker IPC。
+- Vidu 和 UniCompAPI 密钥由 Rust 从 Windows Credential Manager 读取并直接用于固定白名单 HTTPS 请求，不返回 React，也不进入 Node Worker IPC。
 - 同步生图接口直接等待响应；异步视频接口保存任务 ID 并在本地轮询。
 - 纯本地版本不提供公网 `callback_url`。
 
@@ -25,6 +25,7 @@ M0–M4 的代码与自动化修复门禁已通过，M5 尚未开始。当前包
 - [实施计划](docs/IMPLEMENTATION-PLAN.md)
 - [工程质量门禁](docs/QUALITY-GATES.md)
 - [M4 适配器与动态参数](docs/M4-ADAPTERS-PARAMETERS.md)
+- [UniCompAPI 集成与验收](docs/UNICOMPAPI-INTEGRATION.md)
 
 ## 开发
 
