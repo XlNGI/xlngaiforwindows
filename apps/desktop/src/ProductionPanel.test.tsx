@@ -514,6 +514,79 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('UniCompAPI A · UniCompAPI · API v1')).toBeInTheDocument();
   });
 
+  it('refreshes provider connections after settings changes without remounting', async () => {
+    const unicompProfile: ProviderProfileInfo = {
+      ...providerProfile,
+      id: '11111111-1111-4111-8111-111111111114',
+      name: 'UniCompAPI A',
+      providerType: 'unicompapi',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    };
+    const unicompDescriptor: AdapterDescriptor = {
+      ...descriptor,
+      key: 'TEXT_TO_IMAGE:unicompapi:qwen-image:v1',
+      provider: 'unicompapi',
+      providerLabel: 'UniCompAPI',
+      model: 'qwen-image',
+      modelLabel: 'qwen-image',
+      apiVersion: 'v1',
+      endpoint: 'https://unicompapi.com/v1/images/generations',
+      credentialProvider: 'unicompapi',
+    };
+    const unicompModel: ProviderModelInfo = {
+      ...providerModels[0]!,
+      id: '21111111-1111-4111-8111-111111111117',
+      providerProfileId: unicompProfile.id,
+      remoteModelId: 'qwen-image',
+      displayName: 'qwen-image',
+    };
+    const mixedCatalog: AdapterCatalogResult = {
+      ...catalog,
+      providers: [...catalog.providers, { key: 'unicompapi', label: 'UniCompAPI' }],
+      adapters: [descriptor, unicompDescriptor],
+    };
+    let profileListCalls = 0;
+    let modelListCalls = 0;
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(mixedCatalog);
+      if (method === 'provider.profile.list') {
+        profileListCalls += 1;
+        return Promise.resolve(profileListCalls === 1 ? [] : [unicompProfile]);
+      }
+      if (method === 'provider.model.list') {
+        modelListCalls += 1;
+        return Promise.resolve(
+          (params as { profileId: string }).profileId === unicompProfile.id && modelListCalls > 1
+            ? [unicompModel]
+            : [],
+        );
+      }
+      if (method === 'adapter.resolve') return Promise.resolve(unicompDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    const { rerender } = render(
+      <ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={0} writable />,
+    );
+    expect(await screen.findByRole('option', { name: '没有可用连接' })).toBeInTheDocument();
+
+    rerender(
+      <ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={1} writable />,
+    );
+    const profileSelect = await screen.findByLabelText('供应商连接');
+    expect(await screen.findByRole('option', { name: 'UniCompAPI A · UniCompAPI' })).toBeInTheDocument();
+    fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
+
+    expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
+    rerender(
+      <ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={2} writable />,
+    );
+    expect(await screen.findByRole('option', { name: 'qwen-image' })).toBeInTheDocument();
+  });
+
   it('uses the full adapter key and locks the API version during resolution', async () => {
     const v3 = { ...descriptor, key: 'TEXT_TO_IMAGE:vidu:viduq2:v3', apiVersion: 'v3' };
     mockWorker((method, params) => {

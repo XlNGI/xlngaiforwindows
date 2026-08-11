@@ -148,6 +148,7 @@ export function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [startupLoaded, setStartupLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [providerSettingsRevision, setProviderSettingsRevision] = useState(0);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
   const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
   const [productionCapability, setProductionCapability] = useState<GenerationCapability>(
@@ -220,6 +221,11 @@ export function App() {
   };
 
   const writable = project?.mode === 'read-write';
+
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    setProviderSettingsRevision((revision) => revision + 1);
+  };
   const scopeId = scopeType === 'scene' ? scene?.id : scopeType === 'shot' ? shot?.id : undefined;
   const scopeAvailable = scopeType === 'project' || Boolean(scopeId);
   const selectedLlmProfile = llmProfiles.find((profile) => profile.id === selectedLlmProfileId);
@@ -1173,7 +1179,7 @@ export function App() {
       {settingsOpen && (
         <SettingsCenter
           initialPage={settingsInitialPage}
-          onClose={() => setSettingsOpen(false)}
+          onClose={closeSettings}
           maintenance={
             <MaintenanceDialog
               embedded
@@ -1187,7 +1193,7 @@ export function App() {
               diagnosticDestination={diagnosticDestination}
               restoreBackupPath={restoreBackupPath}
               restoreDestination={restoreDestination}
-              onClose={() => setSettingsOpen(false)}
+              onClose={closeSettings}
               onIntegrity={() => void checkIntegrity()}
               onBackup={() => void backupProject()}
               onExportDestinationChange={setExportDestination}
@@ -1736,6 +1742,7 @@ export function App() {
           setView('assets');
         }}
         onOpenProviderSettings={() => openSettings('providers')}
+        providerSettingsRevision={providerSettingsRevision}
       />
 
       <ChatPanel

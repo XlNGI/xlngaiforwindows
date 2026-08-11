@@ -62,6 +62,7 @@ interface ProductionPanelProps {
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
   onOpenAssetLibrary?: (assetId?: string) => void;
   onOpenProviderSettings?: () => void;
+  providerSettingsRevision?: number;
 }
 
 const AUTO_SAVE_STORAGE_KEY = 'ai-video.image-auto-save-local';
@@ -194,6 +195,7 @@ export function ProductionPanel({
   onAssetsChanged,
   onOpenAssetLibrary,
   onOpenProviderSettings,
+  providerSettingsRevision = 0,
 }: ProductionPanelProps) {
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
@@ -245,13 +247,20 @@ export function ProductionPanel({
   }, [autoSaveLocal]);
 
   useEffect(() => {
+    let active = true;
     void Promise.all([callWorker('adapter.catalog', {}), callWorker('provider.profile.list', {})])
       .then(([nextCatalog, nextProfiles]) => {
+        if (!active) return;
         setCatalog(nextCatalog);
         setProfiles(nextProfiles ?? []);
       })
-      .catch((reason) => setMessage(errorMessage(reason, '适配器目录读取失败')));
-  }, []);
+      .catch((reason) => {
+        if (active) setMessage(errorMessage(reason, '适配器目录读取失败'));
+      });
+    return () => {
+      active = false;
+    };
+  }, [providerSettingsRevision]);
 
   const eligibleProfiles = useMemo(
     () =>
@@ -313,7 +322,7 @@ export function ProductionPanel({
     return () => {
       active = false;
     };
-  }, [selectedProfileId]);
+  }, [providerSettingsRevision, selectedProfileId]);
 
   useEffect(() => {
     const selected = catalog?.adapters.find((item) => item.key === adapterKey);
