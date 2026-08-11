@@ -249,7 +249,7 @@ describe('adapter registry', () => {
       catalog.adapters.find(
         (adapter) => adapter.key === 'REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1',
       ),
-    ).toMatchObject({ endpoint: 'https://unicompapi.com/v1/images/edits' });
+    ).toMatchObject({ endpoint: 'https://unicompapi.com/v1/images/edits/' });
     expect(
       catalog.adapters.some((adapter) => adapter.model === 'happyhorse-1.0-video-edit'),
     ).toBe(false);

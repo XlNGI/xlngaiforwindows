@@ -672,7 +672,7 @@ function unicompApiAdapters(): AdapterDescriptor[] {
         key: `REFERENCE_TO_IMAGE:unicompapi:${model.model}:v1`,
         capability: 'REFERENCE_TO_IMAGE',
         capabilityLabel: '图片编辑',
-        endpoint: 'https://unicompapi.com/v1/images/edits',
+        endpoint: 'https://unicompapi.com/v1/images/edits/',
         parameterSchema: unicompImageEditSchema,
         uiSchema: {
           fields: [
