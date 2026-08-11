@@ -77,7 +77,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 以下步骤会产生真实请求或费用，只能由用户使用自己的凭据执行：
 
-- [ ] 添加 UniCompAPI，只填写 API Key，确认连接测试和模型同步成功。
+- [x] 添加 UniCompAPI，只填写 API Key，确认连接测试和模型同步成功（2026-08-11 用户人工确认 `/v1/models` 可正常访问并显示全部模型）。
 - [ ] 搜索一个已知模型和一个未知模型，确认未知模型默认关闭且无生产入口。
 - [ ] 使用一个聊天模型完成一次流式 Chat，记录模型 ID 和 HTTP 结果，不记录密钥或正文。
 - [ ] 使用 `qwen-image` 或 `doubao-seedream-5-0-260128` 完成一次生图并保存到素材库。
