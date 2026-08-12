@@ -328,7 +328,7 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText(/草稿已保存/)).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '普通素材' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '角色' })).toBeInTheDocument();
-    expect(screen.getByLabelText('自动保存到本地素材库')).toBeChecked();
+    expect(screen.queryByLabelText('自动保存到本地素材库')).not.toBeInTheDocument();
   });
 
   it('merges current schema defaults into an older saved draft', async () => {
@@ -594,17 +594,15 @@ describe('ProductionPanel', () => {
     );
     expect(await screen.findByRole('option', { name: '没有可用连接' })).toBeInTheDocument();
 
-    rerender(
-      <ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={1} writable />,
-    );
+    rerender(<ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={1} writable />);
     const profileSelect = await screen.findByLabelText('供应商连接');
-    expect(await screen.findByRole('option', { name: 'UniCompAPI A · UniCompAPI' })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('option', { name: 'UniCompAPI A · UniCompAPI' }),
+    ).toBeInTheDocument();
     fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
 
     expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
-    rerender(
-      <ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={2} writable />,
-    );
+    rerender(<ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={2} writable />);
     expect(await screen.findByRole('option', { name: 'qwen-image' })).toBeInTheDocument();
   });
 
@@ -759,7 +757,7 @@ describe('ProductionPanel', () => {
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'image.generate.complete',
-        expect.objectContaining({ jobId: 'job', assetKind: 'generated-image', saveAsset: true }),
+        expect.objectContaining({ jobId: 'job', assetKind: 'generated-image' }),
       ),
     );
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
@@ -778,7 +776,7 @@ describe('ProductionPanel', () => {
     expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedAsset.id);
   });
 
-  it('keeps an unsaved preview after clearing a previously selected asset', async () => {
+  it('selects the automatically saved result after clearing a previously selected asset', async () => {
     const priorAsset: AssetInfo = {
       ...savedAsset,
       id: 'asset-prior',
@@ -812,21 +810,33 @@ describe('ProductionPanel', () => {
           adapterKey: descriptor.key,
           status: 'succeeded',
           request: { prompt: '电影画面', resolution: '1080p' },
-          results: [],
+          results: [
+            {
+              id: 'result',
+              jobId: 'job',
+              asset: savedAsset,
+              createdAt: '2026-08-02T00:00:01.000Z',
+            },
+          ],
           preview: {
             jobId: 'job',
-            dataUrl: 'data:image/png;base64,preview-only',
+            assetId: savedAsset.id,
+            dataUrl: 'data:image/png;base64,asset',
             contentType: 'image/png',
           },
           createdAt: '2026-08-02T00:00:00.000Z',
           updatedAt: '2026-08-02T00:00:01.000Z',
         });
       }
-      if (method === 'asset.list') return Promise.resolve([priorAsset]);
+      if (method === 'asset.list') return Promise.resolve([priorAsset, savedAsset]);
       if (method === 'asset.preview') {
+        const assetId = (params as { assetId: string }).assetId;
         return Promise.resolve({
-          assetId: priorAsset.id,
-          dataUrl: 'data:image/png;base64,prior',
+          assetId,
+          dataUrl:
+            assetId === priorAsset.id
+              ? 'data:image/png;base64,prior'
+              : 'data:image/png;base64,asset',
           contentType: 'image/png',
         });
       }
@@ -834,24 +844,21 @@ describe('ProductionPanel', () => {
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(
-      <ProductionPanel projectId="project" shotId="shot" writable assets={[priorAsset]} />,
-    );
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[priorAsset]} />);
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
     fireEvent.click(await screen.findByText(priorAsset.relativePath));
     expect(await screen.findByRole('img', { name: priorAsset.relativePath })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText('自动保存到本地素材库'));
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
-    expect(await screen.findByText('图片已生成，仅预览，未保存到素材库。')).toBeInTheDocument();
+    expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
       'src',
-      'data:image/png;base64,preview-only',
+      'data:image/png;base64,asset',
     );
-    expect(screen.getByRole('button', { name: '保存到素材库' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '保存到素材库' })).not.toBeInTheDocument();
   });
 
   it('explains why draft save is blocked when no shot is selected', async () => {
@@ -860,8 +867,7 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('请先在左侧选择镜头后再保存草稿。')).toBeInTheDocument();
   });
 
-  it('can generate a preview without saving to the local asset library', async () => {
-    let assetListCalls = 0;
+  it('always saves generated images to the local asset library', async () => {
     vi.mocked(submitProviderRequest).mockResolvedValueOnce({
       status: 200,
       body: { images: [{ url: 'https://example.test/generated.png' }] },
@@ -890,29 +896,12 @@ describe('ProductionPanel', () => {
           adapterKey: descriptor.key,
           status: 'succeeded',
           request: { prompt: '电影画面', resolution: '1080p' },
-          results: [],
-          preview: {
-            jobId: 'job',
-            dataUrl: 'data:image/png;base64,preview-only',
-            contentType: 'image/png',
-          },
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:01.000Z',
-        });
-      }
-      if (method === 'image.generate.savePreview') {
-        return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'succeeded',
-          request: { prompt: '电影画面', resolution: '1080p' },
           results: [
             {
               id: 'result',
               jobId: 'job',
               asset: savedAsset,
-              createdAt: '2026-08-02T00:00:02.000Z',
+              createdAt: '2026-08-02T00:00:01.000Z',
             },
           ],
           preview: {
@@ -922,13 +911,10 @@ describe('ProductionPanel', () => {
             contentType: 'image/png',
           },
           createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:02.000Z',
+          updatedAt: '2026-08-02T00:00:01.000Z',
         });
       }
-      if (method === 'asset.list') {
-        assetListCalls += 1;
-        return Promise.resolve(assetListCalls === 1 ? [] : [savedAsset]);
-      }
+      if (method === 'asset.list') return Promise.resolve([savedAsset]);
       if (method === 'asset.preview') {
         return Promise.resolve({
           assetId: savedAsset.id,
@@ -944,33 +930,20 @@ describe('ProductionPanel', () => {
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
-    fireEvent.click(screen.getByLabelText('自动保存到本地素材库'));
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'image.generate.complete',
-        expect.objectContaining({ jobId: 'job', saveAsset: false }),
+        expect.objectContaining({ jobId: 'job' }),
       ),
     );
-    expect(await screen.findByText('图片已生成，仅预览，未保存到素材库。')).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
-      'src',
-      'data:image/png;base64,preview-only',
-    );
-    expect(screen.queryByText(savedAsset.relativePath)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: '保存到素材库' }));
-
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('image.generate.savePreview', {
-        jobId: 'job',
-        dataUrl: 'data:image/png;base64,preview-only',
-        contentType: 'image/png',
-        assetKind: 'generated-image',
-      }),
-    );
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
+      'src',
+      'data:image/png;base64,asset',
+    );
+    expect(screen.getAllByText(savedAsset.relativePath).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
   });
 
@@ -1080,6 +1053,77 @@ describe('ProductionPanel', () => {
       providerTaskId: 'provider-task',
     });
     expect(await screen.findByText('视频任务已提交，正在本地查询。')).toBeInTheDocument();
+  });
+
+  it('stores dropped asset references in the draft and resolves them for submission', async () => {
+    vi.mocked(submitVideoProviderTask).mockResolvedValue({
+      status: 200,
+      taskId: 'provider-task',
+      state: 'created',
+    });
+    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
+    mockWorker((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'generation.draft.save')
+        return Promise.resolve({
+          id: 'draft',
+          shotId: 'shot',
+          adapterKey: videoDescriptor.key,
+          parameters: (params as { parameters: object }).parameters,
+          updatedAt: '2026-08-01T12:00:00.000Z',
+        });
+      if (method === 'asset.preview') {
+        const id = (params as { assetId: string }).assetId;
+        return Promise.resolve({
+          assetId: id,
+          dataUrl: `data:image/png;base64,${id}`,
+          contentType: 'image/png',
+        });
+      }
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
+      if (method === 'video.generate.attachTask') return Promise.resolve(videoJob('polling'));
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    const target = (await screen.findByLabelText(/首帧与尾帧/)).closest('.asset-drop-target')!;
+    const payload = JSON.stringify({
+      version: 1,
+      projectId: 'project',
+      assets: [
+        { id: 'asset-start', kind: 'generated-image' },
+        { id: 'asset-end', kind: 'generated-image' },
+      ],
+    });
+    fireEvent.drop(target, {
+      dataTransfer: {
+        getData: (type: string) => (type === 'application/x-ai-video-asset+json' ? payload : ''),
+      },
+    });
+    expect(await screen.findAllByText('素材库图片')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+    await waitFor(() => {
+      const saveCall = vi
+        .mocked(callWorker)
+        .mock.calls.find(([method]) => method === 'generation.draft.save');
+      expect(saveCall?.[1]).toMatchObject({
+        parameters: { images: ['asset://asset-start', 'asset://asset-end'] },
+      });
+    });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(submitVideoProviderTask).toHaveBeenCalledWith(
+        videoDescriptor.key,
+        expect.objectContaining({
+          images: ['data:image/png;base64,asset-start', 'data:image/png;base64,asset-end'],
+        }),
+        providerProfile.id,
+        'cn',
+      ),
+    );
   });
 
   it('selects ordered local start and end frames and submits Data URLs once', async () => {
@@ -1275,7 +1319,11 @@ describe('ProductionPanel', () => {
       if (method === 'asset.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([polling]);
       if (method === 'video.generate.observe') {
-        return Promise.resolve({ ...polling, status: 'failed' as const, error: 'fixture terminal' });
+        return Promise.resolve({
+          ...polling,
+          status: 'failed' as const,
+          error: 'fixture terminal',
+        });
       }
       throw new Error(`Unexpected method ${method}`);
     });

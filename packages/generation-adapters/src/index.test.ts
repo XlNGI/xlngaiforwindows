@@ -237,8 +237,7 @@ describe('adapter registry', () => {
     const catalog = getAdapterCatalog();
     expect(
       catalog.adapters.find(
-        (adapter) =>
-          adapter.key === 'TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1',
+        (adapter) => adapter.key === 'TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1',
       ),
     ).toMatchObject({
       provider: 'unicompapi',
@@ -250,9 +249,9 @@ describe('adapter registry', () => {
         (adapter) => adapter.key === 'REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1',
       ),
     ).toMatchObject({ endpoint: 'https://unicompapi.com/v1/images/generations' });
-    expect(
-      catalog.adapters.some((adapter) => adapter.model === 'happyhorse-1.0-video-edit'),
-    ).toBe(false);
+    expect(catalog.adapters.some((adapter) => adapter.model === 'happyhorse-1.0-video-edit')).toBe(
+      false,
+    );
     expect(() =>
       resolveAdapter({ capability: 'TEXT_TO_VIDEO', provider: 'unicompapi', model: 'qwen-image' }),
     ).toThrow('No adapter matches');
@@ -284,9 +283,7 @@ describe('adapter registry', () => {
 
   it('requires a defaulted size only for the qwen-image model family', () => {
     const qwen = getAdapter('TEXT_TO_IMAGE:unicompapi:qwen-image:v1');
-    const seedream = getAdapter(
-      'TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1',
-    );
+    const seedream = getAdapter('TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1');
     expect(qwen?.parameterSchema.required).toContain('size');
     expect(qwen?.parameterSchema.properties.size?.default).toBe('1024x1024');
     expect(seedream?.parameterSchema.required).not.toContain('size');

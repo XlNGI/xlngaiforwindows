@@ -700,7 +700,10 @@ function unicompApiAdapters(): AdapterDescriptor[] {
 }
 
 function unicompVideoAdapter(
-  common: Omit<AdapterDescriptor, 'key' | 'capability' | 'capabilityLabel' | 'endpoint' | 'parameterSchema' | 'uiSchema'>,
+  common: Omit<
+    AdapterDescriptor,
+    'key' | 'capability' | 'capabilityLabel' | 'endpoint' | 'parameterSchema' | 'uiSchema'
+  >,
   model: string,
   capability: 'TEXT_TO_VIDEO' | 'IMAGE_TO_VIDEO',
   imageRequired: boolean,

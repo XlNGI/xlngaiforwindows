@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { authorizeDevHttpRequest, createDevHttpToken } from './dev-http-security.js';
+import {
+  authorizeDevHttpMediaRequest,
+  authorizeDevHttpRequest,
+  createDevHttpToken,
+} from './dev-http-security.js';
 
 describe('development HTTP Worker security', () => {
   it('creates independent 256-bit session tokens', () => {
@@ -47,6 +51,16 @@ describe('development HTTP Worker security', () => {
         { origin: 'http://127.0.0.1:1420', contentType: 'application/json' },
         token,
       ),
+    ).toMatchObject({ ok: false, status: 403 });
+  });
+
+  it('authorizes media reads with the allowed origin and current token', () => {
+    const token = createDevHttpToken();
+    expect(authorizeDevHttpMediaRequest({ origin: 'http://127.0.0.1:1420', token }, token)).toEqual(
+      { ok: true, status: 200 },
+    );
+    expect(
+      authorizeDevHttpMediaRequest({ origin: 'https://malicious.example', token }, token),
     ).toMatchObject({ ok: false, status: 403 });
   });
 });

@@ -805,6 +805,11 @@ export interface AssetInfo {
   contentHash: string;
   sizeBytes: number;
   sourceUrl?: string;
+  alias?: string;
+  updatedAt?: string;
+  deletedAt?: string;
+  trashRelativePath?: string;
+  tags?: AssetTagInfo[];
   createdAt: string;
 }
 
@@ -962,6 +967,14 @@ export interface VideoGenerationJobParams {
 
 export interface AssetListParams {
   kind?: string;
+  keyword?: string;
+  deleted?: 'active' | 'trash';
+  createdFrom?: string;
+  createdTo?: string;
+  limit?: number;
+  tagIds?: string[];
+  sort?: 'created-asc' | 'created-desc';
+  cursor?: string;
 }
 
 export interface AssetRenameParams {
@@ -969,12 +982,97 @@ export interface AssetRenameParams {
   name: string;
 }
 
+export interface AssetAliasUpdateParams {
+  assetId: string;
+  alias: string;
+}
+
+export interface AssetTagInfo {
+  id: string;
+  projectId: string;
+  name: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  assetCount?: number;
+}
+export interface AssetGroupInfo {
+  id: string;
+  projectId: string;
+  name: string;
+  tagIds: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  assetCount?: number;
+}
+export interface AssetTagListParams {
+  keyword?: string;
+}
+export interface AssetTagCreateParams {
+  name: string;
+}
+export interface AssetTagUpdateParams {
+  tagId: string;
+  name: string;
+}
+export interface AssetTagDeleteParams {
+  tagId: string;
+}
+export interface AssetTagAssignmentParams {
+  assetIds: string[];
+  tagIds: string[];
+}
+export interface AssetGroupListParams {
+  keyword?: string;
+}
+export interface AssetGroupCreateParams {
+  name: string;
+  tagIds: string[];
+}
+export interface AssetGroupUpdateParams {
+  groupId: string;
+  name: string;
+  tagIds: string[];
+}
+export interface AssetGroupDeleteParams {
+  groupId: string;
+}
+export interface AssetGroupResolveParams {
+  groupId: string;
+}
+
 export interface AssetDeleteParams {
+  assetId: string;
+  confirm?: boolean;
+}
+
+export interface AssetDeleteResult {
+  deleted: true;
+  referenceCount: number;
+}
+
+export interface AssetPurgeParams {
+  assetId: string;
+  confirm: boolean;
+}
+
+export interface AssetRestoreParams {
   assetId: string;
 }
 
 export interface AssetPreviewParams {
   assetId: string;
+}
+
+export interface AssetMediaSourceParams {
+  assetId: string;
+}
+
+export interface AssetMediaSourceInfo {
+  assetId: string;
+  path: string;
+  contentType: string;
 }
 
 export interface AssetRevealParams {
@@ -987,6 +1085,12 @@ export interface AssetOpenParams {
 
 export interface AssetRevealResult {
   path: string;
+}
+
+export interface AssetSourceInfo {
+  assetId: string;
+  jobId: string;
+  shotId?: string;
 }
 
 export interface WorkerMethodMap {
@@ -1204,10 +1308,27 @@ export interface WorkerMethodMap {
   };
   'asset.list': { params: AssetListParams; result: AssetInfo[] };
   'asset.preview': { params: AssetPreviewParams; result: ImagePreviewInfo };
+  'asset.mediaSource': { params: AssetMediaSourceParams; result: AssetMediaSourceInfo };
   'asset.open': { params: AssetOpenParams; result: AssetRevealResult };
   'asset.reveal': { params: AssetRevealParams; result: AssetRevealResult };
   'asset.rename': { params: AssetRenameParams; result: AssetInfo };
-  'asset.delete': { params: AssetDeleteParams; result: { deleted: true } };
+  'asset.alias.update': { params: AssetAliasUpdateParams; result: AssetInfo };
+  'asset.delete': { params: AssetDeleteParams; result: AssetDeleteResult };
+  'asset.restore': { params: AssetRestoreParams; result: AssetInfo };
+  'asset.purge': { params: AssetPurgeParams; result: { purged: true } };
+  'asset.source.locate': { params: AssetPreviewParams; result: AssetSourceInfo };
+  'tag.list': { params: AssetTagListParams; result: AssetTagInfo[] };
+  'tag.create': { params: AssetTagCreateParams; result: AssetTagInfo };
+  'tag.update': { params: AssetTagUpdateParams; result: AssetTagInfo };
+  'tag.delete': { params: AssetTagDeleteParams; result: { deleted: true } };
+  'asset.tags.replace': { params: AssetTagAssignmentParams; result: AssetInfo[] };
+  'asset.tags.add': { params: AssetTagAssignmentParams; result: AssetInfo[] };
+  'asset.tags.remove': { params: AssetTagAssignmentParams; result: AssetInfo[] };
+  'assetGroup.list': { params: AssetGroupListParams; result: AssetGroupInfo[] };
+  'assetGroup.create': { params: AssetGroupCreateParams; result: AssetGroupInfo };
+  'assetGroup.update': { params: AssetGroupUpdateParams; result: AssetGroupInfo };
+  'assetGroup.delete': { params: AssetGroupDeleteParams; result: { deleted: true } };
+  'assetGroup.resolve': { params: AssetGroupResolveParams; result: AssetInfo[] };
 }
 
 export type WorkerMethod = keyof WorkerMethodMap;

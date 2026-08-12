@@ -3,6 +3,8 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   CircleAlert,
   CircleCheck,
+  ChevronDown,
+  ChevronUp,
   Eye,
   FolderOpen,
   ImagePlus,
@@ -59,22 +61,15 @@ interface ProductionPanelProps {
   shotId?: string;
   writable: boolean;
   assets?: AssetInfo[];
+  focusedAssetId?: string;
+  focusedJobId?: string;
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
   onOpenAssetLibrary?: (assetId?: string) => void;
   onOpenProviderSettings?: () => void;
   providerSettingsRevision?: number;
 }
 
-const AUTO_SAVE_STORAGE_KEY = 'ai-video.image-auto-save-local';
 const PROVIDER_PROFILE_STORAGE_KEY = 'ai-video.production-provider-profiles';
-
-function initialAutoSaveLocal(): boolean {
-  try {
-    return window.localStorage.getItem(AUTO_SAVE_STORAGE_KEY) !== 'false';
-  } catch {
-    return true;
-  }
-}
 
 function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
   return Object.fromEntries(
@@ -100,6 +95,32 @@ function errorMessage(reason: unknown, fallback: string): string {
 
 function isVideoAsset(asset: AssetInfo | undefined): boolean {
   return asset?.kind === 'generated-video' || asset?.kind === 'shot-video';
+}
+
+function isAssetReference(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith('asset://') && value.length > 8;
+}
+
+async function resolveAssetReferences(parameters: AdapterParameters): Promise<AdapterParameters> {
+  const resolveValue = async (
+    value: AdapterParameters[string],
+  ): Promise<AdapterParameters[string]> => {
+    if (isAssetReference(value)) {
+      return (await callWorker('asset.preview', { assetId: value.slice(8) })).dataUrl;
+    }
+    if (Array.isArray(value)) {
+      return Promise.all(
+        value.map(async (item) => {
+          if (!isAssetReference(item)) return item;
+          return (await callWorker('asset.preview', { assetId: item.slice(8) })).dataUrl;
+        }),
+      );
+    }
+    return value;
+  };
+  const resolved: AdapterParameters = {};
+  for (const [key, value] of Object.entries(parameters)) resolved[key] = await resolveValue(value);
+  return resolved;
 }
 
 function videoStatusLabel(status: VideoGenerationJobInfo['status']): string {
@@ -192,6 +213,8 @@ export function ProductionPanel({
   shotId,
   writable,
   assets: controlledAssets,
+  focusedAssetId,
+  focusedJobId,
   onAssetsChanged,
   onOpenAssetLibrary,
   onOpenProviderSettings,
@@ -217,7 +240,6 @@ export function ProductionPanel({
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
   const [preview, setPreview] = useState<ImagePreviewInfo>();
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
-  const [autoSaveLocal, setAutoSaveLocal] = useState(initialAutoSaveLocal);
   const [savingPreview, setSavingPreview] = useState(false);
   const videoScheduler = useRef<VideoPollingScheduler | undefined>(undefined);
   const onAssetsChangedRef = useRef(onAssetsChanged);
@@ -239,12 +261,11 @@ export function ProductionPanel({
   currentProjectIdRef.current = projectId;
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(AUTO_SAVE_STORAGE_KEY, autoSaveLocal ? 'true' : 'false');
-    } catch {
-      // Auto-save remains valid for the current session when storage is unavailable.
+    if (focusedAssetId && assets.some((item) => item.id === focusedAssetId)) {
+      setSelectedAssetId(focusedAssetId);
     }
-  }, [autoSaveLocal]);
+    if (focusedJobId) setGenerationJobId(focusedJobId);
+  }, [assets, focusedAssetId, focusedJobId]);
 
   useEffect(() => {
     let active = true;
@@ -685,9 +706,10 @@ export function ProductionPanel({
     setBusy(true);
     setGenerationStatus('');
     try {
+      const submissionParameters = await resolveAssetReferences(parameters);
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
-        parameters,
+        parameters: submissionParameters,
       });
       setErrors(validation.errors);
       if (!validation.valid) {
@@ -697,14 +719,14 @@ export function ProductionPanel({
       const job = await callWorker('image.generate.prepare', {
         shotId,
         adapterKey: adapter.key,
-        parameters,
+        parameters: submissionParameters,
       });
       preparedJobId = job.id;
       setGenerationJobId(job.id);
       setGenerationStatus('正在请求 Provider...');
       const response = await submitProviderRequest(
         adapter.key,
-        parameters,
+        submissionParameters,
         selectedProfile.id,
         providerRegion,
       );
@@ -713,10 +735,8 @@ export function ProductionPanel({
         providerStatus: response.status,
         providerBody: response.body,
         assetKind,
-        saveAsset: autoSaveLocal,
       });
       if (completed.status === 'succeeded' && completed.preview) {
-        if (!autoSaveLocal) setSelectedAssetId(undefined);
         setPreview(completed.preview);
       }
       const savedAsset = completed.results.find((result) => result.asset)?.asset;
@@ -727,9 +747,7 @@ export function ProductionPanel({
       }
       setGenerationStatus(
         completed.status === 'succeeded'
-          ? autoSaveLocal
-            ? '图片已保存到本地素材库。'
-            : '图片已生成，仅预览，未保存到素材库。'
+          ? '图片已保存到本地素材库。'
           : completed.status === 'cancelled'
             ? '已取消图片生成。'
             : (completed.error ?? '生成失败。'),
@@ -763,9 +781,10 @@ export function ProductionPanel({
     setBusy(true);
     setGenerationStatus('');
     try {
+      const submissionParameters = await resolveAssetReferences(parameters);
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
-        parameters,
+        parameters: submissionParameters,
       });
       setErrors(validation.errors);
       if (!validation.valid) {
@@ -775,7 +794,7 @@ export function ProductionPanel({
       const prepared = await callWorker('video.generate.prepare', {
         shotId,
         adapterKey: adapter.key,
-        parameters,
+        parameters: submissionParameters,
         providerRegion,
         providerProfileId: selectedProfile.id,
         modelId: selectedModel.remoteModelId,
@@ -790,7 +809,7 @@ export function ProductionPanel({
       }
       const response = await submitVideoProviderTask(
         adapter.key,
-        parameters,
+        submissionParameters,
         selectedProfile.id,
         providerRegion,
       );
@@ -1014,6 +1033,7 @@ export function ProductionPanel({
                         errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message
                       }
                       onChange={(value) => updateParameter(field.key, value)}
+                      projectId={projectId}
                     />
                   ))}
                 </div>
@@ -1033,6 +1053,7 @@ export function ProductionPanel({
                               ?.message
                           }
                           onChange={(value) => updateParameter(field.key, value)}
+                          projectId={projectId}
                         />
                       ))}
                     </div>
@@ -1115,15 +1136,6 @@ export function ProductionPanel({
                             <option value="first-frame">首帧</option>
                             <option value="last-frame">尾帧</option>
                           </select>
-                        </label>
-                        <label className="auto-save-toggle">
-                          <input
-                            type="checkbox"
-                            checked={autoSaveLocal}
-                            onChange={(event) => setAutoSaveLocal(event.target.checked)}
-                            disabled={busy}
-                          />
-                          自动保存到本地素材库
                         </label>
                       </>
                     )}
@@ -1396,6 +1408,7 @@ interface ParameterFieldProps {
   required: boolean;
   error?: string;
   onChange: (value: AdapterParameters[string] | undefined) => void;
+  projectId?: string;
 }
 
 function ParameterField({
@@ -1405,6 +1418,7 @@ function ParameterField({
   required,
   error,
   onChange,
+  projectId,
 }: ParameterFieldProps) {
   const inputId = `parameter-${field.key}`;
   const [localFiles, setLocalFiles] = useState<Array<LocalImageSelection | undefined>>([]);
@@ -1481,8 +1495,40 @@ function ParameterField({
       }
     };
     const visibleError = selectionError || error;
+    const dropAssets = async (event: React.DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      try {
+        const raw = event.dataTransfer.getData('application/x-ai-video-asset+json');
+        const payload = JSON.parse(raw) as {
+          version?: number;
+          projectId?: string;
+          assets?: Array<{ id: string; kind: string }>;
+        };
+        if (payload.version !== 1 || payload.projectId !== projectId || !payload.assets?.length)
+          throw new Error('只能拖入当前项目的素材。');
+        if (payload.assets.some((item) => item.kind.includes('video')))
+          throw new Error('此参数只接受图片素材。');
+        const maximum = property.maxItems ?? 20;
+        if (payload.assets.length > maximum) throw new Error(`最多可拖入 ${maximum} 项素材。`);
+        await Promise.all(
+          payload.assets.map((item) => callWorker('asset.preview', { assetId: item.id })),
+        );
+        const next = payload.assets.map((item) => `asset://${item.id}`);
+        while (next.length < minimumRows) next.push('');
+        commitItems(next);
+      } catch (reason) {
+        setSelectionError(errorMessage(reason, '素材拖入失败。'));
+      }
+    };
     return (
-      <div className={`parameter-field ${visibleError ? 'invalid' : ''}`}>
+      <div
+        className={`parameter-field asset-drop-target ${visibleError ? 'invalid' : ''}`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+        }}
+        onDrop={(event) => void dropAssets(event)}
+      >
         {label}
         <div className="url-list">
           {items.map((item, index) => {
@@ -1495,11 +1541,17 @@ function ParameterField({
               <div className="url-list-item" key={`${field.key}-${index}`}>
                 {rowLabel && <span className="url-row-role">{rowLabel}</span>}
                 <div className="url-row">
-                  {isLocalImageDataUrl(item) ? (
+                  {isLocalImageDataUrl(item) || isAssetReference(item) ? (
                     <div className="local-image-value" id={index === 0 ? inputId : undefined}>
-                      <img src={item} alt="" />
+                      {isLocalImageDataUrl(item) ? (
+                        <img src={item} alt="" />
+                      ) : (
+                        <ImagePlus size={18} />
+                      )}
                       <span>
-                        <strong>{localFile?.name ?? '本地图片'}</strong>
+                        <strong>
+                          {isAssetReference(item) ? '素材库图片' : (localFile?.name ?? '本地图片')}
+                        </strong>
                         {localFile && <small>{formatBytes(localFile.size)}</small>}
                       </span>
                     </div>
@@ -1541,6 +1593,34 @@ function ParameterField({
                       }}
                     />
                   </label>
+                  <button
+                    className="icon-button subtle"
+                    type="button"
+                    title="上移"
+                    onClick={() => {
+                      if (index === 0) return;
+                      const next = [...items];
+                      [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
+                      commitItems(next);
+                    }}
+                    disabled={index === 0}
+                  >
+                    <ChevronUp size={13} />
+                  </button>
+                  <button
+                    className="icon-button subtle"
+                    type="button"
+                    title="下移"
+                    onClick={() => {
+                      if (index >= items.length - 1) return;
+                      const next = [...items];
+                      [next[index], next[index + 1]] = [next[index + 1]!, next[index]!];
+                      commitItems(next);
+                    }}
+                    disabled={index >= items.length - 1}
+                  >
+                    <ChevronDown size={13} />
+                  </button>
                   <button
                     className="icon-button subtle"
                     type="button"

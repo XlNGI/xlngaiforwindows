@@ -15,18 +15,17 @@ import {
   Image,
   Minus,
   PanelLeftClose,
-  Play,
   Plus,
   RotateCcw,
   Save,
   Settings2,
   Square,
-  Video,
   WandSparkles,
   X,
 } from 'lucide-react';
 import type {
   AssetInfo,
+  AssetSourceInfo,
   CacheInspectionResult,
   ChatMessageInfo,
   ConversationInfo,
@@ -48,7 +47,6 @@ import type {
   SceneInfo,
   ShotInfo,
   SqliteProbeResult,
-  ImagePreviewInfo,
   GenerationCapability,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -58,12 +56,15 @@ import { ChatPanel } from './ChatPanel';
 import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
+import { AssetLibraryView } from './assets/AssetLibraryView';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 
 type CheckState = 'checking' | 'ready' | 'error';
 type WorkspaceView = 'documents' | 'shots' | 'assets';
 type NavigationMode = 'project' | 'production';
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
+
+const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
 
 const PRODUCTION_CAPABILITY_STORAGE_KEY = 'ai-video.production-capability';
 const LLM_SELECTION_STORAGE_KEY = 'ai-video.llm-selection';
@@ -115,10 +116,6 @@ const documentKinds: { value: DocumentKind; label: string }[] = [
   { value: 'storyboard', label: '分镜文档' },
   { value: 'note', label: '创作笔记' },
 ];
-
-function isVideoAsset(asset: AssetInfo | undefined): boolean {
-  return asset?.kind === 'generated-video' || asset?.kind === 'shot-video';
-}
 
 export function mergeGenerationMessage(
   messages: ChatMessageInfo[],
@@ -180,8 +177,8 @@ export function App() {
   const [shot, setShot] = useState<ShotInfo>();
   const [assets, setAssets] = useState<AssetInfo[]>([]);
   const [asset, setAsset] = useState<AssetInfo>();
-  const [assetPreview, setAssetPreview] = useState<ImagePreviewInfo>();
-  const [assetMessage, setAssetMessage] = useState('');
+  const [assetLibrarySelectedId, setAssetLibrarySelectedId] = useState<string>();
+  const [focusedSource, setFocusedSource] = useState<AssetSourceInfo>();
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
@@ -427,6 +424,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return () => undefined;
     const window = getCurrentWindow();
     let active = true;
     const updateMaximized = () => {
@@ -654,7 +652,6 @@ export function App() {
       setScenes([]);
       setAssets([]);
       setAsset(undefined);
-      setAssetPreview(undefined);
       setDocument(undefined);
       setConversation(undefined);
       setMessages([]);
@@ -863,23 +860,6 @@ export function App() {
     setShot(created);
   };
 
-  useEffect(() => {
-    let active = true;
-    setAssetPreview(undefined);
-    setAssetMessage('');
-    if (!asset || isVideoAsset(asset)) return () => undefined;
-    void callWorker('asset.preview', { assetId: asset.id })
-      .then((preview) => {
-        if (active) setAssetPreview(preview);
-      })
-      .catch((reason) => {
-        if (active) setAssetMessage(reason instanceof Error ? reason.message : '素材预览失败');
-      });
-    return () => {
-      active = false;
-    };
-  }, [asset?.id]);
-
   const updateAssets = (nextAssets: AssetInfo[], selectedAssetId?: string) => {
     setAssets(nextAssets);
     const selected =
@@ -887,32 +867,28 @@ export function App() {
       nextAssets.find((item) => item.id === asset?.id) ??
       nextAssets[0];
     setAsset(selected);
+    if (selectedAssetId) setAssetLibrarySelectedId(selectedAssetId);
   };
 
-  const revealAsset = async (selected: AssetInfo | undefined = asset) => {
-    if (!selected) return;
-    try {
-      const result = await callWorker('asset.reveal', { assetId: selected.id });
-      setAssetMessage(`已打开：${result.path}`);
-    } catch (reason) {
-      setAssetMessage(reason instanceof Error ? reason.message : '打开素材位置失败');
+  const openAssetSource = async (source: AssetSourceInfo) => {
+    setFocusedSource(source);
+    setAssetLibrarySelectedId(source.assetId);
+    setAsset(assets.find((item) => item.id === source.assetId));
+    if (source.shotId) {
+      for (const candidateScene of scenes) {
+        const candidateShots = await callWorker('shot.list', { sceneId: candidateScene.id });
+        const sourceShot = candidateShots.find((item) => item.id === source.shotId);
+        if (sourceShot) {
+          setScene(candidateScene);
+          setShots(candidateShots);
+          setShot(sourceShot);
+          break;
+        }
+      }
     }
+    setNavigationMode('production');
+    setContentMessage(`已定位来源任务 ${source.jobId}`);
   };
-
-  const openAsset = async (selected: AssetInfo | undefined = asset) => {
-    if (!selected) return;
-    try {
-      await callWorker('asset.open', { assetId: selected.id });
-      setAssetMessage('已使用本机默认应用打开素材。');
-    } catch (reason) {
-      setAssetMessage(reason instanceof Error ? reason.message : '素材打开失败');
-    }
-  };
-
-  const assetAbsolutePath = (item: AssetInfo): string =>
-    project
-      ? `${project.rootPath.replace(/[\\/]+$/, '')}\\${item.relativePath}`
-      : item.relativePath;
 
   const createConversation = async () => {
     if (!scopeAvailable) return;
@@ -1074,6 +1050,7 @@ export function App() {
         data-tauri-drag-region
         onDoubleClick={(event) => {
           if ((event.target as HTMLElement).closest('button')) return;
+          if (!isTauriRuntime()) return;
           void getCurrentWindow().toggleMaximize();
         }}
       >
@@ -1127,7 +1104,9 @@ export function App() {
             type="button"
             title="最小化"
             aria-label="最小化窗口"
-            onClick={() => void getCurrentWindow().minimize()}
+            onClick={() => {
+              if (isTauriRuntime()) void getCurrentWindow().minimize();
+            }}
           >
             <Minus size={15} />
           </button>
@@ -1135,7 +1114,9 @@ export function App() {
             type="button"
             title={windowMaximized ? '还原' : '最大化'}
             aria-label={windowMaximized ? '还原窗口' : '最大化窗口'}
-            onClick={() => void getCurrentWindow().toggleMaximize()}
+            onClick={() => {
+              if (isTauriRuntime()) void getCurrentWindow().toggleMaximize();
+            }}
           >
             {windowMaximized ? <Copy size={13} /> : <Square size={13} />}
           </button>
@@ -1144,7 +1125,9 @@ export function App() {
             type="button"
             title="关闭"
             aria-label="关闭窗口"
-            onClick={() => void getCurrentWindow().close()}
+            onClick={() => {
+              if (isTauriRuntime()) void getCurrentWindow().close();
+            }}
           >
             <X size={16} />
           </button>
@@ -1368,7 +1351,7 @@ export function App() {
                     className="icon-button subtle"
                     type="button"
                     title="打开素材文件夹"
-                    onClick={() => void revealAsset()}
+                    onClick={() => asset && void callWorker('asset.reveal', { assetId: asset.id })}
                     disabled={!asset}
                   >
                     <FolderOpen size={14} />
@@ -1669,61 +1652,14 @@ export function App() {
               <EmptyWorkspace title={scene ? '还没有镜头' : '还没有场次'} />
             )}
           </>
+        ) : project ? (
+          <AssetLibraryView
+            writable={writable}
+            selectedAssetId={assetLibrarySelectedId}
+            onOpenSource={(source) => void openAssetSource(source)}
+          />
         ) : (
-          <>
-            <div className="workspace-toolbar">
-              <div>
-                <span className="eyebrow">本地素材</span>
-                <h1>{asset ? asset.relativePath.split(/[\\/]/).pop() : '素材库'}</h1>
-              </div>
-              <button
-                className="button secondary"
-                type="button"
-                onClick={() => void revealAsset()}
-                disabled={!asset}
-              >
-                <FolderOpen size={15} />
-                打开位置
-              </button>
-            </div>
-            {project && asset ? (
-              <div className="asset-workspace">
-                <div className="asset-preview-stage">
-                  {isVideoAsset(asset) ? (
-                    <div className="asset-preview-empty video-asset-placeholder">
-                      <Video size={42} />
-                      <span>视频素材</span>
-                      <button
-                        className="button primary"
-                        type="button"
-                        onClick={() => void openAsset(asset)}
-                      >
-                        <Play size={14} />
-                        播放视频
-                      </button>
-                    </div>
-                  ) : assetPreview ? (
-                    <img src={assetPreview.dataUrl} alt={asset.relativePath} />
-                  ) : (
-                    <div className="asset-preview-empty">正在读取预览</div>
-                  )}
-                </div>
-                <div className="asset-detail-panel">
-                  <strong>{asset.relativePath}</strong>
-                  <span>{asset.kind}</span>
-                  <span>{(asset.sizeBytes / 1024).toFixed(1)} KiB</span>
-                  <span title={assetAbsolutePath(asset)}>{assetAbsolutePath(asset)}</span>
-                  <button type="button" onClick={() => void revealAsset(asset)}>
-                    <FolderOpen size={13} />
-                    打开保存位置
-                  </button>
-                </div>
-                {assetMessage && <div className="inline-status">{assetMessage}</div>}
-              </div>
-            ) : (
-              <EmptyWorkspace title={project ? '暂无本地素材' : '请打开一个项目'} />
-            )}
-          </>
+          <EmptyWorkspace title="请打开一个项目" />
         )}
       </main>
 
@@ -1735,9 +1671,12 @@ export function App() {
         shotId={shot?.id}
         writable={writable}
         assets={assets}
+        focusedAssetId={focusedSource?.assetId}
+        focusedJobId={focusedSource?.jobId}
         onAssetsChanged={updateAssets}
         onOpenAssetLibrary={(assetId) => {
           updateAssets(assets, assetId);
+          setAssetLibrarySelectedId(assetId);
           setNavigationMode('project');
           setView('assets');
         }}

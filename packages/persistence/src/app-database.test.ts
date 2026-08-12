@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+﻿import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -36,7 +36,7 @@ describe('app settings database', () => {
     expect(migrateAppDatabase(appDatabase)).toBe(3);
     expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 3 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
-    expect(migrateDatabase(projectDatabase)).toBe(7);
+    expect(migrateDatabase(projectDatabase)).toBe(10);
     expect(getAppSchemaVersion(appDatabase)).toBe(3);
 
     const providerColumns = appDatabase

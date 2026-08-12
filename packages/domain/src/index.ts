@@ -151,7 +151,32 @@ export interface AssetRecord {
   contentHash: string;
   sizeBytes: number;
   sourceUrl?: string;
+  alias?: string;
+  updatedAt?: string;
+  deletedAt?: string;
+  trashRelativePath?: string;
   createdAt: string;
+}
+
+export interface AssetTagRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  normalizedName: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssetGroupRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  normalizedName: string;
+  tagIds: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface GenerationResultRecord {
@@ -339,7 +364,33 @@ export interface AssetRepository {
   save(record: AssetRecord): void;
   get(id: string): AssetRecord | undefined;
   listByProject(projectId: string): AssetRecord[];
+  queryByProject(
+    projectId: string,
+    params: {
+      keyword?: string;
+      kind?: string;
+      deleted?: 'active' | 'trash';
+      createdFrom?: string;
+      createdTo?: string;
+      limit?: number;
+      tagIds?: string[];
+      sort?: 'created-asc' | 'created-desc';
+      cursor?: string;
+    },
+  ): AssetRecord[];
   delete(id: string): void;
+  listTags(projectId: string): AssetTagRecord[];
+  getTag(id: string): AssetTagRecord | undefined;
+  saveTag(record: AssetTagRecord): void;
+  deleteTag(id: string): void;
+  listTagIds(assetId: string): string[];
+  replaceTags(assetId: string, tagIds: string[], createdAt: string): void;
+  countDraftReferences(assetId: string): number;
+  listGroups(projectId: string): AssetGroupRecord[];
+  getGroup(id: string): AssetGroupRecord | undefined;
+  saveGroup(record: AssetGroupRecord): void;
+  deleteGroup(id: string): void;
+  resolveGroup(groupId: string): AssetRecord[];
 }
 
 export interface GenerationDraftRepository {
@@ -356,6 +407,7 @@ export interface JobRepository {
 export interface GenerationResultRepository {
   save(record: GenerationResultRecord): void;
   listByJob(jobId: string): GenerationResultRecord[];
+  findJobIdByAsset(assetId: string): string | undefined;
 }
 
 export interface ProviderProfileRepository {

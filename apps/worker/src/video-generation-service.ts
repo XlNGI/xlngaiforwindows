@@ -254,10 +254,7 @@ export class VideoGenerationService {
 
     let source: string;
     try {
-      source = extractVideoSource(
-        params.providerBody,
-        metadata.providerRegion === 'unicompapi',
-      );
+      source = extractVideoSource(params.providerBody, metadata.providerRegion === 'unicompapi');
     } catch (error) {
       return this.transitionFailure(
         job.id,
@@ -832,8 +829,7 @@ function observedMetadata(
   body: unknown,
 ): VideoJobMetadata {
   const provider = getAdapter(adapterKey)?.provider;
-  const cost =
-    (provider ? extractVideoCost(provider, body) : undefined) ?? metadata.cost;
+  const cost = (provider ? extractVideoCost(provider, body) : undefined) ?? metadata.cost;
   return {
     ...metadata,
     pollAttempts: metadata.pollAttempts + 1,
@@ -880,9 +876,7 @@ function providerState(body: unknown): string | undefined {
 }
 
 function isActiveProviderState(state: string, providerRegion: VideoProviderRegion): boolean {
-  return (
-    ACTIVE_STATES.has(state) || (providerRegion === 'unicompapi' && state === 'unknown')
-  );
+  return ACTIVE_STATES.has(state) || (providerRegion === 'unicompapi' && state === 'unknown');
 }
 
 function providerFailureMessage(body: unknown): string {

@@ -236,7 +236,7 @@ class SqliteModelPricingRepository implements ModelPricingRepository {
   save(record: ModelPricingRecord): void {
     this.database
       .prepare(
-         `INSERT INTO model_pricing
+        `INSERT INTO model_pricing
          (provider_profile_id, model_id, currency, unit_tokens, input_price,
            cached_input_price, output_price, credit_price, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -86,6 +86,18 @@ describe('development HTTP Worker endpoint', () => {
     });
     expect(accepted.status).toBe(200);
     expect(await accepted.json()).toMatchObject({ ok: true, result: { protocolVersion: 1 } });
+
+    expect((await fetch(`http://127.0.0.1:${port}/media/missing`)).status).toBe(403);
+    expect(
+      (
+        await fetch(`http://127.0.0.1:${port}/media/missing`, {
+          headers: {
+            origin: 'http://127.0.0.1:1420',
+            [DEV_HTTP_TOKEN_HEADER]: token,
+          },
+        })
+      ).status,
+    ).toBe(404);
   });
 });
 

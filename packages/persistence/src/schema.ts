@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -237,4 +237,52 @@ CREATE INDEX idx_llm_attempts_project ON llm_generation_attempts(conversation_id
 CREATE INDEX idx_llm_attempts_assistant ON llm_generation_attempts(assistant_message_id, started_at);
 CREATE INDEX idx_llm_attempts_generation ON llm_generation_attempts(generation_id, started_at);
 CREATE INDEX idx_llm_attempts_status ON llm_generation_attempts(status, started_at);
+`;
+
+export const MIGRATION_V8 = `
+ALTER TABLE assets ADD COLUMN alias TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN updated_at TEXT;
+ALTER TABLE assets ADD COLUMN deleted_at TEXT;
+ALTER TABLE assets ADD COLUMN trash_relative_path TEXT;
+UPDATE assets SET updated_at = created_at WHERE updated_at IS NULL;
+CREATE INDEX idx_assets_library ON assets(project_id, deleted_at, created_at, id);
+`;
+
+export const MIGRATION_V9 = `
+CREATE TABLE tags (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT 'local-user',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(project_id, normalized_name)
+);
+CREATE TABLE asset_tag_assignments (
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(asset_id, tag_id)
+);
+CREATE INDEX idx_asset_tags_tag ON asset_tag_assignments(tag_id, asset_id);
+`;
+
+export const MIGRATION_V10 = `
+CREATE TABLE asset_groups (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT 'local-user',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(project_id, normalized_name)
+);
+CREATE TABLE asset_group_tags (
+  group_id TEXT NOT NULL REFERENCES asset_groups(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE RESTRICT,
+  PRIMARY KEY(group_id, tag_id)
+);
+CREATE INDEX idx_asset_group_tags_tag ON asset_group_tags(tag_id, group_id);
 `;

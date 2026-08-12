@@ -161,8 +161,7 @@ function inferUniCompApiCapabilities(modelId: string): ProviderModelCapabilities
   capabilities.reasoning = features.has('text_reasoning');
   capabilities.imageGeneration = features.has('text_to_image');
   capabilities.imageEditing = features.has('image_edit');
-  capabilities.videoGeneration =
-    features.has('text_to_video') || features.has('image_to_video');
+  capabilities.videoGeneration = features.has('text_to_video') || features.has('image_to_video');
   return capabilities;
 }
 

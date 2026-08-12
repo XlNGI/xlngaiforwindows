@@ -6,6 +6,16 @@ import react from '@vitejs/plugin-react';
 
 const developmentWorkerTokenPath = join(tmpdir(), 'ai-video-worker-43120.token');
 
+function addDevelopmentWorkerToken(proxyRequest: { setHeader(name: string, value: string): void }) {
+  proxyRequest.setHeader('origin', 'http://127.0.0.1:1420');
+  try {
+    const token = readFileSync(developmentWorkerTokenPath, 'utf8').trim();
+    if (token) proxyRequest.setHeader('x-ai-video-dev-token', token);
+  } catch {
+    // The Worker may still be starting; the secured endpoint will reject this request.
+  }
+}
+
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
@@ -19,16 +29,18 @@ export default defineConfig({
     proxy: {
       '/worker-rpc': {
         target: 'http://127.0.0.1:43120',
+        changeOrigin: true,
         rewrite: () => '/rpc',
         configure(proxy) {
-          proxy.on('proxyReq', (proxyRequest) => {
-            try {
-              const token = readFileSync(developmentWorkerTokenPath, 'utf8').trim();
-              if (token) proxyRequest.setHeader('x-ai-video-dev-token', token);
-            } catch {
-              // The Worker may still be starting; the secured endpoint will reject this request.
-            }
-          });
+          proxy.on('proxyReq', addDevelopmentWorkerToken);
+        },
+      },
+      '/worker-media': {
+        target: 'http://127.0.0.1:43120',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/worker-media/, '/media'),
+        configure(proxy) {
+          proxy.on('proxyReq', addDevelopmentWorkerToken);
         },
       },
     },

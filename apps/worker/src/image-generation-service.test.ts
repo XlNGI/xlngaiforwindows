@@ -1,5 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -109,6 +109,11 @@ describe('ImageGenerationService', () => {
       contentType: 'image/png',
     });
     expect(service.previewAsset({ assetId: asset.id }).dataUrl).toMatch(/^data:image\/png;base64,/);
+    expect(service.assetMediaSource({ assetId: asset.id })).toMatchObject({
+      assetId: asset.id,
+      contentType: 'image/png',
+      path: join(project.current()!.rootPath, asset.relativePath),
+    });
 
     const revealed = service.revealAsset({ assetId: asset.id });
 
@@ -122,7 +127,67 @@ describe('ImageGenerationService', () => {
     expect(() => service.revealAsset({ assetId: '../outside' })).toThrow('Asset was not found.');
   });
 
-  it('can return a preview without saving a local asset', async () => {
+  it('creates a rebuildable hash-keyed preview cache', async () => {
+    const { project, service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const asset = (
+      await service.complete({
+        jobId: job.id,
+        providerStatus: 200,
+        providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+      })
+    ).results[0]!.asset!;
+    service.previewAsset({ assetId: asset.id });
+    const cachePath = join(
+      project.current()!.rootPath,
+      'cache',
+      'thumbnails',
+      `${asset.contentHash}.png`,
+    );
+    expect(existsSync(cachePath)).toBe(true);
+    expect(readFileSync(cachePath)).toEqual(
+      readFileSync(join(project.current()!.rootPath, asset.relativePath)),
+    );
+  });
+
+  it('returns a validated local media source for video preview', async () => {
+    const { project, service } = await setup();
+    const current = project.current()!;
+    const relativePath = join('assets', 'videos', 'preview.mp4');
+    const absolutePath = join(current.rootPath, relativePath);
+    writeFileSync(absolutePath, Buffer.from('video fixture'));
+    project.access(true, (database) => {
+      database
+        .prepare(
+          `INSERT INTO assets
+             (id, project_id, kind, relative_path, content_hash, size_bytes, created_at,
+              alias, updated_at, deleted_at, trash_relative_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+        )
+        .run(
+          'video-preview',
+          current.id,
+          'generated-video',
+          relativePath,
+          'video-hash',
+          13,
+          current.createdAt,
+          '',
+          current.createdAt,
+        );
+    });
+
+    expect(service.assetMediaSource({ assetId: 'video-preview' })).toEqual({
+      assetId: 'video-preview',
+      path: absolutePath,
+      contentType: 'video/mp4',
+    });
+  });
+
+  it('always saves successful generated images to the local asset library', async () => {
     const { project, service } = await setup();
     const job = service.prepare({
       adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
@@ -133,26 +198,17 @@ describe('ImageGenerationService', () => {
       jobId: job.id,
       providerStatus: 200,
       providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
-      saveAsset: false,
     });
 
     expect(result.status).toBe('succeeded');
-    expect(result.results).toHaveLength(0);
-    expect(result.preview).toMatchObject({ jobId: job.id, contentType: 'image/png' });
-    expect(service.listAssets({})).toHaveLength(0);
-
-    const saved = service.savePreview({
-      jobId: job.id,
-      dataUrl: result.preview!.dataUrl,
-      contentType: result.preview!.contentType,
-      assetKind: 'character',
+    expect(result.results[0]?.asset).toBeDefined();
+    expect(result.preview).toMatchObject({
+      assetId: result.results[0]?.asset?.id,
+      contentType: 'image/png',
     });
-
-    expect(saved.results).toHaveLength(1);
-    expect(saved.results[0]?.asset).toMatchObject({ kind: 'character' });
-    expect(service.listAssets({ kind: 'character' })).toHaveLength(1);
+    expect(service.listAssets({})).toHaveLength(1);
     expect(
-      existsSync(join(project.current()!.rootPath, saved.results[0]!.asset!.relativePath)),
+      existsSync(join(project.current()!.rootPath, result.results[0]!.asset!.relativePath)),
     ).toBe(true);
   });
 
@@ -367,8 +423,8 @@ describe('ImageGenerationService', () => {
     const assetPath = join(project.current()!.rootPath, asset.relativePath);
     project.access(true, (database) => {
       database.exec(`
-        CREATE TRIGGER reject_generated_asset_delete
-        BEFORE DELETE ON assets
+        CREATE TRIGGER reject_generated_asset_update
+        BEFORE UPDATE OF deleted_at ON assets
         BEGIN
           SELECT RAISE(ABORT, 'injected asset delete failure');
         END;
@@ -378,6 +434,145 @@ describe('ImageGenerationService', () => {
     expect(() => service.deleteAsset(asset.id)).toThrow('injected asset delete failure');
     expect(existsSync(assetPath)).toBe(true);
     expect(service.listAssets({}).map((item) => item.id)).toContain(asset.id);
+  });
+
+  it('updates an alias without renaming the file and restores trashed assets', async () => {
+    const { project, service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const completed = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const asset = completed.results[0]!.asset!;
+    const originalPath = asset.relativePath;
+    expect(service.updateAssetAlias({ assetId: asset.id, alias: '  Hero Frame  ' })).toMatchObject({
+      alias: 'Hero Frame',
+      relativePath: originalPath,
+    });
+    service.deleteAsset(asset.id);
+    expect(service.listAssets({ deleted: 'active' })).toHaveLength(0);
+    expect(service.listAssets({ deleted: 'trash' })).toHaveLength(1);
+    expect(service.restoreAsset(asset.id)).toMatchObject({
+      relativePath: originalPath,
+      deletedAt: undefined,
+    });
+    expect(existsSync(join(project.current()!.rootPath, originalPath))).toBe(true);
+  });
+
+  it('resolves dynamic asset groups with AND tag semantics', async () => {
+    const { service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const completed = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const asset = completed.results[0]!.asset!;
+    const character = service.createTag('Character');
+    const hero = service.createTag('Hero');
+    service.replaceAssetTags([asset.id], [character.id, hero.id]);
+    const group = service.createGroup('Hero characters', [character.id, hero.id]);
+    expect(service.resolveGroup(group.id).map((item) => item.id)).toEqual([asset.id]);
+    service.replaceAssetTags([asset.id], [character.id]);
+    expect(service.resolveGroup(group.id)).toHaveLength(0);
+  });
+
+  it('returns tag metadata and stable cursor pages with accurate entity counts', async () => {
+    const { project, service } = await setup();
+    const createAsset = async (prompt: string) => {
+      const job = service.prepare({
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        parameters: { prompt, aspect_ratio: '16:9', resolution: '1080p' },
+      });
+      return (
+        await service.complete({
+          jobId: job.id,
+          providerStatus: 200,
+          providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+        })
+      ).results[0]!.asset!;
+    };
+    const first = await createAsset('first');
+    const second = await createAsset('second');
+    project.access(true, (database) => {
+      database
+        .prepare('UPDATE assets SET created_at = ? WHERE id = ?')
+        .run('2026-08-01T00:00:00.000Z', first.id);
+      database
+        .prepare('UPDATE assets SET created_at = ? WHERE id = ?')
+        .run('2026-08-02T00:00:00.000Z', second.id);
+    });
+    const hero = service.createTag('Hero');
+    service.replaceAssetTags([first.id], [hero.id]);
+    const group = service.createGroup('Heroes', [hero.id]);
+
+    expect(service.listTags()[0]).toMatchObject({ id: hero.id, assetCount: 1 });
+    expect(service.listGroups()[0]).toMatchObject({ id: group.id, assetCount: 1 });
+    expect(service.listAssets({ tagIds: [hero.id] })[0]?.tags?.map((tag) => tag.id)).toEqual([
+      hero.id,
+    ]);
+    expect(
+      service
+        .listAssets({
+          cursor: `2026-08-01T00:00:00.000Z|${first.id}`,
+          sort: 'created-asc',
+        })
+        .map((asset) => asset.id),
+    ).toEqual([second.id]);
+    expect(() => service.listAssets({ cursor: 'invalid' })).toThrow('Asset cursor is invalid.');
+  });
+
+  it('requires confirmation for referenced assets and permanently purges trash', async () => {
+    const { project, service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+    const asset = (
+      await service.complete({
+        jobId: job.id,
+        providerStatus: 200,
+        providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+      })
+    ).results[0]!.asset!;
+    project.access(true, (database) => {
+      const shotId = 'shot-for-reference';
+      database
+        .prepare(
+          `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at)
+           VALUES ('scene-for-reference', ?, 'Scene', 0, ?, ?)`,
+        )
+        .run(project.current()!.id, asset.createdAt, asset.createdAt);
+      database
+        .prepare(
+          `INSERT INTO shots (id, scene_id, title, position, status, created_at, updated_at)
+           VALUES (?, 'scene-for-reference', 'Shot', 0, 'draft', ?, ?)`,
+        )
+        .run(shotId, asset.createdAt, asset.createdAt);
+      database
+        .prepare(
+          `INSERT INTO generation_drafts (id, shot_id, adapter_key, parameters_json, updated_at)
+           VALUES ('draft-reference', ?, 'adapter', ?, ?)`,
+        )
+        .run(shotId, JSON.stringify({ assetId: asset.id }), asset.createdAt);
+    });
+
+    expect(() => service.deleteAsset(asset.id)).toThrow('referenced by 1 production draft');
+    expect(service.deleteAsset(asset.id, true)).toEqual({ deleted: true, referenceCount: 1 });
+    const trash = service.listAssets({ deleted: 'trash' })[0]!;
+    const trashPath = join(project.current()!.rootPath, trash.trashRelativePath!);
+    expect(existsSync(trashPath)).toBe(true);
+    expect(() => service.purgeAsset(asset.id, false)).toThrow('requires confirmation');
+    expect(service.purgeAsset(asset.id, true)).toEqual({ purged: true });
+    expect(existsSync(trashPath)).toBe(false);
+    expect(service.listAssets({ deleted: 'trash' })).toHaveLength(0);
   });
 
   it('maps provider HTTP errors to failed jobs', async () => {

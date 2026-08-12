@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { createServer } from 'node:http';
+import { createReadStream, statSync } from 'node:fs';
+import { createServer, type ServerResponse } from 'node:http';
 import { createInterface } from 'node:readline';
+import { IPC_PROTOCOL_VERSION, type AssetMediaSourceInfo } from '@ai-video/contracts';
 import {
+  authorizeDevHttpMediaRequest,
   authorizeDevHttpRequest,
   createDevHttpToken,
   DEV_HTTP_TOKEN_HEADER,
@@ -29,6 +32,41 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
   return typeof value === 'string' ? value : undefined;
 }
 
+function streamMedia(
+  response: ServerResponse,
+  media: AssetMediaSourceInfo,
+  rangeHeader: string | undefined,
+): void {
+  const size = statSync(media.path).size;
+  const match = rangeHeader?.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) {
+    response.writeHead(200, {
+      'accept-ranges': 'bytes',
+      'content-length': size,
+      'content-type': media.contentType,
+    });
+    createReadStream(media.path).pipe(response);
+    return;
+  }
+
+  const requestedStart = match[1] ? Number(match[1]) : undefined;
+  const requestedEnd = match[2] ? Number(match[2]) : undefined;
+  const start = requestedStart ?? Math.max(size - (requestedEnd ?? 0), 0);
+  const end =
+    requestedStart === undefined ? size - 1 : Math.min(requestedEnd ?? size - 1, size - 1);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end) {
+    response.writeHead(416, { 'content-range': `bytes */${size}` }).end();
+    return;
+  }
+  response.writeHead(206, {
+    'accept-ranges': 'bytes',
+    'content-length': end - start + 1,
+    'content-range': `bytes ${start}-${end}/${size}`,
+    'content-type': media.contentType,
+  });
+  createReadStream(media.path, { start, end }).pipe(response);
+}
+
 function startStdio(): void {
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', (line) => {
@@ -54,6 +92,50 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
   const developmentToken = secureDevelopmentMode ? createDevHttpToken() : undefined;
   let developmentTokenPath: string | undefined;
   const server = createServer((request, response) => {
+    const mediaMatch = request.url?.match(/^\/media\/([^/?#]+)$/);
+    if (request.method === 'GET' && mediaMatch && developmentToken) {
+      const authorization = authorizeDevHttpMediaRequest(
+        {
+          origin: singleHeader(request.headers.origin),
+          token: singleHeader(request.headers[DEV_HTTP_TOKEN_HEADER]),
+        },
+        developmentToken,
+      );
+      if (!authorization.ok) {
+        response.writeHead(authorization.status).end();
+        return;
+      }
+      let assetId: string;
+      try {
+        assetId = decodeURIComponent(mediaMatch[1]!);
+      } catch {
+        response.writeHead(400).end();
+        return;
+      }
+      void enqueue(async () => {
+        const result = await handleRequest({
+          id: `dev-media:${assetId}`,
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          method: 'asset.mediaSource',
+          params: { assetId },
+        });
+        if (!result.ok) {
+          response.writeHead(404).end();
+          return;
+        }
+        streamMedia(
+          response,
+          result.result as AssetMediaSourceInfo,
+          singleHeader(request.headers.range),
+        );
+      }).catch((error) => {
+        recordWorkerError('http.media', error);
+        if (!response.headersSent) response.writeHead(404);
+        response.end();
+      });
+      return;
+    }
+
     if (request.method !== 'POST' || request.url !== '/rpc') {
       response.writeHead(404).end();
       return;

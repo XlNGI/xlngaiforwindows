@@ -354,12 +354,11 @@ export class AppSettingsService {
       modelId: model.id,
       currency: normalizeCurrency(params.currency),
       unitTokens: 1_000_000,
-      inputPrice: creditBased
-        ? '0'
-        : normalizeDecimalPrice(params.inputPrice ?? '', 'Input price'),
-      cachedInputPrice: !creditBased && params.cachedInputPrice?.trim()
-        ? normalizeDecimalPrice(params.cachedInputPrice, 'Cached input price')
-        : undefined,
+      inputPrice: creditBased ? '0' : normalizeDecimalPrice(params.inputPrice ?? '', 'Input price'),
+      cachedInputPrice:
+        !creditBased && params.cachedInputPrice?.trim()
+          ? normalizeDecimalPrice(params.cachedInputPrice, 'Cached input price')
+          : undefined,
       outputPrice: creditBased
         ? '0'
         : normalizeDecimalPrice(params.outputPrice ?? '', 'Output price'),
@@ -618,8 +617,7 @@ export function normalizeBaseUrl(value: string): string {
   return url.toString().replace(/\/$/, '');
 }
 
-const UUID_V4_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function requireUuid(value: string): string {
   const normalized = value.toLowerCase();

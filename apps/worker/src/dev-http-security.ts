@@ -64,6 +64,22 @@ export function authorizeDevHttpRequest(
   return { ok: true, status: 200 };
 }
 
+export function authorizeDevHttpMediaRequest(
+  headers: {
+    origin?: string;
+    token?: string;
+  },
+  expectedToken: string,
+): DevHttpAuthorization {
+  if (!headers.origin || !ALLOWED_DEV_ORIGINS.has(headers.origin)) {
+    return { ok: false, status: 403, message: 'Development Worker origin was rejected.' };
+  }
+  if (!headers.token || !tokensMatch(headers.token, expectedToken)) {
+    return { ok: false, status: 403, message: 'Development Worker session was rejected.' };
+  }
+  return { ok: true, status: 200 };
+}
+
 function tokensMatch(value: string, expected: string): boolean {
   const receivedBytes = Buffer.from(value);
   const expectedBytes = Buffer.from(expected);

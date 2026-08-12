@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import type {
   AssetRecord,
+  AssetTagRecord,
+  AssetGroupRecord,
   AssetRepository,
   ChatMessageRecord,
   ChatMessageRepository,
@@ -89,7 +91,7 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
         record.scopeType,
         record.scopeId ?? null,
         record.currentVersionId ?? null,
-        record.createdAt,
+        record.updatedAt ?? record.createdAt,
         record.updatedAt,
       );
   }
@@ -202,7 +204,7 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.projectId,
         record.title,
         record.position,
-        record.createdAt,
+        record.updatedAt ?? record.createdAt,
         record.updatedAt,
       );
   }
@@ -779,12 +781,15 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
     this.database
       .prepare(
         `INSERT INTO assets
-         (id, project_id, kind, relative_path, content_hash, size_bytes, source_url, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         (id, project_id, kind, relative_path, content_hash, size_bytes, source_url, alias,
+          created_at, updated_at, deleted_at, trash_relative_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            kind = excluded.kind, relative_path = excluded.relative_path,
            content_hash = excluded.content_hash, size_bytes = excluded.size_bytes,
-           source_url = excluded.source_url`,
+           source_url = excluded.source_url, alias = excluded.alias,
+           updated_at = excluded.updated_at, deleted_at = excluded.deleted_at,
+           trash_relative_path = excluded.trash_relative_path`,
       )
       .run(
         record.id,
@@ -794,7 +799,11 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         record.contentHash,
         record.sizeBytes,
         record.sourceUrl ?? null,
+        record.alias ?? '',
         record.createdAt,
+        record.updatedAt ?? record.createdAt,
+        record.deletedAt ?? null,
+        record.trashRelativePath ?? null,
       );
   }
 
@@ -812,9 +821,236 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
     ).map(mapAsset);
   }
 
+  queryByProject(
+    projectId: string,
+    params: {
+      keyword?: string;
+      kind?: string;
+      deleted?: 'active' | 'trash';
+      createdFrom?: string;
+      createdTo?: string;
+      limit?: number;
+      tagIds?: string[];
+      sort?: 'created-asc' | 'created-desc';
+      cursor?: string;
+    },
+  ): AssetRecord[] {
+    const where = [
+      'project_id = ?',
+      params.deleted === 'trash' ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL',
+    ];
+    const values: Array<string | number> = [projectId];
+    if (params.kind === 'image') {
+      where.push("kind NOT LIKE '%video%'");
+    } else if (params.kind === 'video') {
+      where.push("kind LIKE '%video%'");
+    } else if (params.kind) {
+      where.push('kind = ?');
+      values.push(params.kind);
+    }
+    if (params.keyword?.trim()) {
+      where.push(
+        `(alias LIKE ? COLLATE NOCASE OR relative_path LIKE ? COLLATE NOCASE OR id IN (
+          SELECT assignment.asset_id
+          FROM asset_tag_assignments assignment
+          JOIN tags tag ON tag.id = assignment.tag_id
+          WHERE tag.project_id = ? AND tag.name LIKE ? COLLATE NOCASE
+        ))`,
+      );
+      const q = `%${params.keyword.trim()}%`;
+      values.push(q, q, projectId, q);
+    }
+    if (params.createdFrom) {
+      where.push('created_at >= ?');
+      values.push(params.createdFrom);
+    }
+    if (params.createdTo) {
+      where.push('created_at <= ?');
+      values.push(params.createdTo);
+    }
+    if (params.tagIds?.length) {
+      const placeholders = params.tagIds.map(() => '?').join(',');
+      where.push(
+        `id IN (SELECT asset_id FROM asset_tag_assignments WHERE tag_id IN (${placeholders}) GROUP BY asset_id HAVING COUNT(DISTINCT tag_id) = ?)`,
+      );
+      values.push(...params.tagIds, params.tagIds.length);
+    }
+    if (params.cursor) {
+      const separator = params.cursor.indexOf('|');
+      if (separator <= 0) throw new Error('Asset cursor is invalid.');
+      const createdAt = params.cursor.slice(0, separator);
+      const id = params.cursor.slice(separator + 1);
+      const operator = params.sort === 'created-desc' ? '<' : '>';
+      where.push(`(created_at ${operator} ? OR (created_at = ? AND id ${operator} ?))`);
+      values.push(createdAt, createdAt, id);
+    }
+    const limit = Math.min(Math.max(params.limit ?? 60, 1), 200);
+    values.push(limit);
+    const direction = params.sort === 'created-desc' ? 'DESC' : 'ASC';
+    return (
+      this.database
+        .prepare(
+          `SELECT * FROM assets WHERE ${where.join(' AND ')} ORDER BY created_at ${direction}, id ${direction} LIMIT ?`,
+        )
+        .all(...values) as AssetRow[]
+    ).map(mapAsset);
+  }
+
   delete(id: string): void {
     this.database.prepare('DELETE FROM assets WHERE id = ?').run(id);
   }
+
+  listTags(projectId: string): AssetTagRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM tags WHERE project_id = ? ORDER BY name, id')
+        .all(projectId) as AssetTagRow[]
+    ).map(mapAssetTag);
+  }
+  getTag(id: string): AssetTagRecord | undefined {
+    const row = this.database.prepare('SELECT * FROM tags WHERE id = ?').get(id) as
+      AssetTagRow | undefined;
+    return row ? mapAssetTag(row) : undefined;
+  }
+  saveTag(record: AssetTagRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO tags (id, project_id, name, normalized_name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, normalized_name=excluded.normalized_name, updated_at=excluded.updated_at`,
+      )
+      .run(
+        record.id,
+        record.projectId,
+        record.name,
+        record.normalizedName,
+        record.createdBy,
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+  deleteTag(id: string): void {
+    this.database.prepare('DELETE FROM tags WHERE id = ?').run(id);
+  }
+  listTagIds(assetId: string): string[] {
+    return (
+      this.database
+        .prepare(
+          'SELECT tag_id AS id FROM asset_tag_assignments WHERE asset_id = ? ORDER BY tag_id',
+        )
+        .all(assetId) as Array<{ id: string }>
+    ).map((row) => row.id);
+  }
+  replaceTags(assetId: string, tagIds: string[], createdAt: string): void {
+    this.database.transaction(() => {
+      this.database.prepare('DELETE FROM asset_tag_assignments WHERE asset_id = ?').run(assetId);
+      const insert = this.database.prepare(
+        'INSERT INTO asset_tag_assignments (asset_id, tag_id, created_at) VALUES (?, ?, ?)',
+      );
+      for (const tagId of [...new Set(tagIds)]) insert.run(assetId, tagId, createdAt);
+    })();
+  }
+  countDraftReferences(assetId: string): number {
+    const row = this.database
+      .prepare(
+        `SELECT COUNT(DISTINCT generation_drafts.id) AS count
+         FROM generation_drafts, json_tree(generation_drafts.parameters_json)
+         WHERE json_tree.type = 'text' AND json_tree.value = ?`,
+      )
+      .get(assetId) as { count: number };
+    return row.count;
+  }
+  listGroups(projectId: string): AssetGroupRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM asset_groups WHERE project_id = ? ORDER BY name, id')
+        .all(projectId) as AssetGroupRow[]
+    ).map((row) => mapAssetGroup(this.database, row));
+  }
+  getGroup(id: string): AssetGroupRecord | undefined {
+    const row = this.database.prepare('SELECT * FROM asset_groups WHERE id = ?').get(id) as
+      AssetGroupRow | undefined;
+    return row ? mapAssetGroup(this.database, row) : undefined;
+  }
+  saveGroup(record: AssetGroupRecord): void {
+    this.database.transaction(() => {
+      this.database
+        .prepare(
+          `INSERT INTO asset_groups (id, project_id, name, normalized_name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, normalized_name=excluded.normalized_name, updated_at=excluded.updated_at`,
+        )
+        .run(
+          record.id,
+          record.projectId,
+          record.name,
+          record.normalizedName,
+          record.createdBy,
+          record.createdAt,
+          record.updatedAt,
+        );
+      this.database.prepare('DELETE FROM asset_group_tags WHERE group_id = ?').run(record.id);
+      const insert = this.database.prepare(
+        'INSERT INTO asset_group_tags (group_id, tag_id) VALUES (?, ?)',
+      );
+      for (const tagId of [...new Set(record.tagIds)]) insert.run(record.id, tagId);
+    })();
+  }
+  deleteGroup(id: string): void {
+    this.database.prepare('DELETE FROM asset_groups WHERE id = ?').run(id);
+  }
+  resolveGroup(groupId: string): AssetRecord[] {
+    const group = this.getGroup(groupId);
+    if (!group || !group.tagIds.length) return [];
+    return this.queryByProject(group.projectId, {
+      tagIds: group.tagIds,
+      deleted: 'active',
+      limit: 200,
+    });
+  }
+}
+
+interface AssetTagRow {
+  id: string;
+  project_id: string;
+  name: string;
+  normalized_name: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+function mapAssetTag(row: AssetTagRow): AssetTagRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    name: row.name,
+    normalizedName: row.normalized_name,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+interface AssetGroupRow {
+  id: string;
+  project_id: string;
+  name: string;
+  normalized_name: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+function mapAssetGroup(database: Database.Database, row: AssetGroupRow): AssetGroupRecord {
+  const tagIds = (
+    database
+      .prepare('SELECT tag_id AS id FROM asset_group_tags WHERE group_id = ? ORDER BY tag_id')
+      .all(row.id) as Array<{ id: string }>
+  ).map((x) => x.id);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    name: row.name,
+    normalizedName: row.normalized_name,
+    tagIds,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface AssetRow {
@@ -825,6 +1061,10 @@ interface AssetRow {
   content_hash: string;
   size_bytes: number;
   source_url: string | null;
+  alias: string;
+  updated_at: string | null;
+  deleted_at: string | null;
+  trash_relative_path: string | null;
   created_at: string;
 }
 
@@ -837,6 +1077,10 @@ function mapAsset(row: AssetRow): AssetRecord {
     contentHash: row.content_hash,
     sizeBytes: row.size_bytes,
     sourceUrl: row.source_url ?? undefined,
+    alias: row.alias,
+    updatedAt: row.updated_at ?? undefined,
+    deletedAt: row.deleted_at ?? undefined,
+    trashRelativePath: row.trash_relative_path ?? undefined,
     createdAt: row.created_at,
   };
 }
@@ -954,6 +1198,15 @@ class SqliteGenerationResultRepository
         .prepare('SELECT * FROM generation_results WHERE job_id = ? ORDER BY created_at, id')
         .all(jobId) as GenerationResultRow[]
     ).map(mapGenerationResult);
+  }
+
+  findJobIdByAsset(assetId: string): string | undefined {
+    const row = this.database
+      .prepare(
+        'SELECT job_id AS id FROM generation_results WHERE asset_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
+      )
+      .get(assetId) as { id: string } | undefined;
+    return row?.id;
   }
 }
 

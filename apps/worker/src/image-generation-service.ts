@@ -7,12 +7,14 @@ import {
   renameSync,
   rmSync,
   statSync,
+  copyFileSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import type {
   AdapterParameters,
   AssetInfo,
+  AssetDeleteResult,
   AssetListParams,
   AssetOpenParams,
   AssetPreviewParams,
@@ -25,6 +27,8 @@ import type {
   ImageGenerationPrepareParams,
   ImageGenerationSavePreviewParams,
   ImagePreviewInfo,
+  AssetMediaSourceInfo,
+  AssetMediaSourceParams,
 } from '@ai-video/contracts';
 import type { AssetRecord, JobRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
@@ -134,27 +138,6 @@ export class ImageGenerationService {
       return current;
     });
     if (activeJob.status !== 'running') return this.get(activeJob.id);
-
-    const preview = toPreviewInfo(image, { jobId: job.id });
-    if (params.saveAsset === false) {
-      return this.projects.access(true, (database, project) => {
-        if (project !== projectSession)
-          throw new Error('Project session changed during generation.');
-        const repositories = createRepositories(database);
-        const current = repositories.jobs.get(job.id);
-        if (!current || current.projectId !== project.id)
-          throw new Error('Generation job was not found.');
-        const now = new Date().toISOString();
-        const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
-        repositories.jobs.save(completed);
-        repositories.projects.touch(now);
-        project.updatedAt = now;
-        return {
-          ...this.toInfo(completed, [], repositories.generationResults.listByJob(completed.id)),
-          preview,
-        };
-      });
-    }
 
     const persisted = this.persistDownloadedImage(projectSession.rootPath, image, {
       projectId: projectSession.id,
@@ -330,18 +313,273 @@ export class ImageGenerationService {
   }
 
   listAssets(params: AssetListParams): AssetInfo[] {
+    for (const value of [params.createdFrom, params.createdTo]) {
+      if (value && Number.isNaN(Date.parse(value)))
+        throw new Error('Asset date filter is invalid.');
+    }
+    if (params.cursor) {
+      const separator = params.cursor.indexOf('|');
+      if (separator <= 0 || Number.isNaN(Date.parse(params.cursor.slice(0, separator))))
+        throw new Error('Asset cursor is invalid.');
+    }
     return this.projects.access(false, (database, project) => {
-      const records = createRepositories(database).assets.listByProject(project.id);
-      return records.filter((asset) => !params.kind || asset.kind === params.kind).map(toAssetInfo);
+      const repo = createRepositories(database).assets;
+      const tagsById = new Map(repo.listTags(project.id).map((tag) => [tag.id, tag]));
+      const records = repo.queryByProject(project.id, params);
+      return records.map((record) => ({
+        ...toAssetInfo(record),
+        tags: repo
+          .listTagIds(record.id)
+          .map((id) => tagsById.get(id))
+          .filter((tag): tag is NonNullable<typeof tag> => Boolean(tag)),
+      }));
+    });
+  }
+
+  updateAssetAlias(params: { assetId: string; alias: string }): AssetInfo {
+    const alias = params.alias.normalize('NFKC').trim();
+    if ([...alias].length > 120) throw new Error('Asset alias is too long.');
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const asset = repositories.assets.get(params.assetId);
+      if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      const updated = { ...asset, alias, updatedAt: new Date().toISOString() };
+      repositories.assets.save(updated);
+      return toAssetInfo(updated);
+    });
+  }
+
+  listTags(keyword?: string) {
+    return this.projects.access(false, (database, project) => {
+      const repo = createRepositories(database).assets;
+      return repo
+        .listTags(project.id)
+        .filter(
+          (tag) =>
+            !keyword?.trim() ||
+            tag.name.toLocaleLowerCase().includes(keyword.trim().toLocaleLowerCase()),
+        )
+        .map((tag) => ({
+          ...tag,
+          assetCount: repo.queryByProject(project.id, { tagIds: [tag.id], limit: 200 }).length,
+        }));
+    });
+  }
+  createTag(name: string) {
+    const normalizedName = normalizeLibraryName(name);
+    const now = new Date().toISOString();
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const record = {
+        id: randomUUID(),
+        projectId: project.id,
+        name: name.trim(),
+        normalizedName,
+        createdBy: 'local-user',
+        createdAt: now,
+        updatedAt: now,
+      };
+      repo.saveTag(record);
+      return record;
+    });
+  }
+  updateTag(tagId: string, name: string) {
+    const normalizedName = normalizeLibraryName(name);
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const tag = repo.getTag(tagId);
+      if (!tag || tag.projectId !== project.id) throw new Error('Tag was not found.');
+      const updated = {
+        ...tag,
+        name: name.trim(),
+        normalizedName,
+        updatedAt: new Date().toISOString(),
+      };
+      repo.saveTag(updated);
+      return updated;
+    });
+  }
+  deleteTag(tagId: string) {
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const tag = repo.getTag(tagId);
+      if (!tag || tag.projectId !== project.id) throw new Error('Tag was not found.');
+      repo.deleteTag(tagId);
+      return { deleted: true as const };
+    });
+  }
+  replaceAssetTags(assetIds: string[], tagIds: string[]) {
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const now = new Date().toISOString();
+      for (const tagId of tagIds) {
+        const tag = repo.getTag(tagId);
+        if (!tag || tag.projectId !== project.id) throw new Error('Tag was not found.');
+      }
+      return database.transaction(() =>
+        assetIds.map((assetId) => {
+          const asset = repo.get(assetId);
+          if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+          repo.replaceTags(assetId, tagIds, now);
+          return toAssetInfo(asset);
+        }),
+      )();
+    });
+  }
+  changeAssetTags(assetIds: string[], tagIds: string[], operation: 'add' | 'remove') {
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const now = new Date().toISOString();
+      if (assetIds.length > 200 || tagIds.length > 100) throw new Error('Tag batch is too large.');
+      for (const tagId of tagIds) {
+        const tag = repo.getTag(tagId);
+        if (!tag || tag.projectId !== project.id) throw new Error('Tag was not found.');
+      }
+      return database.transaction(() =>
+        assetIds.map((assetId) => {
+          const asset = repo.get(assetId);
+          if (!asset || asset.projectId !== project.id || asset.deletedAt)
+            throw new Error('Active asset was not found.');
+          const current = new Set(repo.listTagIds(assetId));
+          for (const tagId of tagIds) {
+            if (operation === 'add') current.add(tagId);
+            else current.delete(tagId);
+          }
+          repo.replaceTags(assetId, [...current], now);
+          return toAssetInfo(asset);
+        }),
+      )();
+    });
+  }
+  listGroups(keyword?: string) {
+    return this.projects.access(false, (database, project) => {
+      const repo = createRepositories(database).assets;
+      return repo
+        .listGroups(project.id)
+        .filter(
+          (group) =>
+            !keyword?.trim() ||
+            group.name.toLocaleLowerCase().includes(keyword.trim().toLocaleLowerCase()),
+        )
+        .map((group) => ({ ...group, assetCount: repo.resolveGroup(group.id).length }));
+    });
+  }
+  createGroup(name: string, tagIds: string[]) {
+    return this.saveGroup(undefined, name, tagIds);
+  }
+  updateGroup(groupId: string, name: string, tagIds: string[]) {
+    return this.saveGroup(groupId, name, tagIds);
+  }
+  deleteGroup(groupId: string) {
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const group = repo.getGroup(groupId);
+      if (!group || group.projectId !== project.id) throw new Error('Asset group was not found.');
+      repo.deleteGroup(groupId);
+      return { deleted: true as const };
+    });
+  }
+  resolveGroup(groupId: string) {
+    return this.projects.access(false, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const group = repo.getGroup(groupId);
+      if (!group || group.projectId !== project.id) throw new Error('Asset group was not found.');
+      const tagsById = new Map(repo.listTags(project.id).map((tag) => [tag.id, tag]));
+      return repo.resolveGroup(groupId).map((asset) => ({
+        ...toAssetInfo(asset),
+        tags: repo
+          .listTagIds(asset.id)
+          .map((id) => tagsById.get(id))
+          .filter((tag): tag is NonNullable<typeof tag> => Boolean(tag)),
+      }));
+    });
+  }
+  private saveGroup(groupId: string | undefined, name: string, tagIds: string[]) {
+    if (!tagIds.length) throw new Error('Asset group requires at least one tag.');
+    const normalizedName = normalizeLibraryName(name);
+    return this.projects.access(true, (database, project) => {
+      const repo = createRepositories(database).assets;
+      for (const tagId of tagIds) {
+        const tag = repo.getTag(tagId);
+        if (!tag || tag.projectId !== project.id) throw new Error('Tag was not found.');
+      }
+      const existing = groupId ? repo.getGroup(groupId) : undefined;
+      if (groupId && (!existing || existing.projectId !== project.id))
+        throw new Error('Asset group was not found.');
+      const now = new Date().toISOString();
+      const record = {
+        id: groupId ?? randomUUID(),
+        projectId: project.id,
+        name: name.trim(),
+        normalizedName,
+        tagIds: [...new Set(tagIds)],
+        createdBy: existing?.createdBy ?? 'local-user',
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      repo.saveGroup(record);
+      return { ...record, assetCount: repo.resolveGroup(record.id).length };
+    });
+  }
+
+  restoreAsset(assetId: string): AssetInfo {
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const asset = repositories.assets.get(assetId);
+      if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      if (!asset.deletedAt) return toAssetInfo(asset);
+      const trashPath = asset.trashRelativePath
+        ? resolveProjectRelativePath(project.rootPath, asset.trashRelativePath)
+        : undefined;
+      const target = resolveProjectRelativePath(project.rootPath, asset.relativePath);
+      if (!trashPath || !existsSync(trashPath))
+        throw new Error('Asset file is missing from trash.');
+      if (existsSync(target)) throw new Error('Asset restore path is already occupied.');
+      mkdirSync(dirname(target), { recursive: true });
+      renameSync(trashPath, target);
+      const updated = {
+        ...asset,
+        deletedAt: undefined,
+        trashRelativePath: undefined,
+        updatedAt: new Date().toISOString(),
+      };
+      try {
+        repositories.assets.save(updated);
+      } catch (error) {
+        renameSync(target, trashPath);
+        throw error;
+      }
+      return toAssetInfo(updated);
+    });
+  }
+
+  locateAssetSource(assetId: string) {
+    return this.projects.access(false, (database, project) => {
+      const repositories = createRepositories(database);
+      const asset = repositories.assets.get(assetId);
+      if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      const jobId = repositories.generationResults.findJobIdByAsset(assetId);
+      if (!jobId) throw new Error('Asset source job was not found.');
+      const job = repositories.jobs.get(jobId);
+      return { assetId, jobId, shotId: job?.shotId };
     });
   }
 
   previewAsset(params: AssetPreviewParams): ImagePreviewInfo {
     const { asset, path } = this.assetRecordAndPath(params.assetId);
-    const bytes = readFileSync(path);
+    const extension = extname(asset.relativePath).toLowerCase();
+    const cacheRelativePath = join('cache', 'thumbnails', `${asset.contentHash}${extension}`);
+    const project = this.projects.current();
+    if (!project) throw new Error('No project is open.');
+    const cachePath = resolveProjectRelativePath(project.rootPath, cacheRelativePath);
+    if (!existsSync(cachePath)) {
+      mkdirSync(dirname(cachePath), { recursive: true });
+      copyFileSync(path, cachePath);
+    }
+    const bytes = readFileSync(cachePath);
     if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES)
       throw new Error('Image size is invalid.');
-    const contentType = contentTypeFor(asset.relativePath);
+    const contentType = contentTypeFor(cachePath);
     if (!contentType.startsWith('image/')) throw new Error('Asset is not a previewable image.');
     return toPreviewInfo(
       {
@@ -351,6 +589,15 @@ export class ImageGenerationService {
       },
       { assetId: asset.id },
     );
+  }
+
+  assetMediaSource(params: AssetMediaSourceParams): AssetMediaSourceInfo {
+    const { asset, path } = this.assetRecordAndPath(params.assetId);
+    const contentType = contentTypeFor(path);
+    if (!contentType.startsWith('image/') && !contentType.startsWith('video/')) {
+      throw new Error('Asset is not previewable media.');
+    }
+    return { assetId: asset.id, path, contentType };
   }
 
   revealAsset(params: AssetRevealParams): AssetRevealResult {
@@ -397,17 +644,27 @@ export class ImageGenerationService {
     });
   }
 
-  deleteAsset(assetId: string): { deleted: true } {
+  deleteAsset(assetId: string, confirm = false): AssetDeleteResult {
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const asset = repositories.assets.get(assetId);
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      if (asset.deletedAt) return { deleted: true as const, referenceCount: 0 };
+      const referenceCount = repositories.assets.countDraftReferences(assetId);
+      if (referenceCount > 0 && !confirm) {
+        throw new Error(`Asset is referenced by ${referenceCount} production draft(s).`);
+      }
       const path = resolveProjectRelativePath(project.rootPath, asset.relativePath);
       const deletedAssetDirectory = resolveProjectRelativePath(
         project.rootPath,
         join('cache', 'deleted-assets'),
       );
-      const tombstonePath = join(deletedAssetDirectory, `${randomUUID()}.trash`);
+      const tombstoneRelativePath = join(
+        'cache',
+        'deleted-assets',
+        `${assetId}${extname(asset.relativePath)}`,
+      );
+      const tombstonePath = resolveProjectRelativePath(project.rootPath, tombstoneRelativePath);
       let movedToTombstone = false;
       if (existsSync(path)) {
         mkdirSync(deletedAssetDirectory, { recursive: true });
@@ -417,7 +674,12 @@ export class ImageGenerationService {
       const now = new Date().toISOString();
       try {
         database.transaction(() => {
-          repositories.assets.delete(assetId);
+          repositories.assets.save({
+            ...asset,
+            deletedAt: now,
+            trashRelativePath: tombstoneRelativePath,
+            updatedAt: now,
+          });
           repositories.projects.touch(now);
         })();
       } catch (error) {
@@ -436,14 +698,27 @@ export class ImageGenerationService {
         throw error;
       }
       project.updatedAt = now;
-      if (movedToTombstone) {
-        try {
-          rmSync(tombstonePath, { force: true });
-        } catch {
-          // The database deletion is authoritative; stale tombstones are recoverable cache files.
-        }
-      }
-      return { deleted: true as const };
+      return { deleted: true as const, referenceCount };
+    });
+  }
+
+  purgeAsset(assetId: string, confirm: boolean): { purged: true } {
+    if (!confirm) throw new Error('Permanent deletion requires confirmation.');
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const asset = repositories.assets.get(assetId);
+      if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      if (!asset.deletedAt || !asset.trashRelativePath)
+        throw new Error('Only trashed assets can be permanently deleted.');
+      const path = resolveProjectRelativePath(project.rootPath, asset.trashRelativePath);
+      rmSync(path, { force: true });
+      const now = new Date().toISOString();
+      database.transaction(() => {
+        repositories.assets.delete(assetId);
+        repositories.projects.touch(now);
+      })();
+      project.updatedAt = now;
+      return { purged: true as const };
     });
   }
 
@@ -585,6 +860,12 @@ export class ImageGenerationService {
 
 function toAssetInfo(asset: AssetRecord): AssetInfo {
   return { ...asset };
+}
+
+function normalizeLibraryName(value: string): string {
+  const name = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  if (!name || [...name].length > 120) throw new Error('Name is invalid.');
+  return name.toLocaleLowerCase();
 }
 
 function toPreviewInfo(
@@ -829,6 +1110,8 @@ function contentTypeFor(relativePath: string): string {
     '.jpeg': 'image/jpeg',
     '.webp': 'image/webp',
     '.gif': 'image/gif',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
   };
   return known[extension] ?? 'application/octet-stream';
 }

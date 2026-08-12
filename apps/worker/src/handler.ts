@@ -24,9 +24,11 @@ import {
   type VideoGenerationObserveParams,
   type VideoGenerationPrepareParams,
   type AssetPreviewParams,
+  type AssetMediaSourceParams,
   type AssetOpenParams,
   type AssetRevealParams,
   type AssetRenameParams,
+  type AssetAliasUpdateParams,
   type ProjectCreateParams,
   type SampleProjectCreateParams,
   type DiagnosticExportParams,
@@ -162,10 +164,27 @@ const methods = new Set<WorkerMethod>([
   'video.generate.list',
   'asset.list',
   'asset.preview',
+  'asset.mediaSource',
   'asset.open',
   'asset.reveal',
   'asset.rename',
+  'asset.alias.update',
   'asset.delete',
+  'asset.restore',
+  'asset.purge',
+  'asset.source.locate',
+  'tag.list',
+  'tag.create',
+  'tag.update',
+  'tag.delete',
+  'asset.tags.replace',
+  'asset.tags.add',
+  'asset.tags.remove',
+  'assetGroup.list',
+  'assetGroup.create',
+  'assetGroup.update',
+  'assetGroup.delete',
+  'assetGroup.resolve',
 ]);
 const isPackaged = 'pkg' in process;
 // A literal require lets pkg discover and extract the native addon from the executable.
@@ -286,6 +305,14 @@ function requireString(params: Record<string, unknown>, key: string): string {
   const value = params[key];
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} must be a string.`);
   return value;
+}
+
+function requireStringArray(params: Record<string, unknown>, key: string): string[] {
+  const value = params[key];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(`${key} must be an array of strings.`);
+  }
+  return value as string[];
 }
 
 function requireNumber(params: Record<string, unknown>, key: string): number {
@@ -724,12 +751,27 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
       case 'asset.list':
         result = imageGenerationService.listAssets({
           kind: typeof params.kind === 'string' ? params.kind : undefined,
+          keyword: typeof params.keyword === 'string' ? params.keyword : undefined,
+          deleted: params.deleted === 'trash' ? 'trash' : 'active',
+          createdFrom: typeof params.createdFrom === 'string' ? params.createdFrom : undefined,
+          createdTo: typeof params.createdTo === 'string' ? params.createdTo : undefined,
+          limit: typeof params.limit === 'number' ? params.limit : undefined,
+          tagIds: Array.isArray(params.tagIds)
+            ? params.tagIds.filter((x): x is string => typeof x === 'string')
+            : undefined,
+          sort: params.sort === 'created-desc' ? 'created-desc' : 'created-asc',
+          cursor: typeof params.cursor === 'string' ? params.cursor : undefined,
         });
         break;
       case 'asset.preview':
         result = imageGenerationService.previewAsset({
           assetId: requireString(params, 'assetId'),
         } satisfies AssetPreviewParams);
+        break;
+      case 'asset.mediaSource':
+        result = imageGenerationService.assetMediaSource({
+          assetId: requireString(params, 'assetId'),
+        } satisfies AssetMediaSourceParams);
         break;
       case 'asset.open':
         result = imageGenerationService.openAsset({
@@ -744,8 +786,89 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
       case 'asset.rename':
         result = imageGenerationService.renameAsset(params as unknown as AssetRenameParams);
         break;
+      case 'asset.alias.update':
+        result = imageGenerationService.updateAssetAlias(
+          params as unknown as AssetAliasUpdateParams,
+        );
+        break;
       case 'asset.delete':
-        result = imageGenerationService.deleteAsset(requireString(params, 'assetId'));
+        result = imageGenerationService.deleteAsset(
+          requireString(params, 'assetId'),
+          params.confirm === true,
+        );
+        break;
+      case 'asset.restore':
+        result = imageGenerationService.restoreAsset(requireString(params, 'assetId'));
+        break;
+      case 'asset.purge':
+        result = imageGenerationService.purgeAsset(
+          requireString(params, 'assetId'),
+          params.confirm === true,
+        );
+        break;
+      case 'asset.source.locate':
+        result = imageGenerationService.locateAssetSource(requireString(params, 'assetId'));
+        break;
+      case 'tag.list':
+        result = imageGenerationService.listTags(
+          typeof params.keyword === 'string' ? params.keyword : undefined,
+        );
+        break;
+      case 'tag.create':
+        result = imageGenerationService.createTag(requireString(params, 'name'));
+        break;
+      case 'tag.update':
+        result = imageGenerationService.updateTag(
+          requireString(params, 'tagId'),
+          requireString(params, 'name'),
+        );
+        break;
+      case 'tag.delete':
+        result = imageGenerationService.deleteTag(requireString(params, 'tagId'));
+        break;
+      case 'asset.tags.replace':
+        result = imageGenerationService.replaceAssetTags(
+          requireStringArray(params, 'assetIds'),
+          requireStringArray(params, 'tagIds'),
+        );
+        break;
+      case 'asset.tags.add':
+        result = imageGenerationService.changeAssetTags(
+          requireStringArray(params, 'assetIds'),
+          requireStringArray(params, 'tagIds'),
+          'add',
+        );
+        break;
+      case 'asset.tags.remove':
+        result = imageGenerationService.changeAssetTags(
+          requireStringArray(params, 'assetIds'),
+          requireStringArray(params, 'tagIds'),
+          'remove',
+        );
+        break;
+      case 'assetGroup.list':
+        result = imageGenerationService.listGroups(
+          typeof params.keyword === 'string' ? params.keyword : undefined,
+        );
+        break;
+      case 'assetGroup.create':
+        result = imageGenerationService.createGroup(
+          requireString(params, 'name'),
+          requireStringArray(params, 'tagIds'),
+        );
+        break;
+      case 'assetGroup.update':
+        result = imageGenerationService.updateGroup(
+          requireString(params, 'groupId'),
+          requireString(params, 'name'),
+          requireStringArray(params, 'tagIds'),
+        );
+        break;
+      case 'assetGroup.delete':
+        result = imageGenerationService.deleteGroup(requireString(params, 'groupId'));
+        break;
+      case 'assetGroup.resolve':
+        result = imageGenerationService.resolveGroup(requireString(params, 'groupId'));
         break;
       default:
         return errorResponse(request.id, {

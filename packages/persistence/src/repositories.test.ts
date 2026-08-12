@@ -259,4 +259,62 @@ describe('repositories', () => {
     });
     database.close();
   });
+
+  it('searches assets by tag name without crossing project boundaries', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-asset-search-'));
+    temporaryDirectories.push(directory);
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    migrateDatabase(database);
+    const now = '2026-08-12T00:00:00.000Z';
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project-a', 'Project A', now, now);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project-b', 'Project B', now, now);
+    const repositories = createRepositories(database);
+
+    for (const [id, projectId] of [
+      ['asset-a', 'project-a'],
+      ['asset-b', 'project-b'],
+    ] as const) {
+      repositories.assets.save({
+        id,
+        projectId,
+        kind: 'image',
+        relativePath: `assets/${id}.png`,
+        contentHash: id,
+        sizeBytes: 10,
+        createdAt: now,
+      });
+    }
+    repositories.assets.saveTag({
+      id: 'tag-a',
+      projectId: 'project-a',
+      name: 'Hero',
+      normalizedName: 'hero',
+      createdBy: 'local-user',
+      createdAt: now,
+      updatedAt: now,
+    });
+    repositories.assets.saveTag({
+      id: 'tag-b',
+      projectId: 'project-b',
+      name: 'Hero',
+      normalizedName: 'hero',
+      createdBy: 'local-user',
+      createdAt: now,
+      updatedAt: now,
+    });
+    repositories.assets.replaceTags('asset-a', ['tag-a'], now);
+    repositories.assets.replaceTags('asset-b', ['tag-b'], now);
+
+    expect(repositories.assets.queryByProject('project-a', { keyword: 'hero' })).toMatchObject([
+      { id: 'asset-a', projectId: 'project-a' },
+    ]);
+    expect(repositories.assets.queryByProject('project-b', { keyword: 'Hero' })).toMatchObject([
+      { id: 'asset-b', projectId: 'project-b' },
+    ]);
+    database.close();
+  });
 });

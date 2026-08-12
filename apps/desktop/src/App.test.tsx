@@ -51,6 +51,10 @@ describe('App', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: {},
+    });
     vi.mocked(openDialog).mockResolvedValue(null);
     windowApi.isMaximized.mockResolvedValue(false);
     windowApi.onResized.mockResolvedValue(() => undefined);
@@ -92,9 +96,7 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '选择项目目录' }));
     await waitFor(() =>
-      expect(screen.getByLabelText('项目绝对目录')).toHaveValue(
-        'D:\\Projects\\existing-project',
-      ),
+      expect(screen.getByLabelText('项目绝对目录')).toHaveValue('D:\\Projects\\existing-project'),
     );
     expect(openDialog).toHaveBeenCalledWith({
       directory: true,
@@ -122,7 +124,10 @@ describe('App', () => {
     expect(container.querySelector('.production-panel')).toHaveClass('expanded');
 
     fireEvent.click(screen.getByRole('button', { name: /项目文档/ }));
-    expect(container.querySelector('.app-shell')).toHaveAttribute('data-navigation-mode', 'project');
+    expect(container.querySelector('.app-shell')).toHaveAttribute(
+      'data-navigation-mode',
+      'project',
+    );
     expect(container.querySelector('.production-panel')).not.toHaveClass('expanded');
   });
 

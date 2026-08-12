@@ -7,9 +7,7 @@ const costFieldPriority = [
   ['creditsUsed', 'credits'],
   ['credits', 'credits'],
   ['cost', 'unknown'],
-] as const satisfies ReadonlyArray<
-  readonly [string, VideoGenerationCostInfo['unit']]
->;
+] as const satisfies ReadonlyArray<readonly [string, VideoGenerationCostInfo['unit']]>;
 
 function parseCostAmount(value: unknown): number | undefined {
   const amount =

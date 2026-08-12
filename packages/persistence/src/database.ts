@@ -11,6 +11,9 @@ import {
   MIGRATION_V5,
   MIGRATION_V6,
   MIGRATION_V7,
+  MIGRATION_V8,
+  MIGRATION_V9,
+  MIGRATION_V10,
 } from './schema.js';
 
 export interface OpenDatabaseOptions {
@@ -122,6 +125,30 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(7, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 7) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V8);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(8, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 8) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V9);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(9, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 9) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V10);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(10, now);
     })();
   }
   return getSchemaVersion(database);

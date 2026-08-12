@@ -281,7 +281,11 @@ function CapabilitySummary({ capabilities }: { capabilities: ProviderModelCapabi
     .map((option) => option.label);
   return (
     <div className="model-capability-summary" aria-label="模型能力">
-      {labels.length > 0 ? labels.map((label) => <span key={label}>{label}</span>) : <span>能力未确认</span>}
+      {labels.length > 0 ? (
+        labels.map((label) => <span key={label}>{label}</span>)
+      ) : (
+        <span>能力未确认</span>
+      )}
     </div>
   );
 }
