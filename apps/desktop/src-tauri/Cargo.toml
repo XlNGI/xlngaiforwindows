@@ -2,7 +2,7 @@
 name = "ai-video-desktop"
 version = "0.1.0"
 description = "Local AI video production workspace"
-authors = ["AI Video Workspace"]
+authors = ["unicomp"]
 edition = "2021"
 
 [lib]

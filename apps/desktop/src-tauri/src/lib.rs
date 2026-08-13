@@ -1549,7 +1549,7 @@ pub fn run() {
             provider_cancel_task
         ])
         .run(tauri::generate_context!())
-        .expect("error while running AI Video Workspace");
+        .expect("error while running unicomp");
 }
 
 #[cfg(test)]
@@ -1585,8 +1585,8 @@ mod tests {
 
         assert_eq!(BUNDLED_WORKER_FILENAME, format!("{configured_name}.exe"));
         assert_eq!(
-            bundled_worker_path(Path::new(r"C:\Program Files\AI Video Workspace")),
-            Path::new(r"C:\Program Files\AI Video Workspace\ai-video-worker.exe")
+            bundled_worker_path(Path::new(r"C:\Program Files\unicomp")),
+            Path::new(r"C:\Program Files\unicomp\ai-video-worker.exe")
         );
     }
 

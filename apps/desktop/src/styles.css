@@ -106,9 +106,16 @@ button {
   place-items: center;
   width: 28px;
   height: 28px;
-  color: #f2c14e;
+  overflow: hidden;
   border: 1px solid #3b3f42;
   border-radius: 4px;
+  background: #f7f7f5;
+}
+
+.brand-mark img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
 }
 
 .project-title {

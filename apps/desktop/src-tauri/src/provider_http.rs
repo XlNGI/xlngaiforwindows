@@ -94,7 +94,7 @@ pub(crate) fn request_bytes(
     request: JsonHttpRequest<'_>,
 ) -> Result<RawHttpResponse, JsonHttpError> {
     validate_request(&request)?;
-    let agent = wide("AI Video Workspace/0.1");
+    let agent = wide("unicomp/0.1");
     let host = wide(request.host);
     let verb = wide(request.method);
     let path = wide(request.path);

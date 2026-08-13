@@ -37,11 +37,11 @@ pnpm tauri:build
 
 ```powershell
 .\scripts\validate-nsis-install.ps1 `
-  -InstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\AI Video Workspace_0.1.0_x64-setup.exe"
+  -InstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe"
 
 .\scripts\validate-nsis-upgrade.ps1 `
-  -PreviousInstallerPath "D:\Release\previous\AI Video Workspace_<old>_x64-setup.exe" `
-  -UpgradeInstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\AI Video Workspace_0.1.0_x64-setup.exe"
+  -PreviousInstallerPath "D:\Release\previous\unicomp_<old>_x64-setup.exe" `
+  -UpgradeInstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe"
 ```
 
 - [ ] 干净安装、桌面启动、Worker 启动、优雅退出和卸载清理通过。
@@ -56,7 +56,7 @@ pnpm tauri:build
 
 ```powershell
 .\scripts\validate-windows-signature.ps1 `
-  -FilePath "apps\desktop\src-tauri\target\release\bundle\nsis\AI Video Workspace_0.1.0_x64-setup.exe" `
+  -FilePath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe" `
   -ExpectedPublisher "<正式发布者名称>"
 ```
 
