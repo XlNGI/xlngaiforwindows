@@ -385,7 +385,7 @@ fn stream_provider(
         .as_str()
         .map_err(|message| StreamFailure::new(message, false))?;
 
-    let agent = wide("AI Video Workspace/0.1");
+    let agent = wide("unicomp/0.1");
     let host = wide(&endpoint.host);
     let verb = wide("POST");
     let path_value = endpoint.path(suffix);

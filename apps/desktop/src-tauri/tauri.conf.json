@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Video Workspace",
+  "productName": "unicomp",
   "version": "0.1.0",
   "identifier": "com.aivideo.workspace",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "AI 影像工作台",
+        "title": "unicomp",
         "decorations": false,
         "shadow": true,
         "width": 1440,

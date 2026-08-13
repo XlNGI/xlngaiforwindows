@@ -58,6 +58,7 @@ import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
+import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
 type WorkspaceView = 'documents' | 'shots' | 'assets';
@@ -1055,10 +1056,10 @@ export function App() {
         }}
       >
         <div className="brand-mark" aria-hidden="true" data-tauri-drag-region>
-          <Clapperboard size={17} />
+          <img src={brandLogo} alt="" data-tauri-drag-region />
         </div>
         <div className="project-title" data-tauri-drag-region>
-          <strong data-tauri-drag-region>AI 影像工作台</strong>
+          <strong data-tauri-drag-region>unicomp</strong>
           <span data-tauri-drag-region>{project?.name ?? '未打开项目'}</span>
         </div>
         <div className="topbar-actions">
