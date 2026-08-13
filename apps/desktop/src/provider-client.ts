@@ -12,6 +12,8 @@ export interface NativeProviderTaskSubmitResponse {
   status: number;
   taskId?: string;
   state?: string;
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 export interface NativeProviderCancelResponse {

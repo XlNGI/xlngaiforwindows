@@ -22,6 +22,8 @@ Registry 来自 Vidu 官方 [Model Map](https://platform.vidu.com/docs/model-map
 | `START_END_TO_VIDEO` | `viduq3-pro` | 严格 2 张首尾帧，1–16 秒，540p/720p/1080p |
 | `IMAGE_TO_VIDEO` | `vidu2.0` | 1 张起始帧；4 秒支持 360p/720p/1080p，8 秒仅支持 720p |
 
+UniCompAPI 的 `viduq3` 参考生视频与 `viduq3-pro` 首尾帧生视频使用同一组 Vidu 官方参数 Schema 和数量约束，请求仍发送到 UniCompAPI 固定端点 `/v1/videos`。原生桥固定注入模型 ID，并原样保留有序 `images` 数组及 Schema 声明的 Vidu 字段；不允许 WebView 覆盖模型、端点或认证信息。
+
 未列出的能力、模型和字段不进行推测，也不会回退到相近适配器。
 
 ## 2. 不变量

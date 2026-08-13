@@ -541,6 +541,8 @@ const UNICOMPAPI_MEDIA_MODELS: readonly {
   imageEdit?: boolean;
   textToVideo?: boolean;
   imageToVideo?: boolean;
+  referenceToVideo?: boolean;
+  startEndToVideo?: boolean;
 }[] = [
   { model: 'doubao-seedream-5-0-260128', textToImage: true },
   { model: 'qwen-image', textToImage: true },
@@ -552,9 +554,9 @@ const UNICOMPAPI_MEDIA_MODELS: readonly {
   { model: 'happyhorse-1.1-i2v', imageToVideo: true },
   { model: 'happyhorse-1.1-t2v', textToVideo: true },
   { model: 'kling-v3-turbo', textToVideo: true, imageToVideo: true },
-  { model: 'viduq3', imageToVideo: true },
+  { model: 'viduq3', imageToVideo: true, referenceToVideo: true },
   { model: 'viduq3-mix', imageToVideo: true },
-  { model: 'viduq3-pro', textToVideo: true },
+  { model: 'viduq3-pro', textToVideo: true, startEndToVideo: true },
   { model: 'viduq3-turbo', textToVideo: true, imageToVideo: true },
 ];
 
@@ -695,8 +697,50 @@ function unicompApiAdapters(): AdapterDescriptor[] {
     if (model.imageToVideo) {
       result.push(unicompVideoAdapter(common, model.model, 'IMAGE_TO_VIDEO', true));
     }
+    if (model.referenceToVideo) {
+      result.push(
+        unicompViduCompatibleVideoAdapter(
+          common,
+          model.model,
+          'REFERENCE_TO_VIDEO',
+          'REFERENCE_TO_VIDEO:vidu:viduq3:v2',
+        ),
+      );
+    }
+    if (model.startEndToVideo) {
+      result.push(
+        unicompViduCompatibleVideoAdapter(
+          common,
+          model.model,
+          'START_END_TO_VIDEO',
+          'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
+        ),
+      );
+    }
   }
   return result;
+}
+
+function unicompViduCompatibleVideoAdapter(
+  common: Omit<
+    AdapterDescriptor,
+    'key' | 'capability' | 'capabilityLabel' | 'endpoint' | 'parameterSchema' | 'uiSchema'
+  >,
+  model: string,
+  capability: 'REFERENCE_TO_VIDEO' | 'START_END_TO_VIDEO',
+  viduAdapterKey: string,
+): AdapterDescriptor {
+  const viduAdapter = adapters.find((adapter) => adapter.key === viduAdapterKey);
+  if (!viduAdapter) throw new Error(`Vidu-compatible adapter ${viduAdapterKey} was not found.`);
+  return {
+    ...common,
+    key: `${capability}:unicompapi:${model}:v1`,
+    capability,
+    capabilityLabel: viduAdapter.capabilityLabel,
+    endpoint: 'https://unicompapi.com/v1/videos',
+    parameterSchema: viduAdapter.parameterSchema,
+    uiSchema: viduAdapter.uiSchema,
+  };
 }
 
 function unicompVideoAdapter(

@@ -281,6 +281,42 @@ describe('adapter registry', () => {
     ).toMatchObject({ valid: false });
   });
 
+  it('publishes Vidu-compatible UniCompAPI reference and start-end video adapters', () => {
+    const referenceKey = 'REFERENCE_TO_VIDEO:unicompapi:viduq3:v1';
+    const startEndKey = 'START_END_TO_VIDEO:unicompapi:viduq3-pro:v1';
+    expect(getAdapter(referenceKey)).toMatchObject({
+      provider: 'unicompapi',
+      model: 'viduq3',
+      endpoint: 'https://unicompapi.com/v1/videos',
+    });
+    expect(
+      validateAdapterParameters(referenceKey, {
+        images: ['https://example.com/one.png', 'https://example.com/two.png'],
+        prompt: 'camera circles the character',
+        duration: 5,
+        aspect_ratio: '16:9',
+        resolution: '720p',
+        audio: true,
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(startEndKey, {
+        images: ['https://example.com/start.png', 'https://example.com/end.png'],
+        duration: 5,
+        resolution: '720p',
+        audio: true,
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(startEndKey, {
+        images: ['https://example.com/start.png'],
+        duration: 5,
+        resolution: '720p',
+        audio: true,
+      }),
+    ).toMatchObject({ valid: false });
+  });
+
   it('requires a defaulted size only for the qwen-image model family', () => {
     const qwen = getAdapter('TEXT_TO_IMAGE:unicompapi:qwen-image:v1');
     const seedream = getAdapter('TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1');

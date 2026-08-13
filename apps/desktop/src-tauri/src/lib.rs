@@ -116,6 +116,8 @@ const UNICOMPAPI_IMAGE_TO_VIDEO_MODELS: &[&str] = &[
     "viduq3-mix",
     "viduq3-turbo",
 ];
+const UNICOMPAPI_REFERENCE_TO_VIDEO_MODELS: &[&str] = &["viduq3"];
+const UNICOMPAPI_START_END_TO_VIDEO_MODELS: &[&str] = &["viduq3-pro"];
 const UNICOMPAPI_IMAGE_FIELDS: &[&str] = &["prompt", "size", "n", "response_format", "watermark"];
 const UNICOMPAPI_IMAGE_EDIT_FIELDS: &[&str] = &["images", "prompt", "size", "response_format"];
 const UNICOMPAPI_VIDEO_FIELDS: &[&str] = &[
@@ -149,6 +151,8 @@ fn unicompapi_adapter_parts(adapter_key: &str) -> Result<(&str, &str), String> {
         "REFERENCE_TO_IMAGE" => UNICOMPAPI_IMAGE_EDIT_MODELS,
         "TEXT_TO_VIDEO" => UNICOMPAPI_TEXT_TO_VIDEO_MODELS,
         "IMAGE_TO_VIDEO" => UNICOMPAPI_IMAGE_TO_VIDEO_MODELS,
+        "REFERENCE_TO_VIDEO" => UNICOMPAPI_REFERENCE_TO_VIDEO_MODELS,
+        "START_END_TO_VIDEO" => UNICOMPAPI_START_END_TO_VIDEO_MODELS,
         _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
     };
     if !models.contains(&model) {
@@ -429,6 +433,8 @@ fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<V
     let allowed_fields = match capability {
         "TEXT_TO_IMAGE" => UNICOMPAPI_IMAGE_FIELDS,
         "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" => UNICOMPAPI_VIDEO_FIELDS,
+        "REFERENCE_TO_VIDEO" => REFERENCE_VIDEO_FIELDS,
+        "START_END_TO_VIDEO" => Q3_VIDEO_FIELDS,
         _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
     };
     validate_payload_fields(&object, allowed_fields)?;
@@ -463,6 +469,26 @@ fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<V
             "image".to_string(),
             serde_json::Value::String(image.to_string()),
         );
+    }
+    if capability == "REFERENCE_TO_VIDEO" || capability == "START_END_TO_VIDEO" {
+        let images = object
+            .get("images")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("UniCompAPI Vidu-compatible generation requires input images")?;
+        let valid_count = if capability == "REFERENCE_TO_VIDEO" {
+            (1..=7).contains(&images.len())
+        } else {
+            images.len() == 2
+        };
+        if !valid_count
+            || images
+                .iter()
+                .any(|image| image.as_str().is_none_or(str::is_empty))
+        {
+            return Err(
+                "UniCompAPI Vidu-compatible generation has an invalid image count".to_string(),
+            );
+        }
     }
     object.insert(
         "model".to_string(),
@@ -590,6 +616,8 @@ struct ProviderTaskSubmitResponse {
     status: u32,
     task_id: Option<String>,
     state: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -644,7 +672,10 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
         | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2"
         | "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => Ok(()),
         _ => match unicompapi_adapter_parts(adapter_key) {
-            Ok(("TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO", _)) => Ok(()),
+            Ok((
+                "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" | "REFERENCE_TO_VIDEO" | "START_END_TO_VIDEO",
+                _,
+            )) => Ok(()),
             _ => Err("Native video task commands require a registered video adapter".to_string()),
         },
     }
@@ -670,6 +701,34 @@ fn provider_state(body: &serde_json::Value) -> Option<&str> {
                 .and_then(|data| data.get("state").or_else(|| data.get("status")))
                 .and_then(serde_json::Value::as_str)
         })
+}
+
+fn provider_error_field(body: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    fn find<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+        let object = value.as_object()?;
+        for key in keys {
+            if let Some(candidate) = object.get(*key).and_then(serde_json::Value::as_str) {
+                if !candidate.trim().is_empty() {
+                    return Some(candidate);
+                }
+            }
+        }
+        for key in ["error", "data", "detail"] {
+            if let Some(candidate) = object.get(key).and_then(|nested| find(nested, keys)) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    find(body, keys).map(|value| value.trim().chars().take(500).collect())
+}
+
+fn provider_submit_error(body: &serde_json::Value) -> (Option<String>, Option<String>) {
+    (
+        provider_error_field(body, &["err_code", "error_code", "code", "type"]),
+        provider_error_field(body, &["message", "error", "error_description", "detail"]),
+    )
 }
 
 fn contains_image_source(value: &serde_json::Value) -> bool {
@@ -795,10 +854,13 @@ fn provider_submit_task_blocking(
         let secret = credential_read(credential_subject)?;
         let response = request_unicompapi_json(&secret, "POST", "/v1/videos", Some(&body))?;
         if response.status < 200 || response.status >= 300 {
+            let (error_code, error_message) = provider_submit_error(&response.body);
             return Ok(ProviderTaskSubmitResponse {
                 status: response.status,
                 task_id: None,
                 state: provider_state(&response.body).map(str::to_string),
+                error_code,
+                error_message,
             });
         }
         let task_id = provider_task_id(&response.body)
@@ -808,6 +870,8 @@ fn provider_submit_task_blocking(
             status: response.status,
             task_id: Some(task_id.to_string()),
             state: provider_state(&response.body).map(str::to_string),
+            error_code: None,
+            error_message: None,
         });
     }
     let target = provider_target(adapter_key, provider_region)?;
@@ -815,10 +879,13 @@ fn provider_submit_task_blocking(
     let secret = credential_read(credential_subject)?;
     let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
     if response.status < 200 || response.status >= 300 {
+        let (error_code, error_message) = provider_submit_error(&response.body);
         return Ok(ProviderTaskSubmitResponse {
             status: response.status,
             task_id: None,
             state: provider_state(&response.body).map(str::to_string),
+            error_code,
+            error_message,
         });
     }
     let task_id = provider_task_id(&response.body)
@@ -828,6 +895,8 @@ fn provider_submit_task_blocking(
         status: response.status,
         task_id: Some(task_id.to_string()),
         state: provider_state(&response.body).map(str::to_string),
+        error_code: None,
+        error_message: None,
     })
 }
 
@@ -1557,11 +1626,11 @@ mod tests {
     use super::{
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
         ensure_video_adapter, is_profile_id, provider_cancel_path, provider_payload,
-        provider_state, provider_target, provider_task_error, provider_task_id, provider_task_path,
-        resolve_media_selection, unicompapi_adapter_model, unicompapi_payload,
-        unicompapi_video_content_path, unicompapi_video_task_path, validate_credential_provider,
-        WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME, PROVIDER_REQUEST_BODY_LIMIT,
-        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
+        provider_state, provider_submit_error, provider_target, provider_task_error,
+        provider_task_id, provider_task_path, resolve_media_selection, unicompapi_adapter_model,
+        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
+        validate_credential_provider, WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME,
+        PROVIDER_REQUEST_BODY_LIMIT, UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
     };
     use serde_json::json;
     use std::{
@@ -2105,6 +2174,57 @@ mod tests {
     }
 
     #[test]
+    fn unicompapi_bridge_preserves_vidu_compatible_video_images_and_fields() {
+        let reference = unicompapi_payload(
+            "REFERENCE_TO_VIDEO:unicompapi:viduq3:v1",
+            json!({
+                "images": ["https://example.com/one.png", "https://example.com/two.png"],
+                "prompt": "camera circles the character",
+                "duration": 5,
+                "aspect_ratio": "16:9",
+                "resolution": "720p",
+                "audio": true,
+                "seed": 42,
+                "off_peak": false
+            }),
+        )
+        .expect("reference-to-video request should preserve Vidu fields");
+        let parsed_reference: serde_json::Value =
+            serde_json::from_slice(&reference).expect("valid reference-to-video JSON");
+        assert_eq!(parsed_reference["model"], "viduq3");
+        assert_eq!(parsed_reference["images"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed_reference["aspect_ratio"], "16:9");
+        assert_eq!(parsed_reference["audio"], true);
+        assert!(parsed_reference.get("image").is_none());
+
+        let start_end = unicompapi_payload(
+            "START_END_TO_VIDEO:unicompapi:viduq3-pro:v1",
+            json!({
+                "images": ["https://example.com/start.png", "https://example.com/end.png"],
+                "prompt": "slow camera move",
+                "is_rec": false,
+                "duration": 5,
+                "resolution": "720p",
+                "audio": true
+            }),
+        )
+        .expect("start-end request should preserve ordered Vidu fields");
+        let parsed_start_end: serde_json::Value =
+            serde_json::from_slice(&start_end).expect("valid start-end JSON");
+        assert_eq!(parsed_start_end["model"], "viduq3-pro");
+        assert_eq!(
+            parsed_start_end["images"][0],
+            "https://example.com/start.png"
+        );
+        assert_eq!(parsed_start_end["images"][1], "https://example.com/end.png");
+        assert!(unicompapi_payload(
+            "START_END_TO_VIDEO:unicompapi:viduq3-pro:v1",
+            json!({"images": ["https://example.com/start.png"], "duration": 5})
+        )
+        .is_err());
+    }
+
+    #[test]
     fn unicompapi_qwen_image_edit_rejects_invalid_images_and_fields() {
         let adapter_key = "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1";
         assert!(unicompapi_payload(
@@ -2204,6 +2324,8 @@ mod tests {
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("TEXT_TO_VIDEO:unicompapi:viduq3-pro:v1").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:unicompapi:viduq3:v1").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:unicompapi:viduq3:v1").is_ok());
+        assert!(ensure_video_adapter("START_END_TO_VIDEO:unicompapi:viduq3-pro:v1").is_ok());
         assert!(ensure_video_adapter("TEXT_TO_IMAGE:vidu:viduq2:v2").is_err());
         assert_eq!(
             provider_task_id(&json!({"task_id": "task-direct"})),
@@ -2226,6 +2348,31 @@ mod tests {
             Some("queueing")
         );
         assert_eq!(provider_task_id(&json!({"input": {"id": "wrong"}})), None);
+    }
+
+    #[test]
+    fn provider_submit_error_extracts_only_bounded_diagnostic_fields() {
+        assert_eq!(
+            provider_submit_error(&json!({
+                "error": { "code": "invalid_request", "message": "images is required" },
+                "request_id": "must-not-leave-native-boundary"
+            })),
+            (
+                Some("invalid_request".to_string()),
+                Some("images is required".to_string())
+            )
+        );
+        assert_eq!(
+            provider_submit_error(&json!({ "error": "unsupported content type" })),
+            (None, Some("unsupported content type".to_string()))
+        );
+        let long_message = "x".repeat(700);
+        assert_eq!(
+            provider_submit_error(&json!({ "message": long_message }))
+                .1
+                .map(|message| message.chars().count()),
+            Some(500)
+        );
     }
 
     #[test]

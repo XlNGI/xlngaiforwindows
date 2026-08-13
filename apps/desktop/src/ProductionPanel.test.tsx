@@ -1055,6 +1055,49 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('视频任务已提交，正在本地查询。')).toBeInTheDocument();
   });
 
+  it('persists the bounded provider detail when video submission is rejected', async () => {
+    vi.mocked(submitVideoProviderTask).mockResolvedValue({
+      status: 400,
+      errorCode: 'invalid_request',
+      errorMessage: 'input_reference is required',
+    });
+    mockWorker((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
+      if (method === 'video.generate.fail') {
+        return Promise.resolve({
+          ...videoJob('failed'),
+          error: (params as { message: string }).message,
+        });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    fireEvent.change(await screen.findByLabelText('首帧 URL'), {
+      target: { value: 'https://example.invalid/start.png' },
+    });
+    fireEvent.change(screen.getByLabelText('尾帧 URL'), {
+      target: { value: 'https://example.invalid/end.png' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+
+    const message =
+      'Provider 视频任务提交失败，HTTP 400：invalid_request：input_reference is required。';
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('video.generate.fail', {
+        jobId: 'video-job',
+        failureKind: 'provider',
+        message,
+      }),
+    );
+    expect(await screen.findAllByText(message)).not.toHaveLength(0);
+  });
+
   it('stores dropped asset references in the draft and resolves them for submission', async () => {
     vi.mocked(submitVideoProviderTask).mockResolvedValue({
       status: 200,

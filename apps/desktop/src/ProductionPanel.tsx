@@ -815,10 +815,14 @@ export function ProductionPanel({
       );
       if (currentProjectIdRef.current !== submissionProjectId) return;
       if (response.status < 200 || response.status >= 300 || !response.taskId) {
+        const providerDetail = [response.errorCode, response.errorMessage]
+          .filter((value): value is string => Boolean(value?.trim()))
+          .join('：');
+        const failureMessage = `Provider 视频任务提交失败，HTTP ${response.status}${providerDetail ? `：${providerDetail}` : ''}。`;
         const failed = await callWorker('video.generate.fail', {
           jobId: prepared.id,
           failureKind: 'provider',
-          message: `Provider 视频任务提交失败，HTTP ${response.status}。`,
+          message: failureMessage,
         });
         setVideoJobs((current) => upsertVideoJob(current, failed));
         setGenerationStatus(failed.error ?? '视频任务提交失败。');
