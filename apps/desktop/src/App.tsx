@@ -2017,6 +2017,7 @@ export function App() {
               onExportProject={() => void maintenance.exportProject()}
               onInspectCache={() => void maintenance.inspectCache()}
               onClearCache={() => void maintenance.clearCache()}
+              onCleanupContextSnapshots={() => void maintenance.cleanupContextSnapshots()}
               onDiagnosticDestinationChange={maintenance.setDiagnosticDestination}
               onExportDiagnostics={() => void maintenance.exportDiagnostics()}
               onRevealDiagnostics={() => void maintenance.revealDiagnostics()}

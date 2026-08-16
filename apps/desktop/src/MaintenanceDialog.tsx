@@ -26,6 +26,7 @@ interface MaintenanceDialogProps {
   onExportProject: () => void;
   onInspectCache: () => void;
   onClearCache: () => void;
+  onCleanupContextSnapshots: () => void;
   onDiagnosticDestinationChange: (value: string) => void;
   onExportDiagnostics: () => void;
   onRevealDiagnostics: () => void;
@@ -55,6 +56,7 @@ export function MaintenanceDialog({
   onExportProject,
   onInspectCache,
   onClearCache,
+  onCleanupContextSnapshots,
   onDiagnosticDestinationChange,
   onExportDiagnostics,
   onRevealDiagnostics,
@@ -154,6 +156,9 @@ export function MaintenanceDialog({
             <div className="maintenance-actions">
               <button type="button" onClick={onRefreshMetrics} disabled={busy}>
                 刷新
+              </button>
+              <button type="button" onClick={onCleanupContextSnapshots} disabled={busy}>
+                清理旧快照
               </button>
             </div>
           </section>

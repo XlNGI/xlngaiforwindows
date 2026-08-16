@@ -424,7 +424,7 @@ details
 
 - [x] 数据库不变量由 Schema 和 Service 双重保证；
 - [x] 会话排序、搜索、归档、恢复和游标分页完成；软删除由归档/恢复承载；
-- [~] 上下文快照保留、清理和新快照 manifest 化已完成；备份边界待补；
+- [x] 上下文快照保留、清理、manifest 化、清理前确认和备份边界已完成；
 - [x] 请求、队列等待、生成指标、耗时、成功/失败、首 Token 和 Provider 分类可查询；
 - [x] 重启、并发、重复请求和恶意输入测试通过。
 
@@ -477,6 +477,7 @@ details
 - `maintenance.contextSnapshots.cleanup` 按保留期清理未被 generation、attempt、task、document version 引用的旧快照；
 - 新 generation 快照只保存 `ProductionContextManifest`，不再复制完整 `systemInstruction`、拼接正文或来源内容；
 - Schema v16 将旧 `llm-generation` 完整正文快照原位重写为 manifest，保留来源版本、裁剪统计和 Token 预算；
+- Desktop 项目维护页增加“清理旧快照”入口，执行前二次确认；快照随项目 SQLite 备份/导出，诊断包不包含快照正文；
 - `maintenance.metrics` 返回请求总数、成功/失败、耗时和按操作统计，并保留关联 requestId；
 - `maintenance.metrics` 增加 generation 首 Token、总耗时、成功/失败/取消和 Provider 分类统计；
 - `RequestScheduler` 上报串行请求队列等待，`maintenance.metrics` 返回队列样本、总等待和最慢等待；
@@ -495,7 +496,7 @@ details
 仍未完成：
 
 - 软删除与恢复由归档状态承载；会话列表游标分页已完成；
-- 上下文快照清理前确认和备份边界；legacy 正文迁移已完成；
+- 上下文快照清理前确认、备份边界和 legacy 正文迁移已完成；
 - 图片、视频、备份、导出等全部异步回写统一采用 `projectSessionId`；
 - 请求队列等待、generation 首 Token 和 Provider 分类指标已加入；
 - Desktop/Worker 其余模块拆分、CI 安全/SBOM/许可证检查和 Windows 正式签名升级门禁。

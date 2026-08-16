@@ -118,6 +118,22 @@ export function useProjectMaintenance({
       return `备份完成：${result.path}`;
     });
 
+  const cleanupContextSnapshots = (olderThanDays = 90) => {
+    if (
+      !window.confirm(
+        `确定清理 ${olderThanDays} 天前且不再被 generation、attempt、task、document version 引用的旧上下文快照？`,
+      )
+    ) {
+      return;
+    }
+    return runMaintenanceAction(async () => {
+      const result = await callWorker('maintenance.contextSnapshots.cleanup', {
+        olderThanDays,
+      });
+      return `已清理 ${result.removedCount} 个旧快照，保留 ${result.retainedCount} 个`;
+    });
+  };
+
   return {
     maintenanceBusy,
     maintenanceMessage,
@@ -142,5 +158,6 @@ export function useProjectMaintenance({
     restoreProject,
     checkIntegrity,
     backupProject,
+    cleanupContextSnapshots,
   };
 }
