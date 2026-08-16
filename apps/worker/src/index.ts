@@ -12,17 +12,9 @@ import {
   removeDevHttpToken,
 } from './dev-http-security.js';
 import { handleRequest, parseRequest, recordWorkerError } from './handler.js';
+import { RequestScheduler } from './request-scheduler.js';
 
-let requestQueue = Promise.resolve();
-
-function enqueue<T>(task: () => Promise<T>): Promise<T> {
-  const result = requestQueue.then(task, task);
-  requestQueue = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const requestScheduler = new RequestScheduler();
 
 function writeResponse(response: unknown): void {
   process.stdout.write(`${JSON.stringify(response)}\n`);
@@ -70,7 +62,7 @@ function streamMedia(
 function startStdio(): void {
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', (line) => {
-    void enqueue(async () => {
+    void (async () => {
       let value: unknown;
       try {
         value = JSON.parse(line) as unknown;
@@ -80,8 +72,12 @@ function startStdio(): void {
         return;
       }
       const parsed = parseRequest(value);
-      writeResponse('ok' in parsed ? parsed : await handleRequest(parsed));
-    }).catch((error) => {
+      writeResponse(
+        'ok' in parsed
+          ? parsed
+          : await requestScheduler.run(parsed.method, () => handleRequest(parsed)),
+      );
+    })().catch((error) => {
       recordWorkerError('ipc.request', error);
       writeResponse(parseRequest(null));
     });
@@ -112,27 +108,29 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
         response.writeHead(400).end();
         return;
       }
-      void enqueue(async () => {
-        const result = await handleRequest({
-          id: `dev-media:${assetId}`,
-          protocolVersion: IPC_PROTOCOL_VERSION,
-          method: 'asset.mediaSource',
-          params: { assetId },
+      void requestScheduler
+        .run('asset.mediaSource', async () => {
+          const result = await handleRequest({
+            id: `dev-media:${assetId}`,
+            protocolVersion: IPC_PROTOCOL_VERSION,
+            method: 'asset.mediaSource',
+            params: { assetId },
+          });
+          if (!result.ok) {
+            response.writeHead(404).end();
+            return;
+          }
+          streamMedia(
+            response,
+            result.result as AssetMediaSourceInfo,
+            singleHeader(request.headers.range),
+          );
+        })
+        .catch((error) => {
+          recordWorkerError('http.media', error);
+          if (!response.headersSent) response.writeHead(404);
+          response.end();
         });
-        if (!result.ok) {
-          response.writeHead(404).end();
-          return;
-        }
-        streamMedia(
-          response,
-          result.result as AssetMediaSourceInfo,
-          singleHeader(request.headers.range),
-        );
-      }).catch((error) => {
-        recordWorkerError('http.media', error);
-        if (!response.headersSent) response.writeHead(404);
-        response.end();
-      });
       return;
     }
 
@@ -166,7 +164,7 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
       if (body.length > 1_000_000) request.destroy();
     });
     request.on('end', () => {
-      void enqueue(async () => {
+      void (async () => {
         let value: unknown;
         try {
           value = JSON.parse(body) as unknown;
@@ -177,10 +175,13 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
           return;
         }
         const parsed = parseRequest(value);
-        const result = 'ok' in parsed ? parsed : await handleRequest(parsed);
+        const result =
+          'ok' in parsed
+            ? parsed
+            : await requestScheduler.run(parsed.method, () => handleRequest(parsed));
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(result));
-      }).catch((error) => {
+      })().catch((error) => {
         recordWorkerError('http.request', error);
         response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(parseRequest(null)));

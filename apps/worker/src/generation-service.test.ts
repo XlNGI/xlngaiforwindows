@@ -84,6 +84,37 @@ describe('GenerationService', () => {
     );
   });
 
+  it('reconstructs a terminal generation from SQLite after a Worker restart', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
+      stream: (request) => {
+        request.onDelta('Persisted');
+        return Promise.resolve({ model: 'test-model', content: 'Persisted response' });
+      },
+    };
+    const { content, conversation, generations, projectRoot, projects } = await setup(provider);
+    const started = generations.generate(conversation.id, 'Restart query');
+    await expect.poll(() => generations.get(started.generationId).status).toBe('complete');
+
+    projects.close();
+    projects.open(projectRoot);
+    const restarted = new GenerationService(
+      projects,
+      content,
+      new ContextService(projects),
+      provider,
+    );
+
+    expect(restarted.get(started.generationId)).toMatchObject({
+      generationId: started.generationId,
+      status: 'complete',
+      assistantMessage: { content: 'Persisted response', status: 'complete' },
+    });
+    await expect(restarted.cancel(started.generationId)).resolves.toMatchObject({
+      status: 'complete',
+    });
+  });
+
   it('batches small deltas instead of rewriting SQLite for every increment', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
@@ -238,17 +269,16 @@ describe('GenerationService', () => {
       status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
       stream: () => Promise.reject(new Error('legacy provider must not run')),
     };
-    const selectionResolver: LlmSelectionResolver = {
-      resolveLlmSelection: () => ({
-        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
-        providerName: 'Local Mock',
-        modelId: '123e4567-e89b-42d3-a456-426614174001',
-        modelName: 'Mock Model',
-        remoteModelId: 'mock-model',
-        protocol: 'openai-responses',
-        baseUrl: 'https://mock.invalid/v1',
-      }),
-    };
+    const resolveLlmSelection = vi.fn(() => ({
+      providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+      providerName: 'Local Mock',
+      modelId: '123e4567-e89b-42d3-a456-426614174001',
+      modelName: 'Mock Model',
+      remoteModelId: 'mock-model',
+      protocol: 'openai-responses' as const,
+      baseUrl: 'https://mock.invalid/v1',
+    }));
+    const selectionResolver: LlmSelectionResolver = { resolveLlmSelection };
     const { content, conversation, generations } = await setup(provider, selectionResolver);
     const prepared = generations.prepare({
       conversationId: conversation.id,
@@ -263,7 +293,7 @@ describe('GenerationService', () => {
     });
     const runtime = generations.runtime(prepared.stream);
     expect(runtime).toMatchObject({
-      protocol: 'openai-responses',
+      protocol: 'openai-responses' as const,
       remoteModelId: 'mock-model',
       prompt: 'Native prompt',
     });
@@ -300,6 +330,78 @@ describe('GenerationService', () => {
         expect.objectContaining({ role: 'user', content: 'Native prompt' }),
         expect.objectContaining({ role: 'assistant', content: 'First second', status: 'complete' }),
       ]),
+    );
+  });
+
+  it('deduplicates native prepare requests by idempotency key', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const resolveLlmSelection = vi.fn(() => ({
+      providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+      providerName: 'Local Mock',
+      modelId: '123e4567-e89b-42d3-a456-426614174001',
+      modelName: 'Mock Model',
+      remoteModelId: 'mock-model',
+      protocol: 'openai-responses' as const,
+      baseUrl: 'https://mock.invalid/v1',
+    }));
+    const selectionResolver: LlmSelectionResolver = { resolveLlmSelection };
+    const { content, conversation, generations } = await setup(provider, selectionResolver);
+    const params = {
+      conversationId: conversation.id,
+      prompt: 'Only once',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+      idempotencyKey: '123e4567-e89b-42d3-a456-426614174099',
+    };
+    const first = generations.prepare(params);
+    const duplicate = generations.prepare(params);
+
+    expect(duplicate.generation.generationId).toBe(first.generation.generationId);
+    expect(content.listMessages({ conversationId: conversation.id }).items).toHaveLength(2);
+    generations.complete({ ...first.stream, content: 'Done' });
+    expect(generations.prepare(params).generation).toMatchObject({
+      generationId: first.generation.generationId,
+      status: 'complete',
+      assistantMessage: { content: 'Done' },
+    });
+    expect(resolveLlmSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects callbacks from an earlier open session of the same project', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses',
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    };
+    const { conversation, generations, projectRoot, projects } = await setup(
+      provider,
+      selectionResolver,
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Old session',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+
+    projects.close();
+    projects.open(projectRoot);
+
+    expect(() => generations.observe({ ...prepared.stream, content: 'Stale' })).toThrow(
+      'Project session changed',
     );
   });
 

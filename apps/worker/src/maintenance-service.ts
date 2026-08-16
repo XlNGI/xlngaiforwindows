@@ -181,6 +181,17 @@ export class MaintenanceService {
     if (this.events.length > MAX_DIAGNOSTIC_EVENTS) this.events.shift();
   }
 
+  recordRequest(operation: string, requestId: string, ok: boolean, durationMs: number): void {
+    this.events.push({
+      at: this.now().toISOString(),
+      operation: redactDiagnosticText(operation),
+      message: redactDiagnosticText(
+        `request=${requestId} status=${ok ? 'ok' : 'error'} durationMs=${Math.max(0, Math.round(durationMs))}`,
+      ),
+    });
+    if (this.events.length > MAX_DIAGNOSTIC_EVENTS) this.events.shift();
+  }
+
   resetSession(): void {
     this.events.length = 0;
     this.exportedPaths.clear();

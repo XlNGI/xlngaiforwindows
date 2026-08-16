@@ -143,14 +143,14 @@ created -> streaming -> complete
 
 ## 6. 本轮复验状态
 
-2026-08-03 自动化与外部条件复验：
+2026-08-03 历史自动化与外部条件复验：
 
 - `pnpm test`：22 个实际测试文件、146 个测试通过。
 - `pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`：通过。
 - `pnpm worker:sidecar` 与 M7 Sidecar 生命周期验证：通过。
 - `cargo fmt --check`、`cargo check`、`cargo test`：通过，12 个 Rust 测试通过。
 - `pnpm tauri:build`：通过，生成 20,275,869 字节的 x64 NSIS 安装包；SHA-256 为 `1DC290F9FCDD9773B275026D24C662EC5C7E6CE929005FF9506844B29474A7C8`。
-- M7 对抗性复验修复：签名 URL 持久化及旧库清理、最近项目僵尸会话、素材删除数据丢失、图片提交孤儿文件、分块视频磁盘预留、LLM 过期回包和开发 HTTP Worker 信任边界均有失败注入或真实本地服务器回归测试；SQLite 当前 Schema 为 v6。
+- M7 对抗性复验修复：签名 URL 持久化及旧库清理、最近项目僵尸会话、素材删除数据丢失、图片提交孤儿文件、分块视频磁盘预留、LLM 过期回包和开发 HTTP Worker 信任边界均有失败注入或真实本地服务器回归测试；SQLite 当前 Schema 为 v11。
 - Release 同目录冒烟：通过；桌面程序实际拉起安装后名称 `ai-video-worker.exe`，并在启动 health/SQLite 检查期间保持 Worker 存活。
 - Vidu 官方失败响应：通过；向固定官方端点发送无效测试令牌得到 HTTP `403`，未创建任务或消耗额度。
 - 干净安装门禁：`scripts/validate-nsis-install.ps1` 已接入 Windows CI，使用唯一临时安装目录，覆盖静默安装、启动、Worker 存活、窗口关闭、Worker 无残留和卸载后二进制清理；本机完整执行通过，fail-fast GitHub Windows runner run `30720119063` 通过且无错误注解（包括该安装生命周期步骤）。
@@ -167,7 +167,15 @@ created -> streaming -> complete
 - 本轮 M7 未验证：真实 OpenAI/Vidu 发布候选成功请求、正式签名、上一正式版本升级、干净 Windows 虚拟机、断网/联网切换和真实系统休眠恢复。既有 M6 真实参考生视频证据不替代当前发布候选验证。
 - UniCompAPI 自动门禁：官方单卡片、搜索式平铺模型列表、未知模型默认关闭、精确能力合同、聊天/图片/编辑/视频固定路由、Bearer 原生桥、鉴权视频下载、Base64 脱敏和 Vidu 回归均有自动测试。模型同步到启用再到原生路由的 Worker/Rust 集成测试通过；真实 UniCompAPI 凭据与额度请求尚未执行，状态保持 `HOLD`。
 - UniCompAPI Vidu 兼容视频请求体：2026-08-12 新增 `viduq3` 参考生视频和 `viduq3-pro` 首尾帧生视频目录项；两者复用 Vidu 官方 Schema，经 `/v1/videos` 发送时保留 `images` 数组、首尾顺序和已声明字段。generation-adapters 16 项、ProductionPanel 23 项、Rust 40 项测试及相关 TypeScript 类型检查通过；真实 UniCompAPI 额度请求尚未执行，状态保持 `HOLD`。
+- Markdown 文档导入：2026-08-13 新增项目文档工具栏一键导入；只接受用户明确选择的 UTF-8 `.md`/`.markdown` 文件，原生读取边界限制为 5 MiB，并覆盖 BOM、非法扩展、非法编码和超限拒绝。导入内容通过既有 `document.save` 创建“创作笔记”正式版本，可进入后续 LLM 上下文；Desktop 63 项、Worker 117 项、Rust 41 项测试，以及全仓类型检查、Lint、Prettier、Rust fmt/check 和桌面生产构建通过，1280×720 与 390×844 工具栏无越界或水平溢出。
+- 素材类型下拉筛选：2026-08-13 将“全部素材 / 图片 / 视频”三段按钮合并为单选下拉菜单，保留 `all/image/video` 查询合同及与素材组、日期、排序的组合筛选；真实项目 9/6/3 项切换正确，1440×900、1280×720 与 390×844 无越界、重叠或水平溢出。
 - UniCompAPI 发布候选本机门禁：2026-08-11 重新打包 Worker Sidecar、M7 Sidecar 生命周期、Tauri Release、NSIS 和临时目录干净安装均通过；候选安装包为 `20,551,685` 字节，SHA-256 `C47BAF6404964609583D20ACF532A5D24CE326C2FA629D16350D2A99C739156D`。安装包仍为 `NotSigned`，本次结果不替代 Hosted Windows、正式签名或真实 UniCompAPI 请求。
+
+2026-08-16 文档工作流审计复验：
+
+- Schema v13 `document_audit_events` 已接入项目迁移；Persistence 18 项、Worker 131 项、Desktop 88 项测试通过。
+- `pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、`cargo fmt --check` 和 Rust 41 项测试通过。
+- 审计记录覆盖草稿保存/恢复、审核提交/退回/拒绝和发布；审计事件有界且不可更新/删除。Windows 独立窗口实机、迁移备份恢复演练和正式签名仍是人工发布门禁。
 
 因此本轮已知代码级 `P1/P2` 已清零，当前硬化提交的本地与 Hosted Windows 自动门禁均通过。最终里程碑签收保持 `HOLD`，未验证项完成前不得标记为完整发布验证。
 

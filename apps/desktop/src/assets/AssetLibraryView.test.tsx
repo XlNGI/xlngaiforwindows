@@ -18,7 +18,7 @@ describe('AssetLibraryView', () => {
     callWorker.mockResolvedValue([]);
   });
 
-  it('opens all assets by default and applies image and video presets', async () => {
+  it('opens all assets by default anpnd applies image and video presets', async () => {
     render(<AssetLibraryView writable />);
     expect(screen.queryByRole('navigation', { name: '素材库导航' })).not.toBeInTheDocument();
     await waitFor(() =>
@@ -27,14 +27,18 @@ describe('AssetLibraryView', () => {
         expect.objectContaining({ deleted: 'active', kind: undefined }),
       ),
     );
-    fireEvent.click(within(screen.getByRole('group', { name: '素材类型' })).getByText('图片'));
+    fireEvent.change(screen.getByRole('combobox', { name: '素材类型' }), {
+      target: { value: 'image' },
+    });
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'asset.list',
         expect.objectContaining({ kind: 'image' }),
       ),
     );
-    fireEvent.click(within(screen.getByRole('group', { name: '素材类型' })).getByText('视频'));
+    fireEvent.change(screen.getByRole('combobox', { name: '素材类型' }), {
+      target: { value: 'video' },
+    });
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'asset.list',

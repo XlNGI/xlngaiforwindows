@@ -54,6 +54,36 @@ describe('OpenAIResponsesProvider', () => {
     expect(typeof body === 'string' ? body : '').not.toContain('test');
   });
 
+  it('parses function call items and argument deltas without executing them', async () => {
+    const payload = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_tool"}}',
+      'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"document.create_draft","arguments":""}}',
+      'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\\"title\\":\\"Outline\\"}"}',
+      'event: response.completed\ndata: {"type":"response.completed"}',
+      '',
+    ].join('\n\n');
+    const provider = new OpenAIResponsesProvider({
+      apiKey: 'test',
+      fetch: () =>
+        Promise.resolve(
+          new Response(payload, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+        ),
+    });
+    await expect(
+      provider.stream({
+        systemInstruction: '',
+        context: '',
+        prompt: '',
+        tools: [{ name: 'document.create_draft', parameters: { type: 'object' } }],
+        onDelta() {},
+      }),
+    ).resolves.toMatchObject({
+      toolCalls: [
+        { id: 'call_1', name: 'document.create_draft', argumentsJson: '{"title":"Outline"}' },
+      ],
+    });
+  });
+
   it.each([
     [
       'response.failed',

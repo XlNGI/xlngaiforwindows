@@ -1,11 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
   IPC_PROTOCOL_VERSION,
+  type WorkerError,
   type WorkerMethod,
   type WorkerMethodMap,
   type WorkerRequest,
   type WorkerResponse,
 } from '@ai-video/contracts';
+
+export class WorkerClientError extends Error {
+  constructor(readonly workerError: WorkerError) {
+    super(workerError.message);
+    this.name = 'WorkerClientError';
+  }
+}
 
 function isTauri(): boolean {
   return '__TAURI_INTERNALS__' in window;
@@ -33,6 +41,6 @@ export async function callWorker<M extends WorkerMethod>(
         return (await result.json()) as WorkerResponse<M>;
       });
 
-  if (!response.ok) throw new Error(response.error.message);
+  if (!response.ok) throw new WorkerClientError(response.error);
   return response.result;
 }

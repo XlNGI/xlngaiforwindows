@@ -24,12 +24,9 @@ import type {
   ShotInfo,
   ShotSaveParams,
 } from '@ai-video/contracts';
-import type {
-  ConversationRecord,
-  DocumentRecord,
-  LlmGenerationAttemptRecord,
-} from '@ai-video/domain';
+import type { ConversationRecord, LlmGenerationAttemptRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
+import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 
 const documentKinds = new Set<DocumentKind>([
@@ -48,16 +45,6 @@ function required(value: string, name: string): string {
   return result;
 }
 
-function asDocumentSummary(record: DocumentRecord): DocumentSummary {
-  if (!documentKinds.has(record.kind as DocumentKind)) {
-    throw new Error(`Unsupported document kind: ${record.kind}`);
-  }
-  if (!scopeTypes.has(record.scopeType as ConversationScopeType)) {
-    throw new Error(`Unsupported document scope: ${record.scopeType}`);
-  }
-  return record as DocumentSummary;
-}
-
 function asConversation(record: ConversationRecord): ConversationInfo {
   if (!scopeTypes.has(record.scopeType as ConversationScopeType)) {
     throw new Error(`Unsupported conversation scope: ${record.scopeType}`);
@@ -66,98 +53,37 @@ function asConversation(record: ConversationRecord): ConversationInfo {
 }
 
 export class ContentService {
-  constructor(private readonly projects: ProjectService) {}
+  private readonly workflow: DocumentWorkflowService;
+
+  constructor(private readonly projects: ProjectService) {
+    this.workflow = new DocumentWorkflowService(projects);
+  }
 
   listDocuments(): DocumentSummary[] {
-    return this.projects.access(false, (database, project) =>
-      createRepositories(database).documents.listByProject(project.id).map(asDocumentSummary),
-    );
+    return this.workflow.listDocuments();
   }
 
   getDocument(documentId: string): DocumentDetail {
-    return this.projects.access(false, (database, project) => {
-      const repository = createRepositories(database).documents;
-      const document = repository.get(documentId);
-      if (!document || document.projectId !== project.id)
-        throw new Error('Document was not found.');
-      return {
-        ...asDocumentSummary(document),
-        currentVersion: document.currentVersionId
-          ? repository.getVersion(document.currentVersionId)
-          : undefined,
-      };
-    });
+    return this.workflow.getDocument(documentId);
   }
 
   saveDocument(params: DocumentSaveParams): DocumentDetail {
-    if (!documentKinds.has(params.kind)) throw new Error('Document kind is invalid.');
-    const title = required(params.title, 'Document title');
-    return this.projects.access(true, (database, project) => {
-      const repositories = createRepositories(database);
-      const existing = params.documentId
-        ? repositories.documents.get(params.documentId)
-        : undefined;
-      if (params.documentId && (!existing || existing.projectId !== project.id)) {
-        throw new Error('Document was not found.');
-      }
-
-      const now = new Date().toISOString();
-      const documentId = existing?.id ?? randomUUID();
-      const scopeType =
-        params.scopeType ?? (existing?.scopeType as ConversationScopeType) ?? 'project';
-      const scopeId = scopeType === 'project' ? undefined : (params.scopeId ?? existing?.scopeId);
-      this.assertScope(repositories, project.id, scopeType, scopeId);
-      const version: DocumentVersionInfo = {
-        id: randomUUID(),
-        documentId,
-        version: (repositories.documents.listVersions(documentId)[0]?.version ?? 0) + 1,
-        contentMarkdown: params.contentMarkdown,
-        createdAt: now,
-      };
-      const document: DocumentRecord = {
-        id: documentId,
-        projectId: project.id,
-        kind: params.kind,
-        title,
-        scopeType,
-        scopeId,
-        currentVersionId: version.id,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      };
-      repositories.documents.saveVersion(document, version);
-      repositories.projects.touch(now);
-      project.updatedAt = now;
-      return { ...asDocumentSummary(document), currentVersion: version };
+    if (params.kind && !documentKinds.has(params.kind))
+      throw new Error('Document kind is invalid.');
+    const existing = params.documentId ? this.workflow.getDocument(params.documentId) : undefined;
+    return this.workflow.saveDraft({
+      ...params,
+      kind: params.kind ?? existing?.kind ?? 'note',
+      expectedDocumentRowVersion: params.expectedDocumentRowVersion ?? existing?.rowVersion,
     });
   }
 
   listDocumentVersions(documentId: string): DocumentVersionInfo[] {
-    return this.projects.access(false, (database, project) => {
-      const repository = createRepositories(database).documents;
-      const document = repository.get(documentId);
-      if (!document || document.projectId !== project.id)
-        throw new Error('Document was not found.');
-      return repository.listVersions(documentId);
-    });
+    return this.workflow.listVersions(documentId);
   }
 
   restoreDocument(params: DocumentRestoreParams): DocumentDetail {
-    const source = this.projects.access(false, (database, project) => {
-      const repository = createRepositories(database).documents;
-      const document = repository.get(params.documentId);
-      const version = repository.getVersion(params.versionId);
-      if (!document || document.projectId !== project.id || version?.documentId !== document.id) {
-        throw new Error('Document version was not found.');
-      }
-      return { document: asDocumentSummary(document), version };
-    });
-    return this.saveDocument({
-      documentId: source.document.id,
-      kind: source.document.kind,
-      title: source.document.title,
-      contentMarkdown: source.version.contentMarkdown,
-    });
+    return this.workflow.restoreDocument(params);
   }
 
   listScenes(): SceneInfo[] {
@@ -337,14 +263,10 @@ export class ContentService {
   }
 
   messageToDocument(params: MessageDocumentParams): DocumentDetail {
-    const { content, conversation } = this.getMessageContext(params.messageId);
-    return this.saveDocument({
-      kind: params.kind ?? 'note',
+    return this.workflow.createDocumentDraftFromMessage({
+      messageId: params.messageId,
       title: params.title,
-      contentMarkdown: content,
-      scopeType: conversation.scopeType as ConversationScopeType,
-      scopeId: conversation.scopeId,
-    });
+    }).document;
   }
 
   messageToMemory(messageId: string): { id: string } {

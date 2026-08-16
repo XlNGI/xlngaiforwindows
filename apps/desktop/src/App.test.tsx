@@ -4,6 +4,7 @@ import type { ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
 import { App, mergeGenerationMessage } from './App';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { readMarkdownDocument } from './markdown-import-client';
 
 const windowApi = vi.hoisted(() => ({
   close: vi.fn().mockResolvedValue(undefined),
@@ -15,6 +16,10 @@ const windowApi = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => windowApi,
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn().mockResolvedValue(() => undefined),
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -47,10 +52,37 @@ vi.mock('./worker-client', () => ({
   ),
 }));
 
+vi.mock('./markdown-import-client', () => ({
+  readMarkdownDocument: vi.fn(),
+}));
+
 describe('App', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(callWorker).mockImplementation((method: string) =>
+      Promise.resolve(
+        method === 'health'
+          ? {
+              protocolVersion: 1,
+              workerVersion: '0.1.0',
+              nodeVersion: 'v22.0.0',
+              platform: 'win32',
+              arch: 'x64',
+              pid: 123,
+            }
+          : method === 'sqlite.probe'
+            ? {
+                databasePath: 'probe.sqlite',
+                sqliteVersion: '3.50.0',
+                journalMode: 'wal',
+                writeVerified: true,
+              }
+            : method === 'project.recent'
+              ? []
+              : null,
+      ),
+    );
     Object.defineProperty(window, '__TAURI_INTERNALS__', {
       configurable: true,
       value: {},
@@ -64,7 +96,6 @@ describe('App', () => {
     render(<App />);
     expect(screen.getByText('项目文档')).toBeInTheDocument();
     expect(screen.getByText('文档编辑器')).toBeInTheDocument();
-    expect(screen.getByText('生产参数')).toBeInTheDocument();
     expect(screen.getByText('项目会话')).toBeInTheDocument();
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
   });
@@ -113,6 +144,109 @@ describe('App', () => {
     );
   });
 
+  it('imports a selected Markdown file as a versioned project document', async () => {
+    const project = {
+      id: 'project',
+      name: 'Imported Novel',
+      rootPath: 'D:\\Projects\\imported-novel',
+      createdAt: 'now',
+      updatedAt: 'now',
+      mode: 'read-write' as const,
+      schemaVersion: 7,
+    };
+    const saved = {
+      id: 'document-imported',
+      projectId: project.id,
+      kind: 'note' as const,
+      title: '第一章',
+      scopeType: 'project' as const,
+      currentVersionId: 'version-1',
+      publishedVersionId: undefined,
+      lifecycleStatus: 'active' as const,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+      currentVersion: {
+        id: 'version-1',
+        documentId: 'document-imported',
+        version: 1,
+        contentMarkdown: '# 第一章\n\n故事开始。',
+        state: 'draft' as const,
+        authorType: 'import' as const,
+        createdAt: 'now',
+      },
+    };
+    vi.mocked(openDialog).mockResolvedValue('D:\\Novels\\第一章.md');
+    vi.mocked(readMarkdownDocument).mockResolvedValue({
+      title: '第一章',
+      contentMarkdown: '# 第一章\n\n故事开始。',
+    });
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current') return Promise.resolve(project);
+      if (
+        method === 'project.recent' ||
+        method === 'document.list' ||
+        method === 'scene.list' ||
+        method === 'asset.list' ||
+        method === 'video.generate.list' ||
+        method === 'conversation.list' ||
+        method === 'provider.profile.list'
+      )
+        return Promise.resolve([]);
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'document.draft.save') return Promise.resolve(saved);
+      if (method === 'document.versions') return Promise.resolve([saved.currentVersion]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '导入 Markdown' }));
+
+    await waitFor(() =>
+      expect(openDialog).toHaveBeenCalledWith({
+        directory: false,
+        multiple: false,
+        title: '导入 Markdown 文档',
+        filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+      }),
+    );
+    expect(readMarkdownDocument).toHaveBeenCalledWith('D:\\Novels\\第一章.md');
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('document.draft.save', {
+        title: '第一章',
+        contentMarkdown: '# 第一章\n\n故事开始。',
+        authorType: 'import',
+      }),
+    );
+    expect(await screen.findByDisplayValue('第一章')).toBeInTheDocument();
+    expect(screen.getByLabelText('文档内容')).toHaveValue('# 第一章\n\n故事开始。');
+    expect(screen.getByText('已导入为草稿 第一章 · 版本 v1')).toBeInTheDocument();
+  });
+
   it('expands production UI across the central workspace when a production mode is selected', () => {
     const { container } = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: '文生图' }));
@@ -128,7 +262,7 @@ describe('App', () => {
       'data-navigation-mode',
       'project',
     );
-    expect(container.querySelector('.production-panel')).not.toHaveClass('expanded');
+    expect(container.querySelector('.production-panel')).not.toBeInTheDocument();
   });
 
   it('offers a sample project on first use and sends the selected absolute path', async () => {

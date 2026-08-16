@@ -42,6 +42,7 @@ interface LockContents {
 }
 
 interface ProjectSession {
+  id: string;
   database: Database.Database;
   project: OpenProject;
   lockPath?: string;
@@ -162,6 +163,7 @@ export class ProjectService {
         .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
         .run(id, projectName, now, now);
       this.session = {
+        id: randomUUID(),
         database,
         lockPath: lock.path,
         lockToken: lock.token,
@@ -214,6 +216,7 @@ export class ProjectService {
       }
       const metadata = createRepositories(database).projects.get();
       this.session = {
+        id: randomUUID(),
         database,
         lockPath: lock?.path,
         lockToken: lock?.token,
@@ -248,6 +251,10 @@ export class ProjectService {
 
   current(): OpenProject | undefined {
     return this.session?.project;
+  }
+
+  currentSessionId(): string | undefined {
+    return this.session?.id;
   }
 
   access<T>(

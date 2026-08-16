@@ -38,7 +38,9 @@ interface ChatPanelProps {
   selectedLlmModelId: string;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
-  onCollapse: () => void;
+  onClose?: () => void;
+  /** @deprecated Use onClose. Kept temporarily for component consumers outside the workspace host. */
+  onCollapse?: () => void;
   onScopeChange: (scope: ConversationScopeType) => void;
   onSelectConversation: (conversation: ConversationInfo) => void;
   onCreateConversation: () => void;
@@ -73,6 +75,7 @@ export function ChatPanel({
   selectedLlmModelId,
   contextPreview,
   generation,
+  onClose,
   onCollapse,
   onScopeChange,
   onSelectConversation,
@@ -86,11 +89,12 @@ export function ChatPanel({
   onCancelGeneration,
   onSendMessage,
 }: ChatPanelProps) {
+  const close = onClose ?? onCollapse;
   return (
-    <aside className="chat-panel panel-border">
+    <section className="chat-panel panel-border" aria-label="项目会话">
       <div className="panel-heading">
         <span>{scopeLabel(scopeType)}会话</span>
-        <button className="icon-button subtle" type="button" title="收起会话" onClick={onCollapse}>
+        <button className="icon-button subtle" type="button" title="关闭会话" onClick={close}>
           <PanelRightClose size={16} />
         </button>
       </div>
@@ -233,13 +237,25 @@ export function ChatPanel({
               )}
               {message.role === 'assistant' && (
                 <footer>
-                  <button type="button" onClick={() => onPromoteMessage(message, 'document')}>
-                    保存为文档
+                  <button
+                    type="button"
+                    onClick={() => onPromoteMessage(message, 'document')}
+                    disabled={!writable || message.status !== 'complete'}
+                  >
+                    保存为文档草稿
                   </button>
-                  <button type="button" onClick={() => onPromoteMessage(message, 'memory')}>
+                  <button
+                    type="button"
+                    onClick={() => onPromoteMessage(message, 'memory')}
+                    disabled={!writable || message.status !== 'complete'}
+                  >
                     加入记忆
                   </button>
-                  <button type="button" onClick={() => onPromoteMessage(message, 'constraint')}>
+                  <button
+                    type="button"
+                    onClick={() => onPromoteMessage(message, 'constraint')}
+                    disabled={!writable || message.status !== 'complete'}
+                  >
                     添加约束
                   </button>
                   {message.status === 'failed' &&
@@ -286,7 +302,7 @@ export function ChatPanel({
           </button>
         )}
       </div>
-    </aside>
+    </section>
   );
 }
 

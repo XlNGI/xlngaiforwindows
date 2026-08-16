@@ -36,6 +36,7 @@ pub(crate) struct LlmStreamStart {
     generation_id: String,
     attempt_id: String,
     project_id: String,
+    project_session_id: String,
     conversation_id: String,
 }
 
@@ -45,6 +46,7 @@ struct LlmRuntimeRequest {
     generation_id: String,
     attempt_id: String,
     project_id: String,
+    project_session_id: String,
     conversation_id: String,
     provider_profile_id: String,
     model_id: String,
@@ -343,6 +345,7 @@ fn resolve_runtime(
     if runtime.generation_id != request.generation_id
         || runtime.attempt_id != request.attempt_id
         || runtime.project_id != request.project_id
+        || runtime.project_session_id != request.project_session_id
         || runtime.conversation_id != request.conversation_id
     {
         return Err("Worker returned a mismatched LLM runtime request".to_string());
@@ -1351,6 +1354,7 @@ mod tests {
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),
+            project_session_id: "project-session".to_string(),
             conversation_id: "conversation".to_string(),
             provider_profile_id: "profile".to_string(),
             model_id: "model".to_string(),

@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FolderOpen,
   Image,
+  Images,
   Pencil,
   Plus,
   RotateCcw,
@@ -346,29 +347,25 @@ export function AssetLibraryView({
         </header>
 
         <div className="asset-filter-bar">
-          <div className="asset-type-filter" role="group" aria-label="素材类型">
-            <button
-              type="button"
-              className={mediaFilter === 'all' ? 'active' : ''}
-              onClick={() => setMediaFilter('all')}
+          <label className="asset-type-select">
+            {mediaFilter === 'image' ? (
+              <Image size={14} />
+            ) : mediaFilter === 'video' ? (
+              <Video size={14} />
+            ) : (
+              <Images size={14} />
+            )}
+            <select
+              aria-label="素材类型"
+              value={mediaFilter}
+              onChange={(event) => setMediaFilter(event.target.value as MediaFilter)}
             >
-              全部素材
-            </button>
-            <button
-              type="button"
-              className={mediaFilter === 'image' ? 'active' : ''}
-              onClick={() => setMediaFilter('image')}
-            >
-              <Image size={14} /> 图片
-            </button>
-            <button
-              type="button"
-              className={mediaFilter === 'video' ? 'active' : ''}
-              onClick={() => setMediaFilter('video')}
-            >
-              <Video size={14} /> 视频
-            </button>
-          </div>
+              <option value="all">全部素材</option>
+              <option value="image">图片</option>
+              <option value="video">视频</option>
+            </select>
+            <ChevronDown size={13} />
+          </label>
           {!showTrash && (
             <>
               <details className="asset-filter-menu asset-manager-menu">

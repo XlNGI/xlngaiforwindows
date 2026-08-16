@@ -30,6 +30,7 @@ const prepared: LlmGenerationPrepareResult = {
     generationId: 'generation',
     attemptId: 'attempt',
     projectId: 'project',
+    projectSessionId: 'project-session',
     conversationId: 'conversation',
   },
   generation: {

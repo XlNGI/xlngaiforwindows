@@ -9,14 +9,28 @@ export interface LlmStreamRequest {
   systemInstruction: string;
   context: string;
   prompt: string;
+  tools?: readonly LlmToolDefinition[];
   signal?: AbortSignal;
   onDelta(delta: string): void;
+}
+
+export interface LlmToolDefinition {
+  name: string;
+  description?: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface LlmToolCall {
+  id: string;
+  name: string;
+  argumentsJson: string;
 }
 
 export interface LlmStreamResult {
   providerResponseId?: string;
   model: string;
   content: string;
+  toolCalls: LlmToolCall[];
 }
 
 export interface LlmProvider {
@@ -94,6 +108,16 @@ export class OpenAIResponsesProvider implements LlmProvider {
               reasoning: { effort: 'none' },
               store: false,
               stream: true,
+              ...(request.tools?.length
+                ? {
+                    tools: request.tools.map((tool) => ({
+                      type: 'function',
+                      name: tool.name,
+                      description: tool.description,
+                      parameters: tool.parameters,
+                    })),
+                  }
+                : {}),
             }),
             signal: controller.signal,
           }),
@@ -133,6 +157,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
       let buffer = '';
       let content = '';
       let providerResponseId: string | undefined;
+      const toolCalls = new Map<string, { id: string; name: string; argumentsJson: string }>();
       let completed = false;
       let receivedBytes = false;
       while (true) {
@@ -170,6 +195,30 @@ export class OpenAIResponsesProvider implements LlmProvider {
             content += parsed.delta;
             request.onDelta(parsed.delta);
           }
+          if (
+            parsed.type === 'response.output_item.added' &&
+            parsed.item?.type === 'function_call'
+          ) {
+            const id = parsed.item.call_id ?? parsed.item.id;
+            const itemKey = parsed.item.id ?? id;
+            if (id && itemKey && parsed.item.name) {
+              toolCalls.set(itemKey, {
+                id,
+                name: parsed.item.name,
+                argumentsJson: parsed.item.arguments ?? '',
+              });
+            }
+          }
+          if (parsed.type === 'response.function_call_arguments.delta') {
+            const id = parsed.item_id;
+            const call = id ? toolCalls.get(id) : undefined;
+            if (call) call.argumentsJson += parsed.delta ?? '';
+          }
+          if (parsed.type === 'response.function_call_arguments.done') {
+            const id = parsed.item_id;
+            const call = id ? toolCalls.get(id) : undefined;
+            if (call && parsed.arguments !== undefined) call.argumentsJson = parsed.arguments;
+          }
           if (parsed.type === 'error') {
             throw new LlmProviderError(
               parsed.message ?? parsed.error?.message ?? 'OpenAI stream failed.',
@@ -196,7 +245,12 @@ export class OpenAIResponsesProvider implements LlmProvider {
           true,
         );
       }
-      return { providerResponseId, model: this.model, content };
+      const completedToolCalls = [...toolCalls.values()].map((call) => ({
+        id: call.id,
+        name: call.name,
+        argumentsJson: call.argumentsJson,
+      }));
+      return { providerResponseId, model: this.model, content, toolCalls: completedToolCalls };
     } catch (error) {
       if (reader) void reader.cancel().catch(() => undefined);
       throw error;
@@ -212,6 +266,9 @@ interface OpenAIStreamEvent {
   message?: string;
   error?: { message?: string };
   response?: { id?: string; error?: { message?: string } };
+  item_id?: string;
+  arguments?: string;
+  item?: { type?: string; id?: string; call_id?: string; name?: string; arguments?: string };
 }
 
 async function safeErrorMessage(response: Response): Promise<string> {

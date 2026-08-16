@@ -14,7 +14,11 @@ import {
   MIGRATION_V8,
   MIGRATION_V9,
   MIGRATION_V10,
+  MIGRATION_V11,
+  MIGRATION_V12,
+  MIGRATION_V13,
 } from './schema.js';
+import { runV14Rebuild } from './migration-v14.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -150,6 +154,33 @@ export function migrateDatabase(
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(10, now);
     })();
+  }
+  if (getSchemaVersion(database) === 10) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V11);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(11, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 11) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V12);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(12, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 12) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V13);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(13, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 13) {
+    runV14Rebuild(database, now);
   }
   return getSchemaVersion(database);
 }

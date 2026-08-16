@@ -1,5 +1,5 @@
 use std::{
-    fs::{create_dir_all, write},
+    fs::{create_dir_all, write, File},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -41,6 +41,7 @@ const UNICOMPAPI_IMAGE_INPUT_LIMIT: usize = 20 * 1024 * 1024;
 const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_TASK_ID_LIMIT: usize = 256;
+const MARKDOWN_IMPORT_LIMIT: u64 = 5 * 1024 * 1024;
 const UNICOMPAPI_HOST: &str = "unicompapi.com";
 const UNICOMPAPI_AUTHORIZATION_SCHEME: &str = "Bearer";
 #[cfg(any(not(debug_assertions), test))]
@@ -1419,6 +1420,68 @@ struct LegacyProviderMigrationReport {
 
 struct LegacyProviderMigrationState(LegacyProviderMigrationReport);
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarkdownImportResult {
+    title: String,
+    content_markdown: String,
+}
+
+fn read_markdown_document(path: &Path) -> Result<MarkdownImportResult, String> {
+    if !path.is_absolute() {
+        return Err("Markdown import path must be absolute".to_string());
+    }
+    let supported_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        });
+    if !supported_extension {
+        return Err("Only .md and .markdown files can be imported".to_string());
+    }
+
+    let mut file =
+        File::open(path).map_err(|error| format!("Could not open Markdown file: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect Markdown file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Markdown import path must identify a file".to_string());
+    }
+    if metadata.len() > MARKDOWN_IMPORT_LIMIT {
+        return Err("Markdown file exceeds the 5 MiB import limit".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read Markdown file: {error}"))?;
+    if bytes.len() as u64 > MARKDOWN_IMPORT_LIMIT {
+        return Err("Markdown file exceeds the 5 MiB import limit".to_string());
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "Markdown files must use UTF-8 encoding".to_string())?;
+    let title = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Markdown file name cannot be used as a document title")?;
+
+    Ok(MarkdownImportResult {
+        title: title.to_string(),
+        content_markdown: content
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&content)
+            .to_string(),
+    })
+}
+
+#[tauri::command]
+fn markdown_import(path: String) -> Result<MarkdownImportResult, String> {
+    read_markdown_document(Path::new(&path))
+}
+
 impl WorkerState {
     fn new(app_data_dir: PathBuf) -> Self {
         Self {
@@ -1604,6 +1667,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             worker_request,
+            markdown_import,
             credential_status,
             credential_set,
             credential_delete,
@@ -1630,15 +1694,51 @@ mod tests {
         provider_task_id, provider_task_path, resolve_media_selection, unicompapi_adapter_model,
         unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
         validate_credential_provider, WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME,
-        PROVIDER_REQUEST_BODY_LIMIT, UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
+        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, UNICOMPAPI_AUTHORIZATION_SCHEME,
+        UNICOMPAPI_HOST,
     };
     use serde_json::json;
     use std::{
-        fs::{create_dir_all, remove_dir_all},
+        fs::{create_dir_all, remove_dir_all, write},
         path::Path,
         process::Command,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn markdown_import_accepts_utf8_markdown_and_rejects_unsafe_inputs() {
+        let root = std::env::temp_dir().join(format!(
+            "unicomp-markdown-import-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        create_dir_all(&root).expect("create Markdown import fixture directory");
+
+        let markdown = root.join("第一章.md");
+        write(&markdown, "\u{feff}# 第一章\n\n故事开始。").expect("write Markdown fixture");
+        let imported = super::read_markdown_document(&markdown).expect("import Markdown fixture");
+        assert_eq!(imported.title, "第一章");
+        assert_eq!(imported.content_markdown, "# 第一章\n\n故事开始。");
+
+        let unsupported = root.join("notes.txt");
+        write(&unsupported, "not Markdown").expect("write unsupported fixture");
+        assert!(super::read_markdown_document(&unsupported).is_err());
+
+        let invalid_utf8 = root.join("invalid.markdown");
+        write(&invalid_utf8, [0xff, 0xfe]).expect("write invalid UTF-8 fixture");
+        assert!(super::read_markdown_document(&invalid_utf8).is_err());
+
+        let oversized = root.join("oversized.md");
+        let oversized_file = std::fs::File::create(&oversized).expect("create oversized fixture");
+        oversized_file
+            .set_len(MARKDOWN_IMPORT_LIMIT + 1)
+            .expect("size oversized fixture");
+        assert!(super::read_markdown_document(&oversized).is_err());
+
+        remove_dir_all(root).expect("remove Markdown import fixture directory");
+    }
 
     #[test]
     fn release_worker_filename_matches_tauri_external_binary() {

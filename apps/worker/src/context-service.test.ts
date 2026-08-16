@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createRepositories } from '@ai-video/persistence';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
+import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 
 const directories: string[] = [];
@@ -25,12 +26,30 @@ async function setup() {
     projects,
     content: new ContentService(projects),
     contexts: new ContextService(projects),
+    workflow: new DocumentWorkflowService(projects),
   };
+}
+
+function publishDocument(
+  workflow: DocumentWorkflowService,
+  documentId: string,
+  rowVersion: number,
+) {
+  workflow.submitReview({
+    documentId,
+    expectedDocumentRowVersion: rowVersion,
+  });
+  const reviewed = workflow.getDocument(documentId);
+  workflow.publish({
+    documentId,
+    expectedDocumentRowVersion: reviewed.rowVersion,
+    expectedPublishedVersionId: reviewed.publishedVersionId,
+  });
 }
 
 describe('ContextService', () => {
   it('tracks document versions and excludes unrelated scene content', async () => {
-    const { content, contexts } = await setup();
+    const { content, contexts, workflow } = await setup();
     const sceneOne = content.saveScene({ title: '场次一' });
     const sceneTwo = content.saveScene({ title: '场次二' });
     const shot = content.saveShot({ sceneId: sceneOne.id, title: '镜头一' });
@@ -39,20 +58,23 @@ describe('ContextService', () => {
       title: '项目大纲',
       contentMarkdown: '全局大纲',
     });
-    content.saveDocument({
+    const sceneDocument = content.saveDocument({
       kind: 'scene',
       title: '场次一文档',
       contentMarkdown: '当前场次',
       scopeType: 'scene',
       scopeId: sceneOne.id,
     });
-    content.saveDocument({
+    publishDocument(workflow, sceneDocument.id, sceneDocument.rowVersion);
+    const unrelatedDocument = content.saveDocument({
       kind: 'scene',
       title: '场次二文档',
       contentMarkdown: '不应泄漏',
       scopeType: 'scene',
       scopeId: sceneTwo.id,
     });
+    publishDocument(workflow, unrelatedDocument.id, unrelatedDocument.rowVersion);
+    publishDocument(workflow, outline.id, outline.rowVersion);
     const conversation = content.createConversation({ scopeType: 'shot', scopeId: shot.id });
 
     const context = contexts.compile(conversation.id);
@@ -70,12 +92,13 @@ describe('ContextService', () => {
   });
 
   it('reuses the deterministic summary cache for long documents', async () => {
-    const { projects, content, contexts } = await setup();
-    content.saveDocument({
+    const { projects, content, contexts, workflow } = await setup();
+    const document = content.saveDocument({
       kind: 'outline',
       title: '长篇大纲',
       contentMarkdown: '开场'.repeat(5_000),
     });
+    publishDocument(workflow, document.id, document.rowVersion);
     const conversation = content.createConversation({ scopeType: 'project' });
 
     const first = contexts.compile(conversation.id);

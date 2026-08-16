@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -285,4 +285,683 @@ CREATE TABLE asset_group_tags (
   PRIMARY KEY(group_id, tag_id)
 );
 CREATE INDEX idx_asset_group_tags_tag ON asset_group_tags(tag_id, group_id);
+`;
+
+export const MIGRATION_V11 = `
+CREATE TABLE llm_generations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_session_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  context_snapshot_id TEXT NOT NULL REFERENCES context_snapshots(id) ON DELETE CASCADE,
+  user_message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  assistant_message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (
+    status IN ('prepared', 'streaming', 'complete', 'failed', 'cancelled')
+  ),
+  execution_mode TEXT NOT NULL CHECK (execution_mode IN ('legacy', 'native')),
+  retry_of_generation_id TEXT REFERENCES llm_generations(id) ON DELETE SET NULL,
+  idempotency_key TEXT,
+  provider_profile_id TEXT,
+  model_id TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  retryable INTEGER CHECK (retryable IS NULL OR retryable IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)
+);
+
+INSERT INTO llm_generations
+  (id, project_id, project_session_id, conversation_id, context_snapshot_id,
+   user_message_id, assistant_message_id, status, execution_mode,
+   provider_profile_id, model_id, error_code, error_message, retryable,
+   created_at, updated_at, version)
+SELECT attempts.generation_id,
+       conversations.project_id,
+       'migrated-session',
+       attempts.conversation_id,
+       attempts.context_snapshot_id,
+       attempts.user_message_id,
+       attempts.assistant_message_id,
+       CASE
+         WHEN attempts.status IN ('interrupted', 'failed') THEN 'failed'
+         WHEN attempts.status = 'cancelled' THEN 'cancelled'
+         WHEN attempts.status = 'complete' THEN 'complete'
+         WHEN attempts.status = 'prepared' THEN 'prepared'
+         ELSE 'streaming'
+       END,
+       CASE WHEN attempts.protocol = 'legacy-openai-responses' THEN 'legacy' ELSE 'native' END,
+       attempts.provider_profile_id,
+       attempts.model_id,
+       attempts.error_code,
+       attempts.error_message,
+       CASE WHEN attempts.status IN ('failed', 'cancelled', 'interrupted') THEN 1 ELSE NULL END,
+       attempts.started_at,
+       COALESCE(attempts.completed_at, attempts.started_at),
+       0
+FROM llm_generation_attempts attempts
+INNER JOIN conversations ON conversations.id = attempts.conversation_id
+WHERE attempts.id = (
+  SELECT latest.id
+  FROM llm_generation_attempts latest
+  WHERE latest.generation_id = attempts.generation_id
+  ORDER BY latest.started_at DESC, latest.id DESC
+  LIMIT 1
+);
+
+CREATE UNIQUE INDEX idx_llm_generations_idempotency
+  ON llm_generations(project_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_llm_generations_conversation
+  ON llm_generations(conversation_id, created_at, id);
+CREATE INDEX idx_llm_generations_status
+  ON llm_generations(project_id, status, updated_at, id);
+
+CREATE TRIGGER conversations_scope_insert
+BEFORE INSERT ON conversations
+WHEN NEW.scope_type NOT IN ('project', 'scene', 'shot')
+  OR (NEW.scope_type = 'project' AND NEW.scope_id IS NOT NULL)
+  OR (NEW.scope_type IN ('scene', 'shot') AND NEW.scope_id IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid conversation scope');
+END;
+
+CREATE TRIGGER conversations_scope_update
+BEFORE UPDATE OF scope_type, scope_id ON conversations
+WHEN NEW.scope_type NOT IN ('project', 'scene', 'shot')
+  OR (NEW.scope_type = 'project' AND NEW.scope_id IS NOT NULL)
+  OR (NEW.scope_type IN ('scene', 'shot') AND NEW.scope_id IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid conversation scope');
+END;
+
+CREATE TRIGGER chat_messages_status_insert
+BEFORE INSERT ON chat_messages
+WHEN NEW.status NOT IN ('streaming', 'complete', 'failed')
+  OR (NEW.role <> 'assistant' AND NEW.status <> 'complete')
+  OR length(NEW.content) > 1000000
+BEGIN
+  SELECT RAISE(ABORT, 'invalid chat message state');
+END;
+
+CREATE TRIGGER chat_messages_status_update
+BEFORE UPDATE OF role, status, content ON chat_messages
+WHEN NEW.status NOT IN ('streaming', 'complete', 'failed')
+  OR (NEW.role <> 'assistant' AND NEW.status <> 'complete')
+  OR length(NEW.content) > 1000000
+BEGIN
+  SELECT RAISE(ABORT, 'invalid chat message state');
+END;
+
+CREATE TRIGGER llm_attempt_generation_insert
+BEFORE INSERT ON llm_generation_attempts
+WHEN NOT EXISTS (SELECT 1 FROM llm_generations WHERE id = NEW.generation_id)
+BEGIN
+  SELECT RAISE(ABORT, 'llm generation does not exist');
+END;
+
+CREATE TRIGGER llm_generation_status_update
+BEFORE UPDATE OF status ON llm_generations
+WHEN (OLD.status IN ('complete', 'failed', 'cancelled') AND NEW.status <> OLD.status)
+  OR (OLD.status = 'prepared' AND NEW.status NOT IN ('prepared', 'streaming', 'complete', 'failed', 'cancelled'))
+  OR (OLD.status = 'streaming' AND NEW.status NOT IN ('streaming', 'complete', 'failed', 'cancelled'))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid llm generation transition');
+END;
+
+CREATE TRIGGER llm_attempt_status_update
+BEFORE UPDATE OF status ON llm_generation_attempts
+WHEN (OLD.status IN ('complete', 'failed', 'cancelled', 'interrupted') AND NEW.status <> OLD.status)
+  OR (OLD.status = 'prepared' AND NEW.status NOT IN ('prepared', 'streaming', 'complete', 'failed', 'cancelled', 'interrupted'))
+  OR (OLD.status = 'streaming' AND NEW.status NOT IN ('streaming', 'complete', 'failed', 'cancelled', 'interrupted'))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid llm attempt transition');
+END;
+
+CREATE TRIGGER chat_messages_terminal_update
+BEFORE UPDATE OF status ON chat_messages
+WHEN OLD.status IN ('complete', 'failed') AND NEW.status <> OLD.status
+BEGIN
+  SELECT RAISE(ABORT, 'invalid chat message transition');
+END;
+`;
+
+export const MIGRATION_V12 = `
+CREATE TABLE agent_tasks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_session_id TEXT NOT NULL,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  user_message_id TEXT REFERENCES chat_messages(id) ON DELETE SET NULL,
+  task_type TEXT NOT NULL CHECK (task_type IN ('document-create', 'document-update')),
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('project', 'scene', 'shot')),
+  scope_id TEXT,
+  title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+  request_snapshot_json TEXT NOT NULL CHECK (json_valid(request_snapshot_json)),
+  request_hash TEXT NOT NULL,
+  context_snapshot_id TEXT REFERENCES context_snapshots(id) ON DELETE SET NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('queued', 'running', 'waiting_review', 'completed', 'failed', 'cancelled')
+  ),
+  outcome TEXT CHECK (outcome IS NULL OR outcome IN ('published', 'rejected', 'discarded')),
+  retry_of_task_id TEXT REFERENCES agent_tasks(id) ON DELETE SET NULL,
+  idempotency_key TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  retryable INTEGER CHECK (retryable IS NULL OR retryable IN (0, 1)),
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)
+);
+
+CREATE TABLE agent_task_events (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK (sequence >= 0),
+  event_type TEXT NOT NULL,
+  level TEXT NOT NULL CHECK (level IN ('info', 'warning', 'error')),
+  actor_type TEXT,
+  actor_id TEXT,
+  summary TEXT NOT NULL CHECK (length(trim(summary)) > 0),
+  payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+  dedupe_key TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, sequence)
+);
+
+CREATE TABLE agent_task_generations (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  generation_id TEXT NOT NULL REFERENCES llm_generations(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  purpose TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id, generation_id),
+  UNIQUE(task_id, ordinal),
+  UNIQUE(generation_id)
+);
+
+CREATE TABLE agent_tool_calls (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  generation_id TEXT REFERENCES llm_generations(id) ON DELETE SET NULL,
+  attempt_id TEXT REFERENCES llm_generation_attempts(id) ON DELETE SET NULL,
+  provider_call_id TEXT,
+  tool_name TEXT NOT NULL,
+  arguments_json TEXT NOT NULL CHECK (json_valid(arguments_json)),
+  arguments_hash TEXT NOT NULL,
+  result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+  status TEXT NOT NULL CHECK (
+    status IN ('received', 'validated', 'executing', 'succeeded', 'failed', 'cancelled')
+  ),
+  idempotency_key TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)
+);
+
+ALTER TABLE documents ADD COLUMN published_version_id TEXT;
+ALTER TABLE documents ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active'
+  CHECK (lifecycle_status IN ('active', 'archived'));
+ALTER TABLE documents ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0
+  CHECK (row_version >= 0);
+
+ALTER TABLE document_versions ADD COLUMN state TEXT NOT NULL DEFAULT 'published'
+  CHECK (
+    state IN (
+      'draft', 'in_review', 'published', 'changes_requested',
+      'rejected', 'superseded', 'discarded'
+    )
+  );
+ALTER TABLE document_versions ADD COLUMN base_version_id TEXT
+  REFERENCES document_versions(id) ON DELETE SET NULL;
+ALTER TABLE document_versions ADD COLUMN title_snapshot TEXT;
+ALTER TABLE document_versions ADD COLUMN scope_type_snapshot TEXT;
+ALTER TABLE document_versions ADD COLUMN scope_id_snapshot TEXT;
+ALTER TABLE document_versions ADD COLUMN author_type TEXT NOT NULL DEFAULT 'user'
+  CHECK (author_type IN ('user', 'agent', 'import', 'migration'));
+ALTER TABLE document_versions ADD COLUMN author_id TEXT;
+ALTER TABLE document_versions ADD COLUMN source_task_id TEXT
+  REFERENCES agent_tasks(id) ON DELETE SET NULL;
+ALTER TABLE document_versions ADD COLUMN source_message_id TEXT
+  REFERENCES chat_messages(id) ON DELETE SET NULL;
+ALTER TABLE document_versions ADD COLUMN context_snapshot_id TEXT
+  REFERENCES context_snapshots(id) ON DELETE SET NULL;
+ALTER TABLE document_versions ADD COLUMN content_hash TEXT;
+ALTER TABLE document_versions ADD COLUMN state_updated_at TEXT;
+ALTER TABLE document_versions ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0
+  CHECK (state_version >= 0);
+
+CREATE TABLE document_reviews (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  document_version_id TEXT NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES agent_tasks(id) ON DELETE SET NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('pending', 'approved', 'changes_requested', 'rejected', 'withdrawn')
+  ),
+  requested_by_type TEXT NOT NULL,
+  requested_by_id TEXT,
+  requested_at TEXT NOT NULL,
+  decided_by_type TEXT,
+  decided_by_id TEXT,
+  decided_at TEXT,
+  comment TEXT,
+  version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+  UNIQUE(document_version_id)
+);
+
+CREATE TABLE document_publications (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  document_version_id TEXT NOT NULL REFERENCES document_versions(id) ON DELETE RESTRICT,
+  previous_version_id TEXT REFERENCES document_versions(id) ON DELETE SET NULL,
+  publication_no INTEGER NOT NULL CHECK (publication_no > 0),
+  review_id TEXT REFERENCES document_reviews(id) ON DELETE SET NULL,
+  task_id TEXT REFERENCES agent_tasks(id) ON DELETE SET NULL,
+  published_by_type TEXT NOT NULL,
+  published_by_id TEXT,
+  published_at TEXT NOT NULL,
+  UNIQUE(document_id, publication_no),
+  UNIQUE(document_version_id)
+);
+
+CREATE TABLE agent_task_document_versions (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  document_version_id TEXT NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+  operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'regenerate')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id, document_version_id, operation)
+);
+
+UPDATE documents
+SET published_version_id = current_version_id
+WHERE current_version_id IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM document_versions
+    WHERE document_versions.id = documents.current_version_id
+      AND document_versions.document_id = documents.id
+  );
+
+UPDATE document_versions
+SET title_snapshot = (
+      SELECT title FROM documents WHERE documents.id = document_versions.document_id
+    ),
+    scope_type_snapshot = (
+      SELECT scope_type FROM documents WHERE documents.id = document_versions.document_id
+    ),
+    scope_id_snapshot = (
+      SELECT scope_id FROM documents WHERE documents.id = document_versions.document_id
+    ),
+    state_updated_at = created_at
+WHERE title_snapshot IS NULL;
+
+INSERT INTO document_publications
+  (id, project_id, document_id, document_version_id, publication_no,
+   published_by_type, published_by_id, published_at)
+SELECT 'migration-publication-' || documents.id,
+       documents.project_id,
+       documents.id,
+       documents.published_version_id,
+       1,
+       'migration',
+       NULL,
+       COALESCE(document_versions.created_at, documents.updated_at)
+FROM documents
+INNER JOIN document_versions ON document_versions.id = documents.published_version_id
+WHERE documents.published_version_id IS NOT NULL;
+
+CREATE INDEX idx_agent_tasks_project_status
+  ON agent_tasks(project_id, status, updated_at, id);
+CREATE INDEX idx_agent_tasks_conversation
+  ON agent_tasks(conversation_id, created_at, id);
+CREATE UNIQUE INDEX idx_agent_tasks_idempotency
+  ON agent_tasks(project_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_agent_task_events_task
+  ON agent_task_events(task_id, sequence);
+CREATE UNIQUE INDEX idx_agent_task_events_dedupe
+  ON agent_task_events(task_id, dedupe_key)
+  WHERE dedupe_key IS NOT NULL;
+CREATE INDEX idx_agent_tool_calls_task
+  ON agent_tool_calls(task_id, created_at, id);
+CREATE UNIQUE INDEX idx_agent_tool_calls_provider
+  ON agent_tool_calls(task_id, provider_call_id)
+  WHERE provider_call_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_agent_tool_calls_idempotency
+  ON agent_tool_calls(task_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_documents_published
+  ON documents(project_id, published_version_id, lifecycle_status);
+CREATE INDEX idx_document_versions_state
+  ON document_versions(document_id, state, version, id);
+CREATE INDEX idx_document_reviews_document
+  ON document_reviews(document_id, requested_at, id);
+CREATE INDEX idx_document_reviews_status
+  ON document_reviews(project_id, status, requested_at, id);
+CREATE INDEX idx_document_publications_document
+  ON document_publications(document_id, publication_no DESC, id DESC);
+CREATE INDEX idx_agent_task_document_versions_task
+  ON agent_task_document_versions(task_id, created_at, document_version_id);
+
+CREATE TRIGGER agent_tasks_scope_insert
+BEFORE INSERT ON agent_tasks
+WHEN (NEW.scope_type = 'project' AND NEW.scope_id IS NOT NULL)
+  OR (NEW.scope_type IN ('scene', 'shot') AND NEW.scope_id IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent task scope');
+END;
+
+CREATE TRIGGER agent_tasks_scope_update
+BEFORE UPDATE OF scope_type, scope_id ON agent_tasks
+WHEN (NEW.scope_type = 'project' AND NEW.scope_id IS NOT NULL)
+  OR (NEW.scope_type IN ('scene', 'shot') AND NEW.scope_id IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent task scope');
+END;
+
+CREATE TRIGGER agent_task_status_update
+BEFORE UPDATE OF status ON agent_tasks
+WHEN (OLD.status IN ('completed', 'failed', 'cancelled') AND NEW.status <> OLD.status)
+  OR (OLD.status = 'queued' AND NEW.status NOT IN ('queued', 'running', 'failed', 'cancelled'))
+  OR (OLD.status = 'running' AND NEW.status NOT IN (
+    'running', 'waiting_review', 'completed', 'failed', 'cancelled'
+  ))
+  OR (OLD.status = 'waiting_review' AND NEW.status NOT IN (
+    'waiting_review', 'running', 'completed', 'cancelled'
+  ))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent task transition');
+END;
+
+CREATE TRIGGER agent_task_event_project_match
+BEFORE INSERT ON agent_task_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_tasks
+  WHERE agent_tasks.id = NEW.task_id
+    AND agent_tasks.project_id = NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'event project does not match task');
+END;
+
+CREATE TRIGGER agent_task_generation_project_match
+BEFORE INSERT ON agent_task_generations
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_tasks
+  INNER JOIN llm_generations ON llm_generations.id = NEW.generation_id
+  WHERE agent_tasks.id = NEW.task_id
+    AND agent_tasks.project_id = llm_generations.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'generation project does not match task');
+END;
+
+CREATE TRIGGER agent_task_event_immutable_update
+BEFORE UPDATE ON agent_task_events
+BEGIN
+  SELECT RAISE(ABORT, 'agent task events are immutable');
+END;
+
+CREATE TRIGGER agent_tool_call_status_update
+BEFORE UPDATE OF status ON agent_tool_calls
+WHEN (OLD.status IN ('succeeded', 'failed', 'cancelled') AND NEW.status <> OLD.status)
+  OR (OLD.status = 'received' AND NEW.status NOT IN (
+    'received', 'validated', 'failed', 'cancelled'
+  ))
+  OR (OLD.status = 'validated' AND NEW.status NOT IN (
+    'validated', 'executing', 'failed', 'cancelled'
+  ))
+  OR (OLD.status = 'executing' AND NEW.status NOT IN (
+    'executing', 'succeeded', 'failed', 'cancelled'
+  ))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent tool call transition');
+END;
+
+CREATE TRIGGER agent_tool_call_generation_project_match
+BEFORE INSERT ON agent_tool_calls
+WHEN NEW.generation_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_tasks
+    INNER JOIN llm_generations ON llm_generations.id = NEW.generation_id
+    WHERE agent_tasks.id = NEW.task_id
+      AND agent_tasks.project_id = llm_generations.project_id
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'tool call generation project does not match task');
+END;
+
+CREATE TRIGGER agent_tool_call_attempt_match
+BEFORE INSERT ON agent_tool_calls
+WHEN NEW.attempt_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM llm_generation_attempts
+    WHERE llm_generation_attempts.id = NEW.attempt_id
+      AND (NEW.generation_id IS NULL OR llm_generation_attempts.generation_id = NEW.generation_id)
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'tool call attempt does not match generation');
+END;
+
+CREATE TRIGGER document_version_state_update
+BEFORE UPDATE OF state ON document_versions
+WHEN (OLD.state IN ('published', 'rejected', 'superseded', 'discarded') AND NEW.state <> OLD.state)
+  OR (OLD.state = 'draft' AND NEW.state NOT IN (
+    'draft', 'in_review', 'superseded', 'discarded'
+  ))
+  OR (OLD.state = 'in_review' AND NEW.state NOT IN (
+    'in_review', 'published', 'changes_requested', 'rejected', 'superseded', 'discarded'
+  ))
+  OR (OLD.state = 'changes_requested' AND NEW.state NOT IN (
+    'changes_requested', 'draft', 'superseded', 'discarded'
+  ))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid document version transition');
+END;
+
+CREATE TRIGGER document_review_status_update
+BEFORE UPDATE OF status ON document_reviews
+WHEN (OLD.status IN ('approved', 'changes_requested', 'rejected', 'withdrawn')
+      AND NEW.status <> OLD.status)
+  OR (OLD.status = 'pending' AND NEW.status NOT IN (
+    'pending', 'approved', 'changes_requested', 'rejected', 'withdrawn'
+  ))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid document review transition');
+END;
+
+CREATE TRIGGER document_publication_immutable_update
+BEFORE UPDATE ON document_publications
+BEGIN
+  SELECT RAISE(ABORT, 'document publications are immutable');
+END;
+
+CREATE TRIGGER documents_published_version_insert
+BEFORE INSERT ON documents
+WHEN NEW.published_version_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM document_versions
+    WHERE document_versions.id = NEW.published_version_id
+      AND document_versions.document_id = NEW.id
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'published version does not belong to document');
+END;
+
+CREATE TRIGGER documents_published_version_update
+BEFORE UPDATE OF published_version_id ON documents
+WHEN NEW.published_version_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM document_versions
+    WHERE document_versions.id = NEW.published_version_id
+      AND document_versions.document_id = NEW.id
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'published version does not belong to document');
+END;
+
+CREATE TRIGGER document_review_version_match
+BEFORE INSERT ON document_reviews
+WHEN NOT EXISTS (
+  SELECT 1 FROM documents
+  INNER JOIN document_versions ON document_versions.id = NEW.document_version_id
+  WHERE documents.id = NEW.document_id
+    AND documents.project_id = NEW.project_id
+    AND document_versions.document_id = NEW.document_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'review version does not belong to document');
+END;
+
+CREATE TRIGGER document_publication_version_match
+BEFORE INSERT ON document_publications
+WHEN NOT EXISTS (
+  SELECT 1 FROM documents
+  INNER JOIN document_versions ON document_versions.id = NEW.document_version_id
+  WHERE documents.id = NEW.document_id
+    AND documents.project_id = NEW.project_id
+    AND document_versions.document_id = NEW.document_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'publication version does not belong to document');
+END;
+
+CREATE TRIGGER agent_task_document_version_match
+BEFORE INSERT ON agent_task_document_versions
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_tasks
+  INNER JOIN documents ON documents.project_id = agent_tasks.project_id
+  INNER JOIN document_versions ON document_versions.id = NEW.document_version_id
+  WHERE agent_tasks.id = NEW.task_id
+    AND documents.id = NEW.document_id
+    AND document_versions.document_id = NEW.document_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'task document version does not belong to document');
+END;
+`;
+
+export const MIGRATION_V13 = `
+CREATE TABLE document_audit_events (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK (sequence >= 0),
+  action TEXT NOT NULL CHECK (
+    action IN (
+      'draft_saved', 'draft_restored', 'review_submitted',
+      'review_changes_requested', 'review_rejected', 'published'
+    )
+  ),
+  actor_type TEXT NOT NULL CHECK (
+    actor_type IN ('user', 'agent', 'system', 'import', 'migration')
+  ),
+  actor_id TEXT CHECK (actor_id IS NULL OR length(actor_id) <= 256),
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  document_version_id TEXT NOT NULL REFERENCES document_versions(id) ON DELETE RESTRICT,
+  source_version_id TEXT REFERENCES document_versions(id) ON DELETE SET NULL,
+  review_id TEXT REFERENCES document_reviews(id) ON DELETE SET NULL,
+  publication_id TEXT REFERENCES document_publications(id) ON DELETE SET NULL,
+  task_id TEXT REFERENCES agent_tasks(id) ON DELETE SET NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      json_valid(metadata_json)
+      AND json_type(metadata_json) = 'object'
+      AND length(metadata_json) <= 4096
+    ),
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id, sequence)
+);
+
+CREATE INDEX idx_document_audit_project
+  ON document_audit_events(project_id, sequence DESC, id DESC);
+CREATE INDEX idx_document_audit_document
+  ON document_audit_events(document_id, sequence DESC, id DESC);
+CREATE INDEX idx_document_audit_action
+  ON document_audit_events(project_id, action, sequence DESC, id DESC);
+
+CREATE TRIGGER document_audit_project_match
+BEFORE INSERT ON document_audit_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM documents
+  WHERE documents.id = NEW.document_id
+    AND documents.project_id = NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'document audit project does not match document');
+END;
+
+CREATE TRIGGER document_audit_version_match
+BEFORE INSERT ON document_audit_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM document_versions
+  WHERE document_versions.id = NEW.document_version_id
+    AND document_versions.document_id = NEW.document_id
+)
+  OR (NEW.source_version_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM document_versions
+    WHERE document_versions.id = NEW.source_version_id
+      AND document_versions.document_id = NEW.document_id
+  ))
+BEGIN
+  SELECT RAISE(ABORT, 'document audit version does not match document');
+END;
+
+CREATE TRIGGER document_audit_review_match
+BEFORE INSERT ON document_audit_events
+WHEN NEW.review_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM document_reviews
+  WHERE document_reviews.id = NEW.review_id
+    AND document_reviews.project_id = NEW.project_id
+    AND document_reviews.document_id = NEW.document_id
+    AND document_reviews.document_version_id = NEW.document_version_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'document audit review does not match document');
+END;
+
+CREATE TRIGGER document_audit_publication_match
+BEFORE INSERT ON document_audit_events
+WHEN NEW.publication_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM document_publications
+  WHERE document_publications.id = NEW.publication_id
+    AND document_publications.project_id = NEW.project_id
+    AND document_publications.document_id = NEW.document_id
+    AND document_publications.document_version_id = NEW.document_version_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'document audit publication does not match document');
+END;
+
+CREATE TRIGGER document_audit_task_match
+BEFORE INSERT ON document_audit_events
+WHEN NEW.task_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM agent_tasks
+  WHERE agent_tasks.id = NEW.task_id
+    AND agent_tasks.project_id = NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'document audit task does not match project');
+END;
+
+CREATE TRIGGER document_audit_immutable_update
+BEFORE UPDATE ON document_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'document audit events are immutable');
+END;
+
+CREATE TRIGGER document_audit_immutable_delete
+BEFORE DELETE ON document_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'document audit events are immutable');
+END;
 `;

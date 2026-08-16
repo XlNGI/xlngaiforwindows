@@ -40,13 +40,11 @@ describe('SampleProjectService', () => {
       const documents = repositories.documents.listByProject(project.id);
       const scenes = repositories.scenes.listByProject(project.id);
       const shots = scenes.flatMap((scene) => repositories.shots.listByScene(scene.id));
-      expect(documents.map((document) => document.kind)).toEqual([
-        'outline',
-        'plan',
-        'character',
-        'scene',
-        'storyboard',
-      ]);
+      // Document IDs are UUIDs and all seed rows share one timestamp; ordering
+      // by the generated identifier is intentionally not a product contract.
+      expect(documents.map((document) => document.kind).sort()).toEqual(
+        ['outline', 'plan', 'character', 'scene', 'storyboard'].sort(),
+      );
       expect(scenes).toHaveLength(2);
       expect(shots).toHaveLength(4);
       expect(documents.every((document) => document.currentVersionId)).toBe(true);

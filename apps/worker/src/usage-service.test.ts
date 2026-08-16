@@ -127,6 +127,22 @@ describe('UsageService', () => {
         contentJson: '{}',
         createdAt: '2026-08-03T00:00:00.000Z',
       });
+      repositories.llmGenerations.insert({
+        id: 'generation-attempt-project',
+        projectId: project.id,
+        projectSessionId: 'project-session',
+        conversationId: 'conversation',
+        contextSnapshotId: 'snapshot',
+        userMessageId: 'user',
+        assistantMessageId: 'assistant-attempt-project',
+        status: 'complete',
+        executionMode: 'native',
+        providerProfileId: 'provider-USD',
+        modelId: 'model-USD',
+        createdAt: '2026-08-03T01:00:00.000Z',
+        updatedAt: '2026-08-03T01:00:01.000Z',
+        version: 0,
+      });
       repositories.llmGenerationAttempts.save(
         attempt('attempt-project', 'USD', '0.25', {
           conversationId: 'conversation',

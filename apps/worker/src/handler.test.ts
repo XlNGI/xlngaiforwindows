@@ -64,6 +64,67 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects unknown conversation parameters before entering the service layer', async () => {
+    const response = await handleRequest({
+      id: 'conversation-unknown-param',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'conversation.list',
+      params: { unexpected: true },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'conversation-unknown-param',
+        retryable: false,
+        operation: 'conversation.list',
+      },
+    });
+  });
+
+  it('rejects unknown document list parameters at the IPC boundary', async () => {
+    const response = await handleRequest({
+      id: 'document-list-unknown-param',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'document.list',
+      params: { unexpected: true },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'document-list-unknown-param',
+        retryable: false,
+        operation: 'document.list',
+      },
+    });
+  });
+
+  it('rejects oversized prompts and invalid message role/status combinations', async () => {
+    const oversized = await handleRequest({
+      id: 'oversized-prompt',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'llm.generate',
+      params: { conversationId: 'conversation', prompt: 'x'.repeat(100_001) },
+    });
+    const invalidMessage = await handleRequest({
+      id: 'invalid-message-state',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'chat.message.save',
+      params: {
+        conversationId: 'conversation',
+        role: 'user',
+        content: 'Pending',
+        status: 'streaming',
+      },
+    });
+
+    expect(oversized).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    expect(invalidMessage).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+  });
+
   it('rejects asset preview requests without a valid asset id', async () => {
     const response = await handleRequest({
       id: 'asset-preview-invalid',

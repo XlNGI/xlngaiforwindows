@@ -33,6 +33,9 @@ export interface DocumentRecord {
   scopeType: string;
   scopeId?: string;
   currentVersionId?: string;
+  publishedVersionId?: string;
+  lifecycleStatus?: 'active' | 'archived';
+  rowVersion?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -50,6 +53,307 @@ export interface DocumentVersionRecord {
   documentId: string;
   version: number;
   contentMarkdown: string;
+  state?:
+    | 'draft'
+    | 'in_review'
+    | 'published'
+    | 'changes_requested'
+    | 'rejected'
+    | 'superseded'
+    | 'discarded';
+  baseVersionId?: string;
+  titleSnapshot?: string;
+  scopeTypeSnapshot?: string;
+  scopeIdSnapshot?: string;
+  authorType?: 'user' | 'agent' | 'import' | 'migration';
+  authorId?: string;
+  sourceTaskId?: string;
+  sourceMessageId?: string;
+  contextSnapshotId?: string;
+  contentHash?: string;
+  stateUpdatedAt?: string;
+  stateVersion?: number;
+  createdAt: string;
+}
+
+export type AgentTaskType =
+  | 'document-create'
+  | 'document-update'
+  | 'document-query'
+  | 'document-archive'
+  | 'document-restore';
+export type AgentTaskStatus =
+  'queued' | 'running' | 'waiting_review' | 'completed' | 'failed' | 'cancelled';
+export type AgentTaskOutcome =
+  'published' | 'rejected' | 'discarded' | 'read-only' | 'archived' | 'restored';
+export type AgentTaskPhase =
+  | 'queued'
+  | 'intent_resolving'
+  | 'context_compiling'
+  | 'model_running'
+  | 'tool_validating'
+  | 'waiting_confirmation'
+  | 'artifact_persisting'
+  | 'waiting_review'
+  | 'recovering';
+
+export interface AgentTaskRecord {
+  id: string;
+  projectId: string;
+  projectSessionId: string;
+  conversationId?: string;
+  userMessageId?: string;
+  taskType: AgentTaskType;
+  scopeType: string;
+  scopeId?: string;
+  title: string;
+  requestSnapshotJson: string;
+  requestHash: string;
+  contextSnapshotId?: string;
+  status: AgentTaskStatus;
+  outcome?: AgentTaskOutcome;
+  retryOfTaskId?: string;
+  idempotencyKey?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  retryable?: boolean;
+  createdAt: string;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+  phase: AgentTaskPhase;
+  rowVersion: number;
+  toolCallLimit: number;
+  toolCallCount: number;
+  lifecycleStatus: 'active' | 'archived';
+  archivedAt?: string;
+}
+
+export type AgentTaskEventLevel = 'info' | 'warning' | 'error';
+
+export interface AgentTaskEventRecord {
+  id: string;
+  taskId: string;
+  projectId: string;
+  sequence: number;
+  eventType: string;
+  level: AgentTaskEventLevel;
+  actorType?: string;
+  actorId?: string;
+  summary: string;
+  payloadJson?: string;
+  dedupeKey?: string;
+  createdAt: string;
+}
+
+export interface AgentTaskGenerationRecord {
+  taskId: string;
+  generationId: string;
+  ordinal: number;
+  purpose: string;
+  createdAt: string;
+}
+
+export type AgentToolCallStatus =
+  | 'received'
+  | 'validated'
+  | 'awaiting_confirmation'
+  | 'executing'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface AgentToolCallRecord {
+  id: string;
+  taskId: string;
+  projectId: string;
+  generationId?: string;
+  attemptId?: string;
+  providerCallId?: string;
+  toolName: string;
+  providerStepId?: string;
+  authorizationId?: string;
+  toolOrdinal?: number;
+  normalizedArgumentsHash: string;
+  argumentsSummaryJson: string;
+  resultSummaryJson?: string;
+  resultDocumentId?: string;
+  resultDocumentVersionId?: string;
+  status: AgentToolCallStatus;
+  idempotencyKey?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  version: number;
+  redactionState: 'native' | 'legacy_redacted';
+}
+
+export type LlmProviderStepStatus =
+  'prepared' | 'in_flight' | 'complete' | 'failed' | 'interrupted';
+
+export interface LlmProviderStepRecord {
+  id: string;
+  projectId: string;
+  generationId: string;
+  attemptId: string;
+  ordinal: number;
+  protocol: string;
+  providerResponseId?: string;
+  status: LlmProviderStepStatus;
+  toolCallCount: number;
+  finishReason?: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  providerReportedCost?: string;
+  currency?: string;
+  continuationManifestJson?: string;
+  requestHash: string;
+  responseHash?: string;
+  startedAt: string;
+  completedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export type AgentToolAuthorizationStatus = 'issued' | 'revoked' | 'expired';
+
+export interface AgentToolAuthorizationRecord {
+  id: string;
+  projectId: string;
+  taskId: string;
+  generationId: string;
+  attemptId: string;
+  providerStepId: string;
+  projectSessionId: string;
+  allowedOperation: string;
+  targetDocumentId?: string;
+  scopeType?: string;
+  scopeId?: string;
+  baseVersionId?: string;
+  expectedDocumentRowVersion?: number;
+  policyVersion: string;
+  toolSchemaVersion: string;
+  authorizationHandleHash: string;
+  status: AgentToolAuthorizationStatus;
+  maxCallUses: number;
+  usedCallCount: number;
+  expiresAt: string;
+  revokedAt?: string;
+  rowVersion: number;
+  createdAt: string;
+}
+
+export type AgentTaskConfirmationStatus = 'pending' | 'rejected' | 'expired' | 'consumed';
+
+export interface AgentTaskConfirmationRecord {
+  id: string;
+  projectId: string;
+  taskId: string;
+  generationId: string;
+  attemptId: string;
+  originalToolCallId: string;
+  action: string;
+  targetDocumentId?: string;
+  targetVersionId?: string;
+  expectedDocumentRowVersion?: number;
+  normalizedArgumentsHash: string;
+  continuationDescriptorJson: string;
+  tokenHash: string;
+  continuationAuthorizationId?: string;
+  status: AgentTaskConfirmationStatus;
+  expiresAt: string;
+  approvedByType?: string;
+  approvedById?: string;
+  approvedAt?: string;
+  consumedAt?: string;
+  createdAt: string;
+}
+
+export interface AgentTaskDocumentArtifactRecord {
+  id: string;
+  projectId: string;
+  taskId: string;
+  documentId: string;
+  documentVersionId: string;
+  artifactRole: 'primary';
+  disposition: 'draft' | 'published' | 'rejected' | 'discarded';
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type DocumentReviewStatus =
+  'pending' | 'approved' | 'changes_requested' | 'rejected' | 'withdrawn';
+
+export interface DocumentReviewRecord {
+  id: string;
+  projectId: string;
+  documentId: string;
+  documentVersionId: string;
+  taskId?: string;
+  status: DocumentReviewStatus;
+  requestedByType: string;
+  requestedById?: string;
+  requestedAt: string;
+  decidedByType?: string;
+  decidedById?: string;
+  decidedAt?: string;
+  comment?: string;
+  version: number;
+}
+
+export interface DocumentPublicationRecord {
+  id: string;
+  projectId: string;
+  documentId: string;
+  documentVersionId: string;
+  previousVersionId?: string;
+  publicationNo: number;
+  reviewId?: string;
+  taskId?: string;
+  publishedByType: string;
+  publishedById?: string;
+  publishedAt: string;
+}
+
+export interface AgentTaskDocumentVersionRecord {
+  taskId: string;
+  documentId: string;
+  documentVersionId: string;
+  operation: 'create' | 'update' | 'regenerate';
+  createdAt: string;
+}
+
+/** Immutable, project-scoped history for document workflow state changes. */
+export type DocumentWorkflowAuditAction =
+  | 'draft_saved'
+  | 'draft_restored'
+  | 'review_submitted'
+  | 'review_changes_requested'
+  | 'review_rejected'
+  | 'published';
+
+export type DocumentWorkflowAuditActorType = 'user' | 'agent' | 'system' | 'import' | 'migration';
+
+export interface DocumentWorkflowAuditRecord {
+  id: string;
+  projectId: string;
+  sequence: number;
+  action: DocumentWorkflowAuditAction;
+  actorType: DocumentWorkflowAuditActorType;
+  actorId?: string;
+  documentId: string;
+  documentVersionId: string;
+  sourceVersionId?: string;
+  reviewId?: string;
+  publicationId?: string;
+  taskId?: string;
+  metadataJson?: string;
   createdAt: string;
 }
 
@@ -97,6 +401,30 @@ export interface ChatMessageRecord {
 
 export type LlmAttemptStatus =
   'prepared' | 'streaming' | 'complete' | 'failed' | 'cancelled' | 'interrupted';
+
+export type LlmExecutionMode = 'legacy' | 'native';
+
+export interface LlmGenerationRecord {
+  id: string;
+  projectId: string;
+  projectSessionId: string;
+  conversationId: string;
+  contextSnapshotId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  status: Exclude<LlmAttemptStatus, 'interrupted'>;
+  executionMode: LlmExecutionMode;
+  retryOfGenerationId?: string;
+  idempotencyKey?: string;
+  providerProfileId?: string;
+  modelId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  retryable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
 
 export interface LlmGenerationAttemptRecord {
   id: string;
@@ -307,6 +635,100 @@ export interface DocumentRepository {
   saveVersion(record: DocumentRecord, version: DocumentVersionRecord): void;
   getVersion(id: string): DocumentVersionRecord | undefined;
   listVersions(documentId: string): DocumentVersionRecord[];
+  updatePublishedVersion(
+    documentId: string,
+    publishedVersionId: string,
+    expectedRowVersion: number,
+    updatedAt: string,
+  ): boolean;
+  updateVersionState(
+    versionId: string,
+    state: NonNullable<DocumentVersionRecord['state']>,
+    expectedStateVersion: number,
+    stateUpdatedAt: string,
+  ): boolean;
+}
+
+export interface AgentTaskRepository {
+  save(record: AgentTaskRecord): void;
+  get(id: string): AgentTaskRecord | undefined;
+  getByIdempotencyKey(projectId: string, idempotencyKey: string): AgentTaskRecord | undefined;
+  listByProject(projectId: string): AgentTaskRecord[];
+  update(record: AgentTaskRecord, expectedVersion: number): boolean;
+}
+
+export interface AgentTaskEventRepository {
+  append(record: AgentTaskEventRecord): void;
+  listByTask(taskId: string): AgentTaskEventRecord[];
+}
+
+export interface AgentTaskGenerationRepository {
+  link(record: AgentTaskGenerationRecord): void;
+  listByTask(taskId: string): AgentTaskGenerationRecord[];
+}
+
+export interface AgentToolCallRepository {
+  save(record: AgentToolCallRecord): void;
+  get(id: string): AgentToolCallRecord | undefined;
+  getByProviderCallId(
+    taskId: string,
+    attemptId: string,
+    providerStepId: string,
+    providerCallId: string,
+  ): AgentToolCallRecord | undefined;
+  getByIdempotencyKey(taskId: string, idempotencyKey: string): AgentToolCallRecord | undefined;
+  listByTask(taskId: string): AgentToolCallRecord[];
+  update(record: AgentToolCallRecord, expectedVersion: number): boolean;
+}
+
+export interface LlmProviderStepRepository {
+  save(record: LlmProviderStepRecord): void;
+  get(id: string): LlmProviderStepRecord | undefined;
+  listByAttempt(attemptId: string): LlmProviderStepRecord[];
+}
+
+export interface AgentToolAuthorizationRepository {
+  save(record: AgentToolAuthorizationRecord): void;
+  get(id: string): AgentToolAuthorizationRecord | undefined;
+  listByProviderStep(providerStepId: string): AgentToolAuthorizationRecord[];
+  update(record: AgentToolAuthorizationRecord, expectedRowVersion: number): boolean;
+}
+
+export interface AgentTaskConfirmationRepository {
+  save(record: AgentTaskConfirmationRecord): void;
+  get(id: string): AgentTaskConfirmationRecord | undefined;
+  getPendingByTask(taskId: string): AgentTaskConfirmationRecord | undefined;
+}
+
+export interface AgentTaskDocumentArtifactRepository {
+  save(record: AgentTaskDocumentArtifactRecord): void;
+  getPrimary(taskId: string): AgentTaskDocumentArtifactRecord | undefined;
+  update(record: AgentTaskDocumentArtifactRecord, expectedRowVersion: number): boolean;
+}
+
+export interface DocumentReviewRepository {
+  save(record: DocumentReviewRecord): void;
+  get(id: string): DocumentReviewRecord | undefined;
+  getByVersion(documentVersionId: string): DocumentReviewRecord | undefined;
+  listByDocument(documentId: string): DocumentReviewRecord[];
+  update(record: DocumentReviewRecord, expectedVersion: number): boolean;
+}
+
+export interface DocumentPublicationRepository {
+  append(record: DocumentPublicationRecord): void;
+  get(id: string): DocumentPublicationRecord | undefined;
+  listByDocument(documentId: string): DocumentPublicationRecord[];
+}
+
+export interface AgentTaskDocumentVersionRepository {
+  link(record: AgentTaskDocumentVersionRecord): void;
+  listByTask(taskId: string): AgentTaskDocumentVersionRecord[];
+}
+
+export interface DocumentWorkflowAuditRepository {
+  append(record: DocumentWorkflowAuditRecord): void;
+  listByProject(projectId: string, limit?: number): DocumentWorkflowAuditRecord[];
+  listByDocument(documentId: string, limit?: number): DocumentWorkflowAuditRecord[];
 }
 
 export interface ContextSnapshotRepository {
@@ -346,6 +768,14 @@ export interface LlmGenerationAttemptRepository {
   getByAssistantMessage(assistantMessageId: string): LlmGenerationAttemptRecord | undefined;
   listByProject(projectId: string): LlmGenerationAttemptRecord[];
   failActiveByProject(projectId: string, completedAt: string, errorMessage: string): number;
+}
+
+export interface LlmGenerationRepository {
+  insert(record: LlmGenerationRecord): void;
+  get(id: string): LlmGenerationRecord | undefined;
+  getByIdempotencyKey(projectId: string, idempotencyKey: string): LlmGenerationRecord | undefined;
+  update(record: LlmGenerationRecord, expectedVersion: number): boolean;
+  failActiveByProject(projectId: string, updatedAt: string, errorMessage: string): number;
 }
 
 export interface MemoryRepository {

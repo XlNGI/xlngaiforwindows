@@ -10,6 +10,14 @@ import {
   MIGRATION_V3,
   MIGRATION_V4,
   MIGRATION_V5,
+  MIGRATION_V6,
+  MIGRATION_V7,
+  MIGRATION_V8,
+  MIGRATION_V9,
+  MIGRATION_V10,
+  MIGRATION_V11,
+  MIGRATION_V12,
+  MIGRATION_V13,
   migrateDatabase,
   openProjectDatabase,
 } from './index.js';
@@ -30,8 +38,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(10);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 10 });
+    expect(migrateDatabase(database)).toBe(14);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 14 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -42,6 +50,144 @@ describe('project database', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('llm_generation_attempts'),
     ).toMatchObject({ name: 'llm_generation_attempts' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('llm_generations'),
+    ).toMatchObject({ name: 'llm_generations' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_tasks'),
+    ).toMatchObject({ name: 'agent_tasks' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('document_audit_events'),
+    ).toMatchObject({ name: 'document_audit_events' });
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('documents') WHERE name = ?")
+        .get('published_version_id'),
+    ).toMatchObject({ name: 'published_version_id' });
+    database.close();
+  });
+
+  it('enforces conversation scope and chat message invariants', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Constraints', 'now', 'now');
+
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO conversations
+           (id, project_id, scope_type, scope_id, title, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('invalid-project', 'project', 'project', 'scene', 'Invalid', 'now', 'now'),
+    ).toThrow('invalid conversation scope');
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO conversations
+           (id, project_id, scope_type, scope_id, title, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('invalid-scene', 'project', 'scene', null, 'Invalid', 'now', 'now'),
+    ).toThrow('invalid conversation scope');
+
+    database
+      .prepare(
+        `INSERT INTO conversations
+         (id, project_id, scope_type, scope_id, title, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('conversation', 'project', 'project', null, 'Valid', 'now', 'now');
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO chat_messages
+           (id, conversation_id, role, content, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run('invalid-message', 'conversation', 'user', 'Pending', 'streaming', 'now'),
+    ).toThrow('invalid chat message state');
+    database.close();
+  });
+
+  it('prevents terminal LLM and message states from returning to active states', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Transitions', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO conversations
+         (id, project_id, scope_type, title, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('conversation', 'project', 'project', 'Transitions', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO chat_messages
+         (id, conversation_id, role, content, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'user',
+        'conversation',
+        'user',
+        'Prompt',
+        'complete',
+        'now',
+        'assistant',
+        'conversation',
+        'assistant',
+        'Response',
+        'complete',
+        'now',
+      );
+    database
+      .prepare(
+        `INSERT INTO context_snapshots (id, project_id, purpose, content_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('snapshot', 'project', 'llm-generation', '{}', 'now');
+    database
+      .prepare(
+        `INSERT INTO llm_generations
+         (id, project_id, project_session_id, conversation_id, context_snapshot_id,
+          user_message_id, assistant_message_id, status, execution_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'generation',
+        'project',
+        'session',
+        'conversation',
+        'snapshot',
+        'user',
+        'assistant',
+        'complete',
+        'native',
+        'now',
+        'now',
+      );
+
+    expect(() =>
+      database
+        .prepare("UPDATE llm_generations SET status = 'streaming' WHERE id = ?")
+        .run('generation'),
+    ).toThrow('invalid llm generation transition');
+    expect(() =>
+      database
+        .prepare("UPDATE chat_messages SET status = 'streaming' WHERE id = ?")
+        .run('assistant'),
+    ).toThrow('invalid chat message transition');
     database.close();
   });
 
@@ -92,7 +238,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(10);
+    expect(migrateDatabase(database)).toBe(14);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -119,7 +265,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(10);
+    expect(migrateDatabase(database)).toBe(14);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -181,13 +327,322 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(10);
+    expect(migrateDatabase(database)).toBe(14);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
     expect(
       database.prepare('SELECT provider_url FROM generation_results WHERE id = ?').get('result'),
     ).toEqual({ provider_url: 'https://cdn.example/frame.png' });
+    database.close();
+  });
+
+  it('upgrades v11 documents with an authoritative published version and migration publication', async () => {
+    const database = await temporaryDatabase();
+    for (const [version, migration] of [
+      [1, MIGRATION_V1],
+      [2, MIGRATION_V2],
+      [3, MIGRATION_V3],
+      [4, MIGRATION_V4],
+      [5, MIGRATION_V5],
+      [6, MIGRATION_V6],
+      [7, MIGRATION_V7],
+      [8, MIGRATION_V8],
+      [9, MIGRATION_V9],
+      [10, MIGRATION_V10],
+      [11, MIGRATION_V11],
+    ] as const) {
+      database.exec(migration);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(version, `v${version}`);
+    }
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Legacy project', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO documents
+         (id, project_id, kind, title, current_version_id, scope_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('document', 'project', 'note', 'Legacy document', 'version', 'project', 'now', 'later');
+    database
+      .prepare(
+        `INSERT INTO document_versions (id, document_id, version, content_markdown, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('version', 'document', 1, '# Legacy', 'now');
+
+    expect(getSchemaVersion(database)).toBe(11);
+    expect(migrateDatabase(database)).toBe(14);
+    expect(
+      database
+        .prepare(
+          `SELECT published_version_id, lifecycle_status, row_version
+           FROM documents WHERE id = ?`,
+        )
+        .get('document'),
+    ).toEqual({ published_version_id: 'version', lifecycle_status: 'active', row_version: 0 });
+    expect(
+      database
+        .prepare(
+          `SELECT state, title_snapshot, scope_type_snapshot, state_updated_at
+           FROM document_versions WHERE id = ?`,
+        )
+        .get('version'),
+    ).toEqual({
+      state: 'published',
+      title_snapshot: 'Legacy document',
+      scope_type_snapshot: 'project',
+      state_updated_at: 'now',
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT document_version_id, published_by_type
+           FROM document_publications WHERE document_id = ?`,
+        )
+        .get('document'),
+    ).toEqual({ document_version_id: 'version', published_by_type: 'migration' });
+    database.close();
+  });
+
+  it('migrates v12 projects to a bounded immutable document audit trail', async () => {
+    const database = await temporaryDatabase();
+    for (const [version, migration] of [
+      [1, MIGRATION_V1],
+      [2, MIGRATION_V2],
+      [3, MIGRATION_V3],
+      [4, MIGRATION_V4],
+      [5, MIGRATION_V5],
+      [6, MIGRATION_V6],
+      [7, MIGRATION_V7],
+      [8, MIGRATION_V8],
+      [9, MIGRATION_V9],
+      [10, MIGRATION_V10],
+      [11, MIGRATION_V11],
+      [12, MIGRATION_V12],
+    ] as const) {
+      database.exec(migration);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(version, `v${version}`);
+    }
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Audit project', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO documents
+         (id, project_id, kind, title, scope_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('document', 'project', 'note', 'Audit document', 'project', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO document_versions
+         (id, document_id, version, content_markdown, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('version', 'document', 1, '# Audit', 'now');
+
+    expect(getSchemaVersion(database)).toBe(12);
+    expect(migrateDatabase(database)).toBe(14);
+    expect(migrateDatabase(database)).toBe(14);
+    const insert = database.prepare(
+      `INSERT INTO document_audit_events
+       (id, project_id, sequence, action, actor_type, actor_id, document_id,
+        document_version_id, source_version_id, review_id, publication_id, task_id,
+        metadata_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run(
+      'audit-1',
+      'project',
+      0,
+      'draft_saved',
+      'user',
+      'local-user',
+      'document',
+      'version',
+      null,
+      null,
+      null,
+      null,
+      '{}',
+      'later',
+    );
+    expect(database.prepare('SELECT action, sequence FROM document_audit_events').get()).toEqual({
+      action: 'draft_saved',
+      sequence: 0,
+    });
+    expect(() =>
+      database
+        .prepare('UPDATE document_audit_events SET action = ? WHERE id = ?')
+        .run('published', 'audit-1'),
+    ).toThrow('document audit events are immutable');
+    expect(() =>
+      database.prepare('DELETE FROM document_audit_events WHERE id = ?').run('audit-1'),
+    ).toThrow('document audit events are immutable');
+    expect(() =>
+      insert.run(
+        'audit-2',
+        'project',
+        1,
+        'draft_saved',
+        'user',
+        'local-user',
+        'document',
+        'version',
+        null,
+        null,
+        null,
+        null,
+        JSON.stringify({ value: 'x'.repeat(4_097) }),
+        'later',
+      ),
+    ).toThrow();
+    database.close();
+  });
+
+  it('rebuilds v13 Agent evidence without retaining tool request or result bodies', async () => {
+    const database = await temporaryDatabase();
+    for (const [version, migration] of [
+      [1, MIGRATION_V1],
+      [2, MIGRATION_V2],
+      [3, MIGRATION_V3],
+      [4, MIGRATION_V4],
+      [5, MIGRATION_V5],
+      [6, MIGRATION_V6],
+      [7, MIGRATION_V7],
+      [8, MIGRATION_V8],
+      [9, MIGRATION_V9],
+      [10, MIGRATION_V10],
+      [11, MIGRATION_V11],
+      [12, MIGRATION_V12],
+      [13, MIGRATION_V13],
+    ] as const) {
+      database.exec(migration);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(version, `v${version}`);
+    }
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'v13 Agent project', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO documents (id, project_id, kind, title, scope_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('document', 'project', 'note', 'Draft', 'project', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO agent_tasks
+         (id, project_id, project_session_id, task_type, scope_type, title,
+          request_snapshot_json, request_hash, status, created_at, updated_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'task',
+        'project',
+        'session',
+        'document-create',
+        'project',
+        'Create draft',
+        '{}',
+        'request-hash',
+        'waiting_review',
+        'now',
+        'later',
+        7,
+      );
+    database
+      .prepare(
+        `INSERT INTO document_versions
+         (id, document_id, version, content_markdown, state, title_snapshot, scope_type_snapshot,
+          author_type, source_task_id, state_updated_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'version',
+        'document',
+        1,
+        '# Secret draft',
+        'draft',
+        'Draft',
+        'project',
+        'agent',
+        'task',
+        'now',
+        'now',
+      );
+    database
+      .prepare(
+        `INSERT INTO agent_task_document_versions
+         (task_id, document_id, document_version_id, operation, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('task', 'document', 'version', 'create', 'now');
+    database
+      .prepare(
+        `INSERT INTO agent_tool_calls
+         (id, task_id, tool_name, arguments_json, arguments_hash, result_json, status,
+          created_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'call',
+        'task',
+        'document.create',
+        '{"content":"secret"}',
+        'arguments-hash',
+        '{"content":"secret"}',
+        'succeeded',
+        'now',
+        2,
+      );
+
+    expect(migrateDatabase(database)).toBe(14);
+    expect(
+      database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
+    ).toEqual({
+      row_version: 7,
+      phase: 'waiting_review',
+    });
+    expect(
+      database
+        .prepare(
+          "SELECT redaction_state, idempotency_key, arguments_summary_json, result_summary_json FROM agent_tool_calls WHERE id = 'call'",
+        )
+        .get(),
+    ).toEqual({
+      redaction_state: 'legacy_redacted',
+      idempotency_key: 'legacy:call',
+      arguments_summary_json: '{"legacy":1,"toolName":"document.create"}',
+      result_summary_json: null,
+    });
+    expect(
+      database
+        .prepare(
+          "SELECT document_id, document_version_id, disposition FROM agent_task_document_artifacts WHERE task_id = 'task'",
+        )
+        .get(),
+    ).toEqual({ document_id: 'document', document_version_id: 'version', disposition: 'draft' });
+    expect(
+      database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM pragma_table_info('agent_tool_calls') WHERE name IN ('arguments_json', 'result_json')",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 14 });
     database.close();
   });
 });

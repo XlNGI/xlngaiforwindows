@@ -290,6 +290,17 @@ export interface DiagnosticRevealParams {
 }
 
 export type DocumentKind = 'outline' | 'plan' | 'character' | 'scene' | 'storyboard' | 'note';
+export type DocumentLifecycleStatus = 'active' | 'archived';
+export type DocumentVersionState =
+  | 'draft'
+  | 'in_review'
+  | 'published'
+  | 'changes_requested'
+  | 'rejected'
+  | 'superseded'
+  | 'discarded';
+export type DocumentReviewStatus =
+  'pending' | 'approved' | 'changes_requested' | 'rejected' | 'withdrawn';
 
 export interface DocumentSummary {
   id: string;
@@ -299,6 +310,9 @@ export interface DocumentSummary {
   scopeType: ConversationScopeType;
   scopeId?: string;
   currentVersionId?: string;
+  publishedVersionId?: string;
+  lifecycleStatus: DocumentLifecycleStatus;
+  rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -308,11 +322,21 @@ export interface DocumentVersionInfo {
   documentId: string;
   version: number;
   contentMarkdown: string;
+  state: DocumentVersionState;
+  baseVersionId?: string;
+  titleSnapshot?: string;
+  scopeTypeSnapshot?: ConversationScopeType;
+  scopeIdSnapshot?: string;
+  authorType: 'user' | 'agent' | 'import' | 'migration';
+  sourceTaskId?: string;
+  sourceMessageId?: string;
+  contextSnapshotId?: string;
   createdAt: string;
 }
 
 export interface DocumentDetail extends DocumentSummary {
   currentVersion?: DocumentVersionInfo;
+  publishedVersion?: DocumentVersionInfo;
 }
 
 export interface DocumentGetParams {
@@ -321,11 +345,172 @@ export interface DocumentGetParams {
 
 export interface DocumentSaveParams {
   documentId?: string;
-  kind: DocumentKind;
+  /** @deprecated The editor no longer exposes classification. Legacy callers may still send it. */
+  kind?: DocumentKind;
   title: string;
   contentMarkdown: string;
   scopeType?: ConversationScopeType;
   scopeId?: string;
+  expectedDocumentRowVersion?: number;
+}
+
+export interface DocumentDraftSaveParams extends DocumentSaveParams {
+  baseVersionId?: string;
+  sourceTaskId?: string;
+  sourceMessageId?: string;
+  contextSnapshotId?: string;
+  authorType?: 'user' | 'agent' | 'import';
+}
+
+export interface DocumentReviewInfo {
+  id: string;
+  projectId: string;
+  documentId: string;
+  documentVersionId: string;
+  taskId?: string;
+  status: DocumentReviewStatus;
+  requestedAt: string;
+  decidedAt?: string;
+  comment?: string;
+  version: number;
+}
+
+export interface DocumentReviewSubmitParams {
+  documentId: string;
+  documentVersionId?: string;
+  expectedDocumentRowVersion: number;
+}
+
+export interface DocumentReviewRejectParams {
+  documentId: string;
+  documentVersionId?: string;
+  expectedDocumentRowVersion: number;
+  comment?: string;
+}
+
+/** Returns a reviewable draft to editing without ending its Agent task. */
+export type DocumentReviewRequestChangesParams = DocumentReviewRejectParams;
+
+export interface DocumentPublishParams {
+  documentId: string;
+  documentVersionId?: string;
+  expectedDocumentRowVersion: number;
+  expectedPublishedVersionId?: string;
+}
+
+export interface DocumentPublicationInfo {
+  id: string;
+  documentId: string;
+  documentVersionId: string;
+  previousVersionId?: string;
+  publicationNo: number;
+  publishedAt: string;
+}
+
+export type AgentTaskType =
+  | 'document-create'
+  | 'document-update'
+  | 'document-query'
+  | 'document-archive'
+  | 'document-restore';
+export type AgentTaskStatus =
+  'queued' | 'running' | 'waiting_review' | 'completed' | 'failed' | 'cancelled';
+export type AgentTaskOutcome =
+  'published' | 'rejected' | 'discarded' | 'read-only' | 'archived' | 'restored';
+export type AgentTaskPhase =
+  | 'queued'
+  | 'intent_resolving'
+  | 'context_compiling'
+  | 'model_running'
+  | 'tool_validating'
+  | 'waiting_confirmation'
+  | 'artifact_persisting'
+  | 'waiting_review'
+  | 'recovering';
+
+export interface AgentTaskInfo {
+  id: string;
+  projectId: string;
+  conversationId?: string;
+  userMessageId?: string;
+  taskType: AgentTaskType;
+  scopeType: ConversationScopeType;
+  scopeId?: string;
+  title: string;
+  status: AgentTaskStatus;
+  outcome?: AgentTaskOutcome;
+  contextSnapshotId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  retryable?: boolean;
+  createdAt: string;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+  phase: AgentTaskPhase;
+  rowVersion: number;
+}
+
+export interface AgentTaskEventInfo {
+  id: string;
+  taskId: string;
+  sequence: number;
+  eventType: string;
+  level: 'info' | 'warning' | 'error';
+  summary: string;
+  createdAt: string;
+}
+
+export interface AgentTaskDocumentArtifact {
+  documentId: string;
+  documentVersionId: string;
+  operation: 'create' | 'update' | 'regenerate';
+  createdAt: string;
+}
+
+export interface AgentTaskDetail {
+  task: AgentTaskInfo;
+  events: AgentTaskEventInfo[];
+  documents: AgentTaskDocumentArtifact[];
+}
+
+export interface AgentTaskListParams {
+  limit?: number;
+  conversationId?: string;
+}
+
+export interface AgentTaskGetParams {
+  taskId: string;
+}
+
+/** Explicit user action that converts a completed assistant response into a reviewable draft. */
+export interface AgentTaskCreateDocumentDraftParams {
+  messageId: string;
+  title?: string;
+  targetDocumentId?: string;
+  expectedDocumentRowVersion?: number;
+  idempotencyKey?: string;
+}
+
+export interface AgentTaskCreateDocumentDraftResult {
+  task: AgentTaskInfo;
+  document: DocumentDetail;
+}
+
+export interface TaskLogItem {
+  id: string;
+  kind: 'agent-document' | 'image' | 'video';
+  title: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  sourceId: string;
+  documentId?: string;
+  documentVersionId?: string;
+}
+
+export interface TaskLogListParams {
+  limit?: number;
 }
 
 export interface DocumentVersionsParams {
@@ -487,12 +672,14 @@ export type LlmExecutionMode = 'legacy' | 'native';
 
 export interface LlmGenerateParams extends ContextPreviewParams {
   prompt: string;
+  idempotencyKey?: string;
 }
 
 export interface LlmGenerationInfo {
   generationId: string;
   attemptId?: string;
   projectId?: string;
+  projectSessionId?: string;
   conversationId: string;
   snapshotId: string;
   status: LlmGenerationStatus;
@@ -515,12 +702,14 @@ export interface LlmGenerationGetParams {
 export interface LlmGenerationRetryParams {
   assistantMessageId: string;
   budgetTokens?: number;
+  idempotencyKey?: string;
 }
 
 export interface LlmGenerationIdentity {
   generationId: string;
   attemptId: string;
   projectId: string;
+  projectSessionId: string;
   conversationId: string;
 }
 
@@ -528,6 +717,7 @@ export interface LlmGenerationPrepareParams extends ContextPreviewParams {
   prompt: string;
   providerProfileId: string;
   modelId: string;
+  idempotencyKey?: string;
 }
 
 export interface LlmGenerationRetryPrepareParams extends LlmGenerationRetryParams {
@@ -1188,8 +1378,26 @@ export interface WorkerMethodMap {
   'document.list': { params: Record<string, never>; result: DocumentSummary[] };
   'document.get': { params: DocumentGetParams; result: DocumentDetail };
   'document.save': { params: DocumentSaveParams; result: DocumentDetail };
+  'document.draft.save': { params: DocumentDraftSaveParams; result: DocumentDetail };
   'document.versions': { params: DocumentVersionsParams; result: DocumentVersionInfo[] };
   'document.restore': { params: DocumentRestoreParams; result: DocumentDetail };
+  'document.review.submit': { params: DocumentReviewSubmitParams; result: DocumentReviewInfo };
+  'document.review.requestChanges': {
+    params: DocumentReviewRequestChangesParams;
+    result: DocumentReviewInfo;
+  };
+  'document.review.reject': { params: DocumentReviewRejectParams; result: DocumentReviewInfo };
+  'document.publish': {
+    params: DocumentPublishParams;
+    result: { document: DocumentDetail; publication: DocumentPublicationInfo };
+  };
+  'agent.task.createDocumentDraft': {
+    params: AgentTaskCreateDocumentDraftParams;
+    result: AgentTaskCreateDocumentDraftResult;
+  };
+  'agent.task.list': { params: AgentTaskListParams; result: AgentTaskInfo[] };
+  'agent.task.get': { params: AgentTaskGetParams; result: AgentTaskDetail };
+  'task.log.list': { params: TaskLogListParams; result: TaskLogItem[] };
   'scene.list': { params: Record<string, never>; result: SceneInfo[] };
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
@@ -1349,11 +1557,20 @@ export interface WorkerError {
     | 'PROJECT_NOT_FOUND'
     | 'PROJECT_READ_ONLY'
     | 'PROJECT_LOCKED'
+    | 'NOT_FOUND'
+    | 'CONFLICT'
+    | 'DOCUMENT_BASE_CONFLICT'
+    | 'IDEMPOTENCY_KEY_REUSED'
+    | 'INVALID_STATE'
+    | 'STALE_SESSION'
     | 'ADAPTER_NOT_FOUND'
     | 'INVALID_PARAMETERS'
     | 'LLM_NOT_CONFIGURED'
     | 'LLM_REQUEST_FAILED';
   message: string;
+  requestId?: string;
+  retryable?: boolean;
+  operation?: string;
   details?: unknown;
 }
 

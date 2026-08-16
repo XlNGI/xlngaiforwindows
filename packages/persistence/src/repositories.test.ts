@@ -148,6 +148,22 @@ describe('repositories', () => {
       contentJson: '{"version":1}',
       createdAt: 'now',
     });
+    repositories.llmGenerations.insert({
+      id: 'generation',
+      projectId: 'project',
+      projectSessionId: 'project-session',
+      conversationId: 'conversation',
+      contextSnapshotId: 'snapshot',
+      userMessageId: 'message',
+      assistantMessageId: 'assistant-message',
+      status: 'streaming',
+      executionMode: 'native',
+      providerProfileId: 'profile',
+      modelId: 'model',
+      createdAt: 'now',
+      updatedAt: 'now',
+      version: 0,
+    });
     repositories.llmGenerationAttempts.save({
       id: 'attempt',
       generationId: 'generation',
@@ -214,6 +230,350 @@ describe('repositories', () => {
     database.close();
   });
 
+  it('persists agent task drafts, review decisions, publications, and immutable events', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-agent-task-repositories-'));
+    temporaryDirectories.push(directory);
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Agent tasks', 'now', 'now');
+    const repositories = createRepositories(database);
+
+    repositories.conversations.save({
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Agent chat',
+      createdAt: 'now',
+      updatedAt: 'now',
+    });
+    repositories.chatMessages.save({
+      id: 'user',
+      conversationId: 'conversation',
+      role: 'user',
+      content: 'Create a project document.',
+      status: 'complete',
+      createdAt: 'now',
+    });
+    repositories.chatMessages.save({
+      id: 'assistant',
+      conversationId: 'conversation',
+      replyToMessageId: 'user',
+      role: 'assistant',
+      content: 'Draft created.',
+      status: 'complete',
+      createdAt: 'now',
+    });
+    repositories.contextSnapshots.save({
+      id: 'snapshot',
+      projectId: 'project',
+      purpose: 'agent-task',
+      contentJson: '{"version":1}',
+      createdAt: 'now',
+    });
+    repositories.llmGenerations.insert({
+      id: 'generation',
+      projectId: 'project',
+      projectSessionId: 'session',
+      conversationId: 'conversation',
+      contextSnapshotId: 'snapshot',
+      userMessageId: 'user',
+      assistantMessageId: 'assistant',
+      status: 'complete',
+      executionMode: 'native',
+      createdAt: 'now',
+      updatedAt: 'now',
+      version: 0,
+    });
+    repositories.llmGenerationAttempts.save({
+      id: 'attempt',
+      generationId: 'generation',
+      conversationId: 'conversation',
+      userMessageId: 'user',
+      assistantMessageId: 'assistant',
+      contextSnapshotId: 'snapshot',
+      providerNameSnapshot: 'Provider',
+      modelNameSnapshot: 'Model',
+      protocol: 'responses',
+      status: 'complete',
+      startedAt: 'now',
+      completedAt: 'later',
+    });
+    repositories.agentTasks.save({
+      id: 'task',
+      projectId: 'project',
+      projectSessionId: 'session',
+      conversationId: 'conversation',
+      userMessageId: 'user',
+      taskType: 'document-create',
+      scopeType: 'project',
+      title: 'Create synopsis',
+      requestSnapshotJson: '{"prompt":"Create a synopsis"}',
+      requestHash: 'request-hash',
+      contextSnapshotId: 'snapshot',
+      status: 'queued',
+      idempotencyKey: 'task-key',
+      createdAt: 'now',
+      updatedAt: 'now',
+      phase: 'queued',
+      rowVersion: 0,
+      toolCallLimit: 8,
+      toolCallCount: 0,
+      lifecycleStatus: 'active',
+    });
+    const runningTask = {
+      ...repositories.agentTasks.get('task')!,
+      status: 'running' as const,
+      startedAt: 'later',
+      updatedAt: 'later',
+      rowVersion: 1,
+    };
+    expect(repositories.agentTasks.update(runningTask, 0)).toBe(true);
+    expect(repositories.agentTasks.update(runningTask, 0)).toBe(false);
+    expect(repositories.agentTasks.getByIdempotencyKey('project', 'task-key')).toMatchObject({
+      id: 'task',
+      status: 'running',
+    });
+    repositories.agentTaskEvents.append({
+      id: 'event',
+      taskId: 'task',
+      projectId: 'project',
+      sequence: 0,
+      eventType: 'agent.task.created',
+      level: 'info',
+      summary: 'Task created',
+      dedupeKey: 'created',
+      createdAt: 'now',
+    });
+    expect(repositories.agentTaskEvents.listByTask('task')).toMatchObject([
+      { eventType: 'agent.task.created', sequence: 0 },
+    ]);
+    expect(() =>
+      database
+        .prepare("UPDATE agent_task_events SET summary = 'changed' WHERE id = ?")
+        .run('event'),
+    ).toThrow('agent task events are immutable');
+    repositories.agentTaskGenerations.link({
+      taskId: 'task',
+      generationId: 'generation',
+      ordinal: 0,
+      purpose: 'initial',
+      createdAt: 'later',
+    });
+    expect(repositories.agentTaskGenerations.listByTask('task')).toMatchObject([
+      { generationId: 'generation', ordinal: 0 },
+    ]);
+    repositories.llmProviderSteps.save({
+      id: 'step',
+      projectId: 'project',
+      generationId: 'generation',
+      attemptId: 'attempt',
+      ordinal: 0,
+      protocol: 'responses',
+      status: 'complete',
+      toolCallCount: 0,
+      requestHash: 'request-hash',
+      startedAt: 'later',
+    });
+    expect(repositories.llmProviderSteps.listByAttempt('attempt')).toMatchObject([
+      { id: 'step', ordinal: 0, status: 'complete' },
+    ]);
+    repositories.agentToolAuthorizations.save({
+      id: 'authorization',
+      projectId: 'project',
+      taskId: 'task',
+      generationId: 'generation',
+      attemptId: 'attempt',
+      providerStepId: 'step',
+      projectSessionId: 'session',
+      allowedOperation: 'document.create_draft',
+      policyVersion: 'policy-1',
+      toolSchemaVersion: 'tools-1',
+      authorizationHandleHash: 'handle-hash',
+      status: 'issued',
+      maxCallUses: 1,
+      usedCallCount: 0,
+      expiresAt: 'later',
+      rowVersion: 0,
+      createdAt: 'later',
+    });
+    expect(repositories.agentToolAuthorizations.get('authorization')).toMatchObject({
+      providerStepId: 'step',
+      usedCallCount: 0,
+    });
+    repositories.agentToolCalls.save({
+      id: 'tool-call',
+      projectId: 'project',
+      taskId: 'task',
+      toolName: 'project.document.createDraft',
+      normalizedArgumentsHash: 'arguments-hash',
+      argumentsSummaryJson: '{"operation":"create"}',
+      status: 'received',
+      idempotencyKey: 'tool-key',
+      createdAt: 'later',
+      version: 0,
+      redactionState: 'native',
+    });
+    const validatedCall = {
+      ...repositories.agentToolCalls.get('tool-call')!,
+      status: 'validated' as const,
+      version: 1,
+    };
+    expect(repositories.agentToolCalls.update(validatedCall, 0)).toBe(true);
+    expect(repositories.agentToolCalls.getByIdempotencyKey('task', 'tool-key')).toMatchObject({
+      id: 'tool-call',
+    });
+
+    repositories.documents.saveVersion(
+      {
+        id: 'document',
+        projectId: 'project',
+        kind: 'note',
+        title: 'Synopsis',
+        scopeType: 'project',
+        currentVersionId: 'published-version',
+        createdAt: 'now',
+        updatedAt: 'now',
+      },
+      {
+        id: 'published-version',
+        documentId: 'document',
+        version: 1,
+        contentMarkdown: '# Published',
+        state: 'published',
+        createdAt: 'now',
+      },
+    );
+    const publishedDocument = repositories.documents.get('document')!;
+    repositories.documents.saveVersion(
+      {
+        ...publishedDocument,
+        currentVersionId: 'draft-version',
+        title: 'Synopsis draft',
+        updatedAt: 'later',
+      },
+      {
+        id: 'draft-version',
+        documentId: 'document',
+        version: 2,
+        contentMarkdown: '# Draft',
+        state: 'draft',
+        baseVersionId: 'published-version',
+        authorType: 'agent',
+        sourceTaskId: 'task',
+        sourceMessageId: 'assistant',
+        contextSnapshotId: 'snapshot',
+        createdAt: 'later',
+      },
+    );
+    expect(repositories.documents.get('document')).toMatchObject({
+      currentVersionId: 'draft-version',
+      publishedVersionId: 'published-version',
+      rowVersion: 1,
+    });
+    expect(repositories.documents.getVersion('draft-version')).toMatchObject({
+      state: 'draft',
+      baseVersionId: 'published-version',
+      authorType: 'agent',
+      sourceTaskId: 'task',
+    });
+    repositories.agentTaskDocumentVersions.link({
+      taskId: 'task',
+      documentId: 'document',
+      documentVersionId: 'draft-version',
+      operation: 'create',
+      createdAt: 'later',
+    });
+    repositories.documentReviews.save({
+      id: 'review',
+      projectId: 'project',
+      documentId: 'document',
+      documentVersionId: 'draft-version',
+      taskId: 'task',
+      status: 'pending',
+      requestedByType: 'agent',
+      requestedAt: 'later',
+      version: 0,
+    });
+    const approvedReview = {
+      ...repositories.documentReviews.get('review')!,
+      status: 'approved' as const,
+      decidedByType: 'user',
+      decidedAt: 'later',
+      version: 1,
+    };
+    expect(repositories.documentReviews.update(approvedReview, 0)).toBe(true);
+    expect(
+      repositories.documents.updateVersionState('draft-version', 'in_review', 0, 'later'),
+    ).toBe(true);
+    expect(
+      repositories.documents.updateVersionState('draft-version', 'published', 1, 'later'),
+    ).toBe(true);
+    expect(
+      repositories.documents.updatePublishedVersion('document', 'draft-version', 1, 'later'),
+    ).toBe(true);
+    repositories.documentPublications.append({
+      id: 'publication',
+      projectId: 'project',
+      documentId: 'document',
+      documentVersionId: 'draft-version',
+      previousVersionId: 'published-version',
+      publicationNo: 2,
+      reviewId: 'review',
+      taskId: 'task',
+      publishedByType: 'user',
+      publishedAt: 'later',
+    });
+    expect(repositories.documentPublications.listByDocument('document')).toMatchObject([
+      { id: 'publication', documentVersionId: 'draft-version', publicationNo: 2 },
+    ]);
+    repositories.documentWorkflowAudits.append({
+      id: 'audit-publication',
+      projectId: 'project',
+      sequence: 0,
+      action: 'published',
+      actorType: 'user',
+      actorId: 'local-user',
+      documentId: 'document',
+      documentVersionId: 'draft-version',
+      sourceVersionId: 'published-version',
+      reviewId: 'review',
+      publicationId: 'publication',
+      taskId: 'task',
+      metadataJson: '{"previousVersionId":"published-version"}',
+      createdAt: 'later',
+    });
+    expect(repositories.documentWorkflowAudits.listByProject('project', 1)).toMatchObject([
+      {
+        id: 'audit-publication',
+        action: 'published',
+        documentVersionId: 'draft-version',
+        publicationId: 'publication',
+      },
+    ]);
+    expect(repositories.documentWorkflowAudits.listByDocument('document')).toMatchObject([
+      { id: 'audit-publication', sourceVersionId: 'published-version' },
+    ]);
+    expect(() =>
+      database
+        .prepare('UPDATE document_audit_events SET action = ? WHERE id = ?')
+        .run('draft_saved', 'audit-publication'),
+    ).toThrow('document audit events are immutable');
+    expect(() =>
+      database.prepare('DELETE FROM document_audit_events WHERE id = ?').run('audit-publication'),
+    ).toThrow('document audit events are immutable');
+    expect(repositories.agentTaskDocumentVersions.listByTask('task')).toMatchObject([
+      { documentVersionId: 'draft-version', operation: 'create' },
+    ]);
+    expect(() =>
+      database
+        .prepare('UPDATE document_publications SET publication_no = 3 WHERE id = ?')
+        .run('publication'),
+    ).toThrow('document publications are immutable');
+    database.close();
+  });
+
   it('rolls back document metadata when a version insert fails', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ai-video-document-transaction-'));
     temporaryDirectories.push(directory);
@@ -257,6 +617,42 @@ describe('repositories', () => {
       title: 'Original',
       currentVersionId: 'version-1',
     });
+    database.close();
+  });
+
+  it('orders conversations by latest activity with a deterministic id tie-breaker', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-conversation-order-'));
+    temporaryDirectories.push(directory);
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Ordering', 'now', 'now');
+    const conversations = createRepositories(database).conversations;
+    for (const id of ['a', 'b']) {
+      conversations.save({
+        id,
+        projectId: 'project',
+        scopeType: 'project',
+        title: id,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      });
+    }
+    conversations.save({
+      id: 'older',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'older',
+      createdAt: '2026-01-03T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    expect(conversations.listByProject('project').map((item) => item.id)).toEqual([
+      'b',
+      'a',
+      'older',
+    ]);
     database.close();
   });
 

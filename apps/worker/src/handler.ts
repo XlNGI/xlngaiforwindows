@@ -5,10 +5,17 @@ import {
   IPC_PROTOCOL_VERSION,
   type ChatMessageListParams,
   type ChatMessageSaveParams,
+  type AgentTaskCreateDocumentDraftParams,
+  type AgentTaskGetParams,
   type AdapterResolveParams,
   type AdapterValidateParams,
   type ConversationCreateParams,
   type DocumentRestoreParams,
+  type DocumentDraftSaveParams,
+  type DocumentPublishParams,
+  type DocumentReviewRequestChangesParams,
+  type DocumentReviewRejectParams,
+  type DocumentReviewSubmitParams,
   type DocumentSaveParams,
   type ImageAssetKind,
   type HealthResult,
@@ -68,6 +75,7 @@ import {
 } from './adapter-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
+import { DocumentWorkflowError, DocumentWorkflowService } from './document-workflow-service.js';
 import { GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
@@ -76,6 +84,7 @@ import { MaintenanceService } from './maintenance-service.js';
 import { SampleProjectService } from './sample-project-service.js';
 import { AppSettingsService, ProviderProfileValidationError } from './app-settings-service.js';
 import { UsageService } from './usage-service.js';
+import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -116,8 +125,17 @@ const methods = new Set<WorkerMethod>([
   'document.list',
   'document.get',
   'document.save',
+  'document.draft.save',
   'document.versions',
   'document.restore',
+  'document.review.submit',
+  'document.review.requestChanges',
+  'document.review.reject',
+  'document.publish',
+  'agent.task.createDocumentDraft',
+  'agent.task.list',
+  'agent.task.get',
+  'task.log.list',
   'scene.list',
   'scene.save',
   'shot.list',
@@ -195,6 +213,7 @@ const packagedSqliteBinding = isPackaged
 const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding });
 const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqliteBinding });
 const contentService = new ContentService(projectService);
+const documentWorkflowService = new DocumentWorkflowService(projectService);
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
 const videoGenerationService = new VideoGenerationService(
@@ -222,7 +241,12 @@ const generationService = new GenerationService(
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
-  return { id, protocolVersion: IPC_PROTOCOL_VERSION, ok: false, error };
+  return {
+    id,
+    protocolVersion: IPC_PROTOCOL_VERSION,
+    ok: false,
+    error: { ...error, requestId: id },
+  };
 }
 
 export function recordWorkerError(operation: string, error: unknown): void {
@@ -351,6 +375,18 @@ function optionalImageAssetKind(
 }
 
 export async function handleRequest(request: WorkerRequest): Promise<WorkerResponse> {
+  const startedAt = performance.now();
+  const response = await handleRequestCore(request);
+  maintenanceService.recordRequest(
+    request.method,
+    request.id,
+    response.ok,
+    performance.now() - startedAt,
+  );
+  return response;
+}
+
+async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse> {
   try {
     if (request.method === 'health') {
       const result: HealthResult = {
@@ -380,7 +416,7 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
       };
     }
 
-    const params = request.params as Record<string, unknown>;
+    const params = validateSessionRequestParams(request.method, request.params);
     let result: unknown;
     switch (request.method) {
       case 'project.create': {
@@ -564,19 +600,54 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         result = maintenanceService.revealDiagnostics(requireString(params, 'path'));
         break;
       case 'document.list':
-        result = contentService.listDocuments();
+        result = documentWorkflowService.listDocuments();
         break;
       case 'document.get':
-        result = contentService.getDocument(requireString(params, 'documentId'));
+        result = documentWorkflowService.getDocument(requireString(params, 'documentId'));
         break;
       case 'document.save':
         result = contentService.saveDocument(params as unknown as DocumentSaveParams);
         break;
+      case 'document.draft.save':
+        result = documentWorkflowService.saveDraft(params as unknown as DocumentDraftSaveParams);
+        break;
       case 'document.versions':
-        result = contentService.listDocumentVersions(requireString(params, 'documentId'));
+        result = documentWorkflowService.listVersions(requireString(params, 'documentId'));
         break;
       case 'document.restore':
         result = contentService.restoreDocument(params as unknown as DocumentRestoreParams);
+        break;
+      case 'document.review.submit':
+        result = documentWorkflowService.submitReview(
+          params as unknown as DocumentReviewSubmitParams,
+        );
+        break;
+      case 'document.review.requestChanges':
+        result = documentWorkflowService.requestChanges(
+          params as unknown as DocumentReviewRequestChangesParams,
+        );
+        break;
+      case 'document.review.reject':
+        result = documentWorkflowService.rejectReview(
+          params as unknown as DocumentReviewRejectParams,
+        );
+        break;
+      case 'document.publish':
+        result = documentWorkflowService.publish(params as unknown as DocumentPublishParams);
+        break;
+      case 'agent.task.createDocumentDraft':
+        result = documentWorkflowService.createDocumentDraftFromMessage(
+          params as unknown as AgentTaskCreateDocumentDraftParams,
+        );
+        break;
+      case 'agent.task.list':
+        result = documentWorkflowService.listTasks(params);
+        break;
+      case 'agent.task.get':
+        result = documentWorkflowService.getTask(params as unknown as AgentTaskGetParams);
+        break;
+      case 'task.log.list':
+        result = documentWorkflowService.listTaskLog(params);
         break;
       case 'scene.list':
         result = contentService.listScenes();
@@ -625,6 +696,7 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
           requireString(params, 'conversationId'),
           requireString(params, 'prompt'),
           optionalNumber(params, 'budgetTokens'),
+          typeof params.idempotencyKey === 'string' ? params.idempotencyKey : undefined,
         );
         break;
       case 'llm.generation.prepare':
@@ -652,6 +724,8 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
         result = generationService.retry({
           assistantMessageId: requireString(params, 'assistantMessageId'),
           budgetTokens: optionalNumber(params, 'budgetTokens'),
+          idempotencyKey:
+            typeof params.idempotencyKey === 'string' ? params.idempotencyKey : undefined,
         });
         break;
       case 'llm.generation.retryPrepare':
@@ -885,23 +959,65 @@ export async function handleRequest(request: WorkerRequest): Promise<WorkerRespo
     } as WorkerResponse;
   } catch (error) {
     recordWorkerError(request.method, error);
-    return errorResponse(request.id, {
-      code:
-        error instanceof AdapterNotFoundError
-          ? 'ADAPTER_NOT_FOUND'
-          : error instanceof InvalidAdapterParametersError
-            ? 'INVALID_PARAMETERS'
-            : error instanceof LlmProviderError
-              ? error.code === 'NOT_CONFIGURED'
-                ? 'LLM_NOT_CONFIGURED'
-                : 'LLM_REQUEST_FAILED'
-              : error instanceof ProviderProfileValidationError
-                ? 'INVALID_PARAMETERS'
-                : 'INTERNAL_ERROR',
-      message: error instanceof Error ? error.message : 'Unexpected worker error.',
-      details: error instanceof InvalidAdapterParametersError ? error.validation.errors : undefined,
-    });
+    return errorResponse(request.id, mapWorkerError(request.method, error));
   }
+}
+
+function mapWorkerError(operation: string, error: unknown): WorkerError {
+  const message = error instanceof Error ? error.message : 'Unexpected worker error.';
+  if (error instanceof RequestValidationError) {
+    return { code: 'INVALID_REQUEST', message, retryable: false, operation };
+  }
+  if (error instanceof DocumentWorkflowError) {
+    return {
+      code: error.code,
+      message,
+      retryable: false,
+      operation,
+    };
+  }
+  if (error instanceof AdapterNotFoundError) {
+    return { code: 'ADAPTER_NOT_FOUND', message, retryable: false, operation };
+  }
+  if (error instanceof InvalidAdapterParametersError) {
+    return {
+      code: 'INVALID_PARAMETERS',
+      message,
+      retryable: false,
+      operation,
+      details: error.validation.errors,
+    };
+  }
+  if (error instanceof ProviderProfileValidationError) {
+    return { code: 'INVALID_PARAMETERS', message, retryable: false, operation };
+  }
+  if (error instanceof LlmProviderError) {
+    return {
+      code: error.code === 'NOT_CONFIGURED' ? 'LLM_NOT_CONFIGURED' : 'LLM_REQUEST_FAILED',
+      message,
+      retryable: error.retryable,
+      operation,
+    };
+  }
+  if (/read-only/i.test(message)) {
+    return { code: 'PROJECT_READ_ONLY', message, retryable: false, operation };
+  }
+  if (/already open for writing|project is already open/i.test(message)) {
+    return { code: 'PROJECT_LOCKED', message, retryable: true, operation };
+  }
+  if (/stale .*callback|session changed|out-of-order/i.test(message)) {
+    return { code: 'STALE_SESSION', message, retryable: false, operation };
+  }
+  if (/was not found|not found/i.test(message)) {
+    return { code: 'NOT_FOUND', message, retryable: false, operation };
+  }
+  if (/no longer available|invalid state|terminal state/i.test(message)) {
+    return { code: 'INVALID_STATE', message, retryable: false, operation };
+  }
+  if (/already exists|conflict/i.test(message)) {
+    return { code: 'CONFLICT', message, retryable: false, operation };
+  }
+  return { code: 'INTERNAL_ERROR', message, retryable: true, operation };
 }
 
 function optionalVideoAssetKind(

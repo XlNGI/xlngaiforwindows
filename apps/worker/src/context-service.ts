@@ -29,8 +29,10 @@ export class ContextService {
       const sources: ContextSourceInput[] = [];
 
       for (const document of repositories.documents.listByProject(project.id)) {
-        const version = document.currentVersionId
-          ? repositories.documents.getVersion(document.currentVersionId)
+        // A working draft is intentionally not project authority. Only the explicit
+        // publication pointer may contribute to another generation's context.
+        const version = document.publishedVersionId
+          ? repositories.documents.getVersion(document.publishedVersionId)
           : undefined;
         if (!version) continue;
         sources.push({

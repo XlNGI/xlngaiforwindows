@@ -15,7 +15,12 @@ import type {
   LlmPricingSnapshotInfo,
   NormalizedLlmUsage,
 } from '@ai-video/contracts';
-import type { LlmGenerationAttemptRecord, ProjectRecord } from '@ai-video/domain';
+import type { ProductionContext } from '@ai-video/context';
+import type {
+  LlmGenerationAttemptRecord,
+  LlmGenerationRecord,
+  ProjectRecord,
+} from '@ai-video/domain';
 import { LlmProviderError, type LlmProvider } from '@ai-video/llm';
 import { createRepositories } from '@ai-video/persistence';
 import type { ResolvedLlmSelection } from './app-settings-service.js';
@@ -27,12 +32,19 @@ import { calculateEstimatedCost, normalizeCurrency, normalizeDecimalPrice } from
 interface GenerationState extends LlmGenerationInfo {
   attemptId: string;
   projectId: string;
+  projectSessionId: string;
   controller?: AbortController;
   completion?: Promise<void>;
   flushTimer?: ReturnType<typeof setTimeout>;
   persistedCharacters: number;
   runtimeRequest?: LlmGenerationRuntimeRequest;
+  record: LlmGenerationRecord;
   attempt: LlmGenerationAttemptRecord;
+}
+
+interface GenerationCreationOptions {
+  idempotencyKey?: string;
+  retryOfGenerationId?: string;
 }
 
 export interface LlmSelectionResolver {
@@ -83,18 +95,31 @@ export class GenerationService {
     };
   }
 
-  generate(conversationId: string, prompt: string, budgetTokens?: number): LlmGenerationInfo {
+  generate(
+    conversationId: string,
+    prompt: string,
+    budgetTokens?: number,
+    idempotencyKey?: string,
+  ): LlmGenerationInfo {
+    const existing = this.findIdempotent(idempotencyKey);
+    if (existing) return generationInfoOf(existing);
     this.assertLegacyConfigured();
-    return this.startLegacy(conversationId, prompt.trim(), budgetTokens);
+    return this.startLegacy(conversationId, prompt.trim(), budgetTokens, undefined, {
+      idempotencyKey,
+    });
   }
 
   prepare(params: LlmGenerationPrepareParams): LlmGenerationPrepareResult {
+    const existing = this.findIdempotent(params.idempotencyKey);
+    if (existing) return prepareResultOf(existing);
     const selection = this.resolveSelection(params.providerProfileId, params.modelId);
     return this.startNative(
       params.conversationId,
       params.prompt.trim(),
       selection,
       params.budgetTokens,
+      undefined,
+      { idempotencyKey: params.idempotencyKey },
     );
   }
 
@@ -179,13 +204,12 @@ export class GenerationService {
 
   get(generationId: string): LlmGenerationInfo {
     const state = this.generations.get(generationId);
-    if (!state) throw new Error('Generation was not found.');
-    return publicState(state);
+    return state ? publicState(state) : this.loadPersisted(generationId);
   }
 
   async cancel(generationId: string): Promise<LlmGenerationInfo> {
     const state = this.generations.get(generationId);
-    if (!state) throw new Error('Generation was not found.');
+    if (!state) return this.cancelPersisted(generationId);
     if (!isActive(state.status)) return publicState(state);
     if (state.executionMode === 'native') {
       this.finishNativeFailure(
@@ -203,12 +227,25 @@ export class GenerationService {
   }
 
   retry(params: LlmGenerationRetryParams): LlmGenerationInfo {
+    const existing = this.findIdempotent(params.idempotencyKey);
+    if (existing) return generationInfoOf(existing);
     this.assertLegacyConfigured();
     const source = this.retrySource(params.assistantMessageId);
-    return this.startLegacy(source.conversationId, source.prompt, params.budgetTokens, source.user);
+    return this.startLegacy(
+      source.conversationId,
+      source.prompt,
+      params.budgetTokens,
+      source.user,
+      {
+        idempotencyKey: params.idempotencyKey,
+        retryOfGenerationId: source.generationId,
+      },
+    );
   }
 
   retryPrepare(params: LlmGenerationRetryPrepareParams): LlmGenerationPrepareResult {
+    const existing = this.findIdempotent(params.idempotencyKey);
+    if (existing) return prepareResultOf(existing);
     const selection = this.resolveSelection(params.providerProfileId, params.modelId);
     const source = this.retrySource(params.assistantMessageId);
     return this.startNative(
@@ -217,6 +254,10 @@ export class GenerationService {
       selection,
       params.budgetTokens,
       source.user,
+      {
+        idempotencyKey: params.idempotencyKey,
+        retryOfGenerationId: source.generationId,
+      },
     );
   }
 
@@ -246,18 +287,120 @@ export class GenerationService {
     return this.projects.access(true, (database) => {
       const repositories = createRepositories(database);
       return database.transaction(() => {
+        const recoveredAt = nowIso();
+        const failureMessage = '生成因 Worker 重启而中断。';
         const messages = repositories.chatMessages.failStreamingByProject(
           project.id,
-          '生成因 Worker 重启而中断。',
+          failureMessage,
         );
         repositories.llmGenerationAttempts.failActiveByProject(
           project.id,
-          nowIso(),
-          '生成因 Worker 重启而中断。',
+          recoveredAt,
+          failureMessage,
         );
+        repositories.llmGenerations.failActiveByProject(project.id, recoveredAt, failureMessage);
         return messages;
       })();
     });
+  }
+
+  private findIdempotent(
+    idempotencyKey: string | undefined,
+  ): GenerationState | LlmGenerationInfo | undefined {
+    if (!idempotencyKey) return undefined;
+    const generationId = this.projects.access(
+      false,
+      (database, project) =>
+        createRepositories(database).llmGenerations.getByIdempotencyKey(project.id, idempotencyKey)
+          ?.id,
+    );
+    if (!generationId) return undefined;
+    return this.generations.get(generationId) ?? this.loadPersisted(generationId);
+  }
+
+  private loadPersisted(generationId: string): LlmGenerationInfo {
+    return this.projects.access(false, (database, project) => {
+      const repositories = createRepositories(database);
+      const record = repositories.llmGenerations.get(generationId);
+      if (!record || record.projectId !== project.id) throw new Error('Generation was not found.');
+      const userMessage = repositories.chatMessages.get(record.userMessageId);
+      const assistantMessage = repositories.chatMessages.get(record.assistantMessageId);
+      const attempt = repositories.llmGenerationAttempts.getByAssistantMessage(
+        record.assistantMessageId,
+      );
+      if (!userMessage || !assistantMessage || !attempt) {
+        throw new Error('Generation persistence is incomplete.');
+      }
+      const snapshot = repositories.contextSnapshots.get(record.contextSnapshotId);
+      return {
+        generationId: record.id,
+        attemptId: attempt.id,
+        projectId: record.projectId,
+        projectSessionId: record.projectSessionId,
+        conversationId: record.conversationId,
+        snapshotId: record.contextSnapshotId,
+        status: record.status,
+        executionMode: record.executionMode,
+        providerProfileId: record.providerProfileId,
+        modelId: record.modelId,
+        providerResponseId: attempt.providerResponseId,
+        finishReason: attempt.finishReason,
+        userMessage,
+        assistantMessage: { ...assistantMessage, attempt: toAttemptInfo(attempt) },
+        sources: contextSourcesOf(snapshot?.contentJson),
+        error: record.errorMessage,
+        retryable: record.retryable,
+      };
+    });
+  }
+
+  private cancelPersisted(generationId: string): LlmGenerationInfo {
+    this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const record = repositories.llmGenerations.get(generationId);
+      if (!record || record.projectId !== project.id) throw new Error('Generation was not found.');
+      if (!isActive(record.status)) return;
+      const assistant = repositories.chatMessages.get(record.assistantMessageId);
+      const attempt = repositories.llmGenerationAttempts.getByAssistantMessage(
+        record.assistantMessageId,
+      );
+      const conversation = repositories.conversations.get(record.conversationId);
+      if (!assistant || !attempt || !conversation) {
+        throw new Error('Generation persistence is incomplete.');
+      }
+      const updatedAt = nowIso();
+      const errorMessage = 'Generation was cancelled.';
+      const nextRecord: LlmGenerationRecord = {
+        ...record,
+        status: 'cancelled',
+        errorCode: 'cancelled',
+        errorMessage,
+        retryable: true,
+        updatedAt,
+        version: record.version + 1,
+      };
+      const nextAttempt: LlmGenerationAttemptRecord = {
+        ...attempt,
+        status: 'cancelled',
+        completedAt: updatedAt,
+        errorCode: 'cancelled',
+        errorMessage,
+      };
+      const updated = database.transaction(() => {
+        if (!repositories.llmGenerations.update(nextRecord, record.version)) return false;
+        repositories.chatMessages.save({
+          ...assistant,
+          content: assistant.content || errorMessage,
+          status: 'failed',
+        });
+        repositories.llmGenerationAttempts.save(nextAttempt);
+        repositories.conversations.save({ ...conversation, updatedAt });
+        repositories.projects.touch(updatedAt);
+        return true;
+      })();
+      if (updated) project.updatedAt = updatedAt;
+    });
+    return this.loadPersisted(generationId);
   }
 
   private assertLegacyConfigured(): void {
@@ -277,6 +420,7 @@ export class GenerationService {
     conversationId: string;
     prompt: string;
     user: ChatMessageInfo;
+    generationId?: string;
   } {
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
@@ -293,7 +437,13 @@ export class GenerationService {
       if (!user || user.role !== 'user' || user.conversationId !== conversation.id) {
         throw new Error('Assistant message has no valid original user message.');
       }
-      return { conversationId: conversation.id, prompt: user.content, user };
+      return {
+        conversationId: conversation.id,
+        prompt: user.content,
+        user,
+        generationId: repositories.llmGenerationAttempts.getByAssistantMessage(assistant.id)
+          ?.generationId,
+      };
     });
   }
 
@@ -303,7 +453,10 @@ export class GenerationService {
     selection: ResolvedLlmSelection,
     budgetTokens?: number,
     existingUser?: ChatMessageInfo,
+    options: GenerationCreationOptions = {},
   ): LlmGenerationPrepareResult {
+    const existing = this.findIdempotent(options.idempotencyKey);
+    if (existing) return prepareResultOf(existing);
     const prepared = this.createState(
       conversationId,
       prompt,
@@ -311,12 +464,14 @@ export class GenerationService {
       existingUser,
       'native',
       selection,
+      options,
     );
     const { state, systemInstruction, context } = prepared;
     state.runtimeRequest = {
       generationId: state.generationId,
       attemptId: state.attemptId,
       projectId: state.projectId,
+      projectSessionId: state.projectSessionId,
       conversationId: state.conversationId,
       providerProfileId: selection.providerProfileId,
       modelId: selection.modelId,
@@ -338,8 +493,19 @@ export class GenerationService {
     prompt: string,
     budgetTokens?: number,
     existingUser?: ChatMessageInfo,
+    options: GenerationCreationOptions = {},
   ): LlmGenerationInfo {
-    const prepared = this.createState(conversationId, prompt, budgetTokens, existingUser, 'legacy');
+    const existing = this.findIdempotent(options.idempotencyKey);
+    if (existing) return generationInfoOf(existing);
+    const prepared = this.createState(
+      conversationId,
+      prompt,
+      budgetTokens,
+      existingUser,
+      'legacy',
+      undefined,
+      options,
+    );
     const { state, systemInstruction, context } = prepared;
     state.status = 'streaming';
     state.controller = new AbortController();
@@ -354,10 +520,12 @@ export class GenerationService {
     existingUser: ChatMessageInfo | undefined,
     executionMode: 'legacy' | 'native',
     selection?: ResolvedLlmSelection,
+    options: GenerationCreationOptions = {},
   ): { state: GenerationState; systemInstruction: string; context: string } {
     if (!prompt) throw new Error('Prompt is required.');
     const projectId = this.projects.current()?.id;
-    if (!projectId) throw new Error('No project is open.');
+    const projectSessionId = this.projects.currentSessionId();
+    if (!projectId || !projectSessionId) throw new Error('No project is open.');
     const compiled = this.contexts.compile(conversationId, budgetTokens);
     const snapshotId = randomUUID();
     const generationId = randomUUID();
@@ -399,10 +567,29 @@ export class GenerationService {
         ? JSON.stringify(selection.pricingSnapshot)
         : undefined,
     };
+    const record: LlmGenerationRecord = {
+      id: generationId,
+      projectId,
+      projectSessionId,
+      conversationId,
+      contextSnapshotId: snapshotId,
+      userMessageId: userMessage.id,
+      assistantMessageId: assistantMessage.id,
+      status: executionMode === 'native' ? 'prepared' : 'streaming',
+      executionMode,
+      retryOfGenerationId: options.retryOfGenerationId,
+      idempotencyKey: options.idempotencyKey,
+      providerProfileId: selection?.providerProfileId,
+      modelId: selection?.modelId,
+      createdAt: startedAt,
+      updatedAt: startedAt,
+      version: 0,
+    };
     const state: GenerationState = {
       generationId,
       attemptId,
       projectId,
+      projectSessionId,
       conversationId,
       snapshotId,
       status: executionMode === 'native' ? 'prepared' : 'streaming',
@@ -413,6 +600,7 @@ export class GenerationService {
       assistantMessage,
       sources: toContextInfo(compiled).sources,
       persistedCharacters: 0,
+      record,
       attempt,
     };
     this.projects.access(true, (database, project) => {
@@ -442,6 +630,7 @@ export class GenerationService {
         });
         if (!existingUser) repositories.chatMessages.save(userMessage);
         repositories.chatMessages.save(assistantMessage);
+        repositories.llmGenerations.insert(record);
         repositories.llmGenerationAttempts.save(attempt);
         repositories.conversations.save({ ...conversation, updatedAt: startedAt });
         repositories.projects.touch(startedAt);
@@ -595,11 +784,15 @@ export class GenerationService {
     if (
       state.attemptId !== identity.attemptId ||
       state.projectId !== identity.projectId ||
+      state.projectSessionId !== identity.projectSessionId ||
       state.conversationId !== identity.conversationId
     ) {
       throw new Error('Stale LLM generation callback was rejected.');
     }
-    if (this.projects.current()?.id !== state.projectId) {
+    if (
+      this.projects.current()?.id !== state.projectId ||
+      this.projects.currentSessionId() !== state.projectSessionId
+    ) {
       throw new Error('Project session changed during generation.');
     }
     return state;
@@ -655,7 +848,12 @@ export class GenerationService {
     status: ChatMessageInfo['status'],
     attempt: LlmGenerationAttemptRecord,
   ): ChatMessageInfo | undefined {
-    if (this.projects.current()?.id !== state.projectId) return undefined;
+    if (
+      this.projects.current()?.id !== state.projectId ||
+      this.projects.currentSessionId() !== state.projectSessionId
+    ) {
+      return undefined;
+    }
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const conversation = repositories.conversations.get(state.conversationId);
@@ -666,12 +864,25 @@ export class GenerationService {
         status,
       };
       const updatedAt = nowIso();
+      const nextRecord: LlmGenerationRecord = {
+        ...state.record,
+        status: generationStatusForAttempt(attempt.status),
+        errorCode: attempt.errorCode,
+        errorMessage: attempt.errorMessage,
+        retryable: state.retryable,
+        updatedAt,
+        version: state.record.version + 1,
+      };
       database.transaction(() => {
         repositories.chatMessages.save(message);
+        if (!repositories.llmGenerations.update(nextRecord, state.record.version)) {
+          throw new Error('LLM generation state conflict.');
+        }
         repositories.llmGenerationAttempts.save(attempt);
         repositories.conversations.save({ ...conversation, updatedAt });
         repositories.projects.touch(updatedAt);
       })();
+      state.record = nextRecord;
       project.updatedAt = updatedAt;
       return message;
     });
@@ -694,6 +905,7 @@ function identityOf(state: GenerationState): LlmGenerationIdentity {
     generationId: state.generationId,
     attemptId: state.attemptId,
     projectId: state.projectId,
+    projectSessionId: state.projectSessionId,
     conversationId: state.conversationId,
   };
 }
@@ -702,11 +914,48 @@ function isActive(status: LlmGenerationInfo['status']): boolean {
   return status === 'prepared' || status === 'streaming';
 }
 
+function generationStatusForAttempt(
+  status: LlmGenerationAttemptRecord['status'],
+): LlmGenerationRecord['status'] {
+  return status === 'interrupted' ? 'failed' : status;
+}
+
+function generationInfoOf(state: GenerationState | LlmGenerationInfo): LlmGenerationInfo {
+  return 'record' in state ? publicState(state) : state;
+}
+
+function prepareResultOf(state: GenerationState | LlmGenerationInfo): LlmGenerationPrepareResult {
+  const generation = generationInfoOf(state);
+  if (!generation.attemptId || !generation.projectId || !generation.projectSessionId) {
+    throw new Error('Generation persistence is incomplete.');
+  }
+  return {
+    generation,
+    stream: {
+      generationId: generation.generationId,
+      attemptId: generation.attemptId,
+      projectId: generation.projectId,
+      projectSessionId: generation.projectSessionId,
+      conversationId: generation.conversationId,
+    },
+  };
+}
+
+function contextSourcesOf(contentJson: string | undefined): LlmGenerationInfo['sources'] {
+  if (!contentJson) return [];
+  try {
+    return toContextInfo(JSON.parse(contentJson) as ProductionContext).sources;
+  } catch {
+    return [];
+  }
+}
+
 function publicState(state: GenerationState): LlmGenerationInfo {
   return {
     generationId: state.generationId,
     attemptId: state.attemptId,
     projectId: state.projectId,
+    projectSessionId: state.projectSessionId,
     conversationId: state.conversationId,
     snapshotId: state.snapshotId,
     status: state.status,

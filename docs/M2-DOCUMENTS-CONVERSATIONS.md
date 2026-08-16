@@ -5,15 +5,16 @@
 
 ## 正式文档
 
-正式文档支持项目大纲、项目计划、角色设定、场景设定、分镜文档和创作笔记。`documents` 保存文档身份与当前版本指针，`document_versions` 保存不可变 Markdown 内容。
+正式文档以 Markdown 项目资料形式保存，运行时权威内容位于项目根目录的 `project.sqlite`，不依赖独立 `.md` 文件。旧 `kind` 字段仍兼容保留项目大纲、项目计划、角色设定、场景设定、分镜文档和创作笔记等历史值，但不再由界面选择，也不参与上下文优先级。`documents.current_version_id` 保存当前工作版本指针，`documents.published_version_id` 保存默认权威版本指针，`document_versions` 保存不可变 Markdown 内容。
 
 M3 Schema v2 已为正式文档增加项目、场次和镜头作用域；Schema v1 文档迁移后保持项目作用域。
 
-- 每次保存都插入一个新版本。
-- 文档元数据、版本记录和当前版本指针在同一事务内提交。
+- 每次保存都插入一个新工作版本。
+- 文档元数据、版本记录和当前工作版本指针在同一事务内提交；发布事务才更新权威版本指针。
 - 恢复历史版本不会覆盖记录，而是复制历史内容并创建一个新版本。
 - 普通聊天消息不会自动修改文档。
-- 只有用户执行“保存为文档”操作时，会话内容才进入正式资料。
+- 会话“保存为文档”只创建可审阅草稿；只有用户显式发布后，内容才进入正式资料。
+- 文档工具栏支持一次选择并导入 UTF-8 编码的 `.md` 或 `.markdown` 文件。导入标题取文件名，正文保持 Markdown，并创建可审阅的导入草稿；只有用户显式发布后才成为正式资料并进入后续 LLM 上下文。单文件上限为 5 MiB，不支持的扩展名、目录、非 UTF-8 内容和超限文件由 Tauri 原生边界拒绝。
 
 ## 场次与镜头
 
@@ -27,7 +28,7 @@ M3 Schema v2 已为正式文档增加项目、场次和镜头作用域；Schema 
 - `scene`：指定场次。
 - `shot`：指定镜头。
 
-场次与镜头会话必须提供有效 `scopeId`。消息按 `created_at + id` 稳定排序并使用游标分页。相同消息 ID 可以从 `streaming` 更新为 `complete` 或 `failed`，用于 M3 流式 LLM 接入。
+场次与镜头会话必须提供有效 `scopeId`。消息按 `created_at + id` 稳定排序并使用游标分页；会话列表按 `updated_at DESC, id DESC` 展示最近活动。相同消息 ID 可以从 `streaming` 更新为 `complete` 或 `failed`，终态不可回退为活动态。
 
 会话消息可以通过明确操作保存为项目文档、项目记忆或生产约束。三种操作均独立执行，不会隐式联动。
 
@@ -37,8 +38,17 @@ M3 Schema v2 已为正式文档增加项目、场次和镜头作用域；Schema 
 document.list
 document.get
 document.save
+document.draft.save
 document.versions
 document.restore
+document.review.submit
+document.review.requestChanges
+document.review.reject
+document.publish
+agent.task.createDocumentDraft
+agent.task.list
+agent.task.get
+task.log.list
 scene.list
 scene.save
 shot.list
@@ -52,7 +62,7 @@ chat.message.toMemory
 chat.message.toConstraint
 ```
 
-项目以只读模式打开时，列表与读取请求可用，所有保存、恢复和内容提升请求均拒绝。
+项目以只读模式打开时，列表与读取请求可用，所有保存、恢复、审核、发布和内容提升请求均拒绝。
 
 ## 工作台
 

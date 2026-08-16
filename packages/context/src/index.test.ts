@@ -86,6 +86,32 @@ describe('compileProductionContext', () => {
     expect(context.rendered).not.toContain('Leak');
   });
 
+  it('does not infer document authority from its title', () => {
+    const context = compileProductionContext({
+      projectId: 'project',
+      projectName: 'Drama',
+      scope: { type: 'project', label: 'Project' },
+      sources: [
+        {
+          id: 'ordinary',
+          type: 'document',
+          scopeType: 'project',
+          label: 'Ordinary document',
+          content: 'Ordinary',
+        },
+        {
+          id: 'renamed-outline',
+          type: 'document',
+          scopeType: 'project',
+          label: 'outline',
+          content: 'Renamed outline',
+        },
+      ],
+    });
+
+    expect(context.sources.map((source) => source.id)).toEqual(['ordinary', 'renamed-outline']);
+  });
+
   it('rejects generation instead of silently dropping oversized constraints', () => {
     expect(() =>
       compileProductionContext({

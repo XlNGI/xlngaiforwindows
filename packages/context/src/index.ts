@@ -207,8 +207,8 @@ function isRelevant(source: ContextSourceInput, scope: ContextScope): boolean {
 
 function sourcePriority(source: ContextSourceInput): number {
   if (source.type === 'constraint') return 0;
-  if (source.type === 'document' && /大纲|计划|outline|plan/i.test(source.label)) return 10;
+  if (source.priority !== undefined) return source.priority;
   if (source.type === 'document') return 20;
   if (source.type === 'memory') return 30;
-  return source.priority ?? 40;
+  return 40;
 }
