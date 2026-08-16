@@ -333,7 +333,7 @@ export function ProductionPanel({
       return;
     }
     let active = true;
-    void callWorker('provider.model.list', { profileId: selectedProfileId })
+    void Promise.resolve(callWorker('provider.model.list', { profileId: selectedProfileId }))
       .then((items) => {
         if (active) setModels(items);
       })
@@ -353,12 +353,14 @@ export function ProductionPanel({
       return;
     }
     let active = true;
-    void callWorker('adapter.resolve', {
-      capability: selected.capability,
-      provider: selected.provider,
-      model: selected.model,
-      apiVersion: selected.apiVersion,
-    })
+    void Promise.resolve(
+      callWorker('adapter.resolve', {
+        capability: selected.capability,
+        provider: selected.provider,
+        model: selected.model,
+        apiVersion: selected.apiVersion,
+      }),
+    )
       .then(async (resolved) => {
         if (!active) return;
         setAdapter(resolved);
