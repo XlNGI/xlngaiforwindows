@@ -595,8 +595,18 @@ export interface TaskLogItem {
   documentVersionId?: string;
 }
 
+export type TaskLogKind = TaskLogItem['kind'];
+
 export interface TaskLogListParams {
   limit?: number;
+  cursor?: string;
+  kind?: TaskLogKind;
+  status?: string;
+}
+
+export interface TaskLogPage {
+  items: TaskLogItem[];
+  nextCursor?: string;
 }
 
 export interface DocumentVersionsParams {
@@ -1511,7 +1521,7 @@ export interface WorkerMethodMap {
   };
   'agent.task.list': { params: AgentTaskListParams; result: AgentTaskInfo[] };
   'agent.task.get': { params: AgentTaskGetParams; result: AgentTaskDetail };
-  'task.log.list': { params: TaskLogListParams; result: TaskLogItem[] };
+  'task.log.list': { params: TaskLogListParams; result: TaskLogPage };
   'scene.list': { params: Record<string, never>; result: SceneInfo[] };
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };

@@ -20,6 +20,7 @@ import type {
   DocumentSummary,
   DocumentVersionInfo,
   TaskLogItem,
+  TaskLogPage,
   TaskLogListParams,
 } from '@ai-video/contracts';
 import type {
@@ -847,49 +848,61 @@ export class DocumentWorkflowService {
     });
   }
 
-  listTaskLog(params: TaskLogListParams = {}): TaskLogItem[] {
+  listTaskLog(params: TaskLogListParams = {}): TaskLogPage {
     return this.projects.access(false, (database, project) => {
-      const limit = Math.min(Math.max(params.limit ?? 200, 1), 500);
-      const tasks = database
-        .prepare(
-          `SELECT tasks.id, tasks.title, tasks.status, tasks.created_at, tasks.updated_at,
-                  (SELECT artifacts.document_id
-                    FROM agent_task_document_artifacts artifacts
-                   WHERE artifacts.task_id = tasks.id
-                    ORDER BY artifacts.updated_at DESC, artifacts.id DESC
-                    LIMIT 1) AS document_id,
-                  (SELECT artifacts.document_version_id
-                    FROM agent_task_document_artifacts artifacts
-                   WHERE artifacts.task_id = tasks.id
-                    ORDER BY artifacts.updated_at DESC, artifacts.id DESC
-                    LIMIT 1) AS document_version_id
-           FROM agent_tasks tasks
-           WHERE tasks.project_id = ?
-            ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT ?`,
-        )
-        .all(project.id, limit) as Array<{
-        id: string;
-        title: string;
-        status: string;
-        created_at: string;
-        updated_at: string;
-        document_id: string | null;
-        document_version_id: string | null;
-      }>;
-      const jobs = database
-        .prepare(
-          `SELECT id, adapter_key, status, created_at, updated_at
-           FROM generation_jobs WHERE project_id = ?
-           ORDER BY updated_at DESC, id DESC LIMIT ?`,
-        )
-        .all(project.id, limit) as Array<{
-        id: string;
-        adapter_key: string;
-        status: string;
-        created_at: string;
-        updated_at: string;
-      }>;
-      return [
+      const pageLimit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+      const maxFetch = 5_000;
+      const includeTasks = params.kind === undefined || params.kind === 'agent-document';
+      const includeJobs =
+        params.kind === undefined || params.kind === 'image' || params.kind === 'video';
+      const tasks = includeTasks
+        ? (database
+            .prepare(
+              `SELECT tasks.id, tasks.title, tasks.status, tasks.created_at, tasks.updated_at,
+                      (SELECT artifacts.document_id
+                        FROM agent_task_document_artifacts artifacts
+                       WHERE artifacts.task_id = tasks.id
+                        ORDER BY artifacts.updated_at DESC, artifacts.id DESC
+                        LIMIT 1) AS document_id,
+                      (SELECT artifacts.document_version_id
+                        FROM agent_task_document_artifacts artifacts
+                       WHERE artifacts.task_id = tasks.id
+                        ORDER BY artifacts.updated_at DESC, artifacts.id DESC
+                        LIMIT 1) AS document_version_id
+               FROM agent_tasks tasks
+               WHERE tasks.project_id = ?${params.status ? ' AND tasks.status = ?' : ''}
+                ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT ?`,
+            )
+            .all(
+              ...(params.status ? [project.id, params.status, maxFetch] : [project.id, maxFetch]),
+            ) as Array<{
+            id: string;
+            title: string;
+            status: string;
+            created_at: string;
+            updated_at: string;
+            document_id: string | null;
+            document_version_id: string | null;
+          }>)
+        : [];
+      const jobs = includeJobs
+        ? (database
+            .prepare(
+              `SELECT id, adapter_key, status, created_at, updated_at
+               FROM generation_jobs WHERE project_id = ?${params.status ? ' AND status = ?' : ''}
+               ORDER BY updated_at DESC, id DESC LIMIT ?`,
+            )
+            .all(
+              ...(params.status ? [project.id, params.status, maxFetch] : [project.id, maxFetch]),
+            ) as Array<{
+            id: string;
+            adapter_key: string;
+            status: string;
+            created_at: string;
+            updated_at: string;
+          }>)
+        : [];
+      const items: TaskLogItem[] = [
         ...tasks.map((task): TaskLogItem => ({
           id: `agent:${task.id}`,
           kind: 'agent-document',
@@ -901,21 +914,28 @@ export class DocumentWorkflowService {
           documentId: task.document_id ?? undefined,
           documentVersionId: task.document_version_id ?? undefined,
         })),
-        ...jobs.map((job): TaskLogItem => ({
-          id: `job:${job.id}`,
-          kind: /video|vidu/i.test(job.adapter_key) ? 'video' : 'image',
-          title: job.adapter_key,
-          status: job.status,
-          createdAt: job.created_at,
-          updatedAt: job.updated_at,
-          sourceId: job.id,
-        })),
-      ]
-        .sort(
-          (left, right) =>
-            right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id),
-        )
-        .slice(0, limit);
+        ...jobs
+          .map((job): TaskLogItem => ({
+            id: `job:${job.id}`,
+            kind: /video|vidu/i.test(job.adapter_key) ? 'video' : 'image',
+            title: job.adapter_key,
+            status: job.status,
+            createdAt: job.created_at,
+            updatedAt: job.updated_at,
+            sourceId: job.id,
+          }))
+          .filter((item) => !params.kind || item.kind === params.kind),
+      ].sort(
+        (left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id),
+      );
+      const cursorIndex = params.cursor ? items.findIndex((item) => item.id === params.cursor) : -1;
+      const afterCursor = params.cursor && cursorIndex < 0 ? [] : items.slice(cursorIndex + 1);
+      const page = afterCursor.slice(0, pageLimit);
+      return {
+        items: page,
+        nextCursor: afterCursor.length > pageLimit ? page.at(-1)?.id : undefined,
+      };
     });
   }
 

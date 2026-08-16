@@ -78,7 +78,8 @@ const agentDetail: AgentTaskDetail = {
 describe('TaskLogView', () => {
   beforeEach(() => {
     vi.mocked(callWorker).mockImplementation((method) => {
-      if (method === 'task.log.list') return Promise.resolve([agentItem, imageItem]);
+      if (method === 'task.log.list')
+        return Promise.resolve({ items: [agentItem, imageItem], nextCursor: undefined });
       if (method === 'agent.task.get') return Promise.resolve(agentDetail);
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
@@ -130,5 +131,39 @@ describe('TaskLogView', () => {
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'task.log.list'),
     ).toHaveLength(1);
+  });
+
+  it('filters by kind and loads the next cursor page', async () => {
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'task.log.list') {
+        const typed = params as { cursor?: string; kind?: string };
+        return Promise.resolve(
+          typed.cursor
+            ? { items: [imageItem], nextCursor: undefined }
+            : typed.kind === 'image'
+              ? { items: [imageItem], nextCursor: undefined }
+              : { items: [agentItem], nextCursor: 'agent:task-1' },
+        );
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    render(<TaskLogView projectId="project-1" />);
+
+    expect(await screen.findByRole('button', { name: /项目大纲草稿/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
+    expect(await screen.findByRole('button', { name: /文本生成图片/ })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('combobox', { name: '任务类型筛选' }), {
+      target: { value: 'image' },
+    });
+    await waitFor(() =>
+      expect(vi.mocked(callWorker)).toHaveBeenCalledWith(
+        'task.log.list',
+        expect.objectContaining({ kind: 'image' }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /项目大纲草稿/ })).not.toBeInTheDocument(),
+    );
   });
 });

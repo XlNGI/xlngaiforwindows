@@ -162,7 +162,7 @@ describe('DocumentWorkflowService', () => {
       operation: 'update',
     });
     expect(
-      workflow.listTaskLog({ limit: 20 }).filter((item) => item.sourceId === created.task.id),
+      workflow.listTaskLog({ limit: 20 }).items.filter((item) => item.sourceId === created.task.id),
     ).toHaveLength(1);
 
     const review = workflow.submitReview({

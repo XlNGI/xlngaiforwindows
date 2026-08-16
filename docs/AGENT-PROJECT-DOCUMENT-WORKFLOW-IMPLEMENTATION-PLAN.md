@@ -15,7 +15,7 @@
 - [~] P3 Agent 工具协议和安全执行网关（已具备受限手工提升审计，真实 Provider tool loop 待实现）
 - [~] P4 会话触发文档草稿与编辑器审核闭环（已完成显式操作闭环，自动意图触发待实现）
 - [~] P5 审核、发布、上下文治理和冲突处理（核心闭环和文档工作流审计完成，差异视图和动态模型预算待实现）
-- [~] P6 统一任务日志页面与来源定位（已完成聚合列表、Agent 详情、事件时间线和文档产物；来源跳转、筛选、分页和自动刷新待实现）
+- [~] P6 统一任务日志页面与来源定位（已完成聚合列表、Agent 详情、事件时间线和文档产物；筛选和游标分页已完成，来源跳转、自动刷新和完整详情待实现）
 - [ ] P7 场次/镜头结构化提案扩展
 - [~] P8 性能、安全、迁移和发布门禁（自动化质量门禁通过，Windows 多窗口实机和恢复演练待完成）
 
@@ -1377,6 +1377,7 @@ agent.task.cancelled
 工作项：
 
 - Worker 增加统一任务查询 DTO 和分页/筛选合同；
+- `task.log.list` 已支持 `kind/status/cursor` 分页并返回 `nextCursor`，Desktop 已增加类型/状态筛选和加载更多；
 - 聚合 Agent、图片和视频任务，不改变各领域底层状态机；
 - Desktop 已新增任务日志工作区并复用现有工作区框架；Agent 任务详情支持状态、错误、事件时间线和文档产物，图片/视频条目显示基础来源；独立任务日志窗口入口尚未完成；
 - 模型、Token、费用摘要默认展示，Provider step 详情按需展开；上下文来源、来源跳转和图片/视频完整详情仍待补齐；
@@ -1607,4 +1608,5 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-16 | P5/P8 | 审计与迁移完成 | Schema v13 `document_audit_events`；Persistence 审计 repository/不可变与有界字段测试；Worker 手工/Agent 保存、恢复、审核、拒绝和发布动作序列测试 | 审计仅覆盖文档工作流动作；任务事件、完整正文和评论保持独立 |
 | 2026-08-16 | P4/P5 | 基础闭环完成 | Desktop 17 个测试文件/88 项；Worker 18 个测试文件/131 项；草稿、提交审核、要求修改、发布、文档独立窗口实体隔离和权威上下文隔离通过 | 自动意图触发、真实 Provider tool loop、差异视图、放弃操作和动态模型预算尚未完成 |
 | 2026-08-16 | P6 | 详情闭环部分完成 | `task.log.list` 聚合 Agent/图片/视频任务；Agent 详情展示错误、事件时间线和文档产物；任务日志空态、刷新和详情 UI 已验证 | 来源跳转、筛选分页、自动刷新、模型/Token/费用和图片/视频完整详情待补 |
+| 2026-08-16 | P6 | 筛选分页完成 | `task.log.list` 支持 `kind/status/cursor` 分页并返回 `nextCursor`；Desktop 增加类型/状态筛选和加载更多；Worker 140 项、Desktop 90 项测试通过 | 来源跳转、自动刷新、模型/Token/费用和图片/视频完整详情待补 |
 | 2026-08-16 | P8 | 自动门禁完成 | `pnpm test`（Desktop 88、Worker 131、Persistence 18）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 41 项测试和 `cargo fmt --check` 全部通过 | Windows 独立窗口实机、端口冲突恢复、迁移备份恢复演练未在本轮自动化验证 |

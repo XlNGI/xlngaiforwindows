@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  ChevronDown,
   Clock3,
   FileText,
   Image as ImageIcon,
@@ -195,26 +196,36 @@ export function TaskLogView({ projectId }: TaskLogViewProps) {
   const [message, setMessage] = useState('');
   const [detailMessage, setDetailMessage] = useState('');
   const detailRequestRef = useRef(0);
+  const [kindFilter, setKindFilter] = useState<TaskLogItem['kind'] | ''>('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [nextCursor, setNextCursor] = useState<string>();
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!projectId) {
       setItems([]);
+      setNextCursor(undefined);
       return;
     }
     setBusy(true);
     setMessage('');
     try {
-      const nextItems = await callWorker('task.log.list', { limit: 200 });
-      setItems(nextItems);
+      const page = await callWorker('task.log.list', {
+        limit: 50,
+        kind: kindFilter || undefined,
+        status: statusFilter || undefined,
+      });
+      setItems(page.items);
+      setNextCursor(page.nextCursor);
       setSelectedItem((current) =>
-        current && nextItems.some((item) => item.id === current.id) ? current : undefined,
+        current && page.items.some((item) => item.id === current.id) ? current : undefined,
       );
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '任务日志读取失败');
     } finally {
       setBusy(false);
     }
-  }, [projectId]);
+  }, [projectId, kindFilter, statusFilter]);
 
   useEffect(() => {
     detailRequestRef.current += 1;
@@ -256,6 +267,29 @@ export function TaskLogView({ projectId }: TaskLogViewProps) {
     setDetailBusy(false);
   };
 
+  const loadMore = async () => {
+    if (!projectId || !nextCursor) return;
+    setLoadingMore(true);
+    setMessage('');
+    try {
+      const page = await callWorker('task.log.list', {
+        limit: 50,
+        cursor: nextCursor,
+        kind: kindFilter || undefined,
+        status: statusFilter || undefined,
+      });
+      setItems((current) => {
+        const known = new Set(current.map((item) => item.id));
+        return [...current, ...page.items.filter((item) => !known.has(item.id))];
+      });
+      setNextCursor(page.nextCursor);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '任务日志加载失败');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
   return (
     <section className="task-log-workspace">
       <div className="workspace-toolbar">
@@ -263,6 +297,38 @@ export function TaskLogView({ projectId }: TaskLogViewProps) {
           <span className="eyebrow">项目执行记录</span>
           <h1>任务日志</h1>
         </div>
+        <select
+          aria-label="任务类型筛选"
+          value={kindFilter}
+          onChange={(event) => {
+            setKindFilter(event.target.value as TaskLogItem['kind'] | '');
+            setSelectedItem(undefined);
+            setDetail(null);
+          }}
+          disabled={!projectId}
+        >
+          <option value="">全部类型</option>
+          <option value="agent-document">Agent 文档</option>
+          <option value="image">图片</option>
+          <option value="video">视频</option>
+        </select>
+        <select
+          aria-label="任务状态筛选"
+          value={statusFilter}
+          onChange={(event) => {
+            setStatusFilter(event.target.value);
+            setSelectedItem(undefined);
+            setDetail(null);
+          }}
+          disabled={!projectId}
+        >
+          <option value="">全部状态</option>
+          {Object.keys(statusLabel).map((status) => (
+            <option key={status} value={status}>
+              {statusLabel[status]}
+            </option>
+          ))}
+        </select>
         <button
           className="button secondary"
           type="button"
@@ -311,6 +377,18 @@ export function TaskLogView({ projectId }: TaskLogViewProps) {
               </button>
             ))}
           </div>
+          {nextCursor && (
+            <button
+              className="button secondary task-log-load-more"
+              type="button"
+              title="加载更多任务"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+            >
+              <ChevronDown size={14} />
+              加载更多
+            </button>
+          )}
           {selectedItem && (
             <aside className="task-log-detail" aria-label="任务详情">
               <div className="task-log-detail-header">

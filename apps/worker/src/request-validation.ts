@@ -3,6 +3,7 @@ import type {
   ChatMessageStatus,
   ConversationScopeType,
   NormalizedLlmUsage,
+  TaskLogKind,
   WorkerMethod,
 } from '@ai-video/contracts';
 
@@ -62,6 +63,7 @@ const roles = new Set<ChatMessageRole>(['system', 'user', 'assistant', 'tool']);
 const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'failed']);
 const documentKinds = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
 const documentAuthors = new Set(['user', 'import']);
+const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video']);
 
 export class RequestValidationError extends Error {}
 
@@ -145,8 +147,11 @@ export function validateSessionRequestParams(
       requireId(params, 'taskId');
       break;
     case 'task.log.list':
-      rejectUnknown(params, ['limit']);
+      rejectUnknown(params, ['limit', 'cursor', 'kind', 'status']);
       optionalInteger(params, 'limit', 1, 500);
+      optionalString(params, 'cursor', 256);
+      optionalEnum(params, 'kind', taskLogKinds);
+      optionalString(params, 'status', 80);
       break;
     case 'conversation.list':
       rejectUnknown(params, [
