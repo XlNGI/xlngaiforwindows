@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
 
@@ -111,8 +111,12 @@ describe('ContentService', () => {
 
   it('pages conversations with a deterministic cursor', async () => {
     const { content } = await setup();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-16T00:00:00.000Z'));
     const first = content.createConversation({ scopeType: 'project', title: '会话 A' });
+    vi.setSystemTime(new Date('2026-08-16T00:00:01.000Z'));
     const second = content.createConversation({ scopeType: 'project', title: '会话 B' });
+    vi.setSystemTime(new Date('2026-08-16T00:00:02.000Z'));
     content.saveMessage({ conversationId: first.id, role: 'user', content: '活跃会话' });
 
     const page = content.listConversations({ scopeType: 'project', limit: 1 });
@@ -125,6 +129,7 @@ describe('ContentService', () => {
     });
     expect(next.items).toMatchObject([{ id: second.id }]);
     expect(next.nextCursor).toBeUndefined();
+    vi.useRealTimers();
   });
 
   it('requires explicit actions to promote chat content', async () => {
