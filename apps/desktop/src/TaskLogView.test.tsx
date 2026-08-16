@@ -40,9 +40,10 @@ const agentDetail: AgentTaskDetail = {
     scopeType: 'project',
     title: '项目大纲草稿',
     status: 'waiting_review',
+    phase: 'waiting_review',
     createdAt: '2026-08-16T01:00:00.000Z',
     updatedAt: '2026-08-16T01:02:00.000Z',
-    version: 3,
+    rowVersion: 3,
   },
   events: [
     {

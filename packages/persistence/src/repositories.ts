@@ -2,8 +2,6 @@ import type Database from 'better-sqlite3';
 import type {
   AgentTaskDocumentVersionRecord,
   AgentTaskDocumentVersionRepository,
-  AgentTaskDocumentArtifactRecord,
-  AgentTaskDocumentArtifactRepository,
   AgentTaskEventRecord,
   AgentTaskEventRepository,
   AgentTaskGenerationRecord,
@@ -14,8 +12,6 @@ import type {
   AgentToolCallRepository,
   AgentToolAuthorizationRecord,
   AgentToolAuthorizationRepository,
-  AgentTaskConfirmationRecord,
-  AgentTaskConfirmationRepository,
   AssetRecord,
   AssetTagRecord,
   AssetGroupRecord,

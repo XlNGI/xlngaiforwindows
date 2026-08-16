@@ -66,7 +66,7 @@ describe('GenerationService', () => {
       stream: (request) => {
         request.onDelta('第一段');
         request.onDelta('第二段');
-        return Promise.resolve({ model: 'test-model', content: '第一段第二段' });
+        return Promise.resolve({ model: 'test-model', content: '第一段第二段', toolCalls: [] });
       },
     };
     const { content, conversation, generations } = await setup(provider);
@@ -89,7 +89,11 @@ describe('GenerationService', () => {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
       stream: (request) => {
         request.onDelta('Persisted');
-        return Promise.resolve({ model: 'test-model', content: 'Persisted response' });
+        return Promise.resolve({
+          model: 'test-model',
+          content: 'Persisted response',
+          toolCalls: [],
+        });
       },
     };
     const { content, conversation, generations, projectRoot, projects } = await setup(provider);
@@ -120,7 +124,7 @@ describe('GenerationService', () => {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
       stream: (request) => {
         for (let index = 0; index < 300; index += 1) request.onDelta('字');
-        return Promise.resolve({ model: 'test-model', content: '字'.repeat(300) });
+        return Promise.resolve({ model: 'test-model', content: '字'.repeat(300), toolCalls: [] });
       },
     };
     const { conversation, generations, projects } = await setup(provider);
@@ -159,7 +163,7 @@ describe('GenerationService', () => {
         prompts.push(request.prompt);
         if (attempt === 1) return Promise.reject(new Error('Temporary failure'));
         request.onDelta('重试成功');
-        return Promise.resolve({ model: 'test-model', content: '重试成功' });
+        return Promise.resolve({ model: 'test-model', content: '重试成功', toolCalls: [] });
       },
     };
     const { content, conversation, generations } = await setup(provider);
