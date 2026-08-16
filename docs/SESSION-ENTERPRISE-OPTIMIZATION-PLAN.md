@@ -430,7 +430,7 @@ details
 
 ### P6
 
-- [~] Desktop 项目维护状态与动作已抽为 `useProjectMaintenance`；其余模块拆分待续；
+- [~] Desktop 项目维护已抽为 hook，Worker 项目/供应商/用量/维护命令已抽为 `worker-commands.ts`；其余模块拆分待续；
 - [x] 领域会话作用域类型已收敛为 `'project' | 'scene' | 'shot'`；
 - [~] CI 已接入生产依赖审计、CycloneDX SBOM 和许可证检查；覆盖率阈值待接入；
 - [x] Schema v16、manifest 迁移、指标和 P6 拆分记录已同步；
@@ -483,6 +483,7 @@ details
 - `RequestScheduler` 上报串行请求队列等待，`maintenance.metrics` 返回队列样本、总等待和最慢等待；
 - Desktop 将项目维护状态、备份/恢复/缓存/诊断动作从 `App.tsx` 抽到 `useProjectMaintenance`，`App.tsx` 不再直接持有维护状态；
 - `packages/domain` 将 `ConversationRecord`、`DocumentRecord`、`AgentTaskRecord` 等作用域字段收紧为受限联合，Persistence 映射增加运行时校验；
+- Worker `handler.ts` 的项目、供应商、用量和维护命令已迁入 `worker-commands.ts`，主分发器只保留文档、LLM、媒体和素材命令；
 - 新增 `pnpm audit`、`pnpm run sbom:generate`、`pnpm license:check`，并接入 CI；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
 - Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；项目维护页增加运行指标摘要；
