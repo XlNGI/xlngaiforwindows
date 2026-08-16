@@ -14,6 +14,7 @@ import type {
   LlmGenerationRuntimeRequest,
   LlmPricingSnapshotInfo,
   NormalizedLlmUsage,
+  WorkerGenerationMetric,
 } from '@ai-video/contracts';
 import type { ProductionContext } from '@ai-video/context';
 import type {
@@ -57,6 +58,7 @@ export interface GenerationServiceOptions {
   flushCharacterThreshold?: number;
   selectionResolver?: LlmSelectionResolver;
   usageIndexer?: LlmUsageIndexer;
+  generationMetricReporter?: (metric: WorkerGenerationMetric) => void;
 }
 
 export interface LlmUsageIndexer {
@@ -70,6 +72,7 @@ export class GenerationService {
   private readonly flushCharacterThreshold: number;
   private readonly selectionResolver?: LlmSelectionResolver;
   private readonly usageIndexer?: LlmUsageIndexer;
+  private readonly generationMetricReporter?: (metric: WorkerGenerationMetric) => void;
 
   constructor(
     private readonly projects: ProjectService,
@@ -83,6 +86,7 @@ export class GenerationService {
     this.flushCharacterThreshold = options.flushCharacterThreshold ?? 512;
     this.selectionResolver = options.selectionResolver;
     this.usageIndexer = options.usageIndexer;
+    this.generationMetricReporter = options.generationMetricReporter;
   }
 
   status() {
@@ -93,6 +97,22 @@ export class GenerationService {
       configured: status.configured,
       configurationSource: status.configured ? ('environment' as const) : ('none' as const),
     };
+  }
+
+  private reportGeneration(state: GenerationState, status: WorkerGenerationMetric['status']): void {
+    this.generationMetricReporter?.({
+      generationId: state.record.id,
+      providerName: state.attempt.providerNameSnapshot,
+      modelId: state.attempt.modelId,
+      status,
+      startedAt: state.attempt.startedAt,
+      firstTokenAt: state.attempt.firstTokenAt,
+      completedAt: state.attempt.completedAt,
+      inputTokens: state.attempt.inputTokens,
+      outputTokens: state.attempt.outputTokens,
+      estimatedCost: state.attempt.estimatedCost,
+      retryOfGenerationId: state.record.retryOfGenerationId,
+    });
   }
 
   generate(
@@ -184,6 +204,7 @@ export class GenerationService {
     state.finishReason = finishReason;
     state.status = 'complete';
     this.indexAttemptBestEffort(attempt);
+    this.reportGeneration(state, 'complete');
     return publicState(state);
   }
 
@@ -697,6 +718,7 @@ export class GenerationService {
       state.finishReason = 'completed';
       state.status = 'complete';
       this.indexAttemptBestEffort(attempt);
+      this.reportGeneration(state, 'complete');
     } catch (error) {
       this.clearFlushTimer(state);
       if (state.status !== 'streaming') return;
@@ -774,6 +796,7 @@ export class GenerationService {
         persistenceError instanceof Error ? persistenceError.message : 'Unknown persistence error.';
       state.error = `${state.error ?? 'Generation failed.'} Failed to persist terminal state: ${message}`;
     }
+    this.reportGeneration(state, state.status === 'cancelled' ? 'cancelled' : 'failed');
   }
 
   private requireNativeState(identity: LlmGenerationIdentity): GenerationState {

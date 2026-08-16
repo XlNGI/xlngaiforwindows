@@ -125,10 +125,18 @@ export function MaintenanceDialog({
                 <span>成功 {metrics.totals.ok}</span>
                 <span>失败 {metrics.totals.errors}</span>
                 <span>最慢 {metrics.totals.maxDurationMs} ms</span>
+                <span>生成 {metrics.generationTotals.attempts}</span>
+                <span>生成成功 {metrics.generationTotals.complete}</span>
+                <span>首Token {metrics.generationTotals.maxFirstTokenMs} ms</span>
                 <ul>
                   {metrics.byOperation.slice(0, 5).map((item) => (
                     <li key={item.operation} title={item.recentRequestIds.join(', ')}>
                       {item.operation} · {item.requests} 次 · {item.maxDurationMs} ms
+                    </li>
+                  ))}
+                  {metrics.byProvider.slice(0, 3).map((item) => (
+                    <li key={item.providerName}>
+                      {item.providerName} · {item.attempts} 次 · {item.maxFirstTokenMs} ms
                     </li>
                   ))}
                 </ul>

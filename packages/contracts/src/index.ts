@@ -293,6 +293,31 @@ export interface WorkerMetricByOperation {
   recentRequestIds: string[];
 }
 
+export interface WorkerGenerationMetric {
+  generationId: string;
+  providerName: string;
+  modelId?: string;
+  status: 'complete' | 'failed' | 'cancelled';
+  startedAt: string;
+  firstTokenAt?: string;
+  completedAt?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  estimatedCost?: string;
+  retryOfGenerationId?: string;
+}
+
+export interface WorkerProviderMetric {
+  providerName: string;
+  attempts: number;
+  complete: number;
+  failed: number;
+  cancelled: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+  maxFirstTokenMs: number;
+}
+
 export interface WorkerMetricsSnapshot {
   totals: {
     requests: number;
@@ -301,7 +326,17 @@ export interface WorkerMetricsSnapshot {
     totalDurationMs: number;
     maxDurationMs: number;
   };
+  generationTotals: {
+    attempts: number;
+    complete: number;
+    failed: number;
+    cancelled: number;
+    totalDurationMs: number;
+    maxDurationMs: number;
+    maxFirstTokenMs: number;
+  };
   byOperation: WorkerMetricByOperation[];
+  byProvider: WorkerProviderMetric[];
   recentRequests: Array<{
     at: string;
     requestId: string;
@@ -309,6 +344,7 @@ export interface WorkerMetricsSnapshot {
     ok: boolean;
     durationMs: number;
   }>;
+  recentGenerations: WorkerGenerationMetric[];
 }
 
 export interface DiagnosticExportParams {

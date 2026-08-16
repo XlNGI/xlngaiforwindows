@@ -195,6 +195,48 @@ describe('MaintenanceService', () => {
     });
   });
 
+  it('tracks generation first-token and provider metrics', async () => {
+    const base = await temporaryRoot('generation-metrics');
+    const projects = createProjectService(join(base, 'recent.json'));
+    const maintenance = new MaintenanceService(projects);
+    maintenance.recordGenerationMetric({
+      generationId: 'generation-1',
+      providerName: 'OpenAI',
+      modelId: 'gpt-test',
+      status: 'complete',
+      startedAt: '2026-08-16T00:00:00.000Z',
+      firstTokenAt: '2026-08-16T00:00:02.000Z',
+      completedAt: '2026-08-16T00:00:05.000Z',
+      inputTokens: 10,
+      outputTokens: 5,
+      estimatedCost: '0.0001',
+    });
+
+    const metrics = maintenance.getMetrics();
+    expect(metrics.generationTotals).toEqual({
+      attempts: 1,
+      complete: 1,
+      failed: 0,
+      cancelled: 0,
+      totalDurationMs: 5_000,
+      maxDurationMs: 5_000,
+      maxFirstTokenMs: 2_000,
+    });
+    expect(metrics.byProvider).toEqual([
+      expect.objectContaining({
+        providerName: 'OpenAI',
+        attempts: 1,
+        complete: 1,
+        maxFirstTokenMs: 2_000,
+      }),
+    ]);
+    expect(metrics.recentGenerations[0]).toMatchObject({
+      generationId: 'generation-1',
+      providerName: 'OpenAI',
+      status: 'complete',
+    });
+  });
+
   it('allows cache inspection but refuses cache clearing from a read-only session', async () => {
     const base = await temporaryRoot('readonly-cache');
     const projectRoot = join(base, 'project');

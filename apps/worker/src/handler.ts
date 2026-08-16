@@ -245,7 +245,11 @@ const generationService = new GenerationService(
   contentService,
   contextService,
   llmProvider,
-  { selectionResolver: appSettingsService, usageIndexer: appSettingsService },
+  {
+    selectionResolver: appSettingsService,
+    usageIndexer: appSettingsService,
+    generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
+  },
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {

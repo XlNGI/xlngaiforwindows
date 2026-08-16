@@ -22,6 +22,7 @@ import type {
   DiagnosticExportParams,
   DiagnosticExportResult,
   PathResult,
+  WorkerGenerationMetric,
   WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
 import { checkIntegrity, createRepositories } from '@ai-video/persistence';
@@ -32,6 +33,7 @@ const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 1_024;
 const MAX_REPORT_BYTES = 256 * 1_024;
 const DIAGNOSTIC_MANIFEST_VERSION = 1 as const;
 const MAX_REQUEST_METRICS = 500;
+const MAX_GENERATION_METRICS = 200;
 const MAX_RECENT_REQUEST_IDS = 20;
 const MAX_RECENT_REQUESTS = 100;
 const SUMMARY_DIRECTORIES = ['assets', 'cache', 'exports', 'backups'] as const;
@@ -57,6 +59,16 @@ interface OperationMetric {
   totalDurationMs: number;
   maxDurationMs: number;
   recentRequestIds: string[];
+}
+
+interface ProviderMetric {
+  attempts: number;
+  complete: number;
+  failed: number;
+  cancelled: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+  maxFirstTokenMs: number;
 }
 
 interface MaintenanceServiceOptions {
@@ -185,6 +197,8 @@ export class MaintenanceService {
   private readonly events: DiagnosticEvent[] = [];
   private readonly requestMetrics: RequestMetric[] = [];
   private readonly operationMetrics = new Map<string, OperationMetric>();
+  private readonly generationMetrics: WorkerGenerationMetric[] = [];
+  private readonly providerMetrics = new Map<string, ProviderMetric>();
   private readonly exportedPaths = new Set<string>();
   private readonly openPath: (path: string) => void;
   private readonly now: () => Date;
@@ -245,10 +259,39 @@ export class MaintenanceService {
     this.operationMetrics.set(operation, current);
   }
 
+  recordGenerationMetric(metric: WorkerGenerationMetric): void {
+    this.generationMetrics.push(metric);
+    if (this.generationMetrics.length > MAX_GENERATION_METRICS) this.generationMetrics.shift();
+    const started = Date.parse(metric.startedAt);
+    const completed = metric.completedAt ? Date.parse(metric.completedAt) : undefined;
+    const durationMs = started && completed && completed >= started ? completed - started : 0;
+    const firstTokenMs =
+      metric.firstTokenAt && started ? Math.max(Date.parse(metric.firstTokenAt) - started, 0) : 0;
+    const current = this.providerMetrics.get(metric.providerName) ?? {
+      attempts: 0,
+      complete: 0,
+      failed: 0,
+      cancelled: 0,
+      totalDurationMs: 0,
+      maxDurationMs: 0,
+      maxFirstTokenMs: 0,
+    };
+    current.attempts += 1;
+    if (metric.status === 'complete') current.complete += 1;
+    else if (metric.status === 'failed') current.failed += 1;
+    else current.cancelled += 1;
+    current.totalDurationMs += durationMs;
+    current.maxDurationMs = Math.max(current.maxDurationMs, durationMs);
+    current.maxFirstTokenMs = Math.max(current.maxFirstTokenMs, firstTokenMs);
+    this.providerMetrics.set(metric.providerName, current);
+  }
+
   resetSession(): void {
     this.events.length = 0;
     this.requestMetrics.length = 0;
     this.operationMetrics.clear();
+    this.generationMetrics.length = 0;
+    this.providerMetrics.clear();
     this.exportedPaths.clear();
   }
 
@@ -266,10 +309,36 @@ export class MaintenanceService {
       }),
       { requests: 0, ok: 0, errors: 0, totalDurationMs: 0, maxDurationMs: 0 },
     );
+    const byProvider = [...this.providerMetrics.entries()]
+      .map(([providerName, value]) => ({ providerName, ...value }))
+      .sort((left, right) => right.attempts - left.attempts);
+    const generationTotals = byProvider.reduce(
+      (summary, provider) => ({
+        attempts: summary.attempts + provider.attempts,
+        complete: summary.complete + provider.complete,
+        failed: summary.failed + provider.failed,
+        cancelled: summary.cancelled + provider.cancelled,
+        totalDurationMs: summary.totalDurationMs + provider.totalDurationMs,
+        maxDurationMs: Math.max(summary.maxDurationMs, provider.maxDurationMs),
+        maxFirstTokenMs: Math.max(summary.maxFirstTokenMs, provider.maxFirstTokenMs),
+      }),
+      {
+        attempts: 0,
+        complete: 0,
+        failed: 0,
+        cancelled: 0,
+        totalDurationMs: 0,
+        maxDurationMs: 0,
+        maxFirstTokenMs: 0,
+      },
+    );
     return {
       totals,
       byOperation,
       recentRequests: [...this.requestMetrics].reverse().slice(0, MAX_RECENT_REQUESTS),
+      generationTotals,
+      byProvider,
+      recentGenerations: [...this.generationMetrics].reverse().slice(0, MAX_RECENT_REQUESTS),
     };
   }
 
