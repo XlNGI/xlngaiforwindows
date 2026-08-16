@@ -423,7 +423,7 @@ details
 ### P4/P5
 
 - [x] 数据库不变量由 Schema 和 Service 双重保证；
-- [~] 会话排序、搜索、归档和恢复策略明确；游标分页和软删除待补；
+- [x] 会话排序、搜索、归档、恢复和游标分页完成；软删除由归档/恢复承载；
 - [ ] 上下文快照有保留和清理策略；
 - [ ] 关键指标和关联 ID 可查询；
 - [x] 重启、并发、重复请求和恶意输入测试通过。
@@ -473,8 +473,9 @@ details
 - Schema v15 为 `conversations` 增加 `archived_at`，新库和 v14 升级路径均验证；
 - `conversation.update`、`conversation.archive`、`conversation.restore` IPC 及运行时校验；
 - `conversation.list` 支持 `includeArchived` 和 `query` 关键字筛选；
+- `conversation.list` 返回 `{ items, nextCursor }`，支持 `limit` 和 `cursor` 游标分页；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
-- Desktop 会话栏增加归档筛选、重命名、归档和恢复入口；
+- Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；
 - 持久化、Worker、Desktop 测试和 `pnpm typecheck`、`pnpm lint`、`pnpm format:check` 全部通过。
 
 聚焦验证：
@@ -486,7 +487,7 @@ details
 
 仍未完成：
 
-- 会话列表游标分页和软删除；
+- 软删除与恢复由归档状态承载；会话列表游标分页已完成；
 - 上下文快照保留、清理和导出策略；
 - 图片、视频、备份、导出等全部异步回写统一采用 `projectSessionId`；
 - generation 首 Token、队列等待、Provider 分类等完整指标体系；

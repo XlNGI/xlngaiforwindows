@@ -1,6 +1,7 @@
 import {
   Archive,
   Bot,
+  ChevronDown,
   ChevronRight,
   Copy,
   MessageSquarePlus,
@@ -52,6 +53,8 @@ interface ChatPanelProps {
   onRenameConversation?: (conversationId: string, title: string) => void;
   onArchiveConversation?: (conversationId: string) => void;
   onRestoreConversation?: (conversationId: string) => void;
+  canLoadMoreConversations?: boolean;
+  onLoadMoreConversations?: () => void;
   onPromoteMessage: (message: ChatMessageInfo, target: PromotionTarget) => void;
   onRetryGeneration: (assistantMessageId: string) => void;
   onLlmProfileChange: (profileId: string) => void;
@@ -93,6 +96,8 @@ export function ChatPanel({
   onRenameConversation,
   onArchiveConversation,
   onRestoreConversation,
+  canLoadMoreConversations,
+  onLoadMoreConversations,
   onPromoteMessage,
   onRetryGeneration,
   onLlmProfileChange,
@@ -197,6 +202,16 @@ export function ChatPanel({
         >
           <RotateCcw size={14} />
         </button>
+        {canLoadMoreConversations && (
+          <button
+            className="icon-button subtle"
+            type="button"
+            title="加载更多会话"
+            onClick={onLoadMoreConversations}
+          >
+            <ChevronDown size={14} />
+          </button>
+        )}
       </div>
       <div className="llm-context-bar">
         <div className="llm-provider-status">

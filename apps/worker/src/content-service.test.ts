@@ -66,12 +66,12 @@ describe('ContentService', () => {
       content: '当前镜头提示词',
     });
 
-    expect(content.listConversations({ scopeType: 'project' })).toMatchObject([
-      { id: projectConversation.id },
-    ]);
-    expect(content.listConversations({ scopeType: 'scene', scopeId: scene.id })).toMatchObject([
-      { id: sceneConversation.id },
-    ]);
+    expect(content.listConversations({ scopeType: 'project' })).toMatchObject({
+      items: [{ id: projectConversation.id }],
+    });
+    expect(content.listConversations({ scopeType: 'scene', scopeId: scene.id })).toMatchObject({
+      items: [{ id: sceneConversation.id }],
+    });
     expect(content.listMessages({ conversationId: shotConversation.id })).toMatchObject({
       items: [{ content: '当前镜头提示词' }],
     });
@@ -93,20 +93,38 @@ describe('ContentService', () => {
 
     const archived = content.archiveConversation({ conversationId: conversation.id });
     expect(archived.archivedAt).toBeTruthy();
-    expect(content.listConversations({ scopeType: 'project' })).toEqual([]);
-    expect(content.listConversations({ scopeType: 'project', includeArchived: true })).toEqual([
-      expect.objectContaining({ id: conversation.id, title: '项目会话' }),
-    ]);
-    expect(content.listConversations({ query: '项目会话' })).toEqual([]);
+    expect(content.listConversations({ scopeType: 'project' })).toEqual({ items: [] });
+    expect(content.listConversations({ scopeType: 'project', includeArchived: true })).toEqual({
+      items: [expect.objectContaining({ id: conversation.id, title: '项目会话' })],
+    });
+    expect(content.listConversations({ query: '项目会话' })).toEqual({ items: [] });
     expect(() =>
       content.updateConversation({ conversationId: conversation.id, title: '不可重命名' }),
     ).toThrow('Archived conversations cannot be renamed.');
 
     const restored = content.restoreConversation({ conversationId: conversation.id });
     expect(restored.archivedAt).toBeUndefined();
-    expect(content.listConversations({ scopeType: 'project', query: '项目' })).toMatchObject([
-      { id: conversation.id, title: '项目会话' },
-    ]);
+    expect(content.listConversations({ scopeType: 'project', query: '项目' })).toMatchObject({
+      items: [{ id: conversation.id, title: '项目会话' }],
+    });
+  });
+
+  it('pages conversations with a deterministic cursor', async () => {
+    const { content } = await setup();
+    const first = content.createConversation({ scopeType: 'project', title: '会话 A' });
+    const second = content.createConversation({ scopeType: 'project', title: '会话 B' });
+    content.saveMessage({ conversationId: first.id, role: 'user', content: '活跃会话' });
+
+    const page = content.listConversations({ scopeType: 'project', limit: 1 });
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBeTruthy();
+    const next = content.listConversations({
+      scopeType: 'project',
+      limit: 1,
+      cursor: page.nextCursor,
+    });
+    expect(next.items).toMatchObject([{ id: second.id }]);
+    expect(next.nextCursor).toBeUndefined();
   });
 
   it('requires explicit actions to promote chat content', async () => {

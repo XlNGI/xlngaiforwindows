@@ -147,11 +147,20 @@ export function validateSessionRequestParams(
       optionalInteger(params, 'limit', 1, 500);
       break;
     case 'conversation.list':
-      rejectUnknown(params, ['scopeType', 'scopeId', 'includeArchived', 'query']);
+      rejectUnknown(params, [
+        'scopeType',
+        'scopeId',
+        'includeArchived',
+        'query',
+        'limit',
+        'cursor',
+      ]);
       optionalScope(params, 'scopeType');
       optionalId(params, 'scopeId');
       optionalBoolean(params, 'includeArchived');
       optionalString(params, 'query', MAX_TITLE_LENGTH);
+      optionalInteger(params, 'limit', 1, 100);
+      optionalId(params, 'cursor');
       break;
     case 'conversation.create': {
       rejectUnknown(params, ['scopeType', 'scopeId', 'title']);

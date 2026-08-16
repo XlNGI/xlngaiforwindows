@@ -242,6 +242,7 @@ export function App() {
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
+  const [conversationNextCursor, setConversationNextCursor] = useState<string>();
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const [conversation, setConversation] = useState<ConversationInfo>();
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
@@ -603,6 +604,7 @@ export function App() {
     let active = true;
     if (!project || !scopeAvailable) {
       setConversations([]);
+      setConversationNextCursor(undefined);
       setConversation(undefined);
       setMessages([]);
       setContextPreview(undefined);
@@ -610,11 +612,12 @@ export function App() {
     }
     void (async () => {
       try {
-        const items = await callWorker('conversation.list', {
+        const page = await callWorker('conversation.list', {
           scopeType,
           scopeId,
           includeArchived: showArchivedConversations,
         });
+        const items = page.items;
         if (!active || requestId !== conversationRequest.current) return;
         const selected = items[0];
         const [messagePage, preview] = selected
@@ -625,6 +628,7 @@ export function App() {
           : [undefined, undefined];
         if (!active || requestId !== conversationRequest.current) return;
         setConversations(items);
+        setConversationNextCursor(page.nextCursor);
         setConversation(selected);
         setMessages(messagePage?.items ?? []);
         setContextPreview(preview);
@@ -1176,6 +1180,30 @@ export function App() {
       setConversation((current) => (current?.id === updated.id ? updated : current));
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : '会话恢复失败');
+    }
+  };
+
+  const loadMoreConversations = async () => {
+    if (!project || !conversationNextCursor) return;
+    const requestId = conversationRequest.current;
+    try {
+      const page = await callWorker('conversation.list', {
+        scopeType,
+        scopeId,
+        includeArchived: showArchivedConversations,
+        limit: 50,
+        cursor: conversationNextCursor,
+      });
+      if (requestId !== conversationRequest.current) return;
+      setConversations((current) => {
+        const known = new Set(current.map((item) => item.id));
+        return [...current, ...page.items.filter((item) => !known.has(item.id))];
+      });
+      setConversationNextCursor(page.nextCursor);
+    } catch (reason) {
+      if (requestId === conversationRequest.current) {
+        setChatMessage(reason instanceof Error ? reason.message : '会话加载失败');
+      }
     }
   };
 
@@ -1847,6 +1875,8 @@ export function App() {
       }
       onArchiveConversation={(conversationId) => void archiveConversation(conversationId)}
       onRestoreConversation={(conversationId) => void restoreConversation(conversationId)}
+      canLoadMoreConversations={Boolean(conversationNextCursor)}
+      onLoadMoreConversations={() => void loadMoreConversations()}
       onPromoteMessage={(message, target) => void promoteMessage(message, target)}
       onRetryGeneration={(messageId) => void retryGeneration(messageId)}
       onLlmProfileChange={(profileId) => {

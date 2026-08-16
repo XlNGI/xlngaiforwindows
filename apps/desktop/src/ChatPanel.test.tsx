@@ -132,6 +132,7 @@ describe('ChatPanel attempt metadata', () => {
     };
     const onArchiveConversation = vi.fn();
     const onRestoreConversation = vi.fn();
+    const onLoadMoreConversations = vi.fn();
     const view = render(
       <ChatPanel
         scopeType="project"
@@ -149,6 +150,8 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmModelId=""
         showArchivedConversations
         onShowArchivedConversationsChange={vi.fn()}
+        canLoadMoreConversations
+        onLoadMoreConversations={onLoadMoreConversations}
         onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
@@ -167,6 +170,8 @@ describe('ChatPanel attempt metadata', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '归档会话' }));
     expect(onArchiveConversation).toHaveBeenCalledWith('conversation');
+    fireEvent.click(screen.getByRole('button', { name: '加载更多会话' }));
+    expect(onLoadMoreConversations).toHaveBeenCalledTimes(1);
 
     const archived: ConversationInfo = { ...conversation, archivedAt: '2026-08-16T00:00:00.000Z' };
     view.rerender(

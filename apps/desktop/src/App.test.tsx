@@ -199,13 +199,13 @@ describe('App', () => {
           writeVerified: true,
         });
       if (method === 'project.current') return Promise.resolve(project);
+      if (method === 'conversation.list') return Promise.resolve({ items: [] });
       if (
         method === 'project.recent' ||
         method === 'document.list' ||
         method === 'scene.list' ||
         method === 'asset.list' ||
         method === 'video.generate.list' ||
-        method === 'conversation.list' ||
         method === 'provider.profile.list'
       )
         return Promise.resolve([]);
@@ -414,8 +414,8 @@ describe('App', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'conversation.list') {
         return (params as { scopeType: string }).scopeType === 'project'
-          ? projectConversations
-          : Promise.resolve([sceneConversation]);
+          ? projectConversations.then((items) => ({ items }))
+          : Promise.resolve({ items: [sceneConversation] });
       }
       if (method === 'chat.message.list') {
         const conversationId = (params as { conversationId: string }).conversationId;
@@ -562,7 +562,8 @@ describe('App', () => {
           configurationSource: 'environment',
         });
       }
-      if (method === 'conversation.list') return Promise.resolve([conversationA, conversationB]);
+      if (method === 'conversation.list')
+        return Promise.resolve({ items: [conversationA, conversationB] });
       if (method === 'chat.message.list') {
         const conversationId = (params as { conversationId: string }).conversationId;
         return Promise.resolve({

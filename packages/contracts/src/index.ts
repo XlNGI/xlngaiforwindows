@@ -575,6 +575,13 @@ export interface ConversationListParams {
   scopeId?: string;
   includeArchived?: boolean;
   query?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface ConversationPage {
+  items: ConversationInfo[];
+  nextCursor?: string;
 }
 
 export interface ConversationCreateParams {
@@ -1418,7 +1425,7 @@ export interface WorkerMethodMap {
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
   'shot.save': { params: ShotSaveParams; result: ShotInfo };
-  'conversation.list': { params: ConversationListParams; result: ConversationInfo[] };
+  'conversation.list': { params: ConversationListParams; result: ConversationPage };
   'conversation.create': { params: ConversationCreateParams; result: ConversationInfo };
   'conversation.update': { params: ConversationUpdateParams; result: ConversationInfo };
   'conversation.archive': { params: ConversationArchiveParams; result: ConversationInfo };

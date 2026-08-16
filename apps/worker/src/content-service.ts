@@ -8,6 +8,7 @@ import type {
   ConversationCreateParams,
   ConversationInfo,
   ConversationListParams,
+  ConversationPage,
   ConversationRestoreParams,
   ConversationScopeType,
   ConversationUpdateParams,
@@ -53,6 +54,18 @@ function asConversation(record: ConversationRecord): ConversationInfo {
     throw new Error(`Unsupported conversation scope: ${record.scopeType}`);
   }
   return record as ConversationInfo;
+}
+
+function sliceConversationPage(
+  items: ConversationInfo[],
+  start: number,
+  limit: number,
+): ConversationPage {
+  const page = items.slice(start, start + limit);
+  return {
+    items: page,
+    nextCursor: items.length > start + limit ? page.at(-1)?.id : undefined,
+  };
 }
 
 export class ContentService {
@@ -159,10 +172,11 @@ export class ContentService {
     });
   }
 
-  listConversations(params: ConversationListParams): ConversationInfo[] {
+  listConversations(params: ConversationListParams): ConversationPage {
     const query = params.query?.trim().toLocaleLowerCase();
-    return this.projects.access(false, (database, project) =>
-      createRepositories(database)
+    const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+    return this.projects.access(false, (database, project) => {
+      const conversations = createRepositories(database)
         .conversations.listByProject(project.id)
         .map(asConversation)
         .filter(
@@ -171,8 +185,14 @@ export class ContentService {
             (params.scopeId === undefined || conversation.scopeId === params.scopeId) &&
             (params.includeArchived || !conversation.archivedAt) &&
             (!query || conversation.title.toLocaleLowerCase().includes(query)),
-        ),
-    );
+        );
+      if (params.cursor !== undefined) {
+        const cursorIndex = conversations.findIndex((item) => item.id === params.cursor);
+        if (cursorIndex < 0) return { items: [], nextCursor: undefined };
+        return sliceConversationPage(conversations, cursorIndex + 1, limit);
+      }
+      return sliceConversationPage(conversations, 0, limit);
+    });
   }
 
   createConversation(params: ConversationCreateParams): ConversationInfo {
