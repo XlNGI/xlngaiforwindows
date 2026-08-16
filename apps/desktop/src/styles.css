@@ -518,6 +518,38 @@ button {
   border-color: #8f7535;
 }
 
+.metrics-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #aeb4b7;
+  font-size: 10px;
+}
+
+.metrics-summary span {
+  padding: 3px 7px;
+  border: 1px solid #383e41;
+  border-radius: 3px;
+  background: #22272a;
+}
+
+.metrics-summary ul {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.metrics-summary li {
+  overflow: hidden;
+  color: #858b90;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .maintenance-actions {
   display: flex;
   flex-wrap: wrap;

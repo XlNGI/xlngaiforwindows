@@ -14,6 +14,7 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'provider.default.list',
   'usage.list',
   'maintenance.cache.inspect',
+  'maintenance.metrics',
   'maintenance.diagnostics.reveal',
   'document.list',
   'document.get',

@@ -22,6 +22,7 @@ import type {
   DiagnosticExportParams,
   DiagnosticExportResult,
   PathResult,
+  WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
 import { checkIntegrity, createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
@@ -30,12 +31,32 @@ const MAX_DIAGNOSTIC_EVENTS = 50;
 const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 1_024;
 const MAX_REPORT_BYTES = 256 * 1_024;
 const DIAGNOSTIC_MANIFEST_VERSION = 1 as const;
+const MAX_REQUEST_METRICS = 500;
+const MAX_RECENT_REQUEST_IDS = 20;
+const MAX_RECENT_REQUESTS = 100;
 const SUMMARY_DIRECTORIES = ['assets', 'cache', 'exports', 'backups'] as const;
 
 interface DiagnosticEvent {
   at: string;
   operation: string;
   message: string;
+}
+
+interface RequestMetric {
+  at: string;
+  operation: string;
+  requestId: string;
+  ok: boolean;
+  durationMs: number;
+}
+
+interface OperationMetric {
+  requests: number;
+  ok: number;
+  errors: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+  recentRequestIds: string[];
 }
 
 interface MaintenanceServiceOptions {
@@ -162,6 +183,8 @@ function scalarCount(database: Database.Database, sql: string, id: string): numb
 
 export class MaintenanceService {
   private readonly events: DiagnosticEvent[] = [];
+  private readonly requestMetrics: RequestMetric[] = [];
+  private readonly operationMetrics = new Map<string, OperationMetric>();
   private readonly exportedPaths = new Set<string>();
   private readonly openPath: (path: string) => void;
   private readonly now: () => Date;
@@ -184,19 +207,70 @@ export class MaintenanceService {
   }
 
   recordRequest(operation: string, requestId: string, ok: boolean, durationMs: number): void {
+    const at = this.now().toISOString();
+    const roundedDuration = Math.max(0, Math.round(durationMs));
     this.events.push({
-      at: this.now().toISOString(),
+      at,
       operation: redactDiagnosticText(operation),
       message: redactDiagnosticText(
-        `request=${requestId} status=${ok ? 'ok' : 'error'} durationMs=${Math.max(0, Math.round(durationMs))}`,
+        `request=${requestId} status=${ok ? 'ok' : 'error'} durationMs=${roundedDuration}`,
       ),
     });
     if (this.events.length > MAX_DIAGNOSTIC_EVENTS) this.events.shift();
+    this.requestMetrics.push({
+      at,
+      operation,
+      requestId,
+      ok,
+      durationMs: roundedDuration,
+    });
+    if (this.requestMetrics.length > MAX_REQUEST_METRICS) this.requestMetrics.shift();
+    const current = this.operationMetrics.get(operation) ?? {
+      requests: 0,
+      ok: 0,
+      errors: 0,
+      totalDurationMs: 0,
+      maxDurationMs: 0,
+      recentRequestIds: [],
+    };
+    current.requests += 1;
+    if (ok) current.ok += 1;
+    else current.errors += 1;
+    current.totalDurationMs += roundedDuration;
+    current.maxDurationMs = Math.max(current.maxDurationMs, roundedDuration);
+    current.recentRequestIds.push(requestId);
+    if (current.recentRequestIds.length > MAX_RECENT_REQUEST_IDS) {
+      current.recentRequestIds.shift();
+    }
+    this.operationMetrics.set(operation, current);
   }
 
   resetSession(): void {
     this.events.length = 0;
+    this.requestMetrics.length = 0;
+    this.operationMetrics.clear();
     this.exportedPaths.clear();
+  }
+
+  getMetrics(): WorkerMetricsSnapshot {
+    const byOperation = [...this.operationMetrics.entries()]
+      .map(([operation, value]) => ({ operation, ...value }))
+      .sort((left, right) => right.requests - left.requests);
+    const totals = byOperation.reduce(
+      (summary, operation) => ({
+        requests: summary.requests + operation.requests,
+        ok: summary.ok + operation.ok,
+        errors: summary.errors + operation.errors,
+        totalDurationMs: summary.totalDurationMs + operation.totalDurationMs,
+        maxDurationMs: Math.max(summary.maxDurationMs, operation.maxDurationMs),
+      }),
+      { requests: 0, ok: 0, errors: 0, totalDurationMs: 0, maxDurationMs: 0 },
+    );
+    return {
+      totals,
+      byOperation,
+      recentRequests: [...this.requestMetrics].reverse().slice(0, MAX_RECENT_REQUESTS),
+    };
   }
 
   inspectCache(): CacheInspectionResult {

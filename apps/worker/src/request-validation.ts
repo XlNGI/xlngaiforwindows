@@ -53,6 +53,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'llm.generation.cancel',
   'llm.generation.retry',
   'llm.generation.retryPrepare',
+  'maintenance.metrics',
   'maintenance.contextSnapshots.cleanup',
 ]);
 
@@ -189,6 +190,9 @@ export function validateSessionRequestParams(
     case 'maintenance.contextSnapshots.cleanup':
       rejectUnknown(params, ['olderThanDays']);
       optionalInteger(params, 'olderThanDays', 1, 3_650);
+      break;
+    case 'maintenance.metrics':
+      rejectUnknown(params, []);
       break;
     case 'chat.message.list':
       rejectUnknown(params, ['conversationId', 'before', 'limit']);

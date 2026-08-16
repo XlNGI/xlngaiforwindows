@@ -1,5 +1,9 @@
-import { Database, FolderOpen, HardDrive, Save, Trash2, X } from 'lucide-react';
-import type { CacheInspectionResult, DiagnosticExportResult } from '@ai-video/contracts';
+import { Activity, Database, FolderOpen, HardDrive, Save, Trash2, X } from 'lucide-react';
+import type {
+  CacheInspectionResult,
+  DiagnosticExportResult,
+  WorkerMetricsSnapshot,
+} from '@ai-video/contracts';
 
 interface MaintenanceDialogProps {
   embedded?: boolean;
@@ -8,6 +12,8 @@ interface MaintenanceDialogProps {
   busy: boolean;
   message: string;
   cacheInspection?: CacheInspectionResult;
+  metrics?: WorkerMetricsSnapshot;
+  onRefreshMetrics: () => void;
   diagnosticExport?: DiagnosticExportResult;
   exportDestination: string;
   diagnosticDestination: string;
@@ -35,6 +41,8 @@ export function MaintenanceDialog({
   busy,
   message,
   cacheInspection,
+  metrics,
+  onRefreshMetrics,
   diagnosticExport,
   exportDestination,
   diagnosticDestination,
@@ -104,6 +112,35 @@ export function MaintenanceDialog({
               <FolderOpen size={14} />
               导出项目副本
             </button>
+          </section>
+
+          <section className="maintenance-section">
+            <div className="maintenance-section-title">
+              <Activity size={15} />
+              <strong>运行指标</strong>
+            </div>
+            {metrics ? (
+              <div className="metrics-summary">
+                <span>请求 {metrics.totals.requests}</span>
+                <span>成功 {metrics.totals.ok}</span>
+                <span>失败 {metrics.totals.errors}</span>
+                <span>最慢 {metrics.totals.maxDurationMs} ms</span>
+                <ul>
+                  {metrics.byOperation.slice(0, 5).map((item) => (
+                    <li key={item.operation} title={item.recentRequestIds.join(', ')}>
+                      {item.operation} · {item.requests} 次 · {item.maxDurationMs} ms
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p>尚未查询运行指标。</p>
+            )}
+            <div className="maintenance-actions">
+              <button type="button" onClick={onRefreshMetrics} disabled={busy}>
+                刷新
+              </button>
+            </div>
           </section>
 
           <section className="maintenance-section">

@@ -425,7 +425,7 @@ details
 - [x] 数据库不变量由 Schema 和 Service 双重保证；
 - [x] 会话排序、搜索、归档、恢复和游标分页完成；软删除由归档/恢复承载；
 - [~] 上下文快照保留和清理策略已具备（仅清理未引用且超期的快照）；manifest 化与备份边界待补；
-- [ ] 关键指标和关联 ID 可查询；
+- [x] 请求指标、耗时、成功/失败数和关联 requestId 可查询；
 - [x] 重启、并发、重复请求和恶意输入测试通过。
 
 ### P6
@@ -475,8 +475,9 @@ details
 - `conversation.list` 支持 `includeArchived` 和 `query` 关键字筛选；
 - `conversation.list` 返回 `{ items, nextCursor }`，支持 `limit` 和 `cursor` 游标分页；
 - `maintenance.contextSnapshots.cleanup` 按保留期清理未被 generation、attempt、task、document version 引用的旧快照；
+- `maintenance.metrics` 返回请求总数、成功/失败、耗时和按操作统计，并保留关联 requestId；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
-- Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；
+- Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；项目维护页增加运行指标摘要；
 - 持久化、Worker、Desktop 测试和 `pnpm typecheck`、`pnpm lint`、`pnpm format:check` 全部通过。
 
 聚焦验证：

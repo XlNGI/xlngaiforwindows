@@ -283,6 +283,34 @@ export interface ContextSnapshotCleanupResult {
   retainedCount: number;
 }
 
+export interface WorkerMetricByOperation {
+  operation: string;
+  requests: number;
+  ok: number;
+  errors: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+  recentRequestIds: string[];
+}
+
+export interface WorkerMetricsSnapshot {
+  totals: {
+    requests: number;
+    ok: number;
+    errors: number;
+    totalDurationMs: number;
+    maxDurationMs: number;
+  };
+  byOperation: WorkerMetricByOperation[];
+  recentRequests: Array<{
+    at: string;
+    requestId: string;
+    operation: string;
+    ok: boolean;
+    durationMs: number;
+  }>;
+}
+
 export interface DiagnosticExportParams {
   destinationRoot?: string;
 }
@@ -1399,6 +1427,7 @@ export interface WorkerMethodMap {
     result: CacheInspectionResult;
   };
   'maintenance.cache.clear': { params: Record<string, never>; result: CacheClearResult };
+  'maintenance.metrics': { params: Record<string, never>; result: WorkerMetricsSnapshot };
   'maintenance.contextSnapshots.cleanup': {
     params: ContextSnapshotCleanupParams;
     result: ContextSnapshotCleanupResult;

@@ -162,6 +162,39 @@ describe('MaintenanceService', () => {
     });
   });
 
+  it('exposes request metrics with association ids', async () => {
+    const base = await temporaryRoot('metrics');
+    const projects = createProjectService(join(base, 'recent.json'));
+    const maintenance = new MaintenanceService(projects);
+    maintenance.recordRequest('chat.message.list', 'request-1', true, 10);
+    maintenance.recordRequest('chat.message.list', 'request-2', true, 20);
+    maintenance.recordRequest('llm.generate', 'request-3', false, 5);
+
+    const metrics = maintenance.getMetrics();
+    expect(metrics.totals).toEqual({
+      requests: 3,
+      ok: 2,
+      errors: 1,
+      totalDurationMs: 35,
+      maxDurationMs: 20,
+    });
+    expect(metrics.recentRequests.map((item) => item.requestId)).toEqual([
+      'request-3',
+      'request-2',
+      'request-1',
+    ]);
+    expect(
+      metrics.byOperation.find((item) => item.operation === 'chat.message.list'),
+    ).toMatchObject({
+      requests: 2,
+      ok: 2,
+      errors: 0,
+      totalDurationMs: 30,
+      maxDurationMs: 20,
+      recentRequestIds: ['request-1', 'request-2'],
+    });
+  });
+
   it('allows cache inspection but refuses cache clearing from a read-only session', async () => {
     const base = await temporaryRoot('readonly-cache');
     const projectRoot = join(base, 'project');

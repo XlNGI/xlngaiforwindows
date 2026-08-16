@@ -50,6 +50,7 @@ import type {
   ShotInfo,
   SqliteProbeResult,
   GenerationCapability,
+  WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { ProductionPanel } from './ProductionPanel';
@@ -211,6 +212,7 @@ export function App() {
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState('');
   const [cacheInspection, setCacheInspection] = useState<CacheInspectionResult>();
+  const [workerMetrics, setWorkerMetrics] = useState<WorkerMetricsSnapshot>();
   const [diagnosticExport, setDiagnosticExport] = useState<DiagnosticExportResult>();
   const [diagnosticDestination, setDiagnosticDestination] = useState('');
   const [exportDestination, setExportDestination] = useState('');
@@ -809,6 +811,13 @@ export function App() {
       return `已释放 ${(result.freedBytes / 1024 / 1024).toFixed(2)} MiB，删除 ${result.removedFiles} 个缓存文件`;
     });
   };
+
+  const refreshMetrics = () =>
+    runMaintenanceAction(async () => {
+      const result = await callWorker('maintenance.metrics', {});
+      setWorkerMetrics(result);
+      return `已记录 ${result.totals.requests} 次请求，失败 ${result.totals.errors} 次`;
+    });
 
   const exportDiagnostics = () =>
     runMaintenanceAction(async () => {
@@ -2047,6 +2056,8 @@ export function App() {
               busy={maintenanceBusy}
               message={maintenanceMessage}
               cacheInspection={cacheInspection}
+              metrics={workerMetrics}
+              onRefreshMetrics={() => void refreshMetrics()}
               diagnosticExport={diagnosticExport}
               exportDestination={exportDestination}
               diagnosticDestination={diagnosticDestination}

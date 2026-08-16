@@ -123,6 +123,7 @@ const methods = new Set<WorkerMethod>([
   'usage.rebuild',
   'maintenance.cache.inspect',
   'maintenance.cache.clear',
+  'maintenance.metrics',
   'maintenance.contextSnapshots.cleanup',
   'maintenance.diagnostics.export',
   'maintenance.diagnostics.reveal',
@@ -588,6 +589,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         break;
       case 'maintenance.cache.clear':
         result = maintenanceService.clearCache();
+        break;
+      case 'maintenance.metrics':
+        result = maintenanceService.getMetrics();
         break;
       case 'maintenance.contextSnapshots.cleanup':
         result = maintenanceService.cleanupContextSnapshots(params);
