@@ -121,6 +121,47 @@ describe('MaintenanceService', () => {
     expect(existsSync(join(projectRoot, 'project.sqlite'))).toBe(true);
   });
 
+  it('cleans only old unreferenced context snapshots', async () => {
+    const base = await temporaryRoot('context-cleanup');
+    const projectRoot = join(base, 'project');
+    const projects = createProjectService(join(base, 'recent.json'));
+    const project = projects.create(projectRoot, 'Context Project');
+    const maintenance = new MaintenanceService(projects, {
+      now: () => new Date('2026-08-16T00:00:00.000Z'),
+    });
+    projects.access(true, (database) => {
+      const insert = database.prepare(
+        `INSERT INTO context_snapshots (id, project_id, purpose, content_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      );
+      insert.run(
+        'old-unreferenced',
+        project.id,
+        'llm-generation',
+        '{}',
+        '2026-01-01T00:00:00.000Z',
+      );
+      insert.run(
+        'recent-unreferenced',
+        project.id,
+        'llm-generation',
+        '{}',
+        '2026-08-01T00:00:00.000Z',
+      );
+    });
+
+    expect(maintenance.cleanupContextSnapshots({ olderThanDays: 90 })).toEqual({
+      removedCount: 1,
+      retainedCount: 1,
+    });
+    projects.access(false, (database) => {
+      const row = database
+        .prepare('SELECT COUNT(*) AS count FROM context_snapshots WHERE id = ?')
+        .get('old-unreferenced') as { count: number };
+      expect(row.count).toBe(0);
+    });
+  });
+
   it('allows cache inspection but refuses cache clearing from a read-only session', async () => {
     const base = await temporaryRoot('readonly-cache');
     const projectRoot = join(base, 'project');

@@ -102,6 +102,25 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects context snapshot cleanup with an invalid retention period', async () => {
+    const response = await handleRequest({
+      id: 'context-cleanup-invalid-retention',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'maintenance.contextSnapshots.cleanup',
+      params: { olderThanDays: 0 },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'context-cleanup-invalid-retention',
+        retryable: false,
+        operation: 'maintenance.contextSnapshots.cleanup',
+      },
+    });
+  });
+
   it('rejects unknown document list parameters at the IPC boundary', async () => {
     const response = await handleRequest({
       id: 'document-list-unknown-param',

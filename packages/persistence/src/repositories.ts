@@ -2083,6 +2083,37 @@ class SqliteContextSnapshotRepository
         .all(projectId, limit) as ContextSnapshotRow[]
     ).map(mapContextSnapshot);
   }
+
+  deleteUnreferencedOlderThan(projectId: string, cutoff: string, limit: number): number {
+    const result = this.database
+      .prepare(
+        `DELETE FROM context_snapshots
+         WHERE id IN (
+           SELECT id FROM context_snapshots
+           WHERE project_id = ?
+             AND created_at < ?
+             AND NOT EXISTS (
+               SELECT 1 FROM llm_generations
+               WHERE context_snapshot_id = context_snapshots.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM llm_generation_attempts
+               WHERE context_snapshot_id = context_snapshots.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM agent_tasks
+               WHERE context_snapshot_id = context_snapshots.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM document_versions
+               WHERE context_snapshot_id = context_snapshots.id
+             )
+           LIMIT ?
+         )`,
+      )
+      .run(projectId, cutoff, limit);
+    return result.changes;
+  }
 }
 
 interface ContextSnapshotRow {

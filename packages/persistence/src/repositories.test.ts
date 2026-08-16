@@ -692,6 +692,69 @@ describe('repositories', () => {
     database.close();
   });
 
+  it('deletes only old unreferenced context snapshots', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-context-cleanup-'));
+    temporaryDirectories.push(directory);
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Context Cleanup', 'now', 'now');
+    const repositories = createRepositories(database);
+    repositories.contextSnapshots.save({
+      id: 'old-unreferenced',
+      projectId: 'project',
+      purpose: 'llm-generation',
+      contentJson: '{}',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    repositories.contextSnapshots.save({
+      id: 'referenced',
+      projectId: 'project',
+      purpose: 'llm-generation',
+      contentJson: '{}',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    repositories.contextSnapshots.save({
+      id: 'recent',
+      projectId: 'project',
+      purpose: 'llm-generation',
+      contentJson: '{}',
+      createdAt: '2026-08-01T00:00:00.000Z',
+    });
+    repositories.documents.saveVersion(
+      {
+        id: 'document',
+        projectId: 'project',
+        kind: 'note',
+        title: 'Doc',
+        scopeType: 'project',
+        currentVersionId: 'version',
+        createdAt: 'now',
+        updatedAt: 'now',
+      },
+      {
+        id: 'version',
+        documentId: 'document',
+        version: 1,
+        contentMarkdown: '# Doc',
+        createdAt: 'now',
+        contextSnapshotId: 'referenced',
+      },
+    );
+
+    const removed = repositories.contextSnapshots.deleteUnreferencedOlderThan(
+      'project',
+      '2026-07-01T00:00:00.000Z',
+      10,
+    );
+    expect(removed).toBe(1);
+    expect(repositories.contextSnapshots.get('old-unreferenced')).toBeUndefined();
+    expect(repositories.contextSnapshots.get('referenced')).toMatchObject({ id: 'referenced' });
+    expect(repositories.contextSnapshots.get('recent')).toMatchObject({ id: 'recent' });
+    database.close();
+  });
+
   it('searches assets by tag name without crossing project boundaries', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ai-video-asset-search-'));
     temporaryDirectories.push(directory);

@@ -17,11 +17,13 @@ import type Database from 'better-sqlite3';
 import type {
   CacheClearResult,
   CacheInspectionResult,
+  ContextSnapshotCleanupParams,
+  ContextSnapshotCleanupResult,
   DiagnosticExportParams,
   DiagnosticExportResult,
   PathResult,
 } from '@ai-video/contracts';
-import { checkIntegrity } from '@ai-video/persistence';
+import { checkIntegrity, createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 
 const MAX_DIAGNOSTIC_EVENTS = 50;
@@ -209,6 +211,25 @@ export class MaintenanceService {
       const result = clearTree(cachePath);
       mkdirSync(cachePath, { recursive: true });
       return result;
+    });
+  }
+
+  cleanupContextSnapshots(params: ContextSnapshotCleanupParams = {}): ContextSnapshotCleanupResult {
+    const olderThanDays = params.olderThanDays ?? 90;
+    const days = Math.min(Math.max(olderThanDays, 1), 3_650);
+    const cutoff = new Date(this.now().getTime() - days * 86_400_000).toISOString();
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const removedCount = repositories.contextSnapshots.deleteUnreferencedOlderThan(
+        project.id,
+        cutoff,
+        500,
+      );
+      const retainedCount = repositories.contextSnapshots.listByProject(
+        project.id,
+        Number.MAX_SAFE_INTEGER,
+      ).length;
+      return { removedCount, retainedCount };
     });
   }
 

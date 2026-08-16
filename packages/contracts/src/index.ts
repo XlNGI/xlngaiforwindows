@@ -274,6 +274,15 @@ export interface CacheClearResult {
   removedLinks: number;
 }
 
+export interface ContextSnapshotCleanupParams {
+  olderThanDays?: number;
+}
+
+export interface ContextSnapshotCleanupResult {
+  removedCount: number;
+  retainedCount: number;
+}
+
 export interface DiagnosticExportParams {
   destinationRoot?: string;
 }
@@ -1390,6 +1399,10 @@ export interface WorkerMethodMap {
     result: CacheInspectionResult;
   };
   'maintenance.cache.clear': { params: Record<string, never>; result: CacheClearResult };
+  'maintenance.contextSnapshots.cleanup': {
+    params: ContextSnapshotCleanupParams;
+    result: ContextSnapshotCleanupResult;
+  };
   'maintenance.diagnostics.export': {
     params: DiagnosticExportParams;
     result: DiagnosticExportResult;

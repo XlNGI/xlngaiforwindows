@@ -53,6 +53,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'llm.generation.cancel',
   'llm.generation.retry',
   'llm.generation.retryPrepare',
+  'maintenance.contextSnapshots.cleanup',
 ]);
 
 const scopes = new Set<ConversationScopeType>(['project', 'scene', 'shot']);
@@ -184,6 +185,10 @@ export function validateSessionRequestParams(
     case 'conversation.restore':
       rejectUnknown(params, ['conversationId']);
       requireId(params, 'conversationId');
+      break;
+    case 'maintenance.contextSnapshots.cleanup':
+      rejectUnknown(params, ['olderThanDays']);
+      optionalInteger(params, 'olderThanDays', 1, 3_650);
       break;
     case 'chat.message.list':
       rejectUnknown(params, ['conversationId', 'before', 'limit']);

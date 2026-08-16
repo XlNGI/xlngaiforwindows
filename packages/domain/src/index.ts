@@ -736,6 +736,7 @@ export interface ContextSnapshotRepository {
   save(record: ContextSnapshotRecord): void;
   get(id: string): ContextSnapshotRecord | undefined;
   listByProject(projectId: string, limit: number): ContextSnapshotRecord[];
+  deleteUnreferencedOlderThan(projectId: string, cutoff: string, limit: number): number;
 }
 
 export interface SceneRepository {
