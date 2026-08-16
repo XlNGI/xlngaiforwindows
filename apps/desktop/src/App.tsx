@@ -28,7 +28,6 @@ import {
 import type {
   AssetInfo,
   AssetSourceInfo,
-  CacheInspectionResult,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -36,7 +35,6 @@ import type {
   DocumentKind,
   DocumentSummary,
   DocumentVersionInfo,
-  DiagnosticExportResult,
   HealthResult,
   LlmGenerationInfo,
   LlmGenerationPrepareResult,
@@ -50,9 +48,9 @@ import type {
   ShotInfo,
   SqliteProbeResult,
   GenerationCapability,
-  WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
+import { useProjectMaintenance } from './use-project-maintenance';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel } from './ChatPanel';
@@ -209,15 +207,6 @@ export function App() {
     initialProductionCapability,
   );
   const [productionMenuOpen, setProductionMenuOpen] = useState(false);
-  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
-  const [maintenanceMessage, setMaintenanceMessage] = useState('');
-  const [cacheInspection, setCacheInspection] = useState<CacheInspectionResult>();
-  const [workerMetrics, setWorkerMetrics] = useState<WorkerMetricsSnapshot>();
-  const [diagnosticExport, setDiagnosticExport] = useState<DiagnosticExportResult>();
-  const [diagnosticDestination, setDiagnosticDestination] = useState('');
-  const [exportDestination, setExportDestination] = useState('');
-  const [restoreBackupPath, setRestoreBackupPath] = useState('');
-  const [restoreDestination, setRestoreDestination] = useState('');
 
   const [view, setView] = useState<WorkspaceView>('documents');
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
@@ -721,6 +710,11 @@ export function App() {
     }
   };
 
+  const maintenance = useProjectMaintenance({
+    runProjectAction,
+    onCloseSettings: () => setSettingsOpen(false),
+  });
+
   const normalizeProjectPath = (value: unknown): string | undefined => {
     if (typeof value !== 'string' || !value.trim()) {
       setProjectMessage('请输入项目绝对目录');
@@ -783,102 +777,12 @@ export function App() {
       return '项目已安全关闭';
     });
 
-  const runMaintenanceAction = async (action: () => Promise<string>) => {
-    setMaintenanceBusy(true);
-    setMaintenanceMessage('');
-    try {
-      setMaintenanceMessage(await action());
-    } catch (reason) {
-      setMaintenanceMessage(reason instanceof Error ? reason.message : '项目维护操作失败');
-    } finally {
-      setMaintenanceBusy(false);
-    }
-  };
-
-  const inspectCache = () =>
-    runMaintenanceAction(async () => {
-      const result = await callWorker('maintenance.cache.inspect', {});
-      setCacheInspection(result);
-      return `缓存占用 ${(result.sizeBytes / 1024 / 1024).toFixed(2)} MiB`;
-    });
-
-  const clearCache = () => {
-    if (!window.confirm('确定清理当前项目的媒体缓存？已保存素材不会被删除。')) return;
-    return runMaintenanceAction(async () => {
-      const result = await callWorker('maintenance.cache.clear', {});
-      const next = await callWorker('maintenance.cache.inspect', {});
-      setCacheInspection(next);
-      return `已释放 ${(result.freedBytes / 1024 / 1024).toFixed(2)} MiB，删除 ${result.removedFiles} 个缓存文件`;
-    });
-  };
-
-  const refreshMetrics = () =>
-    runMaintenanceAction(async () => {
-      const result = await callWorker('maintenance.metrics', {});
-      setWorkerMetrics(result);
-      return `已记录 ${result.totals.requests} 次请求，失败 ${result.totals.errors} 次`;
-    });
-
-  const exportDiagnostics = () =>
-    runMaintenanceAction(async () => {
-      const result = await callWorker('maintenance.diagnostics.export', {
-        destinationRoot: diagnosticDestination.trim() || undefined,
-      });
-      setDiagnosticExport(result);
-      return '脱敏诊断包已导出';
-    });
-
-  const revealDiagnostics = () => {
-    if (!diagnosticExport) return;
-    return runMaintenanceAction(async () => {
-      await callWorker('maintenance.diagnostics.reveal', { path: diagnosticExport.path });
-      return '已打开诊断包位置';
-    });
-  };
-
-  const exportProject = () => {
-    const destinationRoot = exportDestination.trim();
-    if (!destinationRoot) {
-      setMaintenanceMessage('请输入项目导出的绝对目录');
-      return;
-    }
-    return runMaintenanceAction(async () => {
-      const result = await callWorker('project.export', { destinationRoot });
-      return `项目已导出：${result.path}`;
-    });
-  };
-
-  const restoreProject = () => {
-    const backupPath = restoreBackupPath.trim();
-    const destinationRoot = restoreDestination.trim();
-    if (!backupPath || !destinationRoot) {
-      setMaintenanceMessage('请输入备份文件和恢复目标绝对目录');
-      return;
-    }
-    setSettingsOpen(false);
-    return runProjectAction(() => callWorker('project.restore', { backupPath, destinationRoot }));
-  };
-
   const openSettings = (page: SettingsPage = project ? 'providers' : 'maintenance') => {
     setSettingsInitialPage(page);
     setSettingsOpen(true);
-    setMaintenanceMessage('');
-    if (project) void inspectCache();
+    maintenance.clearMaintenanceMessage();
+    if (project) void maintenance.inspectCache();
   };
-
-  const checkIntegrity = () =>
-    runMaintenanceAction(async () => {
-      const result = await callWorker('project.integrity', {});
-      return result.ok
-        ? `完整性检查通过 · Schema v${result.schemaVersion}`
-        : result.messages.join('; ');
-    });
-
-  const backupProject = () =>
-    runMaintenanceAction(async () => {
-      const result = await callWorker('project.backup', {});
-      return `备份完成：${result.path}`;
-    });
 
   const selectDocument = async (summary: DocumentSummary) => {
     const requestId = ++documentRequest.current;
@@ -2096,29 +2000,29 @@ export function App() {
               embedded
               hasProject={Boolean(project)}
               writable={writable}
-              busy={maintenanceBusy}
-              message={maintenanceMessage}
-              cacheInspection={cacheInspection}
-              metrics={workerMetrics}
-              onRefreshMetrics={() => void refreshMetrics()}
-              diagnosticExport={diagnosticExport}
-              exportDestination={exportDestination}
-              diagnosticDestination={diagnosticDestination}
-              restoreBackupPath={restoreBackupPath}
-              restoreDestination={restoreDestination}
+              busy={maintenance.maintenanceBusy}
+              message={maintenance.maintenanceMessage}
+              cacheInspection={maintenance.cacheInspection}
+              metrics={maintenance.workerMetrics}
+              onRefreshMetrics={() => void maintenance.refreshMetrics()}
+              diagnosticExport={maintenance.diagnosticExport}
+              exportDestination={maintenance.exportDestination}
+              diagnosticDestination={maintenance.diagnosticDestination}
+              restoreBackupPath={maintenance.restoreBackupPath}
+              restoreDestination={maintenance.restoreDestination}
               onClose={closeSettings}
-              onIntegrity={() => void checkIntegrity()}
-              onBackup={() => void backupProject()}
-              onExportDestinationChange={setExportDestination}
-              onExportProject={() => void exportProject()}
-              onInspectCache={() => void inspectCache()}
-              onClearCache={() => void clearCache()}
-              onDiagnosticDestinationChange={setDiagnosticDestination}
-              onExportDiagnostics={() => void exportDiagnostics()}
-              onRevealDiagnostics={() => void revealDiagnostics()}
-              onRestoreBackupPathChange={setRestoreBackupPath}
-              onRestoreDestinationChange={setRestoreDestination}
-              onRestoreProject={() => void restoreProject()}
+              onIntegrity={() => void maintenance.checkIntegrity()}
+              onBackup={() => void maintenance.backupProject()}
+              onExportDestinationChange={maintenance.setExportDestination}
+              onExportProject={() => void maintenance.exportProject()}
+              onInspectCache={() => void maintenance.inspectCache()}
+              onClearCache={() => void maintenance.clearCache()}
+              onDiagnosticDestinationChange={maintenance.setDiagnosticDestination}
+              onExportDiagnostics={() => void maintenance.exportDiagnostics()}
+              onRevealDiagnostics={() => void maintenance.revealDiagnostics()}
+              onRestoreBackupPathChange={maintenance.setRestoreBackupPath}
+              onRestoreDestinationChange={maintenance.setRestoreDestination}
+              onRestoreProject={() => void maintenance.restoreProject()}
             />
           }
         />

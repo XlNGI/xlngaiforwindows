@@ -430,7 +430,7 @@ details
 
 ### P6
 
-- [ ] Desktop 和 Worker 模块完成合理拆分；
+- [~] Desktop 项目维护状态与动作已抽为 `useProjectMaintenance`；其余模块拆分待续；
 - [ ] 领域状态类型完成收紧；
 - [ ] CI 覆盖率、安全扫描、SBOM 和许可证检查接入；
 - [ ] 文档、迁移版本和发布验证记录同步；
@@ -480,6 +480,7 @@ details
 - `maintenance.metrics` 返回请求总数、成功/失败、耗时和按操作统计，并保留关联 requestId；
 - `maintenance.metrics` 增加 generation 首 Token、总耗时、成功/失败/取消和 Provider 分类统计；
 - `RequestScheduler` 上报串行请求队列等待，`maintenance.metrics` 返回队列样本、总等待和最慢等待；
+- Desktop 将项目维护状态、备份/恢复/缓存/诊断动作从 `App.tsx` 抽到 `useProjectMaintenance`，`App.tsx` 不再直接持有维护状态；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
 - Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；项目维护页增加运行指标摘要；
 - 持久化、Worker、Desktop 测试和 `pnpm typecheck`、`pnpm lint`、`pnpm format:check` 全部通过。
@@ -497,7 +498,7 @@ details
 - 上下文快照清理前确认和备份边界；legacy 正文迁移已完成；
 - 图片、视频、备份、导出等全部异步回写统一采用 `projectSessionId`；
 - 请求队列等待、generation 首 Token 和 Provider 分类指标已加入；
-- Desktop/Worker 大模块拆分、CI 安全/SBOM/许可证检查和 Windows 正式签名升级门禁。
+- Desktop/Worker 其余模块拆分、CI 安全/SBOM/许可证检查和 Windows 正式签名升级门禁。
 
 ## 13. 暂不纳入本轮范围
 
