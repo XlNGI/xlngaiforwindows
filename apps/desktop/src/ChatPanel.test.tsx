@@ -120,4 +120,89 @@ describe('ChatPanel attempt metadata', () => {
     expect(screen.getByText(/USD 输入 1/)).toBeInTheDocument();
     expect(screen.getByText('USD 0.00061')).toBeInTheDocument();
   });
+
+  it('calls archive and restore callbacks for the selected conversation', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onArchiveConversation = vi.fn();
+    const onRestoreConversation = vi.fn();
+    const view = render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        showArchivedConversations
+        onShowArchivedConversationsChange={vi.fn()}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onArchiveConversation={onArchiveConversation}
+        onRestoreConversation={onRestoreConversation}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '归档会话' }));
+    expect(onArchiveConversation).toHaveBeenCalledWith('conversation');
+
+    const archived: ConversationInfo = { ...conversation, archivedAt: '2026-08-16T00:00:00.000Z' };
+    view.rerender(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[archived]}
+        conversation={archived}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        showArchivedConversations
+        onShowArchivedConversationsChange={vi.fn()}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onArchiveConversation={onArchiveConversation}
+        onRestoreConversation={onRestoreConversation}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '恢复会话' }));
+    expect(onRestoreConversation).toHaveBeenCalledWith('conversation');
+  });
 });

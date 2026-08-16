@@ -1,10 +1,13 @@
 import {
+  Archive,
   Bot,
   ChevronRight,
   Copy,
   MessageSquarePlus,
   PanelRightClose,
+  Pencil,
   RefreshCw,
+  RotateCcw,
   Square,
 } from 'lucide-react';
 import type {
@@ -44,6 +47,11 @@ interface ChatPanelProps {
   onScopeChange: (scope: ConversationScopeType) => void;
   onSelectConversation: (conversation: ConversationInfo) => void;
   onCreateConversation: () => void;
+  showArchivedConversations?: boolean;
+  onShowArchivedConversationsChange?: (show: boolean) => void;
+  onRenameConversation?: (conversationId: string, title: string) => void;
+  onArchiveConversation?: (conversationId: string) => void;
+  onRestoreConversation?: (conversationId: string) => void;
   onPromoteMessage: (message: ChatMessageInfo, target: PromotionTarget) => void;
   onRetryGeneration: (assistantMessageId: string) => void;
   onLlmProfileChange: (profileId: string) => void;
@@ -80,6 +88,11 @@ export function ChatPanel({
   onScopeChange,
   onSelectConversation,
   onCreateConversation,
+  showArchivedConversations = false,
+  onShowArchivedConversationsChange,
+  onRenameConversation,
+  onArchiveConversation,
+  onRestoreConversation,
   onPromoteMessage,
   onRetryGeneration,
   onLlmProfileChange,
@@ -124,10 +137,19 @@ export function ChatPanel({
           </option>
           {conversations.map((item) => (
             <option key={item.id} value={item.id}>
-              {item.title}
+              {item.archivedAt ? `${item.title}（已归档）` : item.title}
             </option>
           ))}
         </select>
+        <label className="archive-toggle" title="显示已归档会话">
+          <input
+            type="checkbox"
+            checked={showArchivedConversations}
+            onChange={(event) => onShowArchivedConversationsChange?.(event.target.checked)}
+            disabled={!scopeAvailable}
+          />
+          <span>归档</span>
+        </label>
         <button
           className="icon-button"
           type="button"
@@ -136,6 +158,44 @@ export function ChatPanel({
           disabled={!writable || !scopeAvailable}
         >
           <MessageSquarePlus size={16} />
+        </button>
+        <button
+          className="icon-button subtle"
+          type="button"
+          title="重命名会话"
+          disabled={!writable || !conversation}
+          onClick={() => {
+            const current = conversation;
+            if (!current) return;
+            const title = window.prompt('新会话名称', current.title);
+            if (title?.trim()) onRenameConversation?.(current.id, title.trim());
+          }}
+        >
+          <Pencil size={14} />
+        </button>
+        <button
+          className="icon-button subtle"
+          type="button"
+          title="归档会话"
+          disabled={!writable || !conversation || Boolean(conversation.archivedAt)}
+          onClick={() => {
+            const current = conversation;
+            if (current) onArchiveConversation?.(current.id);
+          }}
+        >
+          <Archive size={14} />
+        </button>
+        <button
+          className="icon-button subtle"
+          type="button"
+          title="恢复会话"
+          disabled={!writable || !conversation || !conversation.archivedAt}
+          onClick={() => {
+            const current = conversation;
+            if (current) onRestoreConversation?.(current.id);
+          }}
+        >
+          <RotateCcw size={14} />
         </button>
       </div>
       <div className="llm-context-bar">

@@ -474,6 +474,7 @@ details
 - `conversation.update`、`conversation.archive`、`conversation.restore` IPC 及运行时校验；
 - `conversation.list` 支持 `includeArchived` 和 `query` 关键字筛选；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
+- Desktop 会话栏增加归档筛选、重命名、归档和恢复入口；
 - 持久化、Worker、Desktop 测试和 `pnpm typecheck`、`pnpm lint`、`pnpm format:check` 全部通过。
 
 聚焦验证：
@@ -485,7 +486,7 @@ details
 
 仍未完成：
 
-- 会话列表游标分页、软删除和 Desktop 会话管理入口；
+- 会话列表游标分页和软删除；
 - 上下文快照保留、清理和导出策略；
 - 图片、视频、备份、导出等全部异步回写统一采用 `projectSessionId`；
 - generation 首 Token、队列等待、Provider 分类等完整指标体系；

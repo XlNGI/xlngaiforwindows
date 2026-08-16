@@ -242,6 +242,7 @@ export function App() {
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
+  const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const [conversation, setConversation] = useState<ConversationInfo>();
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
@@ -609,7 +610,11 @@ export function App() {
     }
     void (async () => {
       try {
-        const items = await callWorker('conversation.list', { scopeType, scopeId });
+        const items = await callWorker('conversation.list', {
+          scopeType,
+          scopeId,
+          includeArchived: showArchivedConversations,
+        });
         if (!active || requestId !== conversationRequest.current) return;
         const selected = items[0];
         const [messagePage, preview] = selected
@@ -633,7 +638,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [project?.id, scopeType, scopeId]);
+  }, [project?.id, scopeType, scopeId, showArchivedConversations]);
 
   useEffect(() => {
     if (!generation || generation.executionMode === 'native' || generation.status !== 'streaming')
@@ -1130,6 +1135,47 @@ export function App() {
       if (requestId === conversationRequest.current) {
         setChatMessage(reason instanceof Error ? reason.message : '会话创建失败');
       }
+    }
+  };
+
+  const renameConversation = async (conversationId: string, title: string) => {
+    try {
+      const updated = await callWorker('conversation.update', { conversationId, title });
+      setConversations((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setConversation((current) => (current?.id === updated.id ? updated : current));
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '会话重命名失败');
+    }
+  };
+
+  const archiveConversation = async (conversationId: string) => {
+    try {
+      const updated = await callWorker('conversation.archive', { conversationId });
+      if (!showArchivedConversations) {
+        setConversations((current) => current.filter((item) => item.id !== conversationId));
+        setConversation((current) => (current?.id === conversationId ? undefined : current));
+      } else {
+        setConversations((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setConversation((current) => (current?.id === updated.id ? updated : current));
+      }
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '会话归档失败');
+    }
+  };
+
+  const restoreConversation = async (conversationId: string) => {
+    try {
+      const updated = await callWorker('conversation.restore', { conversationId });
+      setConversations((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setConversation((current) => (current?.id === updated.id ? updated : current));
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '会话恢复失败');
     }
   };
 
@@ -1772,6 +1818,8 @@ export function App() {
       writable={writable}
       conversations={conversations}
       conversation={conversation}
+      showArchivedConversations={showArchivedConversations}
+      onShowArchivedConversationsChange={setShowArchivedConversations}
       messages={messages}
       composer={composer}
       statusMessage={chatMessage}
@@ -1794,6 +1842,11 @@ export function App() {
       }}
       onSelectConversation={(selected) => void selectConversation(selected)}
       onCreateConversation={() => void createConversation()}
+      onRenameConversation={(conversationId, title) =>
+        void renameConversation(conversationId, title)
+      }
+      onArchiveConversation={(conversationId) => void archiveConversation(conversationId)}
+      onRestoreConversation={(conversationId) => void restoreConversation(conversationId)}
       onPromoteMessage={(message, target) => void promoteMessage(message, target)}
       onRetryGeneration={(messageId) => void retryGeneration(messageId)}
       onLlmProfileChange={(profileId) => {
