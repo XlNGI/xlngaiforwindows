@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AdapterCatalogResult,
   AdapterDescriptor,
@@ -274,6 +274,8 @@ const savedAsset: AssetInfo = {
 };
 
 describe('ProductionPanel', () => {
+  afterEach(() => cleanup());
+
   beforeEach(() => {
     cleanup();
     vi.resetAllMocks();
