@@ -26,8 +26,6 @@ import {
   X,
 } from 'lucide-react';
 import type {
-  AssetInfo,
-  AssetSourceInfo,
   ChatMessageInfo,
   ConversationScopeType,
   DocumentKind,
@@ -44,12 +42,13 @@ import type {
   SceneInfo,
   ShotInfo,
   SqliteProbeResult,
-  GenerationCapability,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { useProjectMaintenance } from './use-project-maintenance';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { useConversationWorkspace } from './use-conversation-workspace';
+import { useAssetWorkspace } from './use-asset-workspace';
+import { useProductionState } from './use-production-state';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel } from './ChatPanel';
@@ -107,29 +106,7 @@ function detachedConfigMatchesSnapshot(
 }
 
 const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
-
-const PRODUCTION_CAPABILITY_STORAGE_KEY = 'ai-video.production-capability';
 const LLM_SELECTION_STORAGE_KEY = 'ai-video.llm-selection';
-const productionCapabilities = new Set<GenerationCapability>([
-  'TEXT_TO_IMAGE',
-  'REFERENCE_TO_IMAGE',
-  'TEXT_TO_VIDEO',
-  'IMAGE_TO_VIDEO',
-  'REFERENCE_TO_VIDEO',
-  'START_END_TO_VIDEO',
-]);
-
-function initialProductionCapability(): GenerationCapability {
-  try {
-    const stored = window.localStorage.getItem(PRODUCTION_CAPABILITY_STORAGE_KEY);
-    if (stored && productionCapabilities.has(stored as GenerationCapability)) {
-      return stored as GenerationCapability;
-    }
-  } catch {
-    // The selection remains available for the current session when storage is unavailable.
-  }
-  return 'TEXT_TO_IMAGE';
-}
 
 function initialLlmSelection(): { providerProfileId?: string; modelId?: string } {
   try {
@@ -201,10 +178,6 @@ export function App() {
   const [providerSettingsRevision, setProviderSettingsRevision] = useState(0);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
   const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
-  const [productionCapability, setProductionCapability] = useState<GenerationCapability>(
-    initialProductionCapability,
-  );
-  const [productionMenuOpen, setProductionMenuOpen] = useState(false);
 
   const [view, setView] = useState<WorkspaceView>('documents');
   const [detachedPanels, setDetachedPanels] = useState<Partial<Record<WorkspacePanelId, string>>>(
@@ -215,10 +188,6 @@ export function App() {
   const [scene, setScene] = useState<SceneInfo>();
   const [shots, setShots] = useState<ShotInfo[]>([]);
   const [shot, setShot] = useState<ShotInfo>();
-  const [assets, setAssets] = useState<AssetInfo[]>([]);
-  const [asset, setAsset] = useState<AssetInfo>();
-  const [assetLibrarySelectedId, setAssetLibrarySelectedId] = useState<string>();
-  const [focusedSource, setFocusedSource] = useState<AssetSourceInfo>();
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
@@ -316,6 +285,34 @@ export function App() {
     syncMainDocumentIfSelected,
     reset: resetDocumentWorkspace,
   } = docs;
+
+  const assetWorkspace = useAssetWorkspace({
+    scenes,
+    setScene: (scene) => setScene(scene),
+    setShots: (shots) => setShots(shots),
+    setShot: (shot) => setShot(shot),
+    setNavigationMode,
+    setContentMessage,
+  });
+  const {
+    assets,
+    setAssets,
+    asset,
+    setAsset,
+    assetLibrarySelectedId,
+    setAssetLibrarySelectedId,
+    focusedSource,
+    updateAssets,
+    openAssetSource,
+    reset: resetAssetWorkspace,
+  } = assetWorkspace;
+  const productionWorkspace = useProductionState({ setNavigationMode });
+  const {
+    productionCapability,
+    setProductionCapability,
+    productionMenuOpen,
+    setProductionMenuOpen,
+  } = productionWorkspace;
 
   const closeSettings = () => {
     setSettingsOpen(false);
@@ -588,14 +585,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(PRODUCTION_CAPABILITY_STORAGE_KEY, productionCapability);
-    } catch {
-      // The selection remains available for the current session when storage is unavailable.
-    }
-  }, [productionCapability]);
-
-  useEffect(() => {
     if (settingsOpen) return;
     void loadLlmCatalog();
   }, [settingsOpen]);
@@ -776,8 +765,7 @@ export function App() {
       setProject(undefined);
       resetDocumentWorkspace();
       setScenes([]);
-      setAssets([]);
-      setAsset(undefined);
+      resetAssetWorkspace();
       resetConversationWorkspace();
       setGeneration(undefined);
       return '项目已安全关闭';
@@ -841,36 +829,6 @@ export function App() {
     });
     setShots(await callWorker('shot.list', { sceneId: scene.id }));
     setShot(created);
-  };
-
-  const updateAssets = (nextAssets: AssetInfo[], selectedAssetId?: string) => {
-    setAssets(nextAssets);
-    const selected =
-      (selectedAssetId ? nextAssets.find((item) => item.id === selectedAssetId) : undefined) ??
-      nextAssets.find((item) => item.id === asset?.id) ??
-      nextAssets[0];
-    setAsset(selected);
-    if (selectedAssetId) setAssetLibrarySelectedId(selectedAssetId);
-  };
-
-  const openAssetSource = async (source: AssetSourceInfo) => {
-    setFocusedSource(source);
-    setAssetLibrarySelectedId(source.assetId);
-    setAsset(assets.find((item) => item.id === source.assetId));
-    if (source.shotId) {
-      for (const candidateScene of scenes) {
-        const candidateShots = await callWorker('shot.list', { sceneId: candidateScene.id });
-        const sourceShot = candidateShots.find((item) => item.id === source.shotId);
-        if (sourceShot) {
-          setScene(candidateScene);
-          setShots(candidateShots);
-          setShot(sourceShot);
-          break;
-        }
-      }
-    }
-    setNavigationMode('production');
-    setContentMessage(`已定位来源任务 ${source.jobId}`);
   };
 
   const sendMessage = async (composerValue = composer) => {

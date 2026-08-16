@@ -430,7 +430,7 @@ details
 
 ### P6
 
-- [~] Desktop 项目维护、文档工作区和会话工作区已抽为独立 hook，Worker 项目/供应商/用量/维护命令已抽为 `worker-commands.ts`；其余模块拆分待续；
+- [~] Desktop 项目维护、文档、会话、素材和生产状态均已抽为独立 hook，Worker 基础设施命令已抽为 `worker-commands.ts`；剩余独立窗口编排待续；
 - [x] 领域会话作用域类型已收敛为 `'project' | 'scene' | 'shot'`；
 - [~] CI 已接入生产依赖审计、CycloneDX SBOM 和许可证检查；覆盖率阈值待接入；
 - [x] Schema v16、manifest 迁移、指标和 P6 拆分记录已同步；
@@ -486,6 +486,7 @@ details
 - Worker `handler.ts` 的项目、供应商、用量和维护命令已迁入 `worker-commands.ts`，主分发器只保留文档、LLM、媒体和素材命令；
 - Desktop 文档状态、加载、导入、保存、审核、发布、恢复和关闭动作已迁入 `use-document-workspace.ts`，`App.tsx` 不再直接持有文档状态；
 - Desktop 会话列表、游标、归档/恢复、选择和来源会话加载已迁入 `use-conversation-workspace.ts`；
+- Desktop 素材状态与来源定位已迁入 `use-asset-workspace.ts`，生产能力选择与窄屏菜单已迁入 `use-production-state.ts`；
 - 新增 `pnpm audit`、`pnpm run sbom:generate`、`pnpm license:check`，并接入 CI；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
 - Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；项目维护页增加运行指标摘要；
