@@ -31,9 +31,7 @@ import type {
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
-  DocumentDetail,
   DocumentKind,
-  DocumentSummary,
   DocumentVersionInfo,
   HealthResult,
   LlmGenerationInfo,
@@ -51,6 +49,7 @@ import type {
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { useProjectMaintenance } from './use-project-maintenance';
+import { useDocumentWorkspace } from './use-document-workspace';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel } from './ChatPanel';
@@ -60,7 +59,6 @@ import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { TaskLogView } from './TaskLogView';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
-import { readMarkdownDocument } from './markdown-import-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
 import { ResizableAppLayout } from './workspace/ResizableAppLayout';
 import { useWorkspaceLayout } from './workspace/use-workspace-layout';
@@ -209,15 +207,6 @@ export function App() {
   const [productionMenuOpen, setProductionMenuOpen] = useState(false);
 
   const [view, setView] = useState<WorkspaceView>('documents');
-  const [documents, setDocuments] = useState<DocumentSummary[]>([]);
-  const [document, setDocument] = useState<DocumentDetail>();
-  const [documentTitle, setDocumentTitle] = useState('');
-  const [documentKind, setDocumentKind] = useState<DocumentKind>('outline');
-  const [documentContent, setDocumentContent] = useState('');
-  const [versions, setVersions] = useState<DocumentVersionInfo[]>([]);
-  const [contentBusy, setContentBusy] = useState(false);
-  const [contentMessage, setContentMessage] = useState('');
-  const [documentCloseConfirmation, setDocumentCloseConfirmation] = useState(false);
   const [detachedPanels, setDetachedPanels] = useState<Partial<Record<WorkspacePanelId, string>>>(
     {},
   );
@@ -261,7 +250,6 @@ export function App() {
     generationId: undefined as string | undefined,
   });
   const nativeLlmRun = useRef<LlmStreamRun | undefined>(undefined);
-  const documentRequest = useRef(0);
   const sceneRequest = useRef(0);
   const detachedSnapshotRef = useRef<Record<string, DetachedPanelSnapshot>>({});
   const detachedRegistryRef = useRef<Record<string, DetachedPanelRegistration>>({});
@@ -278,20 +266,7 @@ export function App() {
   };
   detachedPanelsRef.current = detachedPanels;
   const writable = project?.mode === 'read-write';
-  const documentEditorWritable =
-    writable &&
-    (!document ||
-      ['draft', 'changes_requested', 'published'].includes(
-        document.currentVersion?.state ?? 'draft',
-      ));
   const { layout: workspaceLayout, dispatch: workspaceDispatch } = useWorkspaceLayout(project?.id);
-  const documentDirty = Boolean(
-    documentTitle.trim() &&
-    (!document ||
-      document.title !== documentTitle ||
-      document.kind !== documentKind ||
-      (document.currentVersion?.contentMarkdown ?? '') !== documentContent),
-  );
 
   const syncDetachedPanelForEntity = (panelId: WorkspacePanelId, entityId?: string) => {
     const label = Object.values(detachedRegistryRef.current).find(
@@ -308,6 +283,49 @@ export function App() {
       return next;
     });
   };
+
+  const docs = useDocumentWorkspace({
+    writable,
+    syncDetachedPanel: (entityId) => syncDetachedPanelForEntity('document', entityId),
+    openDocumentWorkspace: () => {
+      setView('documents');
+      workspaceDispatch({ type: 'open', panelId: 'document' });
+    },
+    closeDocumentPanel: () => workspaceDispatch({ type: 'close', panelId: 'document' }),
+  });
+  const {
+    documents,
+    document,
+    documentTitle,
+    documentKind,
+    documentContent,
+    versions,
+    contentBusy,
+    contentMessage,
+    documentCloseConfirmation,
+    documentEditorWritable,
+    documentDirty,
+    setDocuments,
+    setDocumentTitle,
+    setDocumentContent,
+    setContentMessage,
+    setDocumentCloseConfirmation,
+    selectDocument,
+    openDocumentById,
+    newDocument,
+    importMarkdownDocument,
+    saveDocument,
+    submitDocumentReview,
+    requestDocumentChanges,
+    publishDocument,
+    restoreVersion,
+    openCreatedDocument,
+    requestCloseDocument,
+    discardDocumentChanges,
+    saveAndCloseDocument,
+    syncMainDocumentIfSelected,
+    reset: resetDocumentWorkspace,
+  } = docs;
 
   const closeSettings = () => {
     setSettingsOpen(false);
@@ -686,7 +704,7 @@ export function App() {
     generationPollVersion.current += 1;
     projectContentRequest.current += 1;
     conversationRequest.current += 1;
-    documentRequest.current += 1;
+    resetDocumentWorkspace();
     sceneRequest.current += 1;
     await cancelNativeLlmRun();
     setProjectBusy(true);
@@ -766,11 +784,10 @@ export function App() {
     runProjectAction(async () => {
       await callWorker('project.close', {});
       setProject(undefined);
-      setDocuments([]);
+      resetDocumentWorkspace();
       setScenes([]);
       setAssets([]);
       setAsset(undefined);
-      setDocument(undefined);
       setConversation(undefined);
       setMessages([]);
       setGeneration(undefined);
@@ -782,61 +799,6 @@ export function App() {
     setSettingsOpen(true);
     maintenance.clearMaintenanceMessage();
     if (project) void maintenance.inspectCache();
-  };
-
-  const selectDocument = async (summary: DocumentSummary) => {
-    const requestId = ++documentRequest.current;
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      const [detail, history] = await Promise.all([
-        callWorker('document.get', { documentId: summary.id }),
-        callWorker('document.versions', { documentId: summary.id }),
-      ]);
-      if (requestId !== documentRequest.current) return;
-      setDocument(detail);
-      setDocumentTitle(detail.title);
-      setDocumentKind(detail.kind);
-      setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
-      setVersions(history);
-      syncDetachedPanelForEntity('document', detail.id);
-      setView('documents');
-      workspaceDispatch({ type: 'open', panelId: 'document' });
-    } catch (reason) {
-      if (requestId === documentRequest.current) {
-        setContentMessage(reason instanceof Error ? reason.message : '文档加载失败');
-      }
-    } finally {
-      if (requestId === documentRequest.current) setContentBusy(false);
-    }
-  };
-
-  const openDocumentById = async (documentId: string) => {
-    const requestId = ++documentRequest.current;
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      const [detail, history] = await Promise.all([
-        callWorker('document.get', { documentId }),
-        callWorker('document.versions', { documentId }),
-      ]);
-      if (requestId !== documentRequest.current) return;
-      setDocument(detail);
-      setDocumentTitle(detail.title);
-      setDocumentKind(detail.kind);
-      setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
-      setVersions(history);
-      syncDetachedPanelForEntity('document', detail.id);
-      setNavigationMode('project');
-      setView('documents');
-      workspaceDispatch({ type: 'open', panelId: 'document' });
-    } catch (reason) {
-      if (requestId === documentRequest.current) {
-        setContentMessage(reason instanceof Error ? reason.message : '文档加载失败');
-      }
-    } finally {
-      if (requestId === documentRequest.current) setContentBusy(false);
-    }
   };
 
   const openConversationById = async (conversationId: string) => {
@@ -851,163 +813,6 @@ export function App() {
       workspaceDispatch({ type: 'open', panelId: 'conversation' });
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : '来源会话打开失败');
-    }
-  };
-
-  const newDocument = () => {
-    documentRequest.current += 1;
-    setDocument(undefined);
-    setDocumentTitle('');
-    setDocumentKind('note');
-    setDocumentContent('');
-    setVersions([]);
-    syncDetachedPanelForEntity('document');
-    setView('documents');
-    workspaceDispatch({ type: 'open', panelId: 'document' });
-  };
-
-  const importMarkdownDocument = async () => {
-    const selected = await openDialog({
-      directory: false,
-      multiple: false,
-      title: '导入 Markdown 文档',
-      filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
-    });
-    if (typeof selected !== 'string') return;
-
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      const imported = await readMarkdownDocument(selected);
-      const saved = await callWorker('document.draft.save', {
-        title: imported.title,
-        contentMarkdown: imported.contentMarkdown,
-        authorType: 'import',
-      });
-      setDocument(saved);
-      setDocumentTitle(saved.title);
-      setDocumentKind(saved.kind);
-      setDocumentContent(saved.currentVersion?.contentMarkdown ?? imported.contentMarkdown);
-      setDocuments(await callWorker('document.list', {}));
-      setVersions(await callWorker('document.versions', { documentId: saved.id }));
-      syncDetachedPanelForEntity('document', saved.id);
-      setView('documents');
-      workspaceDispatch({ type: 'open', panelId: 'document' });
-      setContentMessage(`已导入为草稿 ${imported.title} · 版本 v${saved.currentVersion?.version}`);
-    } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : 'Markdown 导入失败');
-    } finally {
-      setContentBusy(false);
-    }
-  };
-
-  const saveDocument = async (): Promise<boolean | undefined> => {
-    if (!documentEditorWritable) {
-      setContentMessage('审核中的版本不可编辑，请先退回修改或完成发布。');
-      return false;
-    }
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      const saved = await callWorker('document.draft.save', {
-        documentId: document?.id,
-        kind: documentKind,
-        title: documentTitle,
-        contentMarkdown: documentContent,
-        expectedDocumentRowVersion: document?.rowVersion,
-      });
-      setDocument(saved);
-      setDocuments(await callWorker('document.list', {}));
-      setVersions(await callWorker('document.versions', { documentId: saved.id }));
-      setContentMessage(`已保存草稿 v${saved.currentVersion?.version}`);
-      return true;
-    } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : '保存失败');
-    } finally {
-      setContentBusy(false);
-    }
-  };
-
-  const submitDocumentReview = async () => {
-    if (!document?.currentVersionId || documentDirty) return;
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      await callWorker('document.review.submit', {
-        documentId: document.id,
-        documentVersionId: document.currentVersionId,
-        expectedDocumentRowVersion: document.rowVersion,
-      });
-      const next = await callWorker('document.get', { documentId: document.id });
-      setDocument(next);
-      setVersions(await callWorker('document.versions', { documentId: document.id }));
-      setContentMessage('已提交审核，发布前仍不会进入 LLM 权威上下文');
-    } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : '提交审核失败');
-    } finally {
-      setContentBusy(false);
-    }
-  };
-
-  const requestDocumentChanges = async () => {
-    if (!document?.currentVersionId) return;
-    const comment = window.prompt('请输入退回原因（可选）') ?? undefined;
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      await callWorker('document.review.requestChanges', {
-        documentId: document.id,
-        documentVersionId: document.currentVersionId,
-        expectedDocumentRowVersion: document.rowVersion,
-        comment,
-      });
-      const next = await callWorker('document.get', { documentId: document.id });
-      setDocument(next);
-      setVersions(await callWorker('document.versions', { documentId: document.id }));
-      setContentMessage('已退回修改，可继续编辑后重新提交审核');
-    } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : '退回修改失败');
-    } finally {
-      setContentBusy(false);
-    }
-  };
-
-  const publishDocument = async () => {
-    if (!document?.currentVersionId) return;
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      const result = await callWorker('document.publish', {
-        documentId: document.id,
-        documentVersionId: document.currentVersionId,
-        expectedDocumentRowVersion: document.rowVersion,
-        expectedPublishedVersionId: document.publishedVersionId,
-      });
-      setDocument(result.document);
-      setDocuments(await callWorker('document.list', {}));
-      setVersions(await callWorker('document.versions', { documentId: document.id }));
-      setContentMessage(`已发布权威版本 v${result.publication.publicationNo}`);
-    } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : '发布失败，请检查版本冲突');
-    } finally {
-      setContentBusy(false);
-    }
-  };
-
-  const restoreVersion = async (versionId: string) => {
-    if (!document || !documentEditorWritable) return;
-    setContentBusy(true);
-    try {
-      const restored = await callWorker('document.restore', {
-        documentId: document.id,
-        versionId,
-      });
-      setDocument(restored);
-      setDocumentContent(restored.currentVersion?.contentMarkdown ?? '');
-      setVersions(await callWorker('document.versions', { documentId: document.id }));
-      setContentMessage(`已从历史版本恢复为 v${restored.currentVersion?.version}`);
-    } finally {
-      setContentBusy(false);
     }
   };
 
@@ -1273,15 +1078,7 @@ export function App() {
           messageId: message.id,
           title: `会话产物 ${new Date().toLocaleDateString()}`,
         });
-        setDocument(created.document);
-        setDocumentTitle(created.document.title);
-        setDocumentKind(created.document.kind);
-        setDocumentContent(created.document.currentVersion?.contentMarkdown ?? '');
-        setVersions(await callWorker('document.versions', { documentId: created.document.id }));
-        setDocuments(await callWorker('document.list', {}));
-        syncDetachedPanelForEntity('document', created.document.id);
-        setView('documents');
-        workspaceDispatch({ type: 'open', panelId: 'document' });
+        await openCreatedDocument(created.document);
         setChatMessage(`已创建草稿任务：${created.task.title}，请在编辑器审核后发布`);
       } else if (target === 'memory') {
         await callWorker('chat.message.toMemory', { messageId: message.id });
@@ -1293,35 +1090,6 @@ export function App() {
       }
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : '操作失败');
-    }
-  };
-
-  const requestCloseDocument = () => {
-    if (documentDirty) {
-      setDocumentCloseConfirmation(true);
-      return;
-    }
-    workspaceDispatch({ type: 'close', panelId: 'document' });
-  };
-
-  const discardDocumentChanges = () => {
-    if (document) {
-      setDocumentTitle(document.title);
-      setDocumentKind(document.kind);
-      setDocumentContent(document.currentVersion?.contentMarkdown ?? '');
-    } else {
-      setDocumentTitle('');
-      setDocumentKind('note');
-      setDocumentContent('');
-    }
-    setDocumentCloseConfirmation(false);
-    workspaceDispatch({ type: 'close', panelId: 'document' });
-  };
-
-  const saveAndCloseDocument = async () => {
-    if (await saveDocument()) {
-      setDocumentCloseConfirmation(false);
-      workspaceDispatch({ type: 'close', panelId: 'document' });
     }
   };
 
@@ -1497,18 +1265,6 @@ export function App() {
         });
       }
     }
-  };
-
-  const syncMainDocumentIfSelected = (
-    nextDocument: DocumentDetail,
-    history: DocumentVersionInfo[],
-  ) => {
-    if (document?.id !== nextDocument.id) return;
-    setDocument(nextDocument);
-    setDocumentTitle(nextDocument.title);
-    setDocumentKind(nextDocument.kind);
-    setDocumentContent(nextDocument.currentVersion?.contentMarkdown ?? '');
-    setVersions(history);
   };
 
   const saveDetachedDocument = (label: string) =>
