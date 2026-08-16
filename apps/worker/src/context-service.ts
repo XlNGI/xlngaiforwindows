@@ -39,7 +39,7 @@ export class ContextService {
         sources.push({
           id: document.id,
           type: 'document',
-          scopeType: document.scopeType as ContextSourceInput['scopeType'],
+          scopeType: document.scopeType,
           scopeId: document.scopeId,
           label: document.title,
           content: version.contentMarkdown,
@@ -75,7 +75,7 @@ export class ContextService {
         sources.push({
           id: conversation.id,
           type: 'conversation',
-          scopeType: conversation.scopeType as ContextSourceInput['scopeType'],
+          scopeType: conversation.scopeType,
           scopeId: conversation.scopeId,
           label: '最近相关会话',
           content: messages.map((message) => `${message.role}: ${message.content}`).join('\n\n'),

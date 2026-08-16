@@ -54,6 +54,9 @@ pnpm typecheck
 pnpm test
 pnpm lint
 pnpm format:check
+pnpm audit
+pnpm run sbom:generate
+pnpm license:check
 ```
 
 生成 Windows x64 独立 Worker：

@@ -50,10 +50,10 @@ function required(value: string, name: string): string {
 }
 
 function asConversation(record: ConversationRecord): ConversationInfo {
-  if (!scopeTypes.has(record.scopeType as ConversationScopeType)) {
+  if (!scopeTypes.has(record.scopeType)) {
     throw new Error(`Unsupported conversation scope: ${record.scopeType}`);
   }
-  return record as ConversationInfo;
+  return record;
 }
 
 function sliceConversationPage(

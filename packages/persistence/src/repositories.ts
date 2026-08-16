@@ -20,6 +20,7 @@ import type {
   ChatMessageRepository,
   ConstraintRecord,
   ConstraintRepository,
+  ConversationScopeType,
   ContextSnapshotRecord,
   ContextSnapshotRepository,
   ConversationRecord,
@@ -260,13 +261,24 @@ interface DocumentRow {
   updated_at: string;
 }
 
+function requireConversationScope(value: string): ConversationScopeType {
+  if (value === 'project' || value === 'scene' || value === 'shot') return value;
+  throw new Error(`Unsupported conversation scope: ${value}`);
+}
+
+function optionalConversationScope(
+  value: string | null | undefined,
+): ConversationScopeType | undefined {
+  return value ? requireConversationScope(value) : undefined;
+}
+
 function mapDocument(row: DocumentRow): DocumentRecord {
   return {
     id: row.id,
     projectId: row.project_id,
     kind: row.kind,
     title: row.title,
-    scopeType: row.scope_type,
+    scopeType: requireConversationScope(row.scope_type),
     scopeId: row.scope_id ?? undefined,
     currentVersionId: row.current_version_id ?? undefined,
     publishedVersionId: row.published_version_id ?? undefined,
@@ -307,7 +319,7 @@ function mapDocumentVersion(row: DocumentVersionRow): DocumentVersionRecord {
     state: row.state,
     baseVersionId: row.base_version_id ?? undefined,
     titleSnapshot: row.title_snapshot ?? undefined,
-    scopeTypeSnapshot: row.scope_type_snapshot ?? undefined,
+    scopeTypeSnapshot: optionalConversationScope(row.scope_type_snapshot),
     scopeIdSnapshot: row.scope_id_snapshot ?? undefined,
     authorType: row.author_type,
     authorId: row.author_id ?? undefined,
@@ -844,7 +856,7 @@ function mapConversation(row: ConversationRow): ConversationRecord {
   return {
     id: row.id,
     projectId: row.project_id,
-    scopeType: row.scope_type,
+    scopeType: requireConversationScope(row.scope_type),
     scopeId: row.scope_id ?? undefined,
     title: row.title,
     createdAt: row.created_at,
@@ -1390,7 +1402,7 @@ function mapAgentTask(row: AgentTaskRow): AgentTaskRecord {
     conversationId: row.conversation_id ?? undefined,
     userMessageId: row.user_message_id ?? undefined,
     taskType: row.task_type,
-    scopeType: row.scope_type,
+    scopeType: requireConversationScope(row.scope_type),
     scopeId: row.scope_id ?? undefined,
     title: row.title,
     requestSnapshotJson: row.request_snapshot_json,

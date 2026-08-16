@@ -32,6 +32,12 @@ jobs:
         run: pnpm typecheck
       - name: Test TypeScript workspace
         run: pnpm test
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
+      - name: Generate SBOM
+        run: pnpm run sbom:generate
+      - name: Check licenses
+        run: node scripts/check-licenses.mjs
       - name: Build standalone worker
         run: pnpm worker:sidecar
       - name: Validate M7 offline diagnostics and maintenance sidecar

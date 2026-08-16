@@ -46,7 +46,7 @@ describe('repositories', () => {
       projectId: 'project',
       kind: 'outline',
       title: 'Outline',
-      scopeType: 'project',
+      scopeType: 'project' as const,
       createdAt: 'now',
       updatedAt: 'now',
     });
@@ -588,7 +588,7 @@ describe('repositories', () => {
       projectId: 'project',
       kind: 'outline',
       title: 'Original',
-      scopeType: 'project',
+      scopeType: 'project' as const,
       currentVersionId: 'version-1',
       createdAt: 'now',
       updatedAt: 'now',

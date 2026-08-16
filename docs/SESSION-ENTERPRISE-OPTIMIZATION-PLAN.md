@@ -431,9 +431,9 @@ details
 ### P6
 
 - [~] Desktop 项目维护状态与动作已抽为 `useProjectMaintenance`；其余模块拆分待续；
-- [ ] 领域状态类型完成收紧；
-- [ ] CI 覆盖率、安全扫描、SBOM 和许可证检查接入；
-- [ ] 文档、迁移版本和发布验证记录同步；
+- [x] 领域会话作用域类型已收敛为 `'project' | 'scene' | 'shot'`；
+- [~] CI 已接入生产依赖审计、CycloneDX SBOM 和许可证检查；覆盖率阈值待接入；
+- [x] Schema v16、manifest 迁移、指标和 P6 拆分记录已同步；
 - [ ] Windows 签名、升级和回滚门禁通过。
 
 ### 12.1 实施记录（2026-08-15）
@@ -482,6 +482,8 @@ details
 - `maintenance.metrics` 增加 generation 首 Token、总耗时、成功/失败/取消和 Provider 分类统计；
 - `RequestScheduler` 上报串行请求队列等待，`maintenance.metrics` 返回队列样本、总等待和最慢等待；
 - Desktop 将项目维护状态、备份/恢复/缓存/诊断动作从 `App.tsx` 抽到 `useProjectMaintenance`，`App.tsx` 不再直接持有维护状态；
+- `packages/domain` 将 `ConversationRecord`、`DocumentRecord`、`AgentTaskRecord` 等作用域字段收紧为受限联合，Persistence 映射增加运行时校验；
+- 新增 `pnpm audit`、`pnpm run sbom:generate`、`pnpm license:check`，并接入 CI；
 - Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
 - Desktop 会话栏增加归档筛选、重命名、归档、恢复和加载更多入口；项目维护页增加运行指标摘要；
 - 持久化、Worker、Desktop 测试和 `pnpm typecheck`、`pnpm lint`、`pnpm format:check` 全部通过。

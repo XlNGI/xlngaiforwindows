@@ -1,4 +1,5 @@
 export type ProjectOpenMode = 'read-write' | 'read-only';
+export type ConversationScopeType = 'project' | 'scene' | 'shot';
 
 export interface ProjectRecord {
   id: string;
@@ -30,7 +31,7 @@ export interface DocumentRecord {
   projectId: string;
   kind: string;
   title: string;
-  scopeType: string;
+  scopeType: ConversationScopeType;
   scopeId?: string;
   currentVersionId?: string;
   publishedVersionId?: string;
@@ -63,7 +64,7 @@ export interface DocumentVersionRecord {
     | 'discarded';
   baseVersionId?: string;
   titleSnapshot?: string;
-  scopeTypeSnapshot?: string;
+  scopeTypeSnapshot?: ConversationScopeType;
   scopeIdSnapshot?: string;
   authorType?: 'user' | 'agent' | 'import' | 'migration';
   authorId?: string;
@@ -104,7 +105,7 @@ export interface AgentTaskRecord {
   conversationId?: string;
   userMessageId?: string;
   taskType: AgentTaskType;
-  scopeType: string;
+  scopeType: ConversationScopeType;
   scopeId?: string;
   title: string;
   requestSnapshotJson: string;
@@ -379,7 +380,7 @@ export interface ShotRecord {
 export interface ConversationRecord {
   id: string;
   projectId: string;
-  scopeType: string;
+  scopeType: ConversationScopeType;
   scopeId?: string;
   title: string;
   createdAt: string;
