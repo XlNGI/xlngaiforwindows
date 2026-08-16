@@ -935,6 +935,21 @@ export function App() {
     }
   };
 
+  const openConversationById = async (conversationId: string) => {
+    try {
+      const page = await callWorker('conversation.list', { includeArchived: true });
+      const conversation = page.items.find((item) => item.id === conversationId);
+      if (!conversation) {
+        setChatMessage('来源会话不存在或已被删除。');
+        return;
+      }
+      await selectConversation(conversation);
+      workspaceDispatch({ type: 'open', panelId: 'conversation' });
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '来源会话打开失败');
+    }
+  };
+
   const newDocument = () => {
     documentRequest.current += 1;
     setDocument(undefined);
@@ -2684,6 +2699,7 @@ export function App() {
               <TaskLogView
                 projectId={project?.id}
                 onOpenDocument={(documentId) => void openDocumentById(documentId)}
+                onOpenConversation={(conversationId) => void openConversationById(conversationId)}
               />
             ) : project ? (
               <AssetLibraryView

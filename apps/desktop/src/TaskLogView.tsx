@@ -2,6 +2,7 @@ import {
   AlertCircle,
   ChevronDown,
   Clock3,
+  ExternalLink,
   FileText,
   Image as ImageIcon,
   ListChecks,
@@ -10,12 +11,18 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentTaskDetail, TaskLogItem } from '@ai-video/contracts';
+import type {
+  AgentTaskDetail,
+  ImageGenerationJobInfo,
+  TaskLogItem,
+  VideoGenerationJobInfo,
+} from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 
 interface TaskLogViewProps {
   projectId?: string;
   onOpenDocument?: (documentId: string) => void;
+  onOpenConversation?: (conversationId: string) => void;
 }
 
 const kindLabel: Record<TaskLogItem['kind'], string> = {
@@ -76,9 +83,11 @@ function TaskLogStatus({ status, outcome }: { status: string; outcome?: string }
 function AgentTaskDetailPanel({
   detail,
   onOpenDocument,
+  onOpenConversation,
 }: {
   detail: AgentTaskDetail;
   onOpenDocument?: (documentId: string) => void;
+  onOpenConversation?: (conversationId: string) => void;
 }) {
   const { task, events, documents } = detail;
   return (
@@ -125,6 +134,20 @@ function AgentTaskDetailPanel({
           </div>
         )}
       </dl>
+
+      {(() => {
+        const conversationId = task.conversationId;
+        return onOpenConversation && conversationId ? (
+          <button
+            className="button secondary task-log-open-document"
+            type="button"
+            onClick={() => onOpenConversation(conversationId)}
+          >
+            <ExternalLink size={13} />
+            打开来源会话
+          </button>
+        ) : null;
+      })()}
 
       {(task.errorCode || task.errorMessage) && (
         <div className="task-log-detail-error" role="alert">
@@ -229,10 +252,116 @@ function SourceHint({ item }: { item: TaskLogItem }) {
   );
 }
 
-export function TaskLogView({ projectId, onOpenDocument }: TaskLogViewProps) {
+function summarizeParameters(parameters: Record<string, unknown>): string {
+  const summarized = Object.fromEntries(
+    Object.entries(parameters).map(([key, value]) => {
+      const text = typeof value === 'string' ? value : JSON.stringify(value);
+      const compact = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+      return [key, compact];
+    }),
+  );
+  const json = JSON.stringify(summarized);
+  return json.length > 2_000 ? `${json.slice(0, 2_000)}…` : json;
+}
+
+function MediaTaskDetailPanel({
+  item,
+  detail,
+}: {
+  item: TaskLogItem;
+  detail: ImageGenerationJobInfo | VideoGenerationJobInfo;
+}) {
+  const isImage = item.kind === 'image';
+  return (
+    <div className="task-log-detail-body">
+      <TaskLogStatus status={detail.status} />
+      <dl className="task-log-detail-meta">
+        <div>
+          <dt>任务 ID</dt>
+          <dd>{detail.id}</dd>
+        </div>
+        <div>
+          <dt>适配器</dt>
+          <dd>{detail.adapterKey}</dd>
+        </div>
+        {detail.shotId && (
+          <div>
+            <dt>镜头</dt>
+            <dd>{detail.shotId}</dd>
+          </div>
+        )}
+        <div>
+          <dt>创建时间</dt>
+          <dd>{formatDate(detail.createdAt)}</dd>
+        </div>
+        <div>
+          <dt>更新时间</dt>
+          <dd>{formatDate(detail.updatedAt)}</dd>
+        </div>
+        {!isImage && (
+          <>
+            <div>
+              <dt>资产类型</dt>
+              <dd>{(detail as VideoGenerationJobInfo).assetKind}</dd>
+            </div>
+            <div>
+              <dt>Provider 任务</dt>
+              <dd>{(detail as VideoGenerationJobInfo).providerTaskId ?? '未提交'}</dd>
+            </div>
+            <div>
+              <dt>轮询</dt>
+              <dd>
+                {(detail as VideoGenerationJobInfo).metadata.pollAttempts} 次 · 截止{' '}
+                {(detail as VideoGenerationJobInfo).metadata.pollDeadlineAt
+                  ? formatDate((detail as VideoGenerationJobInfo).metadata.pollDeadlineAt!)
+                  : '无'}
+              </dd>
+            </div>
+          </>
+        )}
+      </dl>
+
+      {detail.error && (
+        <div className="task-log-detail-error" role="alert">
+          <AlertCircle size={15} />
+          <p>{detail.error}</p>
+        </div>
+      )}
+
+      <section className="task-log-detail-section" aria-labelledby="task-log-request-heading">
+        <h3 id="task-log-request-heading">请求参数摘要</h3>
+        <pre className="task-log-request-summary">{summarizeParameters(detail.request)}</pre>
+      </section>
+
+      <section className="task-log-detail-section" aria-labelledby="task-log-results-heading">
+        <h3 id="task-log-results-heading">{isImage ? '图片产物' : '视频产物'}</h3>
+        {detail.results.length > 0 ? (
+          <ul className="task-log-artifacts">
+            {detail.results.map((result) => (
+              <li key={result.id}>
+                <div>
+                  <strong>{isImage ? '图片' : '视频'}</strong>
+                  <span>{result.asset?.relativePath ?? '未落盘'}</span>
+                </div>
+                <small>创建于 {formatDate(result.createdAt)}</small>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="task-log-detail-empty">暂无已落盘产物。</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+export function TaskLogView({ projectId, onOpenDocument, onOpenConversation }: TaskLogViewProps) {
   const [items, setItems] = useState<TaskLogItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<TaskLogItem>();
   const [detail, setDetail] = useState<AgentTaskDetail | null>(null);
+  const [mediaDetail, setMediaDetail] = useState<
+    ImageGenerationJobInfo | VideoGenerationJobInfo | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [detailBusy, setDetailBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -273,6 +402,7 @@ export function TaskLogView({ projectId, onOpenDocument }: TaskLogViewProps) {
     detailRequestRef.current += 1;
     setSelectedItem(undefined);
     setDetail(null);
+    setMediaDetail(null);
     setDetailMessage('');
     setDetailBusy(false);
     void refresh();
@@ -290,9 +420,23 @@ export function TaskLogView({ projectId, onOpenDocument }: TaskLogViewProps) {
     const requestId = ++detailRequestRef.current;
     setSelectedItem(item);
     setDetail(null);
+    setMediaDetail(null);
     setDetailMessage('');
     if (item.kind !== 'agent-document') {
-      setDetailBusy(false);
+      setDetailBusy(true);
+      try {
+        const nextDetail =
+          item.kind === 'image'
+            ? await callWorker('image.generate.get', { jobId: item.sourceId })
+            : await callWorker('video.generate.get', { jobId: item.sourceId });
+        if (requestId === detailRequestRef.current) setMediaDetail(nextDetail);
+      } catch (reason) {
+        if (requestId === detailRequestRef.current) {
+          setDetailMessage(reason instanceof Error ? reason.message : '任务详情读取失败');
+        }
+      } finally {
+        if (requestId === detailRequestRef.current) setDetailBusy(false);
+      }
       return;
     }
 
@@ -313,6 +457,7 @@ export function TaskLogView({ projectId, onOpenDocument }: TaskLogViewProps) {
     detailRequestRef.current += 1;
     setSelectedItem(undefined);
     setDetail(null);
+    setMediaDetail(null);
     setDetailMessage('');
     setDetailBusy(false);
   };
@@ -463,8 +608,14 @@ export function TaskLogView({ projectId, onOpenDocument }: TaskLogViewProps) {
                   <AlertCircle size={15} />
                   <span>{detailMessage}</span>
                 </div>
+              ) : selectedItem.kind !== 'agent-document' && mediaDetail ? (
+                <MediaTaskDetailPanel item={selectedItem} detail={mediaDetail} />
               ) : selectedItem.kind === 'agent-document' && detail ? (
-                <AgentTaskDetailPanel detail={detail} onOpenDocument={onOpenDocument} />
+                <AgentTaskDetailPanel
+                  detail={detail}
+                  onOpenDocument={onOpenDocument}
+                  onOpenConversation={onOpenConversation}
+                />
               ) : selectedItem.kind === 'agent-document' ? (
                 <div className="task-log-detail-loading">暂无任务详情。</div>
               ) : (

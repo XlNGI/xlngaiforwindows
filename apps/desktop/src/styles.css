@@ -1943,6 +1943,22 @@ button {
   justify-self: start;
 }
 
+.task-log-request-summary {
+  overflow: auto;
+  max-height: 180px;
+  margin: 0;
+  padding: 8px;
+  color: #aeb4b7;
+  border: 1px solid #383e41;
+  border-radius: 3px;
+  background: #22272a;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .task-log-row {
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr) auto;

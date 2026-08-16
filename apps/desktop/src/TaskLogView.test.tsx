@@ -1,6 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentTaskDetail, TaskLogItem } from '@ai-video/contracts';
+import type {
+  AgentTaskDetail,
+  ImageGenerationJobInfo,
+  TaskLogItem,
+  VideoGenerationJobInfo,
+} from '@ai-video/contracts';
 import { TaskLogView } from './TaskLogView';
 import { callWorker } from './worker-client';
 
@@ -80,12 +85,77 @@ const agentDetail: AgentTaskDetail = {
   ],
 };
 
+const imageJob: ImageGenerationJobInfo = {
+  id: 'image-job-1',
+  shotId: 'shot-1',
+  adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+  status: 'succeeded',
+  request: { prompt: '电影画面' },
+  results: [
+    {
+      id: 'image-result-1',
+      jobId: 'image-job-1',
+      asset: {
+        id: 'asset-1',
+        projectId: 'project-1',
+        kind: 'generated-image',
+        relativePath: 'assets/images/generated.png',
+        contentHash: 'hash',
+        sizeBytes: 8192,
+        createdAt: '2026-08-16T01:00:00.000Z',
+      },
+      createdAt: '2026-08-16T01:00:00.000Z',
+    },
+  ],
+  createdAt: '2026-08-16T00:59:00.000Z',
+  updatedAt: '2026-08-16T01:01:00.000Z',
+};
+
+const videoJob: VideoGenerationJobInfo = {
+  id: 'video-job-1',
+  projectId: 'project-1',
+  shotId: 'shot-1',
+  adapterKey: 'TEXT_TO_VIDEO:vidu:viduq2:v2',
+  assetKind: 'generated-video',
+  providerTaskId: 'provider-task-1',
+  status: 'succeeded',
+  request: { prompt: '电影片段' },
+  metadata: {
+    providerRegion: 'global',
+    providerProfileId: 'profile-1',
+    modelId: 'model-1',
+    pollAttempts: 3,
+    pollDeadlineAt: '2026-08-16T01:10:00.000Z',
+  },
+  results: [
+    {
+      id: 'video-result-1',
+      jobId: 'video-job-1',
+      asset: {
+        id: 'video-asset-1',
+        projectId: 'project-1',
+        kind: 'generated-video',
+        relativePath: 'assets/videos/generated.mp4',
+        contentHash: 'video-hash',
+        sizeBytes: 102400,
+        createdAt: '2026-08-16T01:05:00.000Z',
+      },
+      createdAt: '2026-08-16T01:05:00.000Z',
+    },
+  ],
+  elapsedMs: 60_000,
+  createdAt: '2026-08-16T00:59:00.000Z',
+  updatedAt: '2026-08-16T01:06:00.000Z',
+};
+
 describe('TaskLogView', () => {
   beforeEach(() => {
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'task.log.list')
         return Promise.resolve({ items: [agentItem, imageItem], nextCursor: undefined });
       if (method === 'agent.task.get') return Promise.resolve(agentDetail);
+      if (method === 'image.generate.get') return Promise.resolve(imageJob);
+      if (method === 'video.generate.get') return Promise.resolve(videoJob);
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
   });
@@ -114,17 +184,38 @@ describe('TaskLogView', () => {
     expect(screen.getByText('0.0001')).toBeInTheDocument();
   });
 
-  it('shows a basic image source hint without requesting Agent task details', async () => {
+  it('loads full image job details without requesting Agent task details', async () => {
     render(<TaskLogView projectId="project-1" />);
 
     fireEvent.click(await screen.findByRole('button', { name: /文本生成图片/ }));
 
-    expect(await screen.findByRole('heading', { name: '图片来源' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '请求参数摘要' })).toBeInTheDocument();
     expect(screen.getByText('image-job-1')).toBeInTheDocument();
-    expect(
-      screen.getByText('当前仅展示生成任务的基础来源信息，详细参数和产物请从对应工作区查看。'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('assets/images/generated.png')).toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('agent.task.get', expect.anything());
+  });
+
+  it('loads full video job details', async () => {
+    const videoItem: TaskLogItem = {
+      ...imageItem,
+      id: 'job:video-1',
+      kind: 'video',
+      title: '文生视频',
+      sourceId: 'video-job-1',
+    };
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'task.log.list')
+        return Promise.resolve({ items: [videoItem], nextCursor: undefined });
+      if (method === 'video.generate.get') return Promise.resolve(videoJob);
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    render(<TaskLogView projectId="project-1" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /文生视频/ }));
+
+    expect(await screen.findByRole('heading', { name: '视频产物' })).toBeInTheDocument();
+    expect(screen.getByText('provider-task-1')).toBeInTheDocument();
+    expect(screen.getByText('assets/videos/generated.mp4')).toBeInTheDocument();
   });
 
   it('opens the source document from an agent detail', async () => {
@@ -136,6 +227,17 @@ describe('TaskLogView', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开文档' }));
 
     expect(onOpenDocument).toHaveBeenCalledWith('document-1');
+  });
+
+  it('opens the source conversation from an agent detail', async () => {
+    const onOpenConversation = vi.fn();
+    render(<TaskLogView projectId="project-1" onOpenConversation={onOpenConversation} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /项目大纲草稿/ }));
+    expect(await screen.findByRole('heading', { name: '事件时间线' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打开来源会话' }));
+
+    expect(onOpenConversation).toHaveBeenCalledWith('conversation-1');
   });
 
   it('closes the selected detail panel without reloading the task list', async () => {

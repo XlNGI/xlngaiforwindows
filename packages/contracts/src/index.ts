@@ -596,6 +596,8 @@ export interface TaskLogItem {
   createdAt: string;
   updatedAt: string;
   sourceId: string;
+  conversationId?: string;
+  shotId?: string;
   documentId?: string;
   documentVersionId?: string;
   providerName?: string;

@@ -904,6 +904,7 @@ export class DocumentWorkflowService {
         ? (database
             .prepare(
               `SELECT tasks.id, tasks.title, tasks.status, tasks.created_at, tasks.updated_at,
+                      tasks.conversation_id,
                       ${AGENT_ATTEMPT_SUMMARY_SELECT},
                       (SELECT artifacts.document_id
                         FROM agent_task_document_artifacts artifacts
@@ -927,6 +928,7 @@ export class DocumentWorkflowService {
             status: string;
             created_at: string;
             updated_at: string;
+            conversation_id: string | null;
             document_id: string | null;
             document_version_id: string | null;
             provider_name: string | null;
@@ -939,7 +941,7 @@ export class DocumentWorkflowService {
       const jobs = includeJobs
         ? (database
             .prepare(
-              `SELECT id, adapter_key, status, created_at, updated_at
+              `SELECT id, adapter_key, shot_id, status, created_at, updated_at
                FROM generation_jobs WHERE project_id = ?${params.status ? ' AND status = ?' : ''}
                ORDER BY updated_at DESC, id DESC LIMIT ?`,
             )
@@ -948,6 +950,7 @@ export class DocumentWorkflowService {
             ) as Array<{
             id: string;
             adapter_key: string;
+            shot_id: string | null;
             status: string;
             created_at: string;
             updated_at: string;
@@ -962,6 +965,7 @@ export class DocumentWorkflowService {
           createdAt: task.created_at,
           updatedAt: task.updated_at,
           sourceId: task.id,
+          conversationId: task.conversation_id ?? undefined,
           documentId: task.document_id ?? undefined,
           documentVersionId: task.document_version_id ?? undefined,
           providerName: task.provider_name ?? undefined,
@@ -979,6 +983,7 @@ export class DocumentWorkflowService {
             createdAt: job.created_at,
             updatedAt: job.updated_at,
             sourceId: job.id,
+            shotId: job.shot_id ?? undefined,
           }))
           .filter((item) => !params.kind || item.kind === params.kind),
       ].sort(
