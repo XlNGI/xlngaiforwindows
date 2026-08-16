@@ -1380,7 +1380,7 @@ agent.task.cancelled
 - `task.log.list` 已支持 `kind/status/cursor` 分页并返回 `nextCursor`，Desktop 已增加类型/状态筛选和加载更多；
 - 聚合 Agent、图片和视频任务，不改变各领域底层状态机；
 - Desktop 已新增任务日志工作区并复用现有工作区框架；Agent 任务详情支持状态、错误、事件时间线和文档产物，图片/视频条目显示基础来源；独立任务日志窗口入口尚未完成；
-- 模型、Token、费用摘要默认展示，Provider step 详情按需展开；上下文来源、来源跳转和图片/视频完整详情仍待补齐；
+- 模型、Token、费用摘要已默认展示；Provider step 详情按需展开；上下文来源、来源跳转和图片/视频完整详情仍待补齐；
 - Agent 文档任务可打开草稿/正式文档/来源会话；
 - 图片/视频任务可打开素材/来源镜头；
 - 支持取消、重试、继续审核和冲突处理；
@@ -1609,4 +1609,5 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-16 | P4/P5 | 基础闭环完成 | Desktop 17 个测试文件/88 项；Worker 18 个测试文件/131 项；草稿、提交审核、要求修改、发布、文档独立窗口实体隔离和权威上下文隔离通过 | 自动意图触发、真实 Provider tool loop、差异视图、放弃操作和动态模型预算尚未完成 |
 | 2026-08-16 | P6 | 详情闭环部分完成 | `task.log.list` 聚合 Agent/图片/视频任务；Agent 详情展示错误、事件时间线和文档产物；任务日志空态、刷新和详情 UI 已验证 | 来源跳转、筛选分页、自动刷新、模型/Token/费用和图片/视频完整详情待补 |
 | 2026-08-16 | P6 | 筛选分页完成 | `task.log.list` 支持 `kind/status/cursor` 分页并返回 `nextCursor`；Desktop 增加类型/状态筛选和加载更多；Worker 140 项、Desktop 90 项测试通过 | 来源跳转、自动刷新、模型/Token/费用和图片/视频完整详情待补 |
+| 2026-08-16 | P6 | 摘要展示完成 | Agent 任务和任务日志带出最新 attempt 的 Provider、模型、输入/输出 Token 和费用摘要；Desktop 详情面板展示 | Provider step 详情、来源跳转、自动刷新和图片/视频完整详情待补 |
 | 2026-08-16 | P8 | 自动门禁完成 | `pnpm test`（Desktop 88、Worker 131、Persistence 18）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 41 项测试和 `cargo fmt --check` 全部通过 | Windows 独立窗口实机、端口冲突恢复、迁移备份恢复演练未在本轮自动化验证 |

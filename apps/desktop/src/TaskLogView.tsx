@@ -97,6 +97,26 @@ function AgentTaskDetailPanel({ detail }: { detail: AgentTaskDetail }) {
             <dd>{formatDate(task.completedAt)}</dd>
           </div>
         )}
+        {(task.providerName || task.modelName) && (
+          <div>
+            <dt>模型</dt>
+            <dd>{[task.providerName, task.modelName].filter(Boolean).join(' · ')}</dd>
+          </div>
+        )}
+        {(task.inputTokens !== undefined || task.outputTokens !== undefined) && (
+          <div>
+            <dt>Token</dt>
+            <dd>
+              输入 {task.inputTokens ?? 0} · 输出 {task.outputTokens ?? 0}
+            </dd>
+          </div>
+        )}
+        {task.estimatedCost && (
+          <div>
+            <dt>费用</dt>
+            <dd>{task.estimatedCost}</dd>
+          </div>
+        )}
       </dl>
 
       {(task.errorCode || task.errorMessage) && (

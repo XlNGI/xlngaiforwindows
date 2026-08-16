@@ -34,6 +34,38 @@ import { ProjectService } from './project-service.js';
 const LOCAL_USER = 'local-user';
 const MAX_DOCUMENT_LENGTH = 1_000_000;
 const MAX_TITLE_LENGTH = 200;
+const AGENT_ATTEMPT_SUMMARY_SELECT = `
+  (SELECT attempts.provider_name_snapshot
+     FROM agent_task_generations links
+     INNER JOIN llm_generation_attempts attempts
+       ON attempts.generation_id = links.generation_id
+    WHERE links.task_id = tasks.id
+    ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1) AS provider_name,
+  (SELECT attempts.model_name_snapshot
+     FROM agent_task_generations links
+     INNER JOIN llm_generation_attempts attempts
+       ON attempts.generation_id = links.generation_id
+    WHERE links.task_id = tasks.id
+    ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1) AS model_name,
+  (SELECT attempts.input_tokens
+     FROM agent_task_generations links
+     INNER JOIN llm_generation_attempts attempts
+       ON attempts.generation_id = links.generation_id
+    WHERE links.task_id = tasks.id
+    ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1) AS input_tokens,
+  (SELECT attempts.output_tokens
+     FROM agent_task_generations links
+     INNER JOIN llm_generation_attempts attempts
+       ON attempts.generation_id = links.generation_id
+    WHERE links.task_id = tasks.id
+    ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1) AS output_tokens,
+  (SELECT attempts.estimated_cost
+     FROM agent_task_generations links
+     INNER JOIN llm_generation_attempts attempts
+       ON attempts.generation_id = links.generation_id
+    WHERE links.task_id = tasks.id
+    ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1) AS estimated_cost
+`;
 
 type WorkflowErrorCode =
   'DOCUMENT_BASE_CONFLICT' | 'IDEMPOTENCY_KEY_REUSED' | 'CONFLICT' | 'INVALID_STATE';
@@ -102,6 +134,11 @@ interface AgentTaskRow {
   completed_at: string | null;
   phase: AgentTaskInfo['phase'];
   row_version: number;
+  provider_name?: string;
+  model_name?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  estimated_cost?: string;
 }
 
 interface AgentTaskEventRow {
@@ -265,6 +302,11 @@ function toTask(row: AgentTaskRow): AgentTaskInfo {
     completedAt: row.completed_at ?? undefined,
     phase: row.phase,
     rowVersion: row.row_version,
+    providerName: row.provider_name ?? undefined,
+    modelName: row.model_name ?? undefined,
+    inputTokens: row.input_tokens ?? undefined,
+    outputTokens: row.output_tokens ?? undefined,
+    estimatedCost: row.estimated_cost ?? undefined,
   };
 }
 
@@ -801,14 +843,17 @@ export class DocumentWorkflowService {
       const rows = params.conversationId
         ? (database
             .prepare(
-              `SELECT * FROM agent_tasks
-               WHERE project_id = ? AND conversation_id = ?
-               ORDER BY updated_at DESC, id DESC LIMIT ?`,
+              `SELECT tasks.*, ${AGENT_ATTEMPT_SUMMARY_SELECT}
+               FROM agent_tasks tasks
+               WHERE tasks.project_id = ? AND tasks.conversation_id = ?
+               ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT ?`,
             )
             .all(project.id, params.conversationId, limit) as AgentTaskRow[])
         : (database
             .prepare(
-              'SELECT * FROM agent_tasks WHERE project_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?',
+              `SELECT tasks.*, ${AGENT_ATTEMPT_SUMMARY_SELECT}
+               FROM agent_tasks tasks
+               WHERE tasks.project_id = ? ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT ?`,
             )
             .all(project.id, limit) as AgentTaskRow[]);
       return rows.map(toTask);
@@ -859,6 +904,7 @@ export class DocumentWorkflowService {
         ? (database
             .prepare(
               `SELECT tasks.id, tasks.title, tasks.status, tasks.created_at, tasks.updated_at,
+                      ${AGENT_ATTEMPT_SUMMARY_SELECT},
                       (SELECT artifacts.document_id
                         FROM agent_task_document_artifacts artifacts
                        WHERE artifacts.task_id = tasks.id
@@ -883,6 +929,11 @@ export class DocumentWorkflowService {
             updated_at: string;
             document_id: string | null;
             document_version_id: string | null;
+            provider_name: string | null;
+            model_name: string | null;
+            input_tokens: number | null;
+            output_tokens: number | null;
+            estimated_cost: string | null;
           }>)
         : [];
       const jobs = includeJobs
@@ -913,6 +964,11 @@ export class DocumentWorkflowService {
           sourceId: task.id,
           documentId: task.document_id ?? undefined,
           documentVersionId: task.document_version_id ?? undefined,
+          providerName: task.provider_name ?? undefined,
+          modelName: task.model_name ?? undefined,
+          inputTokens: task.input_tokens ?? undefined,
+          outputTokens: task.output_tokens ?? undefined,
+          estimatedCost: task.estimated_cost ?? undefined,
         })),
         ...jobs
           .map((job): TaskLogItem => ({
@@ -1451,8 +1507,12 @@ export class DocumentWorkflowService {
     project: OpenProject,
     taskId: string,
   ): AgentTaskRow {
-    const task = database.prepare('SELECT * FROM agent_tasks WHERE id = ?').get(taskId) as
-      AgentTaskRow | undefined;
+    const task = database
+      .prepare(
+        `SELECT tasks.*, ${AGENT_ATTEMPT_SUMMARY_SELECT}
+         FROM agent_tasks tasks WHERE tasks.id = ?`,
+      )
+      .get(taskId) as AgentTaskRow | undefined;
     if (!task || task.project_id !== project.id) throw new Error('Agent task was not found.');
     return task;
   }

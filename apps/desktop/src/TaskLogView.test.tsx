@@ -44,6 +44,11 @@ const agentDetail: AgentTaskDetail = {
     createdAt: '2026-08-16T01:00:00.000Z',
     updatedAt: '2026-08-16T01:02:00.000Z',
     rowVersion: 3,
+    providerName: 'OpenAI',
+    modelName: 'gpt-test',
+    inputTokens: 100,
+    outputTokens: 20,
+    estimatedCost: '0.0001',
   },
   events: [
     {
@@ -104,6 +109,9 @@ describe('TaskLogView', () => {
     expect(screen.getByText('document.draft.created')).toBeInTheDocument();
     expect(screen.getByText('已创建可审阅草稿。')).toBeInTheDocument();
     expect(screen.getByText(/版本/)).toHaveTextContent('version-1');
+    expect(screen.getByText('OpenAI · gpt-test')).toBeInTheDocument();
+    expect(screen.getByText('输入 100 · 输出 20')).toBeInTheDocument();
+    expect(screen.getByText('0.0001')).toBeInTheDocument();
   });
 
   it('shows a basic image source hint without requesting Agent task details', async () => {

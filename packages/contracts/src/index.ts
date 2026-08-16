@@ -535,6 +535,11 @@ export interface AgentTaskInfo {
   completedAt?: string;
   phase: AgentTaskPhase;
   rowVersion: number;
+  providerName?: string;
+  modelName?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  estimatedCost?: string;
 }
 
 export interface AgentTaskEventInfo {
@@ -593,6 +598,11 @@ export interface TaskLogItem {
   sourceId: string;
   documentId?: string;
   documentVersionId?: string;
+  providerName?: string;
+  modelName?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  estimatedCost?: string;
 }
 
 export type TaskLogKind = TaskLogItem['kind'];
