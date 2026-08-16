@@ -1,4 +1,4 @@
-﻿import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -20,6 +20,7 @@ import {
   MIGRATION_V13,
   migrateDatabase,
   openProjectDatabase,
+  rewriteLegacyContextSnapshots,
 } from './index.js';
 
 const temporaryDirectories: string[] = [];
@@ -38,8 +39,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(15);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 15 });
+    expect(migrateDatabase(database)).toBe(16);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 16 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -75,6 +76,64 @@ describe('project database', () => {
         .prepare("SELECT name FROM pragma_table_info('documents') WHERE name = ?")
         .get('published_version_id'),
     ).toMatchObject({ name: 'published_version_id' });
+    database.close();
+  });
+
+  it('rewrites legacy context snapshots to manifests', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Manifest', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO context_snapshots (id, project_id, purpose, content_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'legacy-snapshot',
+        'project',
+        'llm-generation',
+        JSON.stringify({
+          version: 1,
+          projectId: 'project',
+          projectName: 'Manifest',
+          scope: { type: 'project', label: '项目' },
+          systemInstruction: 'secret-instruction',
+          rendered: 'full-rendered-body',
+          estimatedTokens: 100,
+          budgetTokens: 1_000,
+          sources: [
+            {
+              id: 'document',
+              type: 'document',
+              scopeType: 'project',
+              label: 'Doc',
+              version: 1,
+              versionId: 'version-1',
+              originalCharacters: 10,
+              includedCharacters: 10,
+              truncated: false,
+              content: 'full-document-body',
+            },
+          ],
+        }),
+        'now',
+      );
+
+    expect(rewriteLegacyContextSnapshots(database)).toBe(1);
+    const row = database
+      .prepare('SELECT content_json FROM context_snapshots WHERE id = ?')
+      .get('legacy-snapshot') as { content_json: string };
+    const manifest = JSON.parse(row.content_json) as Record<string, unknown>;
+    expect(manifest).toMatchObject({ version: 1, projectId: 'project' });
+    expect(row.content_json).not.toContain('secret-instruction');
+    expect(row.content_json).not.toContain('full-rendered-body');
+    expect(row.content_json).not.toContain('full-document-body');
+    expect((manifest.sources as Array<Record<string, unknown>>)[0]).toMatchObject({
+      id: 'document',
+      versionId: 'version-1',
+    });
     database.close();
   });
 
@@ -243,7 +302,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(15);
+    expect(migrateDatabase(database)).toBe(16);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -270,7 +329,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(15);
+    expect(migrateDatabase(database)).toBe(16);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -332,7 +391,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(15);
+    expect(migrateDatabase(database)).toBe(16);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -380,7 +439,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(15);
+    expect(migrateDatabase(database)).toBe(16);
     expect(
       database
         .prepare(
@@ -453,8 +512,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(15);
-    expect(migrateDatabase(database)).toBe(15);
+    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(16);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -609,7 +668,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(15);
+    expect(migrateDatabase(database)).toBe(16);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -647,7 +706,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 15 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 16 });
     database.close();
   });
 });

@@ -20,6 +20,7 @@ import {
   MIGRATION_V15,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
+import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -189,6 +190,14 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(15, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 15) {
+    database.transaction(() => {
+      rewriteLegacyContextSnapshots(database);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(16, now);
     })();
   }
   return getSchemaVersion(database);
