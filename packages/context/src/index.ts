@@ -43,6 +43,27 @@ export interface ProductionContext {
   rendered: string;
 }
 
+export interface ProductionContextManifest {
+  version: 1;
+  projectId: string;
+  projectName: string;
+  scope: ContextScope;
+  estimatedTokens: number;
+  budgetTokens: number;
+  sources: Array<{
+    id: string;
+    type: ContextSourceReference['type'];
+    scopeType: ContextSourceReference['scopeType'];
+    scopeId?: string;
+    label: string;
+    version?: number;
+    versionId?: string;
+    originalCharacters: number;
+    includedCharacters: number;
+    truncated: boolean;
+  }>;
+}
+
 export interface CompileContextInput {
   projectId: string;
   projectName: string;
@@ -157,6 +178,29 @@ export function compileProductionContext(input: CompileContextInput): Production
     estimatedTokens: estimateTokenCount(`${systemInstruction}${rendered}`),
     budgetTokens,
     rendered,
+  };
+}
+
+export function toContextManifest(context: ProductionContext): ProductionContextManifest {
+  return {
+    version: 1,
+    projectId: context.projectId,
+    projectName: context.projectName,
+    scope: context.scope,
+    estimatedTokens: context.estimatedTokens,
+    budgetTokens: context.budgetTokens,
+    sources: context.sources.map((source) => ({
+      id: source.id,
+      type: source.type,
+      scopeType: source.scopeType,
+      scopeId: source.scopeId,
+      label: source.label,
+      version: source.version,
+      versionId: source.versionId,
+      originalCharacters: source.originalCharacters,
+      includedCharacters: source.includedCharacters,
+      truncated: source.truncated,
+    })),
   };
 }
 

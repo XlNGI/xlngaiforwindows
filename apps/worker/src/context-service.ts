@@ -4,6 +4,7 @@ import {
   compileProductionContext,
   extractiveSummary,
   sourceSummaryKey,
+  toContextManifest,
   type ContextScope,
   type ContextSourceInput,
   type ProductionContext,
@@ -127,7 +128,7 @@ export class ContextService {
         id,
         projectId: project.id,
         purpose,
-        contentJson: JSON.stringify(context),
+        contentJson: JSON.stringify(toContextManifest(context)),
         createdAt: new Date().toISOString(),
       });
       return id;

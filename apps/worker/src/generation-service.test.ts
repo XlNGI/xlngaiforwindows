@@ -84,6 +84,35 @@ describe('GenerationService', () => {
     );
   });
 
+  it('persists a context manifest without full rendered text', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
+      stream: (request) => {
+        request.onDelta('第一段');
+        return Promise.resolve({ model: 'test-model', content: '第一段', toolCalls: [] });
+      },
+    };
+    const { content, conversation, generations, projects } = await setup(provider);
+    const started = generations.generate(conversation.id, '生成测试');
+    await expect.poll(() => generations.get(started.generationId).status).toBe('complete');
+    content.listMessages({ conversationId: conversation.id });
+
+    projects.access(false, (database, project) => {
+      const row = database
+        .prepare(
+          `SELECT content_json FROM context_snapshots
+           WHERE project_id = ? AND purpose = 'llm-generation'
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(project.id) as { content_json: string };
+      const manifest = JSON.parse(row.content_json) as Record<string, unknown>;
+      expect(manifest).toMatchObject({ version: 1 });
+      expect(Array.isArray(manifest.sources)).toBe(true);
+      expect(row.content_json).not.toContain('systemInstruction');
+      expect(row.content_json).not.toContain('rendered');
+    });
+  });
+
   it('reconstructs a terminal generation from SQLite after a Worker restart', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),

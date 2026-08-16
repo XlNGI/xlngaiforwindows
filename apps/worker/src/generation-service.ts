@@ -16,7 +16,7 @@ import type {
   NormalizedLlmUsage,
   WorkerGenerationMetric,
 } from '@ai-video/contracts';
-import type { ProductionContext } from '@ai-video/context';
+import { toContextManifest, type ProductionContext } from '@ai-video/context';
 import type {
   LlmGenerationAttemptRecord,
   LlmGenerationRecord,
@@ -646,7 +646,7 @@ export class GenerationService {
           id: snapshotId,
           projectId: project.id,
           purpose: 'llm-generation',
-          contentJson: JSON.stringify(compiled),
+          contentJson: JSON.stringify(toContextManifest(compiled)),
           createdAt: startedAt,
         });
         if (!existingUser) repositories.chatMessages.save(userMessage);
