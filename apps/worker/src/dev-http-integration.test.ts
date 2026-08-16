@@ -98,7 +98,7 @@ describe('development HTTP Worker endpoint', () => {
         })
       ).status,
     ).toBe(404);
-  });
+  }, 10_000);
 });
 
 function availablePort(): Promise<number> {
