@@ -6,6 +6,7 @@ import {
   IPC_PROTOCOL_VERSION,
   type SceneInfo,
   type ShotInfo,
+  type WorkerMetricsSnapshot,
   type WorkerRequest,
 } from '@ai-video/contracts';
 import { handleRequest, parseRequest } from './handler.js';
@@ -27,6 +28,27 @@ describe('worker handler', () => {
 
     expect(response.ok).toBe(true);
     if (response.ok) expect(response.result).toMatchObject({ protocolVersion: 1 });
+  });
+
+  it('exposes accumulated worker metrics after handling requests', async () => {
+    await handleRequest({
+      id: 'health-before-metrics',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'health',
+      params: {},
+    });
+    const response = await handleRequest({
+      id: 'worker-metrics',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'maintenance.metrics',
+      params: {},
+    } as unknown as WorkerRequest);
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      const metrics = response.result as WorkerMetricsSnapshot;
+      expect(metrics.totals.requests).toBeGreaterThanOrEqual(2);
+    }
   });
 
   it('creates and writes the SQLite probe database', async () => {

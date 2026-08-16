@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { WorkerGenerationMetric } from '@ai-video/contracts';
 import type { LlmProvider, LlmStreamRequest } from '@ai-video/llm';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
@@ -24,6 +25,7 @@ async function setup(
   provider: LlmProvider,
   selectionResolver?: LlmSelectionResolver,
   usageIndexer?: LlmUsageIndexer,
+  generationMetricReporter?: (metric: WorkerGenerationMetric) => void,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-generation-'));
   directories.push(directory);
@@ -41,6 +43,7 @@ async function setup(
     generations: new GenerationService(projects, content, new ContextService(projects), provider, {
       selectionResolver,
       usageIndexer,
+      generationMetricReporter,
     }),
   };
 }
@@ -110,6 +113,29 @@ describe('GenerationService', () => {
       expect(Array.isArray(manifest.sources)).toBe(true);
       expect(row.content_json).not.toContain('systemInstruction');
       expect(row.content_json).not.toContain('rendered');
+    });
+  });
+
+  it('reports complete generation metrics through the callback', async () => {
+    const reported: WorkerGenerationMetric[] = [];
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
+      stream: (request) => {
+        request.onDelta('第一段');
+        return Promise.resolve({ model: 'test-model', content: '第一段', toolCalls: [] });
+      },
+    };
+    const { conversation, generations } = await setup(provider, undefined, undefined, (metric) =>
+      reported.push(metric),
+    );
+    const started = generations.generate(conversation.id, '生成测试');
+    await expect.poll(() => generations.get(started.generationId).status).toBe('complete');
+
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toMatchObject({
+      generationId: started.generationId,
+      providerName: 'Test',
+      status: 'complete',
     });
   });
 
