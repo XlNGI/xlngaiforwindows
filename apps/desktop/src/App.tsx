@@ -29,7 +29,6 @@ import type {
   AssetInfo,
   AssetSourceInfo,
   ChatMessageInfo,
-  ConversationInfo,
   ConversationScopeType,
   DocumentKind,
   DocumentVersionInfo,
@@ -50,6 +49,7 @@ import type {
 import { callWorker } from './worker-client';
 import { useProjectMaintenance } from './use-project-maintenance';
 import { useDocumentWorkspace } from './use-document-workspace';
+import { useConversationWorkspace } from './use-conversation-workspace';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel } from './ChatPanel';
@@ -221,13 +221,10 @@ export function App() {
   const [focusedSource, setFocusedSource] = useState<AssetSourceInfo>();
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
-  const [conversations, setConversations] = useState<ConversationInfo[]>([]);
-  const [conversationNextCursor, setConversationNextCursor] = useState<string>();
-  const [showArchivedConversations, setShowArchivedConversations] = useState(false);
-  const [conversation, setConversation] = useState<ConversationInfo>();
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatMessage, setChatMessage] = useState('');
+  const [contextPreview, setContextPreview] = useState<ProductionContextInfo>();
   const [llmStatus, setLlmStatus] = useState<LlmStatusResult>();
   const [initialLlmSelectionValue] = useState(initialLlmSelection);
   const [llmProfiles, setLlmProfiles] = useState<ProviderProfileInfo[]>([]);
@@ -238,11 +235,9 @@ export function App() {
   const [selectedLlmModelId, setSelectedLlmModelId] = useState(
     initialLlmSelectionValue.modelId ?? '',
   );
-  const [contextPreview, setContextPreview] = useState<ProductionContextInfo>();
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
-  const conversationRequest = useRef(0);
   const generationPollVersion = useRef(0);
   const generationPollOwner = useRef({
     projectId: undefined as string | undefined,
@@ -259,11 +254,6 @@ export function App() {
     (action: DetachedPanelAction, label: string, envelope: DetachedPanelEnvelope<unknown>) => void
   >(() => undefined);
 
-  generationPollOwner.current = {
-    projectId: project?.id,
-    conversationId: conversation?.id,
-    generationId: generation?.generationId,
-  };
   detachedPanelsRef.current = detachedPanels;
   const writable = project?.mode === 'read-write';
   const { layout: workspaceLayout, dispatch: workspaceDispatch } = useWorkspaceLayout(project?.id);
@@ -477,6 +467,51 @@ export function App() {
     }
   };
 
+  const cancelGenerationForConversation = async (conversationId: string) => {
+    if (
+      generation &&
+      isGenerationActive(generation) &&
+      generation.conversationId !== conversationId
+    ) {
+      if (generation.executionMode === 'native') await cancelNativeLlmRun();
+      setGeneration(
+        await callWorker('llm.generation.cancel', { generationId: generation.generationId }),
+      );
+    }
+  };
+
+  const conversationWorkspace = useConversationWorkspace({
+    projectId: project?.id,
+    scopeAvailable,
+    scopeType,
+    scopeId,
+    setMessages,
+    setContextPreview,
+    setChatMessage,
+    onCancelGenerationForConversation: cancelGenerationForConversation,
+  });
+  const {
+    conversations,
+    conversation,
+    conversationNextCursor,
+    showArchivedConversations,
+    setShowArchivedConversations,
+    conversationRequest,
+    createConversation,
+    renameConversation,
+    archiveConversation,
+    restoreConversation,
+    loadMoreConversations,
+    selectConversation,
+    reset: resetConversationWorkspace,
+  } = conversationWorkspace;
+
+  generationPollOwner.current = {
+    projectId: project?.id,
+    conversationId: conversation?.id,
+    generationId: generation?.generationId,
+  };
+
   const checkRuntime = async () => {
     setState('checking');
     setError('');
@@ -609,51 +644,6 @@ export function App() {
   }, [project?.id]);
 
   useEffect(() => {
-    const requestId = ++conversationRequest.current;
-    let active = true;
-    if (!project || !scopeAvailable) {
-      setConversations([]);
-      setConversationNextCursor(undefined);
-      setConversation(undefined);
-      setMessages([]);
-      setContextPreview(undefined);
-      return;
-    }
-    void (async () => {
-      try {
-        const page = await callWorker('conversation.list', {
-          scopeType,
-          scopeId,
-          includeArchived: showArchivedConversations,
-        });
-        const items = page.items;
-        if (!active || requestId !== conversationRequest.current) return;
-        const selected = items[0];
-        const [messagePage, preview] = selected
-          ? await Promise.all([
-              callWorker('chat.message.list', { conversationId: selected.id }),
-              callWorker('context.preview', { conversationId: selected.id }),
-            ])
-          : [undefined, undefined];
-        if (!active || requestId !== conversationRequest.current) return;
-        setConversations(items);
-        setConversationNextCursor(page.nextCursor);
-        setConversation(selected);
-        setMessages(messagePage?.items ?? []);
-        setContextPreview(preview);
-        setChatMessage('');
-      } catch (reason) {
-        if (active && requestId === conversationRequest.current) {
-          setChatMessage(reason instanceof Error ? reason.message : '会话加载失败');
-        }
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [project?.id, scopeType, scopeId, showArchivedConversations]);
-
-  useEffect(() => {
     if (!generation || generation.executionMode === 'native' || generation.status !== 'streaming')
       return;
     const projectId = project?.id;
@@ -703,7 +693,7 @@ export function App() {
     const requestId = ++projectActionRequest.current;
     generationPollVersion.current += 1;
     projectContentRequest.current += 1;
-    conversationRequest.current += 1;
+    resetConversationWorkspace();
     resetDocumentWorkspace();
     sceneRequest.current += 1;
     await cancelNativeLlmRun();
@@ -788,8 +778,7 @@ export function App() {
       setScenes([]);
       setAssets([]);
       setAsset(undefined);
-      setConversation(undefined);
-      setMessages([]);
+      resetConversationWorkspace();
       setGeneration(undefined);
       return '项目已安全关闭';
     });
@@ -882,122 +871,6 @@ export function App() {
     }
     setNavigationMode('production');
     setContentMessage(`已定位来源任务 ${source.jobId}`);
-  };
-
-  const createConversation = async () => {
-    if (!scopeAvailable) return;
-    const requestId = ++conversationRequest.current;
-    generationPollVersion.current += 1;
-    try {
-      const created = await callWorker('conversation.create', { scopeType, scopeId });
-      const preview = await callWorker('context.preview', { conversationId: created.id });
-      if (requestId !== conversationRequest.current) return;
-      setConversations((current) => [created, ...current]);
-      setConversation(created);
-      setMessages([]);
-      setContextPreview(preview);
-    } catch (reason) {
-      if (requestId === conversationRequest.current) {
-        setChatMessage(reason instanceof Error ? reason.message : '会话创建失败');
-      }
-    }
-  };
-
-  const renameConversation = async (conversationId: string, title: string) => {
-    try {
-      const updated = await callWorker('conversation.update', { conversationId, title });
-      setConversations((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      setConversation((current) => (current?.id === updated.id ? updated : current));
-    } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '会话重命名失败');
-    }
-  };
-
-  const archiveConversation = async (conversationId: string) => {
-    try {
-      const updated = await callWorker('conversation.archive', { conversationId });
-      if (!showArchivedConversations) {
-        setConversations((current) => current.filter((item) => item.id !== conversationId));
-        setConversation((current) => (current?.id === conversationId ? undefined : current));
-      } else {
-        setConversations((current) =>
-          current.map((item) => (item.id === updated.id ? updated : item)),
-        );
-        setConversation((current) => (current?.id === updated.id ? updated : current));
-      }
-    } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '会话归档失败');
-    }
-  };
-
-  const restoreConversation = async (conversationId: string) => {
-    try {
-      const updated = await callWorker('conversation.restore', { conversationId });
-      setConversations((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      setConversation((current) => (current?.id === updated.id ? updated : current));
-    } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '会话恢复失败');
-    }
-  };
-
-  const loadMoreConversations = async () => {
-    if (!project || !conversationNextCursor) return;
-    const requestId = conversationRequest.current;
-    try {
-      const page = await callWorker('conversation.list', {
-        scopeType,
-        scopeId,
-        includeArchived: showArchivedConversations,
-        limit: 50,
-        cursor: conversationNextCursor,
-      });
-      if (requestId !== conversationRequest.current) return;
-      setConversations((current) => {
-        const known = new Set(current.map((item) => item.id));
-        return [...current, ...page.items.filter((item) => !known.has(item.id))];
-      });
-      setConversationNextCursor(page.nextCursor);
-    } catch (reason) {
-      if (requestId === conversationRequest.current) {
-        setChatMessage(reason instanceof Error ? reason.message : '会话加载失败');
-      }
-    }
-  };
-
-  const selectConversation = async (selected: ConversationInfo) => {
-    const requestId = ++conversationRequest.current;
-    generationPollVersion.current += 1;
-    setChatMessage('');
-    try {
-      if (
-        generation &&
-        isGenerationActive(generation) &&
-        generation.conversationId !== selected.id
-      ) {
-        if (generation.executionMode === 'native') await cancelNativeLlmRun();
-        const cancelled = await callWorker('llm.generation.cancel', {
-          generationId: generation.generationId,
-        });
-        if (requestId !== conversationRequest.current) return;
-        setGeneration(cancelled);
-      }
-      setConversation(selected);
-      const [messagePage, preview] = await Promise.all([
-        callWorker('chat.message.list', { conversationId: selected.id }),
-        callWorker('context.preview', { conversationId: selected.id }),
-      ]);
-      if (requestId !== conversationRequest.current) return;
-      setMessages(messagePage.items);
-      setContextPreview(preview);
-    } catch (reason) {
-      if (requestId === conversationRequest.current) {
-        setChatMessage(reason instanceof Error ? reason.message : '会话加载失败');
-      }
-    }
   };
 
   const sendMessage = async (composerValue = composer) => {
