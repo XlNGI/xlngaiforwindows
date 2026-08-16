@@ -1598,6 +1598,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 日期 | 阶段 | 结果 | 验证证据 | 备注 |
 |---|---|---|---|---|
 | 2026-08-16 | P1 / P3 基础合同 | Provider step、step-local authorization Repository 已接入；LLM Responses 适配器可解析 function-call 事件 | `pnpm --filter @ai-video/persistence test`（19 项）、`pnpm --filter @ai-video/llm test`（10 项）、相关 typecheck 通过 | 当前只完成事实持久化和事件解析；Native Runtime 的可信信封、工具执行、结果回传和确认续执行仍未开放 |
+| 2026-08-17 | P3/P4 真实工具链 | 用户确认真实 Provider 工具调用链路已验证正常 | 用户人工验证 | 真实链路冒烟证据与任务记录待补充到验收表 |
 | 2026-08-16 | P1 / v14 Schema | 完成持久化基础 | `pnpm --filter @ai-video/persistence test`（19 项）、`pnpm --filter @ai-video/worker test`（131 项）、`pnpm --filter @ai-video/desktop test`（88 项）及 `pnpm typecheck` 通过 | `runV14Rebuild` 重建完整入站 FK 闭包；任务 `version` 无损迁移为 `row_version`；旧工具正文转为 `legacy_redacted` 摘要；现有回答转草稿链路写入 primary artifact。Provider 请求循环、预授权签发和确认消费仍待 P3 实现 |
 | 2026-08-16 | 计划 v0.6 | 实现级复审修订 | 统一确认 token 的唯一消费点和无正文 continuation descriptor；补齐 primary artifact 生命周期、legacy tool-call 确定性迁移、完整入站 FK swap、v13 状态事实与 partial 恢复审计动作；最终格式、链接和结构校验见本轮执行结果 | 本项只修订计划，v14 及后续代码仍待实施 |
 | 2026-08-16 | 计划 v0.5 | 最终交叉审阅修订 | 固化 `agent_task_confirmations` 的 v14 影子迁移、Provider/manual 互斥调用路径、原子去重冲突重读、手工草稿 selfPublish、同项目 step/call 复合键和小说 partial 恢复不变量；最终格式、链接和结构校验见本轮执行结果 | 本项只修订计划，v14 及后续代码仍待实施 |
