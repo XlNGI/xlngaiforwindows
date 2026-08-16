@@ -174,4 +174,11 @@ describe('TaskLogView', () => {
       expect(screen.queryByRole('button', { name: /项目大纲草稿/ })).not.toBeInTheDocument(),
     );
   });
+
+  it('registers an auto-refresh interval while a project is open', () => {
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+    render(<TaskLogView projectId="project-1" />);
+    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
+    setIntervalSpy.mockRestore();
+  });
 });

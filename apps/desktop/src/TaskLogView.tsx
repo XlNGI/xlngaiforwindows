@@ -256,6 +256,14 @@ export function TaskLogView({ projectId }: TaskLogViewProps) {
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!projectId) return;
+    const timer = window.setInterval(() => {
+      if (!busy && !detailBusy && !loadingMore) void refresh();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [projectId, refresh, busy, detailBusy, loadingMore]);
+
   const openDetails = async (item: TaskLogItem) => {
     const requestId = ++detailRequestRef.current;
     setSelectedItem(item);
