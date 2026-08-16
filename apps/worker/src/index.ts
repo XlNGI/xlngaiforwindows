@@ -11,10 +11,12 @@ import {
   publishDevHttpToken,
   removeDevHttpToken,
 } from './dev-http-security.js';
-import { handleRequest, parseRequest, recordWorkerError } from './handler.js';
+import { handleRequest, parseRequest, recordQueueWait, recordWorkerError } from './handler.js';
 import { RequestScheduler } from './request-scheduler.js';
 
-const requestScheduler = new RequestScheduler();
+const requestScheduler = new RequestScheduler({
+  onQueueWait: (method, waitMs) => recordQueueWait(method, waitMs),
+});
 
 function writeResponse(response: unknown): void {
   process.stdout.write(`${JSON.stringify(response)}\n`);

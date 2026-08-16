@@ -1,5 +1,9 @@
 import type { WorkerMethod } from '@ai-video/contracts';
 
+export interface RequestSchedulerOptions {
+  onQueueWait?: (method: WorkerMethod, waitMs: number) => void;
+}
+
 const concurrentReadMethods = new Set<WorkerMethod>([
   'health',
   'sqlite.probe',
@@ -61,10 +65,20 @@ export function isSerializedWorkerMethod(method: WorkerMethod): boolean {
 
 export class RequestScheduler {
   private mutationQueue = Promise.resolve();
+  private readonly onQueueWait?: (method: WorkerMethod, waitMs: number) => void;
+
+  constructor(options: RequestSchedulerOptions = {}) {
+    this.onQueueWait = options.onQueueWait;
+  }
 
   run<T>(method: WorkerMethod, task: () => Promise<T>): Promise<T> {
     if (!isSerializedWorkerMethod(method)) return task();
-    const result = this.mutationQueue.then(task, task);
+    const queuedAt = performance.now();
+    const execute = (): Promise<T> => {
+      this.onQueueWait?.(method, performance.now() - queuedAt);
+      return task();
+    };
+    const result = this.mutationQueue.then(execute, execute);
     this.mutationQueue = result.then(
       () => undefined,
       () => undefined,

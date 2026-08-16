@@ -71,6 +71,17 @@ interface ProviderMetric {
   maxFirstTokenMs: number;
 }
 
+interface QueueWaitMetric {
+  operation: string;
+  waitMs: number;
+}
+
+interface QueueWaitOperationMetric {
+  samples: number;
+  totalMs: number;
+  maxMs: number;
+}
+
 interface MaintenanceServiceOptions {
   openPath?: (path: string) => void;
   now?: () => Date;
@@ -199,6 +210,8 @@ export class MaintenanceService {
   private readonly operationMetrics = new Map<string, OperationMetric>();
   private readonly generationMetrics: WorkerGenerationMetric[] = [];
   private readonly providerMetrics = new Map<string, ProviderMetric>();
+  private readonly queueWaitMetrics: QueueWaitMetric[] = [];
+  private readonly queueWaitByOperation = new Map<string, QueueWaitOperationMetric>();
   private readonly exportedPaths = new Set<string>();
   private readonly openPath: (path: string) => void;
   private readonly now: () => Date;
@@ -286,12 +299,29 @@ export class MaintenanceService {
     this.providerMetrics.set(metric.providerName, current);
   }
 
+  recordQueueWait(operation: string, waitMs: number): void {
+    const rounded = Math.max(0, Math.round(waitMs));
+    this.queueWaitMetrics.push({ operation, waitMs: rounded });
+    if (this.queueWaitMetrics.length > MAX_REQUEST_METRICS) this.queueWaitMetrics.shift();
+    const current = this.queueWaitByOperation.get(operation) ?? {
+      samples: 0,
+      totalMs: 0,
+      maxMs: 0,
+    };
+    current.samples += 1;
+    current.totalMs += rounded;
+    current.maxMs = Math.max(current.maxMs, rounded);
+    this.queueWaitByOperation.set(operation, current);
+  }
+
   resetSession(): void {
     this.events.length = 0;
     this.requestMetrics.length = 0;
     this.operationMetrics.clear();
     this.generationMetrics.length = 0;
     this.providerMetrics.clear();
+    this.queueWaitMetrics.length = 0;
+    this.queueWaitByOperation.clear();
     this.exportedPaths.clear();
   }
 
@@ -332,6 +362,17 @@ export class MaintenanceService {
         maxFirstTokenMs: 0,
       },
     );
+    const byQueueOperation = [...this.queueWaitByOperation.entries()]
+      .map(([operation, value]) => ({ operation, ...value }))
+      .sort((left, right) => right.totalMs - left.totalMs);
+    const queueWaitTotals = byQueueOperation.reduce(
+      (summary, operation) => ({
+        samples: summary.samples + operation.samples,
+        totalMs: summary.totalMs + operation.totalMs,
+        maxMs: Math.max(summary.maxMs, operation.maxMs),
+      }),
+      { samples: 0, totalMs: 0, maxMs: 0 },
+    );
     return {
       totals,
       byOperation,
@@ -339,6 +380,8 @@ export class MaintenanceService {
       generationTotals,
       byProvider,
       recentGenerations: [...this.generationMetrics].reverse().slice(0, MAX_RECENT_REQUESTS),
+      queueWaitTotals,
+      byQueueOperation,
     };
   }
 

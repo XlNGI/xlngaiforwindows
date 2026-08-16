@@ -237,6 +237,29 @@ describe('MaintenanceService', () => {
     });
   });
 
+  it('tracks queue wait totals per operation', async () => {
+    const base = await temporaryRoot('queue-metrics');
+    const projects = createProjectService(join(base, 'recent.json'));
+    const maintenance = new MaintenanceService(projects);
+    maintenance.recordQueueWait('chat.message.save', 5);
+    maintenance.recordQueueWait('chat.message.save', 15);
+
+    const metrics = maintenance.getMetrics();
+    expect(metrics.queueWaitTotals).toEqual({
+      samples: 2,
+      totalMs: 20,
+      maxMs: 15,
+    });
+    expect(metrics.byQueueOperation).toEqual([
+      {
+        operation: 'chat.message.save',
+        samples: 2,
+        totalMs: 20,
+        maxMs: 15,
+      },
+    ]);
+  });
+
   it('allows cache inspection but refuses cache clearing from a read-only session', async () => {
     const base = await temporaryRoot('readonly-cache');
     const projectRoot = join(base, 'project');

@@ -128,6 +128,8 @@ export function MaintenanceDialog({
                 <span>生成 {metrics.generationTotals.attempts}</span>
                 <span>生成成功 {metrics.generationTotals.complete}</span>
                 <span>首Token {metrics.generationTotals.maxFirstTokenMs} ms</span>
+                <span>队列 {metrics.queueWaitTotals.samples}</span>
+                <span>最慢等待 {metrics.queueWaitTotals.maxMs} ms</span>
                 <ul>
                   {metrics.byOperation.slice(0, 5).map((item) => (
                     <li key={item.operation} title={item.recentRequestIds.join(', ')}>
@@ -137,6 +139,11 @@ export function MaintenanceDialog({
                   {metrics.byProvider.slice(0, 3).map((item) => (
                     <li key={item.providerName}>
                       {item.providerName} · {item.attempts} 次 · {item.maxFirstTokenMs} ms
+                    </li>
+                  ))}
+                  {metrics.byQueueOperation.slice(0, 3).map((item) => (
+                    <li key={item.operation}>
+                      等待 {item.operation} · {item.samples} 次 · {item.maxMs} ms
                     </li>
                   ))}
                 </ul>

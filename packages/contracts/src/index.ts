@@ -318,6 +318,13 @@ export interface WorkerProviderMetric {
   maxFirstTokenMs: number;
 }
 
+export interface WorkerQueueWaitMetric {
+  operation: string;
+  samples: number;
+  totalMs: number;
+  maxMs: number;
+}
+
 export interface WorkerMetricsSnapshot {
   totals: {
     requests: number;
@@ -335,8 +342,14 @@ export interface WorkerMetricsSnapshot {
     maxDurationMs: number;
     maxFirstTokenMs: number;
   };
+  queueWaitTotals: {
+    samples: number;
+    totalMs: number;
+    maxMs: number;
+  };
   byOperation: WorkerMetricByOperation[];
   byProvider: WorkerProviderMetric[];
+  byQueueOperation: WorkerQueueWaitMetric[];
   recentRequests: Array<{
     at: string;
     requestId: string;

@@ -265,6 +265,10 @@ export function recordWorkerError(operation: string, error: unknown): void {
   maintenanceService.recordError(operation, error);
 }
 
+export function recordQueueWait(method: WorkerMethod, waitMs: number): void {
+  maintenanceService.recordQueueWait(method, waitMs);
+}
+
 export function parseRequest(value: unknown): WorkerRequest | WorkerResponse {
   if (!value || typeof value !== 'object') {
     return errorResponse('unknown', {

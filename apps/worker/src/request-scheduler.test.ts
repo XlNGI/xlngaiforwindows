@@ -37,4 +37,25 @@ describe('RequestScheduler', () => {
     await Promise.all([first, second]);
     expect(events).toEqual(['first-start', 'first-end', 'second']);
   });
+
+  it('reports queue wait for serialized mutations', async () => {
+    const waits: number[] = [];
+    const scheduler = new RequestScheduler({
+      onQueueWait: (_method, waitMs) => waits.push(waitMs),
+    });
+    let releaseFirst: (() => void) | undefined;
+    const first = scheduler.run(
+      'chat.message.save',
+      () => new Promise<void>((resolve) => (releaseFirst = resolve)),
+    );
+    const second = scheduler.run('conversation.create', () => Promise.resolve());
+
+    await Promise.resolve();
+    expect(waits).toHaveLength(1);
+    releaseFirst?.();
+    await Promise.all([first, second]);
+    expect(waits).toHaveLength(2);
+    expect(waits[0]).toBeGreaterThanOrEqual(0);
+    expect(waits[1]).toBeGreaterThanOrEqual(0);
+  });
 });
