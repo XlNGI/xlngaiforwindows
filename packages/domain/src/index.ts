@@ -384,6 +384,7 @@ export interface ConversationRecord {
   title: string;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
 }
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';

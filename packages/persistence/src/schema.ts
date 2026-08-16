@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 14;
+export const CURRENT_SCHEMA_VERSION = 15;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -964,4 +964,8 @@ BEFORE DELETE ON document_audit_events
 BEGIN
   SELECT RAISE(ABORT, 'document audit events are immutable');
 END;
+`;
+
+export const MIGRATION_V15 = `
+ALTER TABLE conversations ADD COLUMN archived_at TEXT;
 `;

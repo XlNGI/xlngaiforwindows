@@ -392,7 +392,7 @@ details
 
 ### 11.3 文档同步
 
-当前代码 Schema 版本为 v13（包含 generation、Agent 文档工作流和不可变文档审计），而部分质量文档仍记录为旧版本。实施过程中必须同步：
+当前代码 Schema 版本为 v15（包含 generation、Agent 文档工作流、不可变文档审计和会话归档），而部分质量文档仍记录为旧版本。实施过程中必须同步：
 
 - `README.md`；
 - `docs/M2-DOCUMENTS-CONVERSATIONS.md`；
@@ -423,7 +423,7 @@ details
 ### P4/P5
 
 - [x] 数据库不变量由 Schema 和 Service 双重保证；
-- [ ] 会话排序、分页、搜索、归档策略明确；
+- [~] 会话排序、搜索、归档和恢复策略明确；游标分页和软删除待补；
 - [ ] 上下文快照有保留和清理策略；
 - [ ] 关键指标和关联 ID 可查询；
 - [x] 重启、并发、重复请求和恶意输入测试通过。
@@ -461,8 +461,33 @@ details
 仍未完成：
 
 - 图片、视频、备份、导出等全部异步回写统一采用 `projectSessionId`；
-- 会话重命名、归档、软删除、搜索和会话列表游标分页；
+- 会话列表游标分页和软删除；会话重命名、归档、恢复和关键字搜索已完成；
 - 上下文快照保留、清理和导出策略；
+- generation 首 Token、队列等待、Provider 分类等完整指标体系；
+- Desktop/Worker 大模块拆分、CI 安全/SBOM/许可证检查和 Windows 正式签名升级门禁。
+
+### 12.2 实施记录（2026-08-16）
+
+本轮已完成：
+
+- Schema v15 为 `conversations` 增加 `archived_at`，新库和 v14 升级路径均验证；
+- `conversation.update`、`conversation.archive`、`conversation.restore` IPC 及运行时校验；
+- `conversation.list` 支持 `includeArchived` 和 `query` 关键字筛选；
+- Worker 侧重命名、归档、恢复和项目归属校验，归档会话禁止重命名，恢复保持幂等；
+- 持久化、Worker、Desktop 测试和 `pnpm typecheck`、`pnpm lint`、`pnpm format:check` 全部通过。
+
+聚焦验证：
+
+- Persistence：20 项通过；
+- Worker：133 项通过；
+- Desktop：88 项通过；
+- 全仓类型检查、Lint 和格式检查通过。
+
+仍未完成：
+
+- 会话列表游标分页、软删除和 Desktop 会话管理入口；
+- 上下文快照保留、清理和导出策略；
+- 图片、视频、备份、导出等全部异步回写统一采用 `projectSessionId`；
 - generation 首 Token、队列等待、Provider 分类等完整指标体系；
 - Desktop/Worker 大模块拆分、CI 安全/SBOM/许可证检查和 Windows 正式签名升级门禁。
 

@@ -4,10 +4,13 @@ import type {
   ChatMessageListParams,
   ChatMessagePage,
   ChatMessageSaveParams,
+  ConversationArchiveParams,
   ConversationCreateParams,
   ConversationInfo,
   ConversationListParams,
+  ConversationRestoreParams,
   ConversationScopeType,
+  ConversationUpdateParams,
   DocumentDetail,
   DocumentKind,
   DocumentRestoreParams,
@@ -157,6 +160,7 @@ export class ContentService {
   }
 
   listConversations(params: ConversationListParams): ConversationInfo[] {
+    const query = params.query?.trim().toLocaleLowerCase();
     return this.projects.access(false, (database, project) =>
       createRepositories(database)
         .conversations.listByProject(project.id)
@@ -164,7 +168,9 @@ export class ContentService {
         .filter(
           (conversation) =>
             (!params.scopeType || conversation.scopeType === params.scopeType) &&
-            (params.scopeId === undefined || conversation.scopeId === params.scopeId),
+            (params.scopeId === undefined || conversation.scopeId === params.scopeId) &&
+            (params.includeArchived || !conversation.archivedAt) &&
+            (!query || conversation.title.toLocaleLowerCase().includes(query)),
         ),
     );
   }
@@ -188,6 +194,58 @@ export class ContentService {
       repositories.projects.touch(now);
       project.updatedAt = now;
       return record;
+    });
+  }
+
+  updateConversation(params: ConversationUpdateParams): ConversationInfo {
+    const title = required(params.title, 'Conversation title');
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const existing = repositories.conversations.get(params.conversationId);
+      if (!existing || existing.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      if (existing.archivedAt) throw new Error('Archived conversations cannot be renamed.');
+      const now = new Date().toISOString();
+      const record: ConversationRecord = { ...existing, title, updatedAt: now };
+      repositories.conversations.save(record);
+      repositories.projects.touch(now);
+      project.updatedAt = now;
+      return asConversation(record);
+    });
+  }
+
+  archiveConversation(params: ConversationArchiveParams): ConversationInfo {
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const existing = repositories.conversations.get(params.conversationId);
+      if (!existing || existing.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      if (existing.archivedAt) return asConversation(existing);
+      const now = new Date().toISOString();
+      const record: ConversationRecord = { ...existing, archivedAt: now, updatedAt: now };
+      repositories.conversations.save(record);
+      repositories.projects.touch(now);
+      project.updatedAt = now;
+      return asConversation(record);
+    });
+  }
+
+  restoreConversation(params: ConversationRestoreParams): ConversationInfo {
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const existing = repositories.conversations.get(params.conversationId);
+      if (!existing || existing.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      if (!existing.archivedAt) return asConversation(existing);
+      const now = new Date().toISOString();
+      const record: ConversationRecord = { ...existing, archivedAt: undefined, updatedAt: now };
+      repositories.conversations.save(record);
+      repositories.projects.touch(now);
+      project.updatedAt = now;
+      return asConversation(record);
     });
   }
 

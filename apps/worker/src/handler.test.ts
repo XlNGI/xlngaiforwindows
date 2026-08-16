@@ -83,6 +83,25 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects conversation lifecycle requests without a conversation id', async () => {
+    const response = await handleRequest({
+      id: 'conversation-archive-missing-id',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'conversation.archive',
+      params: {},
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'conversation-archive-missing-id',
+        retryable: false,
+        operation: 'conversation.archive',
+      },
+    });
+  });
+
   it('rejects unknown document list parameters at the IPC boundary', async () => {
     const response = await handleRequest({
       id: 'document-list-unknown-param',

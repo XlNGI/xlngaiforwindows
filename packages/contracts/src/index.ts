@@ -567,17 +567,33 @@ export interface ConversationInfo {
   title: string;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
 }
 
 export interface ConversationListParams {
   scopeType?: ConversationScopeType;
   scopeId?: string;
+  includeArchived?: boolean;
+  query?: string;
 }
 
 export interface ConversationCreateParams {
   scopeType: ConversationScopeType;
   scopeId?: string;
   title?: string;
+}
+
+export interface ConversationUpdateParams {
+  conversationId: string;
+  title: string;
+}
+
+export interface ConversationArchiveParams {
+  conversationId: string;
+}
+
+export interface ConversationRestoreParams {
+  conversationId: string;
 }
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -1404,6 +1420,9 @@ export interface WorkerMethodMap {
   'shot.save': { params: ShotSaveParams; result: ShotInfo };
   'conversation.list': { params: ConversationListParams; result: ConversationInfo[] };
   'conversation.create': { params: ConversationCreateParams; result: ConversationInfo };
+  'conversation.update': { params: ConversationUpdateParams; result: ConversationInfo };
+  'conversation.archive': { params: ConversationArchiveParams; result: ConversationInfo };
+  'conversation.restore': { params: ConversationRestoreParams; result: ConversationInfo };
   'chat.message.list': { params: ChatMessageListParams; result: ChatMessagePage };
   'chat.message.save': { params: ChatMessageSaveParams; result: ChatMessageInfo };
   'chat.message.toDocument': { params: MessageDocumentParams; result: DocumentDetail };

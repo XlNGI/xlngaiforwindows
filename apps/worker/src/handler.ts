@@ -9,7 +9,10 @@ import {
   type AgentTaskGetParams,
   type AdapterResolveParams,
   type AdapterValidateParams,
+  type ConversationArchiveParams,
   type ConversationCreateParams,
+  type ConversationRestoreParams,
+  type ConversationUpdateParams,
   type DocumentRestoreParams,
   type DocumentDraftSaveParams,
   type DocumentPublishParams,
@@ -142,6 +145,9 @@ const methods = new Set<WorkerMethod>([
   'shot.save',
   'conversation.list',
   'conversation.create',
+  'conversation.update',
+  'conversation.archive',
+  'conversation.restore',
   'chat.message.list',
   'chat.message.save',
   'chat.message.toDocument',
@@ -666,6 +672,15 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         break;
       case 'conversation.create':
         result = contentService.createConversation(params as unknown as ConversationCreateParams);
+        break;
+      case 'conversation.update':
+        result = contentService.updateConversation(params as unknown as ConversationUpdateParams);
+        break;
+      case 'conversation.archive':
+        result = contentService.archiveConversation(params as unknown as ConversationArchiveParams);
+        break;
+      case 'conversation.restore':
+        result = contentService.restoreConversation(params as unknown as ConversationRestoreParams);
         break;
       case 'chat.message.list':
         result = contentService.listMessages(params as unknown as ChatMessageListParams);

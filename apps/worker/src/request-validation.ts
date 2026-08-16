@@ -20,6 +20,9 @@ const MAX_RAW_USAGE_BYTES = 64 * 1024;
 const sessionMethods = new Set<WorkerMethod>([
   'conversation.list',
   'conversation.create',
+  'conversation.update',
+  'conversation.archive',
+  'conversation.restore',
   'chat.message.list',
   'chat.message.save',
   'chat.message.toDocument',
@@ -144,9 +147,11 @@ export function validateSessionRequestParams(
       optionalInteger(params, 'limit', 1, 500);
       break;
     case 'conversation.list':
-      rejectUnknown(params, ['scopeType', 'scopeId']);
+      rejectUnknown(params, ['scopeType', 'scopeId', 'includeArchived', 'query']);
       optionalScope(params, 'scopeType');
       optionalId(params, 'scopeId');
+      optionalBoolean(params, 'includeArchived');
+      optionalString(params, 'query', MAX_TITLE_LENGTH);
       break;
     case 'conversation.create': {
       rejectUnknown(params, ['scopeType', 'scopeId', 'title']);
@@ -161,6 +166,16 @@ export function validateSessionRequestParams(
       }
       break;
     }
+    case 'conversation.update':
+      rejectUnknown(params, ['conversationId', 'title']);
+      requireId(params, 'conversationId');
+      requireString(params, 'title', MAX_TITLE_LENGTH);
+      break;
+    case 'conversation.archive':
+    case 'conversation.restore':
+      rejectUnknown(params, ['conversationId']);
+      requireId(params, 'conversationId');
+      break;
     case 'chat.message.list':
       rejectUnknown(params, ['conversationId', 'before', 'limit']);
       requireId(params, 'conversationId');
@@ -471,4 +486,9 @@ function requireBoolean(value: Record<string, unknown>, key: string): boolean {
   const input = value[key];
   if (typeof input !== 'boolean') throw new RequestValidationError(`${key} must be a boolean.`);
   return input;
+}
+
+function optionalBoolean(value: Record<string, unknown>, key: string): boolean | undefined {
+  if (value[key] === undefined) return undefined;
+  return requireBoolean(value, key);
 }

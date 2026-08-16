@@ -77,6 +77,38 @@ describe('ContentService', () => {
     });
   });
 
+  it('renames, archives, restores, and filters conversations', async () => {
+    const { content } = await setup();
+    const conversation = content.createConversation({
+      scopeType: 'project',
+      title: '大纲讨论',
+    });
+
+    const renamed = content.updateConversation({
+      conversationId: conversation.id,
+      title: '项目会话',
+    });
+    expect(renamed).toMatchObject({ title: '项目会话' });
+    expect(renamed.archivedAt).toBeUndefined();
+
+    const archived = content.archiveConversation({ conversationId: conversation.id });
+    expect(archived.archivedAt).toBeTruthy();
+    expect(content.listConversations({ scopeType: 'project' })).toEqual([]);
+    expect(content.listConversations({ scopeType: 'project', includeArchived: true })).toEqual([
+      expect.objectContaining({ id: conversation.id, title: '项目会话' }),
+    ]);
+    expect(content.listConversations({ query: '项目会话' })).toEqual([]);
+    expect(() =>
+      content.updateConversation({ conversationId: conversation.id, title: '不可重命名' }),
+    ).toThrow('Archived conversations cannot be renamed.');
+
+    const restored = content.restoreConversation({ conversationId: conversation.id });
+    expect(restored.archivedAt).toBeUndefined();
+    expect(content.listConversations({ scopeType: 'project', query: '项目' })).toMatchObject([
+      { id: conversation.id, title: '项目会话' },
+    ]);
+  });
+
   it('requires explicit actions to promote chat content', async () => {
     const { content } = await setup();
     const conversation = content.createConversation({ scopeType: 'project' });

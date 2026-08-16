@@ -793,11 +793,12 @@ class SqliteConversationRepository
     this.database
       .prepare(
         `INSERT INTO conversations
-         (id, project_id, scope_type, scope_id, title, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+         (id, project_id, scope_type, scope_id, title, created_at, updated_at, archived_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            scope_type = excluded.scope_type, scope_id = excluded.scope_id,
-           title = excluded.title, updated_at = excluded.updated_at`,
+           title = excluded.title, updated_at = excluded.updated_at,
+           archived_at = excluded.archived_at`,
       )
       .run(
         record.id,
@@ -807,6 +808,7 @@ class SqliteConversationRepository
         record.title,
         record.createdAt,
         record.updatedAt,
+        record.archivedAt ?? null,
       );
   }
 
@@ -835,6 +837,7 @@ interface ConversationRow {
   title: string;
   created_at: string;
   updated_at: string;
+  archived_at: string | null;
 }
 
 function mapConversation(row: ConversationRow): ConversationRecord {
@@ -846,6 +849,7 @@ function mapConversation(row: ConversationRow): ConversationRecord {
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    archivedAt: row.archived_at ?? undefined,
   };
 }
 

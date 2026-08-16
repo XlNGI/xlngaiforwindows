@@ -17,6 +17,7 @@ import {
   MIGRATION_V11,
   MIGRATION_V12,
   MIGRATION_V13,
+  MIGRATION_V15,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 
@@ -181,6 +182,14 @@ export function migrateDatabase(
   }
   if (getSchemaVersion(database) === 13) {
     runV14Rebuild(database, now);
+  }
+  if (getSchemaVersion(database) === 14) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V15);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(15, now);
+    })();
   }
   return getSchemaVersion(database);
 }

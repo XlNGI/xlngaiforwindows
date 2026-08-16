@@ -656,6 +656,42 @@ describe('repositories', () => {
     database.close();
   });
 
+  it('persists conversation archive state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-conversation-archive-'));
+    temporaryDirectories.push(directory);
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Archive', 'now', 'now');
+    const conversations = createRepositories(database).conversations;
+
+    conversations.save({
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Chat',
+      createdAt: 'now',
+      updatedAt: 'now',
+      archivedAt: '2026-08-16T00:00:00.000Z',
+    });
+
+    expect(conversations.get('conversation')).toMatchObject({
+      archivedAt: '2026-08-16T00:00:00.000Z',
+    });
+
+    conversations.save({
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Chat',
+      createdAt: 'now',
+      updatedAt: 'now',
+    });
+    expect(conversations.get('conversation')).toMatchObject({ archivedAt: undefined });
+    database.close();
+  });
+
   it('searches assets by tag name without crossing project boundaries', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ai-video-asset-search-'));
     temporaryDirectories.push(directory);
