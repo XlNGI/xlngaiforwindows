@@ -127,6 +127,17 @@ describe('TaskLogView', () => {
     expect(callWorker).not.toHaveBeenCalledWith('agent.task.get', expect.anything());
   });
 
+  it('opens the source document from an agent detail', async () => {
+    const onOpenDocument = vi.fn();
+    render(<TaskLogView projectId="project-1" onOpenDocument={onOpenDocument} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /项目大纲草稿/ }));
+    expect(await screen.findByRole('heading', { name: '事件时间线' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打开文档' }));
+
+    expect(onOpenDocument).toHaveBeenCalledWith('document-1');
+  });
+
   it('closes the selected detail panel without reloading the task list', async () => {
     render(<TaskLogView projectId="project-1" />);
     fireEvent.click(await screen.findByRole('button', { name: /项目大纲草稿/ }));

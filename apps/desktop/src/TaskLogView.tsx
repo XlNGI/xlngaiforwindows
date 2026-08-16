@@ -15,6 +15,7 @@ import { callWorker } from './worker-client';
 
 interface TaskLogViewProps {
   projectId?: string;
+  onOpenDocument?: (documentId: string) => void;
 }
 
 const kindLabel: Record<TaskLogItem['kind'], string> = {
@@ -72,7 +73,13 @@ function TaskLogStatus({ status, outcome }: { status: string; outcome?: string }
   );
 }
 
-function AgentTaskDetailPanel({ detail }: { detail: AgentTaskDetail }) {
+function AgentTaskDetailPanel({
+  detail,
+  onOpenDocument,
+}: {
+  detail: AgentTaskDetail;
+  onOpenDocument?: (documentId: string) => void;
+}) {
   const { task, events, documents } = detail;
   return (
     <div className="task-log-detail-body">
@@ -161,19 +168,34 @@ function AgentTaskDetailPanel({ detail }: { detail: AgentTaskDetail }) {
           文档产物
         </h3>
         {documents.length > 0 ? (
-          <ul className="task-log-artifacts">
-            {documents.map((document) => (
-              <li key={`${document.documentVersionId}-${document.createdAt}`}>
-                <div>
-                  <strong>{operationLabel[document.operation]}</strong>
-                  <span>文档 {document.documentId}</span>
-                </div>
-                <small>
-                  版本 {document.documentVersionId} · {formatDate(document.createdAt)}
-                </small>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="task-log-artifacts">
+              {documents.map((document) => (
+                <li key={`${document.documentVersionId}-${document.createdAt}`}>
+                  <div>
+                    <strong>{operationLabel[document.operation]}</strong>
+                    <span>文档 {document.documentId}</span>
+                  </div>
+                  <small>
+                    版本 {document.documentVersionId} · {formatDate(document.createdAt)}
+                  </small>
+                </li>
+              ))}
+            </ul>
+            {(() => {
+              const primaryDocument = documents[0];
+              return onOpenDocument && primaryDocument ? (
+                <button
+                  className="button secondary task-log-open-document"
+                  type="button"
+                  onClick={() => onOpenDocument(primaryDocument.documentId)}
+                >
+                  <FileText size={13} />
+                  打开文档
+                </button>
+              ) : null;
+            })()}
+          </>
         ) : (
           <p className="task-log-detail-empty">暂无文档产物。</p>
         )}
@@ -207,7 +229,7 @@ function SourceHint({ item }: { item: TaskLogItem }) {
   );
 }
 
-export function TaskLogView({ projectId }: TaskLogViewProps) {
+export function TaskLogView({ projectId, onOpenDocument }: TaskLogViewProps) {
   const [items, setItems] = useState<TaskLogItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<TaskLogItem>();
   const [detail, setDetail] = useState<AgentTaskDetail | null>(null);
@@ -442,7 +464,7 @@ export function TaskLogView({ projectId }: TaskLogViewProps) {
                   <span>{detailMessage}</span>
                 </div>
               ) : selectedItem.kind === 'agent-document' && detail ? (
-                <AgentTaskDetailPanel detail={detail} />
+                <AgentTaskDetailPanel detail={detail} onOpenDocument={onOpenDocument} />
               ) : selectedItem.kind === 'agent-document' ? (
                 <div className="task-log-detail-loading">暂无任务详情。</div>
               ) : (

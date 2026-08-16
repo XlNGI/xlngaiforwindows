@@ -907,6 +907,34 @@ export function App() {
     }
   };
 
+  const openDocumentById = async (documentId: string) => {
+    const requestId = ++documentRequest.current;
+    setContentBusy(true);
+    setContentMessage('');
+    try {
+      const [detail, history] = await Promise.all([
+        callWorker('document.get', { documentId }),
+        callWorker('document.versions', { documentId }),
+      ]);
+      if (requestId !== documentRequest.current) return;
+      setDocument(detail);
+      setDocumentTitle(detail.title);
+      setDocumentKind(detail.kind);
+      setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
+      setVersions(history);
+      syncDetachedPanelForEntity('document', detail.id);
+      setNavigationMode('project');
+      setView('documents');
+      workspaceDispatch({ type: 'open', panelId: 'document' });
+    } catch (reason) {
+      if (requestId === documentRequest.current) {
+        setContentMessage(reason instanceof Error ? reason.message : '文档加载失败');
+      }
+    } finally {
+      if (requestId === documentRequest.current) setContentBusy(false);
+    }
+  };
+
   const newDocument = () => {
     documentRequest.current += 1;
     setDocument(undefined);
@@ -2653,7 +2681,10 @@ export function App() {
                 )}
               </>
             ) : view === 'tasks' ? (
-              <TaskLogView projectId={project?.id} />
+              <TaskLogView
+                projectId={project?.id}
+                onOpenDocument={(documentId) => void openDocumentById(documentId)}
+              />
             ) : project ? (
               <AssetLibraryView
                 writable={writable}
