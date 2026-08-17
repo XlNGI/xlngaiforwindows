@@ -105,6 +105,33 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects untrusted fields on Agent prepare requests at the IPC boundary', async () => {
+    const response = await handleRequest({
+      id: 'agent-prepare-unknown-param',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.generation.prepare',
+      params: {
+        conversationId: 'conversation',
+        prompt: 'Draft a project brief',
+        providerProfileId: 'profile',
+        modelId: 'model',
+        agentMode: 'document',
+        documentIntent: { operation: 'document.create_draft' },
+        forgedAuthorizationHandle: 'must-not-reach-agent-loop',
+      },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'agent-prepare-unknown-param',
+        retryable: false,
+        operation: 'agent.generation.prepare',
+      },
+    });
+  });
+
   it('rejects conversation lifecycle requests without a conversation id', async () => {
     const response = await handleRequest({
       id: 'conversation-archive-missing-id',

@@ -12,6 +12,8 @@ import type {
   LlmGenerationRetryParams,
   LlmGenerationRetryPrepareParams,
   LlmGenerationRuntimeRequest,
+  LlmToolContinuation,
+  LlmToolDefinition,
   LlmPricingSnapshotInfo,
   NormalizedLlmUsage,
   WorkerGenerationMetric,
@@ -149,6 +151,27 @@ export class GenerationService {
       throw new Error('LLM generation is no longer available for native streaming.');
     }
     return { ...state.runtimeRequest };
+  }
+
+  configureAgentTools(
+    identity: LlmGenerationIdentity,
+    tools: LlmToolDefinition[],
+    continuation?: LlmToolContinuation,
+  ): void {
+    const state = this.requireNativeState(identity);
+    if (!isActive(state.status) || !state.runtimeRequest) {
+      throw new Error('LLM generation is no longer available for Agent tool execution.');
+    }
+    state.runtimeRequest = {
+      ...state.runtimeRequest,
+      tools: tools.map((tool) => ({ ...tool, parameters: structuredClone(tool.parameters) })),
+      continuation: continuation
+        ? {
+            previousResponseId: continuation.previousResponseId,
+            outputs: continuation.outputs.map((output) => ({ ...output })),
+          }
+        : undefined,
+    };
   }
 
   observe(params: LlmGenerationObserveParams): LlmGenerationInfo {

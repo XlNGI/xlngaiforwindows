@@ -54,6 +54,11 @@ const sessionMethods = new Set<WorkerMethod>([
   'llm.generation.cancel',
   'llm.generation.retry',
   'llm.generation.retryPrepare',
+  'agent.generation.prepare',
+  'agent.generation.executeTools',
+  'agent.generation.confirmTool',
+  'agent.providerStep.complete',
+  'agent.providerStep.start',
   'maintenance.metrics',
   'maintenance.contextSnapshots.cleanup',
 ]);
@@ -64,6 +69,14 @@ const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'fa
 const documentKinds = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
 const documentAuthors = new Set(['user', 'import']);
 const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video']);
+const agentDocumentOperations = new Set([
+  'document.create_draft',
+  'document.list',
+  'document.read',
+  'document.update_draft',
+  'document.archive',
+  'document.restore',
+]);
 
 export class RequestValidationError extends Error {}
 
@@ -314,6 +327,48 @@ export function validateSessionRequestParams(
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
       break;
+    case 'agent.generation.prepare':
+      rejectUnknown(params, [
+        'conversationId',
+        'budgetTokens',
+        'prompt',
+        'providerProfileId',
+        'modelId',
+        'idempotencyKey',
+        'agentMode',
+        'title',
+        'documentIntent',
+      ]);
+      requireId(params, 'conversationId');
+      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      requireId(params, 'providerProfileId');
+      requireId(params, 'modelId');
+      optionalId(params, 'idempotencyKey');
+      requireEnum(params, 'agentMode', new Set(['document']));
+      optionalString(params, 'title', MAX_TITLE_LENGTH);
+      validateAgentDocumentIntent(params.documentIntent);
+      break;
+    case 'agent.generation.executeTools':
+      validateIdentity(params, ['providerResponseId', 'calls', 'usage']);
+      requireString(params, 'providerResponseId', MAX_PROVIDER_RESPONSE_ID_LENGTH);
+      validateAgentToolCalls(params.calls);
+      validateUsage(params.usage);
+      break;
+    case 'agent.generation.confirmTool':
+      validateIdentity(params, ['confirmationToken', 'approved']);
+      requireString(params, 'confirmationToken', MAX_ID_LENGTH);
+      requireBoolean(params, 'approved');
+      break;
+    case 'agent.providerStep.complete':
+      validateIdentity(params, ['providerResponseId', 'finishReason', 'usage']);
+      optionalString(params, 'providerResponseId', MAX_PROVIDER_RESPONSE_ID_LENGTH);
+      optionalString(params, 'finishReason', MAX_FINISH_REASON_LENGTH);
+      validateUsage(params.usage);
+      break;
+    case 'agent.providerStep.start':
+      validateIdentity(params);
+      break;
   }
 
   return params;
@@ -362,6 +417,39 @@ function validateDocumentDraft(params: Record<string, unknown>): void {
   optionalInteger(params, 'expectedDocumentRowVersion', 0, Number.MAX_SAFE_INTEGER);
   optionalId(params, 'baseVersionId');
   optionalEnum(params, 'authorType', documentAuthors);
+}
+
+function validateAgentDocumentIntent(input: unknown): void {
+  if (input === undefined) return;
+  const intent = requireObject(input, 'documentIntent');
+  rejectUnknown(intent, ['operation', 'documentId']);
+  const operation = requireEnum(intent, 'operation', agentDocumentOperations);
+  const documentId = optionalId(intent, 'documentId');
+  const requiresDocument =
+    operation === 'document.read' ||
+    operation === 'document.update_draft' ||
+    operation === 'document.archive' ||
+    operation === 'document.restore';
+  if (requiresDocument && !documentId) {
+    throw new RequestValidationError('documentIntent.documentId is required for this operation.');
+  }
+  if (!requiresDocument && documentId) {
+    throw new RequestValidationError(
+      'documentIntent.documentId is not allowed for this operation.',
+    );
+  }
+}
+
+function validateAgentToolCalls(input: unknown): void {
+  if (!Array.isArray(input) || input.length !== 1) {
+    throw new RequestValidationError('calls must contain exactly one tool call.');
+  }
+  const call = requireObject(input[0], 'calls[0]');
+  rejectUnknown(call, ['id', 'name', 'argumentsJson', 'authorizationHandle']);
+  requireId(call, 'id');
+  requireString(call, 'name', MAX_ID_LENGTH);
+  requireString(call, 'argumentsJson', MAX_DOCUMENT_LENGTH, true);
+  requireString(call, 'authorizationHandle', MAX_ID_LENGTH);
 }
 
 function validateUsage(input: unknown): NormalizedLlmUsage | undefined {

@@ -1,5 +1,7 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type {
+  AgentGenerationPrepareResult,
+  AgentToolConfirmationRequest,
   LlmGenerationCompleteParams,
   LlmGenerationFailParams,
   LlmGenerationIdentity,
@@ -15,6 +17,7 @@ const FLUSH_CHARACTER_THRESHOLD = 512;
 export interface LlmStreamCallbacks {
   onDelta(content: string): void;
   onState(state: LlmGenerationInfo): void;
+  onConfirmation?(request: AgentToolConfirmationRequest): Promise<boolean>;
 }
 
 export interface LlmStreamRun {
@@ -33,6 +36,7 @@ export function streamPreparedLlmGeneration(
   let terminal = false;
   let closing = false;
   let cancelRequested = false;
+  let continueRequested = false;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let events = Promise.resolve();
   let writes = Promise.resolve();
@@ -109,6 +113,9 @@ export function streamPreparedLlmGeneration(
     if (terminal || closing) return;
     switch (event.type) {
       case 'started':
+        if ((prepared as Partial<AgentGenerationPrepareResult>).agentTaskId) {
+          await callWorker('agent.providerStep.start', identity);
+        }
         await observe(true);
         break;
       case 'delta':
@@ -117,6 +124,36 @@ export function streamPreparedLlmGeneration(
         callbacks.onDelta(aggregate);
         queueObserve();
         break;
+      case 'toolCalls': {
+        const agentTaskId = (prepared as Partial<AgentGenerationPrepareResult>).agentTaskId;
+        if (!agentTaskId || !event.providerResponseId) {
+          await fail('Provider returned tool calls outside an Agent generation.', false);
+          break;
+        }
+        const execution = await callWorker('agent.generation.executeTools', {
+          ...identity,
+          providerResponseId: event.providerResponseId,
+          calls: event.calls,
+          usage: event.usage,
+        });
+        let continuation = execution.continuation;
+        if (!continuation && execution.confirmation && callbacks.onConfirmation) {
+          const approved = await callbacks.onConfirmation(execution.confirmation);
+          continuation = (
+            await callWorker('agent.generation.confirmTool', {
+              ...identity,
+              confirmationToken: execution.confirmation.confirmationToken,
+              approved,
+            })
+          ).continuation;
+        }
+        if (!continuation) {
+          await fail('This document action requires explicit user confirmation.', false);
+          break;
+        }
+        continueRequested = true;
+        break;
+      }
       case 'complete': {
         closing = true;
         clearFlushTimer();
@@ -129,6 +166,14 @@ export function streamPreparedLlmGeneration(
           usage: event.usage,
         };
         try {
+          if ((prepared as Partial<AgentGenerationPrepareResult>).agentTaskId) {
+            await callWorker('agent.providerStep.complete', {
+              ...identity,
+              providerResponseId: event.providerResponseId,
+              finishReason: event.finishReason,
+              usage: event.usage,
+            });
+          }
           callbacks.onState(await callWorker('llm.generation.complete', params));
           terminal = true;
         } finally {
@@ -161,8 +206,11 @@ export function streamPreparedLlmGeneration(
       return;
     }
     try {
-      await invoke<void>('llm_stream', { request: identity, onEvent: channel });
-      await events;
+      do {
+        continueRequested = false;
+        await invoke<void>('llm_stream', { request: identity, onEvent: channel });
+        await events;
+      } while (continueRequested && !terminal && !cancelRequested);
       if (!terminal) {
         if (cancelRequested) await cancelWorker();
         else await fail('Native LLM stream ended without a terminal event.', true);

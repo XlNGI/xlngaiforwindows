@@ -6,6 +6,84 @@ import { ChatPanel } from './ChatPanel';
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
+  it('exposes an explicit document draft action only for a writable message', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Test conversation',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onCreateDocumentDraft = vi.fn();
+    const { rerender } = render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer="Draft a project brief"
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        onCollapse={vi.fn()}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+        onCreateDocumentDraft={onCreateDocumentDraft}
+      />,
+    );
+
+    fireEvent.click(screen.getByTitle('创建文档草稿'));
+    expect(onCreateDocumentDraft).toHaveBeenCalledOnce();
+
+    rerender(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable={false}
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer="Draft a project brief"
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        onCollapse={vi.fn()}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+        onCreateDocumentDraft={onCreateDocumentDraft}
+      />,
+    );
+
+    expect(screen.getByTitle('创建文档草稿')).toBeDisabled();
+  });
+
   it('shows provider usage, snapshot cost, latency details, and missing usage', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',

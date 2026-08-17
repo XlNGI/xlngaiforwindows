@@ -1,5 +1,6 @@
 import type { WorkerMethod } from '@ai-video/contracts';
 import type { AppSettingsService } from './app-settings-service.js';
+import type { AgentProviderLoopService } from './agent-provider-loop-service.js';
 import type { GenerationService } from './generation-service.js';
 import type { ImageGenerationService } from './image-generation-service.js';
 import type { MaintenanceService } from './maintenance-service.js';
@@ -17,6 +18,7 @@ export interface InfrastructureCommandServices {
   generationService: GenerationService;
   imageGenerationService: ImageGenerationService;
   videoGenerationService: VideoGenerationService;
+  agentProviderLoopService: AgentProviderLoopService;
 }
 
 export interface InfrastructureCommandResult {
@@ -39,6 +41,7 @@ async function resetRuntime(services: InfrastructureCommandServices): Promise<vo
 
 function recoverRuntime(services: InfrastructureCommandServices): void {
   services.generationService.recoverInterrupted();
+  services.agentProviderLoopService.recoverInterrupted();
   services.imageGenerationService.recoverInterrupted();
   services.videoGenerationService.recoverInterrupted();
 }

@@ -870,7 +870,98 @@ export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
   systemInstruction: string;
   context: string;
   prompt: string;
+  tools?: LlmToolDefinition[];
+  continuation?: LlmToolContinuation;
 }
+
+export interface LlmToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  /** Opaque Native Runtime capability. It is never serialized into the Provider request. */
+  authorizationHandle?: string;
+}
+
+export interface LlmToolCall {
+  id: string;
+  name: string;
+  argumentsJson: string;
+  authorizationHandle?: string;
+}
+
+export interface LlmToolOutput {
+  callId: string;
+  output: string;
+}
+
+export interface LlmToolContinuation {
+  previousResponseId: string;
+  outputs: LlmToolOutput[];
+}
+
+export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
+  agentMode: 'document';
+  title?: string;
+  /**
+   * This is trusted Desktop input, not a Provider tool argument. A target is
+   * resolved and frozen by the Worker before the Provider sees any tool.
+   */
+  documentIntent?: AgentDocumentIntent;
+}
+
+export interface AgentGenerationPrepareResult extends LlmGenerationPrepareResult {
+  agentTaskId: string;
+}
+
+export type AgentDocumentOperation =
+  | 'document.create_draft'
+  | 'document.list'
+  | 'document.read'
+  | 'document.update_draft'
+  | 'document.archive'
+  | 'document.restore';
+
+export interface AgentDocumentIntent {
+  operation: AgentDocumentOperation;
+  /** Required for read, update, archive, and restore. */
+  documentId?: string;
+}
+
+export interface AgentGenerationExecuteToolsParams extends LlmGenerationIdentity {
+  providerResponseId: string;
+  calls: LlmToolCall[];
+  usage?: NormalizedLlmUsage;
+}
+
+export interface AgentGenerationExecuteToolsResult {
+  continuation?: LlmToolContinuation;
+  confirmation?: AgentToolConfirmationRequest;
+}
+
+export interface AgentToolConfirmationRequest {
+  confirmationToken: string;
+  action: 'document.archive' | 'document.restore';
+  documentId: string;
+  documentTitle: string;
+  expiresAt: string;
+}
+
+export interface AgentGenerationConfirmToolParams extends LlmGenerationIdentity {
+  confirmationToken: string;
+  approved: boolean;
+}
+
+export interface AgentGenerationConfirmToolResult {
+  continuation?: LlmToolContinuation;
+}
+
+export interface AgentProviderStepCompleteParams extends LlmGenerationIdentity {
+  providerResponseId?: string;
+  finishReason?: string;
+  usage?: NormalizedLlmUsage;
+}
+
+export type AgentProviderStepStartParams = LlmGenerationIdentity;
 
 export interface LlmGenerationObserveParams extends LlmGenerationIdentity {
   content: string;
@@ -938,6 +1029,12 @@ export interface LlmGenerationFailParams extends LlmGenerationObserveParams {
 export type LlmNativeStreamEvent =
   | { type: 'started' }
   | { type: 'delta'; delta: string }
+  | {
+      type: 'toolCalls';
+      calls: LlmToolCall[];
+      providerResponseId?: string;
+      usage?: NormalizedLlmUsage;
+    }
   | {
       type: 'complete';
       providerResponseId?: string;
@@ -1533,6 +1630,26 @@ export interface WorkerMethodMap {
   };
   'agent.task.list': { params: AgentTaskListParams; result: AgentTaskInfo[] };
   'agent.task.get': { params: AgentTaskGetParams; result: AgentTaskDetail };
+  'agent.generation.prepare': {
+    params: AgentGenerationPrepareParams;
+    result: AgentGenerationPrepareResult;
+  };
+  'agent.generation.executeTools': {
+    params: AgentGenerationExecuteToolsParams;
+    result: AgentGenerationExecuteToolsResult;
+  };
+  'agent.generation.confirmTool': {
+    params: AgentGenerationConfirmToolParams;
+    result: AgentGenerationConfirmToolResult;
+  };
+  'agent.providerStep.complete': {
+    params: AgentProviderStepCompleteParams;
+    result: Record<string, never>;
+  };
+  'agent.providerStep.start': {
+    params: AgentProviderStepStartParams;
+    result: Record<string, never>;
+  };
   'task.log.list': { params: TaskLogListParams; result: TaskLogPage };
   'scene.list': { params: Record<string, never>; result: SceneInfo[] };
   'scene.save': { params: SceneSaveParams; result: SceneInfo };

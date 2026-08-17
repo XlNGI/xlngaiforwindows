@@ -626,4 +626,160 @@ describe('App', () => {
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'llm.generation.get'),
     ).toHaveLength(1);
   });
+
+  it('starts an explicit document draft agent with a create-only intent', async () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Project conversation',
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const profile = {
+      id: 'profile',
+      name: 'OpenAI',
+      category: 'llm' as const,
+      providerType: 'openai',
+      accessType: 'official' as const,
+      protocol: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: true,
+      connectionStatus: 'ready' as const,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const model = {
+      id: 'model',
+      providerProfileId: profile.id,
+      remoteModelId: 'gpt-test',
+      displayName: 'GPT Test',
+      capabilities: {
+        text: true,
+        vision: false,
+        streaming: true,
+        reasoning: false,
+        tools: true,
+        structuredOutput: false,
+        embeddings: false,
+        imageGeneration: false,
+        videoGeneration: false,
+      },
+      source: 'manual' as const,
+      enabled: true,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const prepared = {
+      agentTaskId: 'agent-task',
+      stream: {
+        generationId: 'generation',
+        attemptId: 'attempt',
+        projectId: 'project',
+        projectSessionId: 'session',
+        conversationId: conversation.id,
+      },
+      generation: {
+        generationId: 'generation',
+        attemptId: 'attempt',
+        projectId: 'project',
+        projectSessionId: 'session',
+        conversationId: conversation.id,
+        snapshotId: 'snapshot',
+        status: 'complete' as const,
+        userMessage: {
+          id: 'user',
+          conversationId: conversation.id,
+          role: 'user' as const,
+          content: 'Draft a project brief',
+          status: 'complete' as const,
+          createdAt: 'now',
+        },
+        assistantMessage: {
+          id: 'assistant',
+          conversationId: conversation.id,
+          replyToMessageId: 'user',
+          role: 'assistant' as const,
+          content: '',
+          status: 'complete' as const,
+          createdAt: 'now',
+        },
+        sources: [],
+      },
+    };
+
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Agent Project',
+          rootPath: 'D:\\AgentProject',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write' as const,
+          schemaVersion: 14,
+        });
+      if (method === 'project.recent' || method === 'document.list' || method === 'scene.list')
+        return Promise.resolve([]);
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'GPT Test',
+          configured: true,
+          configurationSource: 'managed' as const,
+        });
+      if (method === 'provider.profile.list') return Promise.resolve([profile]);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'conversation.list') return Promise.resolve({ items: [conversation] });
+      if (method === 'chat.message.list') return Promise.resolve({ items: [] });
+      if (method === 'context.preview')
+        return Promise.resolve({
+          version: 1,
+          scopeType: 'project' as const,
+          scopeLabel: 'project',
+          estimatedTokens: 1,
+          budgetTokens: 1_000,
+          sources: [],
+        });
+      if (method === 'agent.generation.prepare') return Promise.resolve(prepared);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<App />);
+    await screen.findByDisplayValue('Project conversation');
+    fireEvent.change(screen.getByLabelText('会话消息'), {
+      target: { value: 'Draft a project brief' },
+    });
+    fireEvent.click(screen.getByTitle('创建文档草稿'));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('agent.generation.prepare', {
+        conversationId: conversation.id,
+        prompt: 'Draft a project brief',
+        providerProfileId: profile.id,
+        modelId: model.id,
+        agentMode: 'document',
+        documentIntent: { operation: 'document.create_draft' },
+      }),
+    );
+  });
 });

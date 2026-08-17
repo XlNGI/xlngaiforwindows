@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  FilePlus2,
   MessageSquarePlus,
   PanelRightClose,
   Pencil,
@@ -63,6 +64,7 @@ interface ChatPanelProps {
   onComposerChange: (value: string) => void;
   onCancelGeneration: () => void;
   onSendMessage: () => void;
+  onCreateDocumentDraft?: () => void;
 }
 
 function scopeLabel(scope: ConversationScopeType): string {
@@ -106,6 +108,7 @@ export function ChatPanel({
   onComposerChange,
   onCancelGeneration,
   onSendMessage,
+  onCreateDocumentDraft,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
   return (
@@ -366,15 +369,28 @@ export function ChatPanel({
             <Square size={14} fill="currentColor" />
           </button>
         ) : (
-          <button
-            className="icon-button send-button"
-            type="button"
-            title="发送消息"
-            onClick={onSendMessage}
-            disabled={!composer.trim() || !conversation}
-          >
-            <ChevronRight size={18} />
-          </button>
+          <>
+            {onCreateDocumentDraft && (
+              <button
+                className="icon-button subtle"
+                type="button"
+                title="创建文档草稿"
+                onClick={onCreateDocumentDraft}
+                disabled={!composer.trim() || !conversation || !writable}
+              >
+                <FilePlus2 size={16} />
+              </button>
+            )}
+            <button
+              className="icon-button send-button"
+              type="button"
+              title="发送消息"
+              onClick={onSendMessage}
+              disabled={!composer.trim() || !conversation}
+            >
+              <ChevronRight size={18} />
+            </button>
+          </>
         )}
       </div>
     </section>

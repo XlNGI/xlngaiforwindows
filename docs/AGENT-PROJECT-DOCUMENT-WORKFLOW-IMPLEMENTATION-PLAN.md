@@ -1,6 +1,6 @@
 # Agent 项目文档生成、审核与任务日志实施计划
 
-版本：0.6  
+版本：0.7  
 日期：2026-08-16  
 状态：实施中（业务合同已冻结；v12/v13 基础闭环已完成，v14 增强待实施）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、LLM Provider
@@ -10,9 +10,10 @@
 ## 1. 执行状态
 
 - [x] P0 业务合同、术语和状态机评审
-- [~] P1 Agent 任务、事件和工具调用持久化（v12/v13 基线已完成；v14 Schema、影子迁移和现有手工草稿链路已完成，真实 Provider tool loop 待实施）
+- [~] P1 Agent 任务、事件和工具调用持久化（v12-v14 基线已完成；`document.create_draft` 的真实 Provider step、授权、工具调用和 continuation 已闭合，其他文档工具待扩展）
 - [x] P2 文档工作版本与权威版本模型
-- [~] P3 Agent 工具协议和安全执行网关（已具备受限手工提升审计，真实 Provider tool loop 待实现）
+- [~] P3 Agent 工具协议和安全执行网关（`document.create_draft/list/read/update_draft/archive/restore` 均已具备工具定义下发、step-local 不透明授权、受限执行与结果回传；archive/restore 通过一次性确认记录和 Desktop 本地确认续执行。恢复、取消与延迟工具回调已覆盖，仍待更广泛的故障注入、人工 Provider 验收和 P3.1 第三方路由工具兼容性验证）
+  - [ ] P3.1 Provider 工具路由兼容性（先验证模型 function calling 与路由端到端 tool loop；不对既有任务、普通聊天或未验证路由开放副作用）
 - [~] P4 会话触发文档草稿与编辑器审核闭环（已完成显式操作闭环，自动意图触发待实现）
 - [~] P5 审核、发布、上下文治理和冲突处理（核心闭环和文档工作流审计完成，差异视图和动态模型预算待实现）
 - [~] P6 统一任务日志页面与来源定位（聚合列表、Agent 详情、事件时间线、文档产物、筛选、游标分页、自动刷新、来源会话跳转和图片/视频完整详情已完成；Provider step 详情待补）
@@ -1336,6 +1337,21 @@ agent.task.cancelled
 
 测试门禁：list/read 句柄越权、预授权 handle 伪造/过期/撤销/跨 step 重放、archive/restore 显式意图与确认 token 单次消费、purge/发布拒绝、未知工具、额外字段、伪造可信 ID/CAS、创建/更新一任务一主要产物、同 call ID 同/不同 hash、每 step/任务配额与并列调用预留、取消竞态、工具超时、Provider step 续写/恢复、不支持 tools、恶意路径/SQL/HTML 输入、工具正文脱敏和工具结果重放通过。
 
+#### P3.1：Provider 工具路由兼容性
+
+目标：在不改变既有 Agent 任务、文档、普通聊天和已验证 Responses 路径的前提下，按 Provider 路由验证并逐项开放第三方模型的完整工具循环。
+
+工作项：
+
+- 将“模型可调用 function”与“当前 Provider 路由可执行完整 tool loop”视为两个独立门禁：前者来自受控模型能力目录，后者由协议适配器、endpoint 和真实冒烟证据共同决定；不得仅因模型名称或文本能力推断可用。
+- Worker 启动 Agent 时同时要求 `text && streaming && tools` 和 transport `toolLoop` 能力；任何一项缺失都稳定拒绝 Agent 请求，并保留普通聊天的纯文本路径，不得将显式草稿请求静默降级为普通聊天。
+- 为每个可开放路由登记精确的 Provider profile、协议、endpoint、模型 allowlist、工具调用格式、工具结果续写格式和验证日期；默认关闭，只有通过端到端冒烟和回归后才开放。
+- 当前 OpenAI Responses 路径是已验证基线。UniCompAPI 官方路由当前登记为 `openai-chat-completions` 且模型目录不声明 `tools`，在确认其目标模型、endpoint、工具调用事件和工具结果续写均兼容之前，只允许普通聊天，不得加入 Agent allowlist。
+- 若 UniCompAPI 或其他 Chat Completions 路由确认支持工具循环，单独实现并测试该协议的工具定义下发、function/tool-call 解析、`tool` 结果消息续写、usage 归一化、取消和 Provider step 持久化；不得复用 Responses 的 `function_call_output` 请求结构。
+- 不新增或回填既有 `agent_tasks`、Provider steps、授权、文档或项目数据库记录；新路由只影响新建 Agent generation 的选择门禁。关闭 allowlist 后，已完成任务保持可读，未启动任务明确拒绝。
+
+验收门禁：已验证 Responses 路径回归成功；未列入 allowlist 的 UniCompAPI 模型被 Worker 拒绝且无任务/文档/Provider step 副作用；每个新路由都有真实 Provider 冒烟记录，覆盖工具定义、一次 function call、工具结果续写、两个以上 Provider step、usage、取消和重启后的不重放；普通聊天在所有拒绝路径中仍不创建 Agent 任务。
+
 ### P4：会话触发文档草稿和编辑器闭环
 
 目标：用户在会话中要求生成项目文档后，系统自动创建草稿并打开编辑器。
@@ -1599,6 +1615,10 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 |---|---|---|---|---|
 | 2026-08-16 | P1 / P3 基础合同 | Provider step、step-local authorization Repository 已接入；LLM Responses 适配器可解析 function-call 事件 | `pnpm --filter @ai-video/persistence test`（19 项）、`pnpm --filter @ai-video/llm test`（10 项）、相关 typecheck 通过 | 当前只完成事实持久化和事件解析；Native Runtime 的可信信封、工具执行、结果回传和确认续执行仍未开放 |
 | 2026-08-17 | P3/P4 真实工具链 | 用户确认真实 Provider 工具调用链路已验证正常 | 用户人工验证 | 真实链路冒烟证据与任务记录待补充到验收表 |
+| 2026-08-17 | P1/P3 验收审计 | 未通过真实 Provider 工具循环门禁；保留上一行人工验证记录，但不得据此勾选阶段完成 | `pnpm.cmd --filter @ai-video/llm test`（10 项）、`pnpm.cmd --filter @ai-video/worker test`（143 项）、`cargo test llm_stream`（8 项）通过；代码审计确认 `LlmGenerationRuntimeRequest`、Native `LlmRuntimeRequest` 和请求体均未携带工具定义，`LlmStreamEvent`/SSE 解析仅处理文本 delta，且不存在 ToolGateway/ProviderLoopService 调用路径 | 下一步必须实现“工具定义下发 -> step-local 预授权 -> 受限执行 -> 工具结果回传 -> 续写”的可重复端到端测试；在此之前 P1/P3 保持进行中 |
+| 2026-08-17 | P1/P3 核心工具循环 | `document.create_draft` 纵向闭环完成：显式 Agent IPC 创建任务与 Provider step；Worker 签发只对 Native 可见的不透明授权 handle；Native 下发工具定义但不向 Provider 泄露 handle；function call 经白名单、严格参数和配额校验后原子写入草稿与主要产物；工具结果通过 `function_call_output` 续写；两个 step 的 usage 与 continuation manifest 持久化 | Worker 19 个测试文件/145 项、Desktop 17 个测试文件/95 项、Rust 43 项及 `pnpm typecheck`、Lint、格式、生产构建全部通过；新增伪造 handle、额外字段、副作用前拒绝、Native 请求脱敏、Desktop 双流续写测试 | P1/P3 保持进行中；此后续记录补齐剩余文档工具和确认续执行。 |
+| 2026-08-17 | P3 文档工具扩展 | `document.list/read/update_draft/archive/restore` 已加入显式 Agent 意图和单工具 step-local 授权；更新的目标文档、基础版本和 CAS 由 Worker 冻结；读取正文只经短期 continuation 返回而不写入工具证据或 manifest；归档/恢复先进入 `waiting_confirmation`，一次性 token 确认后才领取调用配额、执行生命周期变更并创建续写 step | `agent-provider-loop-service.test.ts` 覆盖读取正文脱敏、受信目标/CAS 更新、确认单次消费、过期和跨 step 旧 handle 拒绝 | P3 仍待 Worker 中断恢复、取消与工具提交竞争、完整确认 UI 和更广泛的配额/重放故障注入验收。 |
+| 2026-08-17 | P3 取消、恢复与确认闭环 | `llm.generation.cancel/fail` 终态会撤销 Agent 授权、终止未完成 Provider step/confirmation，并拒绝迟到工具回调；项目恢复时清理仍在运行但 generation 已中断的任务。Desktop 在高影响工具调用后调用本地确认，再使用一次性 token 续写同一 Provider loop | Worker Agent loop 8 项测试覆盖取消先提交零写入、授权撤销和恢复清理；Desktop `llm-client` 4 项测试覆盖确认后的同一 loop 续写 | P3 继续保留进行中，待完整 Provider 人工演练、并发故障注入与最终恢复验收。 |
 | 2026-08-16 | P1 / v14 Schema | 完成持久化基础 | `pnpm --filter @ai-video/persistence test`（19 项）、`pnpm --filter @ai-video/worker test`（131 项）、`pnpm --filter @ai-video/desktop test`（88 项）及 `pnpm typecheck` 通过 | `runV14Rebuild` 重建完整入站 FK 闭包；任务 `version` 无损迁移为 `row_version`；旧工具正文转为 `legacy_redacted` 摘要；现有回答转草稿链路写入 primary artifact。Provider 请求循环、预授权签发和确认消费仍待 P3 实现 |
 | 2026-08-16 | 计划 v0.6 | 实现级复审修订 | 统一确认 token 的唯一消费点和无正文 continuation descriptor；补齐 primary artifact 生命周期、legacy tool-call 确定性迁移、完整入站 FK swap、v13 状态事实与 partial 恢复审计动作；最终格式、链接和结构校验见本轮执行结果 | 本项只修订计划，v14 及后续代码仍待实施 |
 | 2026-08-16 | 计划 v0.5 | 最终交叉审阅修订 | 固化 `agent_task_confirmations` 的 v14 影子迁移、Provider/manual 互斥调用路径、原子去重冲突重读、手工草稿 selfPublish、同项目 step/call 复合键和小说 partial 恢复不变量；最终格式、链接和结构校验见本轮执行结果 | 本项只修订计划，v14 及后续代码仍待实施 |
@@ -1616,3 +1636,6 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-16 | P6 | 来源跳转完成 | Agent 文档详情增加“打开文档”，跳转到文档工作区并加载版本历史 | 来源会话跳转、图片/视频完整详情和 Provider step 详情待补 |
 | 2026-08-17 | P6 | 任务日志闭环完成 | Agent 详情可打开来源会话；图片/视频详情读取 `image.generate.get`/`video.generate.get` 并展示状态、请求摘要、Provider 任务和落盘产物 | Provider step 详情和素材/镜头直接跳转待补 |
 | 2026-08-16 | P8 | 自动门禁完成 | `pnpm test`（Desktop 88、Worker 131、Persistence 18）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 41 项测试和 `cargo fmt --check` 全部通过 | Windows 独立窗口实机、端口冲突恢复、迁移备份恢复演练未在本轮自动化验证 |
+| 2026-08-17 | P4 显式草稿入口与 Agent IPC 边界 | 会话输入区新增“创建文档草稿”显式图标，仅在可写会话且存在输入时可用；点击后固定发起 `agent.generation.prepare`、`agentMode=document` 和 `document.create_draft` 意图。Agent 准备、工具执行、确认和 Provider step 已纳入 IPC 参数白名单，拒绝伪造授权字段和未声明参数 | Desktop `App`/`ChatPanel` 15 项定向测试覆盖显式入口、固定意图和只读禁用；Worker `handler`/Agent loop 23 项定向测试覆盖未信任字段拒绝；全量 `pnpm test`（Desktop 98、Worker 152）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 43 项及 `cargo fmt --check` 通过 | P4 继续进行中：尚未提供 update/read/archive/restore 的目标选择入口，且普通聊天仍按产品决策保持无副作用；P3 仍待真实 Provider 人工演练和更广泛故障注入。 |
+| 2026-08-17 | P3.1 Provider 工具路由兼容性计划 | 将模型 function calling 与 transport tool loop 分离为双重门禁；新增 OpenAI Responses 基线、UniCompAPI Chat Completions 默认不开放、allowlist、无静默降级、逐路由真实 Provider 验收和无数据回填要求 | 计划合同复核；本项尚未实施运行时代码或真实 Provider 冒烟 | P3.1 未开始；待确认 UniCompAPI 的目标模型、endpoint 和 Chat Completions 工具续写兼容性，再决定是否新增适配器。 |
+| 2026-08-17 | P3.1 计划文档同步 | Markdown 计划升级至 v0.7，并生成同内容的 `AGENT-PROJECT-DOCUMENT-WORKFLOW-IMPLEMENTATION-PLAN.docx`；DOCX 结构校验通过（段落、表格、样式、固定表格宽度和 P3.1 文本存在） | 使用 bundled Python/`python-docx` 生成；LibreOffice/soffice 不在当前 Windows 环境，未完成 PNG 渲染视觉 QA | 计划文档已同步；P3.1 运行时代码、Provider 冒烟和适配器仍未开始。 |

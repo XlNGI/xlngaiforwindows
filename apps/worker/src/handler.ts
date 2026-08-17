@@ -6,6 +6,11 @@ import {
   type ChatMessageListParams,
   type ChatMessageSaveParams,
   type AgentTaskCreateDocumentDraftParams,
+  type AgentGenerationPrepareParams,
+  type AgentGenerationExecuteToolsParams,
+  type AgentGenerationConfirmToolParams,
+  type AgentProviderStepCompleteParams,
+  type AgentProviderStepStartParams,
   type AgentTaskGetParams,
   type AdapterResolveParams,
   type AdapterValidateParams,
@@ -74,6 +79,7 @@ import { AppSettingsService, ProviderProfileValidationError } from './app-settin
 import { UsageService } from './usage-service.js';
 import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
 import { executeInfrastructureCommand } from './worker-commands.js';
+import { AgentProviderLoopService } from './agent-provider-loop-service.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -126,6 +132,11 @@ const methods = new Set<WorkerMethod>([
   'agent.task.createDocumentDraft',
   'agent.task.list',
   'agent.task.get',
+  'agent.generation.prepare',
+  'agent.generation.executeTools',
+  'agent.generation.confirmTool',
+  'agent.providerStep.complete',
+  'agent.providerStep.start',
   'task.log.list',
   'scene.list',
   'scene.save',
@@ -236,6 +247,10 @@ const generationService = new GenerationService(
     usageIndexer: appSettingsService,
     generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
   },
+);
+const agentProviderLoopService = new AgentProviderLoopService(
+  projectService,
+  documentWorkflowService,
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
@@ -427,6 +442,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       usageService,
       maintenanceService,
       generationService,
+      agentProviderLoopService,
       imageGenerationService,
       videoGenerationService,
     });
@@ -480,6 +496,55 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           break;
         case 'agent.task.get':
           result = documentWorkflowService.getTask(params as unknown as AgentTaskGetParams);
+          break;
+        case 'agent.generation.prepare': {
+          const agentParams = params as unknown as AgentGenerationPrepareParams;
+          const model = appSettingsService
+            .listModels(agentParams.providerProfileId)
+            .find((candidate) => candidate.id === agentParams.modelId);
+          if (
+            !model?.capabilities.text ||
+            !model.capabilities.streaming ||
+            !model.capabilities.tools
+          ) {
+            throw new ProviderProfileValidationError(
+              'The selected Agent model must support text generation, streaming, and tools.',
+            );
+          }
+          const prepared = generationService.prepare(agentParams);
+          const agent = agentProviderLoopService.prepare(
+            prepared.stream,
+            agentParams.prompt,
+            agentParams.title,
+            agentParams.documentIntent,
+          );
+          generationService.configureAgentTools(prepared.stream, agent.tools);
+          result = { ...prepared, agentTaskId: agent.taskId };
+          break;
+        }
+        case 'agent.generation.executeTools': {
+          const executionParams = params as unknown as AgentGenerationExecuteToolsParams;
+          const execution = agentProviderLoopService.executeTools(executionParams);
+          generationService.configureAgentTools(executionParams, [], execution.continuation);
+          result = execution;
+          break;
+        }
+        case 'agent.generation.confirmTool':
+          result = agentProviderLoopService.confirmTool(
+            params as unknown as AgentGenerationConfirmToolParams,
+          );
+          break;
+        case 'agent.providerStep.complete':
+          agentProviderLoopService.completeProviderStep(
+            params as unknown as AgentProviderStepCompleteParams,
+          );
+          result = {};
+          break;
+        case 'agent.providerStep.start':
+          agentProviderLoopService.startProviderStep(
+            params as unknown as AgentProviderStepStartParams,
+          );
+          result = {};
           break;
         case 'task.log.list':
           result = documentWorkflowService.listTaskLog(params);
@@ -559,15 +624,21 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'llm.generation.complete':
           result = generationService.complete(params as unknown as LlmGenerationCompleteParams);
           break;
-        case 'llm.generation.fail':
-          result = generationService.failNative(params as unknown as LlmGenerationFailParams);
+        case 'llm.generation.fail': {
+          const failed = generationService.failNative(params as unknown as LlmGenerationFailParams);
+          agentProviderLoopService.terminateGeneration(failed.generationId, 'failed');
+          result = failed;
           break;
+        }
         case 'llm.generation.get':
           result = generationService.get(requireString(params, 'generationId'));
           break;
-        case 'llm.generation.cancel':
-          result = await generationService.cancel(requireString(params, 'generationId'));
+        case 'llm.generation.cancel': {
+          const generationId = requireString(params, 'generationId');
+          result = await generationService.cancel(generationId);
+          agentProviderLoopService.terminateGeneration(generationId, 'cancelled');
           break;
+        }
         case 'llm.generation.retry':
           result = generationService.retry({
             assistantMessageId: requireString(params, 'assistantMessageId'),

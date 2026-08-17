@@ -440,6 +440,10 @@ export function App() {
           setChatMessage(next.error ?? '生成完成');
         }
       },
+      onConfirmation(request) {
+        const action = request.action === 'document.archive' ? '归档' : '恢复归档';
+        return Promise.resolve(window.confirm(`确认${action}文档“${request.documentTitle}”？`));
+      },
     });
     nativeLlmRun.current = run;
     void run.completion
@@ -872,6 +876,30 @@ export function App() {
     });
     setMessages((current) => [...current, saved]);
     setChatMessage('消息已保存；在供应商与模型中添加 LLM 连接后可生成回复');
+  };
+
+  const createDocumentDraft = async () => {
+    if (!composer.trim() || !conversation) return;
+    if (!selectedLlmProfile || !selectedLlmModel) {
+      setChatMessage('创建文档草稿需要已配置支持工具调用的 LLM 模型。');
+      return;
+    }
+    const prompt = composer;
+    setComposer('');
+    try {
+      const prepared = await callWorker('agent.generation.prepare', {
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: selectedLlmProfile.id,
+        modelId: selectedLlmModel.id,
+        agentMode: 'document',
+        documentIntent: { operation: 'document.create_draft' },
+      });
+      launchPreparedGeneration(prepared);
+    } catch (reason) {
+      setComposer(prompt);
+      setChatMessage(reason instanceof Error ? reason.message : '文档草稿任务启动失败');
+    }
   };
 
   const cancelGeneration = async () => {
@@ -1436,6 +1464,7 @@ export function App() {
       onComposerChange={setComposer}
       onCancelGeneration={() => void cancelGeneration()}
       onSendMessage={() => void sendMessage()}
+      onCreateDocumentDraft={() => void createDocumentDraft()}
     />
   );
 

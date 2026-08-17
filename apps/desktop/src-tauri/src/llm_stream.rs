@@ -56,6 +56,43 @@ struct LlmRuntimeRequest {
     system_instruction: String,
     context: String,
     prompt: String,
+    #[serde(default)]
+    tools: Vec<LlmToolDefinition>,
+    #[serde(default)]
+    continuation: Option<LlmToolContinuation>,
+}
+
+#[derive(Clone, Deserialize)]
+struct LlmToolDefinition {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+    #[serde(default)]
+    authorization_handle: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmToolOutput {
+    call_id: String,
+    output: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmToolContinuation {
+    previous_response_id: String,
+    outputs: Vec<LlmToolOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LlmToolCall {
+    id: String,
+    name: String,
+    arguments_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorization_handle: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -89,6 +126,13 @@ pub(crate) enum LlmStreamEvent {
     Started,
     Delta {
         delta: String,
+    },
+    ToolCalls {
+        calls: Vec<LlmToolCall>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_response_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<NormalizedUsage>,
     },
     Complete {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -530,13 +574,32 @@ fn stream_provider(
     }
     let completed =
         parser.finish(|event| channel.send(event).map_err(|_| StreamFailure::cancelled()))?;
-    channel
-        .send(LlmStreamEvent::Complete {
-            provider_response_id: completed.provider_response_id,
-            finish_reason: completed.finish_reason,
-            usage: completed.usage,
-        })
-        .map_err(|_| StreamFailure::cancelled())?;
+    if completed.tool_calls.is_empty() {
+        channel
+            .send(LlmStreamEvent::Complete {
+                provider_response_id: completed.provider_response_id,
+                finish_reason: completed.finish_reason,
+                usage: completed.usage,
+            })
+            .map_err(|_| StreamFailure::cancelled())?;
+    } else {
+        let mut calls = completed.tool_calls;
+        for call in &mut calls {
+            call.authorization_handle = runtime
+                .tools
+                .iter()
+                .find(|tool| tool.name == call.name)
+                .and_then(|tool| tool.authorization_handle.clone());
+        }
+        calls.sort_by(|left, right| left.id.cmp(&right.id));
+        channel
+            .send(LlmStreamEvent::ToolCalls {
+                calls,
+                provider_response_id: completed.provider_response_id,
+                usage: completed.usage,
+            })
+            .map_err(|_| StreamFailure::cancelled())?;
+    }
     Ok(())
 }
 
@@ -546,13 +609,55 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
         runtime.context, runtime.prompt
     );
     let value = if runtime.protocol == "openai-responses" {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "model": runtime.remote_model_id,
             "instructions": runtime.system_instruction,
             "input": context,
             "store": false,
             "stream": true
-        })
+        });
+        if !runtime.tools.is_empty() {
+            value["tools"] = serde_json::Value::Array(
+                runtime
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "type": "function",
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(continuation) = &runtime.continuation {
+            if continuation.previous_response_id.trim().is_empty()
+                || continuation.outputs.is_empty()
+            {
+                return Err(StreamFailure::new(
+                    "LLM tool continuation is invalid.",
+                    false,
+                ));
+            }
+            value["previous_response_id"] =
+                serde_json::Value::String(continuation.previous_response_id.clone());
+            value["input"] = serde_json::Value::Array(
+                continuation
+                    .outputs
+                    .iter()
+                    .map(|output| {
+                        serde_json::json!({
+                            "type": "function_call_output",
+                            "call_id": output.call_id,
+                            "output": output.output,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        value
     } else {
         let system = if runtime.context.trim().is_empty() {
             runtime.system_instruction.clone()
@@ -758,6 +863,7 @@ struct CompletedStream {
     provider_response_id: Option<String>,
     finish_reason: Option<String>,
     usage: Option<NormalizedUsage>,
+    tool_calls: Vec<LlmToolCall>,
 }
 
 struct SseParser {
@@ -767,6 +873,7 @@ struct SseParser {
     provider_response_id: Option<String>,
     finish_reason: Option<String>,
     usage: Option<NormalizedUsage>,
+    tool_calls: HashMap<String, LlmToolCall>,
 }
 
 impl SseParser {
@@ -778,6 +885,7 @@ impl SseParser {
             provider_response_id: None,
             finish_reason: None,
             usage: None,
+            tool_calls: HashMap::new(),
         }
     }
 
@@ -818,6 +926,7 @@ impl SseParser {
             provider_response_id: self.provider_response_id,
             finish_reason: self.finish_reason,
             usage: self.usage,
+            tool_calls: self.tool_calls.into_values().collect(),
         })
     }
 
@@ -888,6 +997,52 @@ impl SseParser {
                         emit(LlmStreamEvent::Delta {
                             delta: delta.to_string(),
                         })?;
+                    }
+                }
+            }
+            "response.output_item.added" => {
+                let item = value.get("item").unwrap_or(value);
+                if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call") {
+                    let item_id = item.get("id").and_then(serde_json::Value::as_str);
+                    let call_id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(serde_json::Value::as_str);
+                    let name = item.get("name").and_then(serde_json::Value::as_str);
+                    if let (Some(item_id), Some(call_id), Some(name)) = (item_id, call_id, name) {
+                        self.tool_calls.insert(
+                            item_id.to_string(),
+                            LlmToolCall {
+                                id: call_id.to_string(),
+                                name: name.to_string(),
+                                arguments_json: item
+                                    .get("arguments")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                authorization_handle: None,
+                            },
+                        );
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let (Some(item_id), Some(delta)) = (
+                    value.get("item_id").and_then(serde_json::Value::as_str),
+                    value.get("delta").and_then(serde_json::Value::as_str),
+                ) {
+                    if let Some(call) = self.tool_calls.get_mut(item_id) {
+                        call.arguments_json.push_str(delta);
+                    }
+                }
+            }
+            "response.function_call_arguments.done" => {
+                if let (Some(item_id), Some(arguments)) = (
+                    value.get("item_id").and_then(serde_json::Value::as_str),
+                    value.get("arguments").and_then(serde_json::Value::as_str),
+                ) {
+                    if let Some(call) = self.tool_calls.get_mut(item_id) {
+                        call.arguments_json = arguments.to_string();
                     }
                 }
             }
@@ -1198,6 +1353,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_responses_function_calls_before_completion() {
+        let mut parser = SseParser::new("openai-responses");
+        let mut events = Vec::new();
+        parser
+            .feed(
+                b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"item_1\",\"call_id\":\"call_1\",\"name\":\"document.create_draft\",\"arguments\":\"\"}}\n\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"item_1\",\"delta\":\"{\\\"title\\\":\\\"Draft\\\"}\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\"}}\n\n",
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .expect("tool call stream should parse");
+        let completed = parser
+            .finish(|_| Ok(()))
+            .expect("completion should be accepted");
+        assert_eq!(
+            completed.tool_calls,
+            vec![super::LlmToolCall {
+                id: "call_1".to_string(),
+                name: "document.create_draft".to_string(),
+                arguments_json: "{\"title\":\"Draft\"}".to_string(),
+                authorization_handle: None,
+            }]
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn rejects_truncated_responses_streams() {
         let mut parser = SseParser::new("openai-responses");
         parser
@@ -1275,6 +1458,46 @@ mod tests {
         assert_eq!(endpoint.path("responses"), "/v1/responses");
         assert!(parse_base_url("http://api.openai.com/v1", false).is_err());
         assert!(parse_base_url("https://example.com/v1/../admin", false).is_err());
+    }
+
+    #[test]
+    fn sends_tools_and_continuation_outputs_to_responses() {
+        let runtime = LlmRuntimeRequest {
+            generation_id: "generation".to_string(),
+            attempt_id: "attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            provider_profile_id: "profile".to_string(),
+            model_id: "model".to_string(),
+            remote_model_id: "remote-model".to_string(),
+            protocol: "openai-responses".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            system_instruction: "System".to_string(),
+            context: "Context".to_string(),
+            prompt: "Prompt".to_string(),
+            tools: vec![super::LlmToolDefinition {
+                name: "document.create_draft".to_string(),
+                description: "Create a reviewable draft".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                authorization_handle: Some("native-only-handle".to_string()),
+            }],
+            continuation: Some(super::LlmToolContinuation {
+                previous_response_id: "resp_1".to_string(),
+                outputs: vec![super::LlmToolOutput {
+                    call_id: "call_1".to_string(),
+                    output: "{\"status\":\"draft\"}".to_string(),
+                }],
+            }),
+        };
+        let body = super::build_request_body(&runtime).expect("request body should build");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("body should be JSON");
+        assert_eq!(value["previous_response_id"], "resp_1");
+        assert_eq!(value["tools"][0]["name"], "document.create_draft");
+        assert!(value["tools"][0].get("authorizationHandle").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("native-only-handle"));
+        assert_eq!(value["input"][0]["type"], "function_call_output");
+        assert_eq!(value["input"][0]["call_id"], "call_1");
     }
 
     #[test]
@@ -1364,6 +1587,8 @@ mod tests {
             system_instruction: "System".to_string(),
             context: "Context".to_string(),
             prompt: "Prompt".to_string(),
+            tools: Vec::new(),
+            continuation: None,
         };
         let cancellation = Arc::new(LlmCancellation::default());
         let channel = Channel::new(|_| Ok(()));

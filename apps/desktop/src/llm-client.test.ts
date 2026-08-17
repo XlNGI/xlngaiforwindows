@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AgentGenerationPrepareResult,
   LlmGenerationInfo,
   LlmGenerationCompleteParams,
   LlmGenerationFailParams,
@@ -24,6 +25,8 @@ vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 
 import { callWorker } from './worker-client';
 import { streamPreparedLlmGeneration } from './llm-client';
+
+let requiresConfirmation = false;
 
 const prepared: LlmGenerationPrepareResult = {
   stream: {
@@ -79,6 +82,7 @@ function state(status: LlmGenerationInfo['status'], content: string): LlmGenerat
 describe('streamPreparedLlmGeneration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    requiresConfirmation = false;
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'llm.generation.observe') {
         const input = params as LlmGenerationObserveParams;
@@ -99,6 +103,35 @@ describe('streamPreparedLlmGeneration', () => {
       if (method === 'llm.generation.cancel') {
         return Promise.resolve(state('cancelled', ''));
       }
+      if (method === 'agent.generation.executeTools') {
+        if (requiresConfirmation) {
+          return Promise.resolve({
+            confirmation: {
+              confirmationToken: 'one-time-token',
+              action: 'document.archive' as const,
+              documentId: 'document',
+              documentTitle: 'Draft',
+              expiresAt: '2099-01-01T00:00:00.000Z',
+            },
+          });
+        }
+        return Promise.resolve({
+          continuation: {
+            previousResponseId: 'response-tool',
+            outputs: [{ callId: 'call-1', output: '{"status":"draft_created"}' }],
+          },
+        });
+      }
+      if (method === 'agent.generation.confirmTool') {
+        return Promise.resolve({
+          continuation: {
+            previousResponseId: 'response-tool',
+            outputs: [{ callId: 'call-1', output: '{"status":"archived"}' }],
+          },
+        });
+      }
+      if (method === 'agent.providerStep.complete') return Promise.resolve({});
+      if (method === 'agent.providerStep.start') return Promise.resolve({});
       throw new Error(`Unexpected Worker method ${method}`);
     });
   });
@@ -152,5 +185,112 @@ describe('streamPreparedLlmGeneration', () => {
       status: 'failed',
       error: 'Native LLM stream ended without a terminal event.',
     });
+  });
+
+  it('executes Agent tool calls and starts a continuation stream before completing', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+    };
+    native.invoke
+      .mockImplementationOnce((_command, args) => {
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        channel.onmessage?.({ type: 'started' });
+        channel.onmessage?.({
+          type: 'toolCalls',
+          providerResponseId: 'response-tool',
+          calls: [
+            {
+              id: 'call-1',
+              name: 'document.create_draft',
+              argumentsJson: '{"title":"Draft","contentMarkdown":"# Draft"}',
+              authorizationHandle: 'native-only-handle',
+            },
+          ],
+        });
+        return Promise.resolve();
+      })
+      .mockImplementationOnce((_command, args) => {
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        channel.onmessage?.({ type: 'started' });
+        channel.onmessage?.({ type: 'delta', delta: 'Draft created.' });
+        channel.onmessage?.({
+          type: 'complete',
+          providerResponseId: 'response-final',
+          finishReason: 'completed',
+        });
+        return Promise.resolve();
+      });
+
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState: (next) => states.push(next),
+    });
+    await run.completion;
+
+    expect(native.invoke).toHaveBeenCalledTimes(2);
+    expect(callWorker).toHaveBeenCalledWith(
+      'agent.generation.executeTools',
+      expect.objectContaining({ providerResponseId: 'response-tool' }),
+    );
+    expect(callWorker).toHaveBeenCalledWith(
+      'agent.providerStep.complete',
+      expect.objectContaining({ providerResponseId: 'response-final' }),
+    );
+    expect(states.at(-1)).toMatchObject({ status: 'complete' });
+  });
+
+  it('confirms a high-impact Agent tool locally before continuing the same Provider loop', async () => {
+    requiresConfirmation = true;
+    const agentPrepared: AgentGenerationPrepareResult = { ...prepared, agentTaskId: 'agent-task' };
+    native.invoke
+      .mockImplementationOnce((_command, args) => {
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        channel.onmessage?.({ type: 'started' });
+        channel.onmessage?.({
+          type: 'toolCalls',
+          providerResponseId: 'response-tool',
+          calls: [
+            {
+              id: 'call-1',
+              name: 'document.archive',
+              argumentsJson: '{}',
+              authorizationHandle: 'native-only-handle',
+            },
+          ],
+        });
+        return Promise.resolve();
+      })
+      .mockImplementationOnce((_command, args) => {
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        channel.onmessage?.({ type: 'started' });
+        channel.onmessage?.({
+          type: 'complete',
+          providerResponseId: 'response-final',
+          finishReason: 'completed',
+        });
+        return Promise.resolve();
+      });
+
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState() {},
+      onConfirmation: (request) => {
+        expect(request.action).toBe('document.archive');
+        return Promise.resolve(true);
+      },
+    });
+    await run.completion;
+
+    expect(callWorker).toHaveBeenCalledWith(
+      'agent.generation.confirmTool',
+      expect.objectContaining({ confirmationToken: 'one-time-token', approved: true }),
+    );
+    expect(native.invoke).toHaveBeenCalledTimes(2);
   });
 });

@@ -180,6 +180,29 @@ interface TaskDocumentRow {
   created_at: string;
 }
 
+export interface TrustedAgentDraftParams {
+  taskId: string;
+  title: string;
+  contentMarkdown: string;
+  scopeType: DocumentSummary['scopeType'];
+  scopeId?: string;
+  sourceMessageId?: string;
+  contextSnapshotId?: string;
+}
+
+export interface TrustedAgentUpdateParams extends TrustedAgentDraftParams {
+  documentId: string;
+  expectedDocumentRowVersion: number;
+  baseVersionId: string;
+}
+
+export interface TrustedAgentLifecycleParams {
+  taskId: string;
+  documentId: string;
+  expectedDocumentRowVersion: number;
+  outcome: 'archived' | 'restored';
+}
+
 function hash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
@@ -835,6 +858,209 @@ export class DocumentWorkflowService {
         this.createDocumentDraftFromMessageInTransaction(database, project, params),
       )(),
     );
+  }
+
+  writeTrustedAgentDraftInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    params: TrustedAgentDraftParams,
+  ): DocumentDetail {
+    const existingArtifact = database
+      .prepare('SELECT document_id FROM agent_task_document_artifacts WHERE task_id = ?')
+      .get(params.taskId) as { document_id: string } | undefined;
+    if (existingArtifact) {
+      return this.getDocumentInProject(database, project, existingArtifact.document_id);
+    }
+    const now = new Date().toISOString();
+    const document = this.writeDraft(database, project, {
+      kind: 'note',
+      title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
+      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      scopeType: params.scopeType,
+      scopeId: params.scopeId,
+      sourceTaskId: params.taskId,
+      sourceMessageId: params.sourceMessageId,
+      contextSnapshotId: params.contextSnapshotId,
+      authorType: 'agent',
+    });
+    const version = document.currentVersion;
+    if (!version) throw new DocumentWorkflowError('EXPECTED_ARTIFACT_MISSING', 'CONFLICT');
+    this.appendAudit(database, project.id, {
+      action: 'draft_saved',
+      actorType: 'agent',
+      actorId: 'agent-provider-loop',
+      documentId: document.id,
+      documentVersionId: version.id,
+      taskId: params.taskId,
+      metadata: { operation: 'create', providerTool: true },
+      createdAt: version.createdAt,
+    });
+    database
+      .prepare(
+        `INSERT INTO agent_task_document_versions
+         (task_id, document_id, document_version_id, operation, created_at)
+         VALUES (?, ?, ?, 'create', ?)`,
+      )
+      .run(params.taskId, document.id, version.id, now);
+    database
+      .prepare(
+        `INSERT INTO agent_task_document_artifacts
+         (id, project_id, task_id, document_id, document_version_id, artifact_role,
+          disposition, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'primary', 'draft', 0, ?, ?)`,
+      )
+      .run(randomUUID(), project.id, params.taskId, document.id, version.id, now, now);
+    database
+      .prepare(
+        `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
+         updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
+      )
+      .run(now, params.taskId);
+    this.appendEvent(
+      database,
+      project.id,
+      params.taskId,
+      'document.draft.created',
+      'info',
+      'The Provider tool created a reviewable document draft.',
+      { documentId: document.id, documentVersionId: version.id },
+      now,
+    );
+    return document;
+  }
+
+  writeTrustedAgentUpdateInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    params: TrustedAgentUpdateParams,
+  ): DocumentDetail {
+    const existing = this.requireDocument(database, project, params.documentId);
+    this.requireDocumentRowVersion(existing, params.expectedDocumentRowVersion);
+    if (existing.current_version_id !== params.baseVersionId) {
+      throw new DocumentWorkflowError('Document base version is stale.', 'DOCUMENT_BASE_CONFLICT');
+    }
+    const document = this.writeDraft(database, project, {
+      documentId: params.documentId,
+      kind: documentKind(existing.kind),
+      title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
+      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      scopeType: scopeType(existing.scope_type),
+      scopeId: existing.scope_id ?? undefined,
+      expectedDocumentRowVersion: params.expectedDocumentRowVersion,
+      baseVersionId: params.baseVersionId,
+      sourceTaskId: params.taskId,
+      sourceMessageId: params.sourceMessageId,
+      contextSnapshotId: params.contextSnapshotId,
+      authorType: 'agent',
+    });
+    const version = document.currentVersion;
+    if (!version) throw new DocumentWorkflowError('EXPECTED_ARTIFACT_MISSING', 'CONFLICT');
+    const now = version.createdAt;
+    this.appendAudit(database, project.id, {
+      action: 'draft_saved',
+      actorType: 'agent',
+      actorId: 'agent-provider-loop',
+      documentId: document.id,
+      documentVersionId: version.id,
+      taskId: params.taskId,
+      metadata: { operation: 'update', providerTool: true, baseVersionId: params.baseVersionId },
+      createdAt: now,
+    });
+    database
+      .prepare(
+        `INSERT INTO agent_task_document_versions
+         (task_id, document_id, document_version_id, operation, created_at)
+         VALUES (?, ?, ?, 'update', ?)`,
+      )
+      .run(params.taskId, document.id, version.id, now);
+    database
+      .prepare(
+        `INSERT INTO agent_task_document_artifacts
+         (id, project_id, task_id, document_id, document_version_id, artifact_role,
+          disposition, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'primary', 'draft', 0, ?, ?)`,
+      )
+      .run(randomUUID(), project.id, params.taskId, document.id, version.id, now, now);
+    database
+      .prepare(
+        `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
+         updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
+      )
+      .run(now, params.taskId);
+    this.appendEvent(
+      database,
+      project.id,
+      params.taskId,
+      'document.draft.updated',
+      'info',
+      'The Provider tool created a reviewable document revision.',
+      { documentId: document.id, documentVersionId: version.id },
+      now,
+    );
+    return document;
+  }
+
+  applyTrustedAgentLifecycleInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    params: TrustedAgentLifecycleParams,
+  ): DocumentDetail {
+    const document = this.requireDocument(database, project, params.documentId);
+    this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+    const now = new Date().toISOString();
+    const expected = params.outcome === 'archived' ? 'active' : 'archived';
+    const next = params.outcome === 'archived' ? 'archived' : 'active';
+    const result = database
+      .prepare(
+        `UPDATE documents SET lifecycle_status = ?, updated_at = ?, row_version = row_version + 1
+         WHERE id = ? AND lifecycle_status = ? AND row_version = ?`,
+      )
+      .run(next, now, document.id, expected, params.expectedDocumentRowVersion);
+    if (result.changes !== 1) {
+      throw new DocumentWorkflowError('Document lifecycle changed in another window.', 'CONFLICT');
+    }
+    database
+      .prepare(
+        `UPDATE agent_tasks SET status = 'completed', outcome = ?,
+         completed_at = ?, updated_at = ?, row_version = row_version + 1
+         WHERE id = ? AND status = 'running'`,
+      )
+      .run(params.outcome, now, now, params.taskId);
+    this.appendEvent(
+      database,
+      project.id,
+      params.taskId,
+      `document.${params.outcome}`,
+      'info',
+      `The Provider tool ${params.outcome}d the document.`,
+      { documentId: document.id },
+      now,
+    );
+    return this.getDocumentInProject(database, project, document.id);
+  }
+
+  listAgentDocumentsInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+  ): DocumentSummary[] {
+    return (
+      database
+        .prepare(
+          `SELECT * FROM documents WHERE project_id = ? AND lifecycle_status = 'active'
+           ORDER BY updated_at DESC, id DESC LIMIT 100`,
+        )
+        .all(project.id) as DocumentRow[]
+    ).map(toDocumentSummary);
+  }
+
+  readAgentDocumentInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    documentId: string,
+  ): DocumentDetail {
+    const document = this.requireDocument(database, project, documentId);
+    if (document.lifecycle_status === 'archived') throw new Error('Document is archived.');
+    return this.getDocumentInProject(database, project, documentId);
   }
 
   listTasks(params: AgentTaskListParams = {}): AgentTaskInfo[] {
