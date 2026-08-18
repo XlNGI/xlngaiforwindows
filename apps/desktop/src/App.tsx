@@ -394,6 +394,27 @@ export function App() {
   };
 
   const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
+    const isAgentGeneration = 'agentTaskId' in prepared;
+    const previousDocumentIds = new Set(documents.map((item) => item.id));
+    let agentDocumentRefreshStarted = false;
+    const refreshAgentDocuments = () => {
+      if (!isAgentGeneration || agentDocumentRefreshStarted) return;
+      agentDocumentRefreshStarted = true;
+      const projectId = prepared.stream.projectId;
+      void callWorker('document.list', {})
+        .then((nextDocuments) => {
+          if (generationPollOwner.current.projectId === projectId) {
+            setDocuments(nextDocuments);
+            const createdDocument = nextDocuments.find((item) => !previousDocumentIds.has(item.id));
+            if (createdDocument) void openDocumentById(createdDocument.id);
+          }
+        })
+        .catch((reason) => {
+          if (generationPollOwner.current.projectId === projectId) {
+            setContentMessage(reason instanceof Error ? reason.message : '文档列表刷新失败');
+          }
+        });
+    };
     setGeneration(prepared.generation);
     setMessages((current) => {
       const withoutAssistant = current.filter(
@@ -409,6 +430,7 @@ export function App() {
     });
     if (!isGenerationActive(prepared.generation)) {
       setChatMessage(prepared.generation.error ?? '生成已完成');
+      refreshAgentDocuments();
       return;
     }
     const run = streamPreparedLlmGeneration(prepared, {
@@ -438,6 +460,7 @@ export function App() {
         );
         if (!isGenerationActive(next)) {
           setChatMessage(next.error ?? '生成完成');
+          refreshAgentDocuments();
         }
       },
       onConfirmation(request) {
@@ -893,6 +916,7 @@ export function App() {
         providerProfileId: selectedLlmProfile.id,
         modelId: selectedLlmModel.id,
         agentMode: 'document',
+        researchMode: 'auto',
         documentIntent: { operation: 'document.create_draft' },
       });
       launchPreparedGeneration(prepared);

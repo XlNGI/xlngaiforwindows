@@ -29,6 +29,7 @@ const REQUEST_BODY_LIMIT: usize = 4 * 1024 * 1024;
 const ERROR_BODY_LIMIT: usize = 64 * 1024;
 const STREAM_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const CHAT_TOOL_NAME_DOT_MARKER: &str = "__dot__";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +64,7 @@ struct LlmRuntimeRequest {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LlmToolDefinition {
     name: String,
     description: String,
@@ -79,13 +81,24 @@ struct LlmToolOutput {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LlmToolContinuation {
-    previous_response_id: String,
-    outputs: Vec<LlmToolOutput>,
+#[serde(tag = "protocol")]
+enum LlmToolContinuation {
+    #[serde(rename = "openai-responses")]
+    Responses {
+        #[serde(rename = "previousResponseId")]
+        previous_response_id: String,
+        outputs: Vec<LlmToolOutput>,
+    },
+    #[serde(rename = "openai-chat-completions")]
+    ChatCompletions {
+        #[serde(rename = "providerResponseId")]
+        provider_response_id: String,
+        calls: Vec<LlmToolCall>,
+        outputs: Vec<LlmToolOutput>,
+    },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LlmToolCall {
     id: String,
@@ -121,7 +134,11 @@ pub(crate) struct NormalizedUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum LlmStreamEvent {
     Started,
     Delta {
@@ -584,6 +601,11 @@ fn stream_provider(
             .map_err(|_| StreamFailure::cancelled())?;
     } else {
         let mut calls = completed.tool_calls;
+        let provider_response_id = completed.provider_response_id.or_else(|| {
+            calls
+                .first()
+                .and_then(|call| normalize_optional(&format!("chat-tool-call:{}", call.id), 256))
+        });
         for call in &mut calls {
             call.authorization_handle = runtime
                 .tools
@@ -591,11 +613,10 @@ fn stream_provider(
                 .find(|tool| tool.name == call.name)
                 .and_then(|tool| tool.authorization_handle.clone());
         }
-        calls.sort_by(|left, right| left.id.cmp(&right.id));
         channel
             .send(LlmStreamEvent::ToolCalls {
                 calls,
-                provider_response_id: completed.provider_response_id,
+                provider_response_id,
                 usage: completed.usage,
             })
             .map_err(|_| StreamFailure::cancelled())?;
@@ -633,19 +654,25 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
             );
         }
         if let Some(continuation) = &runtime.continuation {
-            if continuation.previous_response_id.trim().is_empty()
-                || continuation.outputs.is_empty()
-            {
+            let LlmToolContinuation::Responses {
+                previous_response_id,
+                outputs,
+            } = continuation
+            else {
+                return Err(StreamFailure::new(
+                    "LLM tool continuation protocol does not match the Provider route.",
+                    false,
+                ));
+            };
+            if previous_response_id.trim().is_empty() || outputs.is_empty() {
                 return Err(StreamFailure::new(
                     "LLM tool continuation is invalid.",
                     false,
                 ));
             }
-            value["previous_response_id"] =
-                serde_json::Value::String(continuation.previous_response_id.clone());
+            value["previous_response_id"] = serde_json::Value::String(previous_response_id.clone());
             value["input"] = serde_json::Value::Array(
-                continuation
-                    .outputs
+                outputs
                     .iter()
                     .map(|output| {
                         serde_json::json!({
@@ -667,18 +694,136 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                 runtime.system_instruction, runtime.context
             )
         };
-        serde_json::json!({
+        let mut messages = vec![
+            serde_json::json!({ "role": "system", "content": system }),
+            serde_json::json!({ "role": "user", "content": runtime.prompt }),
+        ];
+        if let Some(continuation) = &runtime.continuation {
+            let LlmToolContinuation::ChatCompletions {
+                provider_response_id,
+                calls,
+                outputs,
+            } = continuation
+            else {
+                return Err(StreamFailure::new(
+                    "LLM tool continuation protocol does not match the Provider route.",
+                    false,
+                ));
+            };
+            append_chat_continuation(&mut messages, provider_response_id, calls, outputs)?;
+        }
+        let mut value = serde_json::json!({
             "model": runtime.remote_model_id,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": runtime.prompt }
-            ],
+            "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true }
-        })
+        });
+        if !runtime.tools.is_empty() {
+            value["tools"] = serde_json::Value::Array(
+                runtime
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": encode_chat_tool_name(&tool.name),
+                                "description": tool.description,
+                                "parameters": tool.parameters,
+                            }
+                        })
+                    })
+                    .collect(),
+            );
+            value["tool_choice"] = serde_json::Value::String("auto".to_string());
+            value["parallel_tool_calls"] = serde_json::Value::Bool(true);
+        }
+        value
     };
     serde_json::to_vec(&value)
         .map_err(|_| StreamFailure::new("LLM request could not be serialized.", false))
+}
+
+fn append_chat_continuation(
+    messages: &mut Vec<serde_json::Value>,
+    provider_response_id: &str,
+    calls: &[LlmToolCall],
+    outputs: &[LlmToolOutput],
+) -> Result<(), StreamFailure> {
+    if provider_response_id.trim().is_empty() || calls.is_empty() || outputs.is_empty() {
+        return Err(StreamFailure::new(
+            "LLM tool continuation is invalid.",
+            false,
+        ));
+    }
+    let mut outputs_by_call = HashMap::new();
+    for output in outputs {
+        if output.call_id.trim().is_empty()
+            || outputs_by_call
+                .insert(output.call_id.as_str(), output)
+                .is_some()
+        {
+            return Err(StreamFailure::new(
+                "LLM tool continuation has duplicate or invalid outputs.",
+                false,
+            ));
+        }
+    }
+    let mut provider_calls = Vec::with_capacity(calls.len());
+    let mut tool_messages = Vec::with_capacity(calls.len());
+    let mut seen_calls = HashMap::new();
+    for call in calls {
+        if call.id.trim().is_empty()
+            || call.name.trim().is_empty()
+            || seen_calls.insert(call.id.as_str(), ()).is_some()
+            || serde_json::from_str::<serde_json::Value>(&call.arguments_json).is_err()
+        {
+            return Err(StreamFailure::new(
+                "LLM tool continuation has an invalid call.",
+                false,
+            ));
+        }
+        let Some(output) = outputs_by_call.remove(call.id.as_str()) else {
+            return Err(StreamFailure::new(
+                "LLM tool continuation is missing a call output.",
+                false,
+            ));
+        };
+        provider_calls.push(serde_json::json!({
+            "id": call.id,
+            "type": "function",
+            "function": {
+                "name": encode_chat_tool_name(&call.name),
+                "arguments": call.arguments_json,
+            }
+        }));
+        tool_messages.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": output.output,
+        }));
+    }
+    if !outputs_by_call.is_empty() {
+        return Err(StreamFailure::new(
+            "LLM tool continuation contains an unknown call output.",
+            false,
+        ));
+    }
+    messages.push(serde_json::json!({
+        "role": "assistant",
+        "content": serde_json::Value::Null,
+        "tool_calls": provider_calls,
+    }));
+    messages.extend(tool_messages);
+    Ok(())
+}
+
+fn encode_chat_tool_name(name: &str) -> String {
+    name.replace('.', CHAT_TOOL_NAME_DOT_MARKER)
+}
+
+fn decode_chat_tool_name(name: &str) -> String {
+    name.replace(CHAT_TOOL_NAME_DOT_MARKER, ".")
 }
 
 fn parse_base_url(
@@ -873,7 +1018,13 @@ struct SseParser {
     provider_response_id: Option<String>,
     finish_reason: Option<String>,
     usage: Option<NormalizedUsage>,
-    tool_calls: HashMap<String, LlmToolCall>,
+    tool_calls: HashMap<String, ToolCallAccumulator>,
+    next_tool_call_ordinal: u64,
+}
+
+struct ToolCallAccumulator {
+    ordinal: u64,
+    call: LlmToolCall,
 }
 
 impl SseParser {
@@ -886,6 +1037,7 @@ impl SseParser {
             finish_reason: None,
             usage: None,
             tool_calls: HashMap::new(),
+            next_tool_call_ordinal: 0,
         }
     }
 
@@ -922,11 +1074,41 @@ impl SseParser {
                 true,
             ));
         }
+        let mut tool_calls = self.tool_calls.into_values().collect::<Vec<_>>();
+        tool_calls.sort_by_key(|item| item.ordinal);
+        let protocol = self.protocol;
+        let tool_calls = tool_calls
+            .into_iter()
+            .map(|item| {
+                let mut call = item.call;
+                if protocol == "openai-chat-completions" {
+                    call.name = decode_chat_tool_name(&call.name);
+                }
+                call
+            })
+            .collect::<Vec<_>>();
+        if tool_calls
+            .iter()
+            .any(|call| call.id.trim().is_empty() || call.name.trim().is_empty())
+        {
+            return Err(StreamFailure::new(
+                "LLM stream returned an incomplete tool call.",
+                false,
+            ));
+        }
+        let mut provider_response_id = self.provider_response_id;
+        if protocol == "openai-chat-completions"
+            && provider_response_id.is_none()
+            && !tool_calls.is_empty()
+        {
+            provider_response_id =
+                normalize_optional(&format!("chat-tool-call:{}", tool_calls[0].id), 256);
+        }
         Ok(CompletedStream {
-            provider_response_id: self.provider_response_id,
+            provider_response_id,
             finish_reason: self.finish_reason,
             usage: self.usage,
-            tool_calls: self.tool_calls.into_values().collect(),
+            tool_calls,
         })
     }
 
@@ -1010,17 +1192,22 @@ impl SseParser {
                         .and_then(serde_json::Value::as_str);
                     let name = item.get("name").and_then(serde_json::Value::as_str);
                     if let (Some(item_id), Some(call_id), Some(name)) = (item_id, call_id, name) {
+                        let ordinal = self.next_tool_call_ordinal;
+                        self.next_tool_call_ordinal += 1;
                         self.tool_calls.insert(
                             item_id.to_string(),
-                            LlmToolCall {
-                                id: call_id.to_string(),
-                                name: name.to_string(),
-                                arguments_json: item
-                                    .get("arguments")
-                                    .and_then(serde_json::Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string(),
-                                authorization_handle: None,
+                            ToolCallAccumulator {
+                                ordinal,
+                                call: LlmToolCall {
+                                    id: call_id.to_string(),
+                                    name: name.to_string(),
+                                    arguments_json: item
+                                        .get("arguments")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    authorization_handle: None,
+                                },
                             },
                         );
                     }
@@ -1032,7 +1219,7 @@ impl SseParser {
                     value.get("delta").and_then(serde_json::Value::as_str),
                 ) {
                     if let Some(call) = self.tool_calls.get_mut(item_id) {
-                        call.arguments_json.push_str(delta);
+                        append_bounded(&mut call.call.arguments_json, delta, "tool arguments")?;
                     }
                 }
             }
@@ -1042,7 +1229,13 @@ impl SseParser {
                     value.get("arguments").and_then(serde_json::Value::as_str),
                 ) {
                     if let Some(call) = self.tool_calls.get_mut(item_id) {
-                        call.arguments_json = arguments.to_string();
+                        if arguments.len() > STREAM_BUFFER_LIMIT {
+                            return Err(StreamFailure::new(
+                                "LLM tool arguments exceed the parser limit.",
+                                false,
+                            ));
+                        }
+                        call.call.arguments_json = arguments.to_string();
                     }
                 }
             }
@@ -1096,6 +1289,54 @@ impl SseParser {
                         })?;
                     }
                 }
+                if let Some(tool_calls) = choice
+                    .pointer("/delta/tool_calls")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for tool_call in tool_calls {
+                        let index = tool_call
+                            .get("index")
+                            .and_then(serde_json::Value::as_u64)
+                            .ok_or_else(|| {
+                                StreamFailure::new(
+                                    "LLM stream returned a tool call without an index.",
+                                    false,
+                                )
+                            })?;
+                        let key = format!("chat:{index}");
+                        let accumulator =
+                            self.tool_calls
+                                .entry(key)
+                                .or_insert_with(|| ToolCallAccumulator {
+                                    ordinal: index,
+                                    call: LlmToolCall {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        arguments_json: String::new(),
+                                        authorization_handle: None,
+                                    },
+                                });
+                        if let Some(id) = tool_call.get("id").and_then(serde_json::Value::as_str) {
+                            append_bounded(&mut accumulator.call.id, id, "tool call ID")?;
+                        }
+                        if let Some(name) = tool_call
+                            .pointer("/function/name")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            append_bounded(&mut accumulator.call.name, name, "tool name")?;
+                        }
+                        if let Some(arguments) = tool_call
+                            .pointer("/function/arguments")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            append_bounded(
+                                &mut accumulator.call.arguments_json,
+                                arguments,
+                                "tool arguments",
+                            )?;
+                        }
+                    }
+                }
                 if let Some(reason) = choice
                     .get("finish_reason")
                     .and_then(serde_json::Value::as_str)
@@ -1106,6 +1347,17 @@ impl SseParser {
         }
         Ok(())
     }
+}
+
+fn append_bounded(target: &mut String, fragment: &str, label: &str) -> Result<(), StreamFailure> {
+    if target.len().saturating_add(fragment.len()) > STREAM_BUFFER_LIMIT {
+        return Err(StreamFailure::new(
+            format!("LLM {label} exceed the parser limit."),
+            false,
+        ));
+    }
+    target.push_str(fragment);
+    Ok(())
 }
 
 fn parse_responses_usage(value: &serde_json::Value) -> Option<NormalizedUsage> {
@@ -1423,6 +1675,20 @@ mod tests {
     }
 
     #[test]
+    fn serializes_tool_call_event_fields_for_the_desktop_contract() {
+        let serialized = serde_json::to_value(LlmStreamEvent::ToolCalls {
+            calls: Vec::new(),
+            provider_response_id: Some("chat-tool-call:call_1".to_string()),
+            usage: None,
+        })
+        .expect("tool call event should serialize");
+
+        assert_eq!(serialized["type"], "toolCalls");
+        assert_eq!(serialized["providerResponseId"], "chat-tool-call:call_1");
+        assert!(serialized.get("provider_response_id").is_none());
+    }
+
+    #[test]
     fn parses_chat_completion_done_and_usage() {
         let mut parser = SseParser::new("openai-chat-completions");
         let mut events = Vec::new();
@@ -1448,6 +1714,46 @@ mod tests {
         assert_eq!(
             completed.usage.and_then(|usage| usage.total_tokens),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn parses_fragmented_parallel_chat_tool_calls_in_index_order() {
+        let mut parser = SseParser::new("openai-chat-completions");
+        parser
+            .feed(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"document__dot__\",\"arguments\":\"{\\\"b\\\":\"}},{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"document__dot__\",\"arguments\":\"{\\\"a\\\":\"}}]},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"1}\"}},{\"index\":1,\"function\":{\"name\":\"list\",\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":8,\"total_tokens\":28}}\n\ndata: [DONE]\n\n",
+                |_| Ok(()),
+            )
+            .expect("fragmented tool calls should parse");
+        let completed = parser
+            .finish(|_| Ok(()))
+            .expect("done should complete chat tool stream");
+        assert_eq!(
+            completed.provider_response_id.as_deref(),
+            Some("chat-tool-call:call_a")
+        );
+        assert_eq!(completed.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            completed.tool_calls,
+            vec![
+                super::LlmToolCall {
+                    id: "call_a".to_string(),
+                    name: "document.read".to_string(),
+                    arguments_json: "{\"a\":1}".to_string(),
+                    authorization_handle: None,
+                },
+                super::LlmToolCall {
+                    id: "call_b".to_string(),
+                    name: "document.list".to_string(),
+                    arguments_json: "{\"b\":2}".to_string(),
+                    authorization_handle: None,
+                },
+            ]
+        );
+        assert_eq!(
+            completed.usage.and_then(|usage| usage.total_tokens),
+            Some(28)
         );
     }
 
@@ -1482,7 +1788,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
                 authorization_handle: Some("native-only-handle".to_string()),
             }],
-            continuation: Some(super::LlmToolContinuation {
+            continuation: Some(super::LlmToolContinuation::Responses {
                 previous_response_id: "resp_1".to_string(),
                 outputs: vec![super::LlmToolOutput {
                     call_id: "call_1".to_string(),
@@ -1498,6 +1804,142 @@ mod tests {
         assert!(!String::from_utf8_lossy(&body).contains("native-only-handle"));
         assert_eq!(value["input"][0]["type"], "function_call_output");
         assert_eq!(value["input"][0]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn deserializes_native_tool_authorization_handle() {
+        let tool: super::LlmToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "document.create_draft",
+            "description": "Create a draft",
+            "parameters": { "type": "object" },
+            "authorizationHandle": "native-only-handle"
+        }))
+        .expect("native tool definition should deserialize");
+
+        assert_eq!(
+            tool.authorization_handle.as_deref(),
+            Some("native-only-handle")
+        );
+    }
+
+    #[test]
+    fn sends_tools_to_chat_completions_without_authorization_handles() {
+        let runtime = LlmRuntimeRequest {
+            generation_id: "generation".to_string(),
+            attempt_id: "attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            provider_profile_id: "profile".to_string(),
+            model_id: "model".to_string(),
+            remote_model_id: "remote-model".to_string(),
+            protocol: "openai-chat-completions".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            system_instruction: "System".to_string(),
+            context: "Context".to_string(),
+            prompt: "Prompt".to_string(),
+            tools: vec![super::LlmToolDefinition {
+                name: "document.create_draft".to_string(),
+                description: "Create a draft".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                authorization_handle: Some("native-only-handle".to_string()),
+            }],
+            continuation: None,
+        };
+        let body = super::build_request_body(&runtime).expect("chat tool request should build");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("body should be JSON");
+        assert_eq!(value["tools"][0]["type"], "function");
+        assert_eq!(
+            value["tools"][0]["function"]["name"],
+            "document__dot__create_draft"
+        );
+        assert_eq!(value["tool_choice"], "auto");
+        assert_eq!(value["parallel_tool_calls"], true);
+        assert!(!String::from_utf8_lossy(&body).contains("native-only-handle"));
+    }
+
+    #[test]
+    fn rebuilds_chat_tool_calls_and_outputs_for_continuation() {
+        let runtime = LlmRuntimeRequest {
+            generation_id: "generation".to_string(),
+            attempt_id: "attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            provider_profile_id: "profile".to_string(),
+            model_id: "model".to_string(),
+            remote_model_id: "gpt-5.6-sol".to_string(),
+            protocol: "openai-chat-completions".to_string(),
+            base_url: "https://unicompapi.com/v1".to_string(),
+            system_instruction: "System".to_string(),
+            context: "Context".to_string(),
+            prompt: "Prompt".to_string(),
+            tools: Vec::new(),
+            continuation: Some(super::LlmToolContinuation::ChatCompletions {
+                provider_response_id: "chatcmpl_tool".to_string(),
+                calls: vec![super::LlmToolCall {
+                    id: "call_1".to_string(),
+                    name: "document.create_draft".to_string(),
+                    arguments_json: "{\"title\":\"Draft\"}".to_string(),
+                    authorization_handle: Some("native-only-handle".to_string()),
+                }],
+                outputs: vec![super::LlmToolOutput {
+                    call_id: "call_1".to_string(),
+                    output: "{\"status\":\"draft\"}".to_string(),
+                }],
+            }),
+        };
+        let body = super::build_request_body(&runtime).expect("continuation should build");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("body should be JSON");
+        assert_eq!(value["messages"][2]["role"], "assistant");
+        assert_eq!(value["messages"][2]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            value["messages"][2]["tool_calls"][0]["function"]["arguments"],
+            "{\"title\":\"Draft\"}"
+        );
+        assert_eq!(
+            value["messages"][2]["tool_calls"][0]["function"]["name"],
+            "document__dot__create_draft"
+        );
+        assert_eq!(value["messages"][3]["role"], "tool");
+        assert_eq!(value["messages"][3]["tool_call_id"], "call_1");
+        assert!(!String::from_utf8_lossy(&body).contains("native-only-handle"));
+    }
+
+    #[test]
+    fn rejects_chat_continuation_without_matching_output() {
+        let runtime = LlmRuntimeRequest {
+            generation_id: "generation".to_string(),
+            attempt_id: "attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            provider_profile_id: "profile".to_string(),
+            model_id: "model".to_string(),
+            remote_model_id: "gpt-5.6-sol".to_string(),
+            protocol: "openai-chat-completions".to_string(),
+            base_url: "https://unicompapi.com/v1".to_string(),
+            system_instruction: "System".to_string(),
+            context: "Context".to_string(),
+            prompt: "Prompt".to_string(),
+            tools: Vec::new(),
+            continuation: Some(super::LlmToolContinuation::ChatCompletions {
+                provider_response_id: "chatcmpl_tool".to_string(),
+                calls: vec![super::LlmToolCall {
+                    id: "call_1".to_string(),
+                    name: "document.read".to_string(),
+                    arguments_json: "{}".to_string(),
+                    authorization_handle: None,
+                }],
+                outputs: vec![super::LlmToolOutput {
+                    call_id: "call_other".to_string(),
+                    output: "{}".to_string(),
+                }],
+            }),
+        };
+        let error = super::build_request_body(&runtime)
+            .expect_err("mismatched output must reject the continuation");
+        assert!(error.message.contains("missing a call output"));
     }
 
     #[test]

@@ -18,9 +18,11 @@ import {
   MIGRATION_V12,
   MIGRATION_V13,
   MIGRATION_V15,
+  MIGRATION_V17,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
+import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -199,6 +201,17 @@ export function migrateDatabase(
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(16, now);
     })();
+  }
+  if (getSchemaVersion(database) === 16) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V17);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(17, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 17) {
+    widenAgentTaskToolCallLimit(database, now);
   }
   return getSchemaVersion(database);
 }

@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 16;
+export const CURRENT_SCHEMA_VERSION = 18;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -968,4 +968,64 @@ END;
 
 export const MIGRATION_V15 = `
 ALTER TABLE conversations ADD COLUMN archived_at TEXT;
+`;
+
+export const MIGRATION_V17 = `
+CREATE TABLE agent_research_sources (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE RESTRICT,
+  generation_id TEXT NOT NULL REFERENCES llm_generations(id) ON DELETE RESTRICT,
+  attempt_id TEXT NOT NULL,
+  provider_step_id TEXT NOT NULL REFERENCES llm_provider_steps(id) ON DELETE RESTRICT,
+  tool_call_id TEXT NOT NULL REFERENCES agent_tool_calls(id) ON DELETE RESTRICT,
+  adapter_id TEXT NOT NULL CHECK (length(adapter_id) BETWEEN 1 AND 120),
+  source_handle_hash TEXT NOT NULL,
+  canonical_url TEXT NOT NULL CHECK (length(canonical_url) BETWEEN 1 AND 4096),
+  url_hash TEXT NOT NULL,
+  site TEXT NOT NULL CHECK (length(site) BETWEEN 1 AND 255),
+  title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 500),
+  retrieved_at TEXT NOT NULL,
+  content_hash TEXT,
+  character_count INTEGER CHECK (character_count IS NULL OR character_count >= 0),
+  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+  cache_relative_path TEXT CHECK (
+    cache_relative_path IS NULL
+    OR (
+      cache_relative_path LIKE 'cache/research/%'
+      AND cache_relative_path NOT LIKE '%..%'
+      AND length(cache_relative_path) <= 512
+    )
+  ),
+  status TEXT NOT NULL CHECK (status IN ('searched', 'fetched', 'excluded', 'failed')),
+  citation_label TEXT CHECK (citation_label IS NULL OR length(citation_label) <= 80),
+  error_code TEXT CHECK (error_code IS NULL OR length(error_code) <= 120),
+  created_at TEXT NOT NULL,
+  UNIQUE(tool_call_id, canonical_url),
+  FOREIGN KEY(attempt_id, generation_id)
+    REFERENCES llm_generation_attempts(id, generation_id) ON DELETE RESTRICT,
+  FOREIGN KEY(provider_step_id, project_id)
+    REFERENCES llm_provider_steps(id, project_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX idx_agent_research_sources_task
+  ON agent_research_sources(task_id, created_at, id);
+CREATE INDEX idx_agent_research_sources_attempt
+  ON agent_research_sources(attempt_id, provider_step_id, id);
+
+CREATE TRIGGER agent_research_source_match
+BEFORE INSERT ON agent_research_sources
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_tool_calls calls
+  WHERE calls.id = NEW.tool_call_id
+    AND calls.project_id = NEW.project_id
+    AND calls.task_id = NEW.task_id
+    AND calls.generation_id = NEW.generation_id
+    AND calls.attempt_id = NEW.attempt_id
+    AND calls.provider_step_id = NEW.provider_step_id
+    AND calls.tool_name IN ('research.search', 'research.fetch')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'research source does not match its tool call');
+END;
 `;

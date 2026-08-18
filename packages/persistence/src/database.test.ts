@@ -39,8 +39,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(16);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 16 });
+    expect(migrateDatabase(database)).toBe(18);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 18 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -66,6 +66,17 @@ describe('project database', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('agent_tasks'),
     ).toMatchObject({ name: 'agent_tasks' });
+    const taskTable = database
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'")
+      .get() as { sql: string } | undefined;
+    expect(taskTable?.sql).toContain(
+      'tool_call_limit INTEGER NOT NULL DEFAULT 16 CHECK (tool_call_limit BETWEEN 1 AND 32)',
+    );
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_research_sources'),
+    ).toMatchObject({ name: 'agent_research_sources' });
     expect(
       database
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -302,7 +313,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(18);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -329,7 +340,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(18);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -391,7 +402,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(18);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -439,7 +450,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(18);
     expect(
       database
         .prepare(
@@ -512,8 +523,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(16);
-    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(18);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -668,7 +679,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(16);
+    expect(migrateDatabase(database)).toBe(18);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -706,7 +717,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 16 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 18 });
     database.close();
   });
 });

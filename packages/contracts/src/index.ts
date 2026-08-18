@@ -894,13 +894,28 @@ export interface LlmToolOutput {
   output: string;
 }
 
-export interface LlmToolContinuation {
+export interface LlmResponsesToolContinuation {
+  protocol: 'openai-responses';
   previousResponseId: string;
   outputs: LlmToolOutput[];
 }
 
+export interface LlmChatCompletionsToolContinuation {
+  protocol: 'openai-chat-completions';
+  providerResponseId: string;
+  calls: LlmToolCall[];
+  outputs: LlmToolOutput[];
+}
+
+export type LlmToolContinuation = LlmResponsesToolContinuation | LlmChatCompletionsToolContinuation;
+
 export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
   agentMode: 'document';
+  /**
+   * External research is opt-out for explicit Agent document tasks. The Worker
+   * still enforces the selected mode when deciding which tools to authorize.
+   */
+  researchMode?: AgentResearchMode;
   title?: string;
   /**
    * This is trusted Desktop input, not a Provider tool argument. A target is
@@ -908,6 +923,8 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
    */
   documentIntent?: AgentDocumentIntent;
 }
+
+export type AgentResearchMode = 'auto' | 'project_only' | 'network_disabled';
 
 export interface AgentGenerationPrepareResult extends LlmGenerationPrepareResult {
   agentTaskId: string;
@@ -936,6 +953,8 @@ export interface AgentGenerationExecuteToolsParams extends LlmGenerationIdentity
 export interface AgentGenerationExecuteToolsResult {
   continuation?: LlmToolContinuation;
   confirmation?: AgentToolConfirmationRequest;
+  /** Tools authorized for the next Provider step, including read-only research. */
+  tools?: LlmToolDefinition[];
 }
 
 export interface AgentToolConfirmationRequest {
@@ -1821,6 +1840,8 @@ export interface WorkerError {
     | 'STALE_SESSION'
     | 'ADAPTER_NOT_FOUND'
     | 'INVALID_PARAMETERS'
+    | 'MODEL_TOOLS_REQUIRED'
+    | 'PROVIDER_TOOL_LOOP_REQUIRED'
     | 'LLM_NOT_CONFIGURED'
     | 'LLM_REQUEST_FAILED';
   message: string;

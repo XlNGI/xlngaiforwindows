@@ -132,6 +132,33 @@ describe('worker handler', () => {
     });
   });
 
+  it('reports a missing Agent provider profile as invalid parameters', async () => {
+    const response = await handleRequest({
+      id: 'agent-prepare-missing-profile',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.generation.prepare',
+      params: {
+        conversationId: 'conversation',
+        prompt: 'Draft a project brief',
+        providerProfileId: '11111111-1111-4111-8111-111111111111',
+        modelId: '22222222-2222-4222-8222-222222222222',
+        agentMode: 'document',
+        documentIntent: { operation: 'document.create_draft' },
+      },
+    });
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_PARAMETERS',
+        message: 'Provider profile was not found.',
+        requestId: 'agent-prepare-missing-profile',
+        retryable: false,
+        operation: 'agent.generation.prepare',
+      },
+    });
+  });
+
   it('rejects conversation lifecycle requests without a conversation id', async () => {
     const response = await handleRequest({
       id: 'conversation-archive-missing-id',

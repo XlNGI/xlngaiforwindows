@@ -627,7 +627,7 @@ describe('App', () => {
     ).toHaveLength(1);
   });
 
-  it('starts an explicit document draft agent with a create-only intent', async () => {
+  it('starts an explicit document draft agent and refreshes documents when it completes', async () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -707,6 +707,33 @@ describe('App', () => {
         sources: [],
       },
     };
+    const createdDocument = {
+      id: 'document-created-by-agent',
+      projectId: 'project',
+      kind: 'note' as const,
+      title: 'Agent 人工验收样本',
+      scopeType: 'project' as const,
+      currentVersionId: 'version-created-by-agent',
+      publishedVersionId: undefined,
+      lifecycleStatus: 'active' as const,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const createdDocumentDetail = {
+      ...createdDocument,
+      currentVersion: {
+        id: 'version-created-by-agent',
+        documentId: createdDocument.id,
+        version: 1,
+        contentMarkdown: 'Agent 桌面人工测试成功',
+        state: 'draft' as const,
+        authorType: 'agent' as const,
+        sourceTaskId: 'agent-task',
+        createdAt: 'now',
+      },
+    };
+    let documentListCalls = 0;
 
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'health')
@@ -735,8 +762,14 @@ describe('App', () => {
           mode: 'read-write' as const,
           schemaVersion: 14,
         });
-      if (method === 'project.recent' || method === 'document.list' || method === 'scene.list')
-        return Promise.resolve([]);
+      if (method === 'document.list') {
+        documentListCalls += 1;
+        return Promise.resolve(documentListCalls === 1 ? [] : [createdDocument]);
+      }
+      if (method === 'document.get') return Promise.resolve(createdDocumentDetail);
+      if (method === 'document.versions')
+        return Promise.resolve([createdDocumentDetail.currentVersion]);
+      if (method === 'project.recent' || method === 'scene.list') return Promise.resolve([]);
       if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
@@ -778,8 +811,15 @@ describe('App', () => {
         providerProfileId: profile.id,
         modelId: model.id,
         agentMode: 'document',
+        researchMode: 'auto',
         documentIntent: { operation: 'document.create_draft' },
       }),
     );
+    expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);
+    expect(await screen.findByDisplayValue(createdDocument.title)).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('Agent 桌面人工测试成功')).toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.list'),
+    ).toHaveLength(2);
   });
 });

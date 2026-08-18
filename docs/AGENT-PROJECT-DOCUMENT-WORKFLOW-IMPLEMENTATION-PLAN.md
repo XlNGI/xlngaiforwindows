@@ -1,8 +1,8 @@
 # Agent 项目文档生成、审核与任务日志实施计划
 
-版本：0.7  
-日期：2026-08-16  
-状态：实施中（业务合同已冻结；v12/v13 基础闭环已完成，v14 增强待实施）  
+版本：1.1  
+日期：2026-08-18  
+状态：实施中（v14 核心闭环和 UniCompAPI 桌面 Native 两轮工具验收已完成；P3.2 Worker 主动研究、Schema v18 配额治理、Fake-IP DNS 兼容和“UniCompAPI + 真实研究 + 自动打开草稿”桌面链路已完成，来源 UI、稳定引用与校验、用户可见研究模式、Native 网络桥及缓存/取消/重启恢复加固待完成）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档是 Agent 项目资料生成工作流的实施依据和执行记录。已完成项必须附验证证据；未完成项保留明确边界，不得以 UI 已接入代替后端能力。
@@ -12,9 +12,10 @@
 - [x] P0 业务合同、术语和状态机评审
 - [~] P1 Agent 任务、事件和工具调用持久化（v12-v14 基线已完成；`document.create_draft` 的真实 Provider step、授权、工具调用和 continuation 已闭合，其他文档工具待扩展）
 - [x] P2 文档工作版本与权威版本模型
-- [~] P3 Agent 工具协议和安全执行网关（`document.create_draft/list/read/update_draft/archive/restore` 均已具备工具定义下发、step-local 不透明授权、受限执行与结果回传；archive/restore 通过一次性确认记录和 Desktop 本地确认续执行。恢复、取消与延迟工具回调已覆盖，仍待更广泛的故障注入、人工 Provider 验收和 P3.1 第三方路由工具兼容性验证）
-  - [ ] P3.1 Provider 工具路由兼容性（先验证模型 function calling 与路由端到端 tool loop；不对既有任务、普通聊天或未验证路由开放副作用）
-- [~] P4 会话触发文档草稿与编辑器审核闭环（已完成显式操作闭环，自动意图触发待实现）
+- [~] P3 Agent 工具协议和安全执行网关（`document.create_draft/list/read/update_draft/archive/restore` 均已具备工具定义下发、step-local 不透明授权、受限执行与结果回传；archive/restore 通过一次性确认记录和 Desktop 本地确认续执行。恢复、取消与延迟工具回调已覆盖，P3.1 本地路由门禁、UniCompAPI 协议适配和桌面 Native 草稿两轮工具验收已落地，仍待更广泛的故障注入、取消/重启恢复实机演练和其他第三方路由兼容性验证）
+  - [~] P3.1 Provider 工具路由兼容性（官方 OpenAI Responses 与 UniCompAPI Chat Completions 精确路由的模型能力/transport 双重门禁、工具循环适配、真实协议冒烟和桌面 Native Agent 草稿链路已完成；取消/重启恢复、安装包链路及其他第三方适配器仍待完成）
+  - [~] P3.2 Agent 主动外部研究（`researchMode`、Bing HTML Research Adapter、受控 `research.search/fetch`、并行只读工具循环、项目本地正文缓存、Schema v17 来源事实、Schema v18 工具配额和 UniCompAPI 桌面真实研究起草链路已落地；来源 UI、稳定引用与校验、用户可见模式选择、Native 网络桥及缓存/取消/重启恢复加固待完成）
+- [~] P4 会话触发文档草稿与编辑器审核闭环（显式 Agent 创建、终态刷新和新草稿自动打开已完成；自动意图触发及其他文档操作入口待实现）
 - [~] P5 审核、发布、上下文治理和冲突处理（核心闭环和文档工作流审计完成，差异视图和动态模型预算待实现）
 - [~] P6 统一任务日志页面与来源定位（聚合列表、Agent 详情、事件时间线、文档产物、筛选、游标分页、自动刷新、来源会话跳转和图片/视频完整详情已完成；Provider step 详情待补）
 - [ ] P7 场次/镜头结构化提案扩展
@@ -27,7 +28,9 @@
 ```text
 用户请求
   -> 创建 Agent 任务
-  -> 冻结权威上下文
+  -> 冻结项目权威上下文
+  -> 判断是否需要外部研究
+  -> 必要时执行受控搜索、网页读取和来源快照
   -> LLM 通过受限工具生成文档草稿
   -> Worker 校验并持久化草稿
   -> 编辑器自动打开草稿
@@ -39,6 +42,7 @@
 目标是同时满足：
 
 - LLM 可以主动生成相关项目资料；
+- 当项目资料不足或请求依赖外部事实时，LLM 可以主动检索、读取并引用外部来源；
 - LLM 不能绕过用户直接修改权威资料；
 - 生成结果可以在独立编辑器窗口中继续修改；
 - 每次生成、工具调用、审核和发布都有可追溯记录；
@@ -64,6 +68,11 @@
 | 普通问答 | 没有持久化副作用的普通问答继续只记录在会话和 LLM generation 中，不创建 Agent 任务日志 |
 | 文档分类 | 移除 UI 中的文档类型下拉菜单；旧 `kind` 字段暂时保留兼容，不再参与用户选择、上下文排序或 Agent 决策 |
 | 草稿上下文 | 草稿默认不进入其他会话的 LLM 上下文；当前任务可显式引用自己的草稿，并必须标记为未审核候选资料 |
+| 信息来源策略 | 项目生产约束、已发布资料和记忆是高优先级来源，但不是 Agent 的唯一信息来源；外部事实不足时允许主动研究，不能再用“仅限项目上下文”作为默认拒绝理由 |
+| 主动外部研究 | 显式 Agent 任务默认采用 `auto` 研究模式：请求依赖外部事实、时效信息或上下文不足时，模型可先调用受控 `research.search/fetch`，再创建或更新草稿；用户可显式要求仅使用项目资料或禁止联网 |
+| 模型既有知识 | 可用于创意推演和提出检索方向，但不得伪装成已实时检索或已核验来源；时效性、争议性和关键事实需要外部来源或明确标记未核验 |
+| 研究来源与引用 | 外部资料始终视为不受信内容；草稿中的可核验事实应关联来源标题、规范 URL 和检索时间，来源冲突、单一来源或证据不足必须可见 |
+| 研究网络边界 | 搜索/抓取通过独立、已验证的 Research Adapter 和 Native 网络桥执行；搜索凭据保存在桌面凭据管理器，Worker/SQLite 只保存凭据 handle 和脱敏来源事实 |
 | Agent 模型门禁 | Agent 模式要求模型同时具备 `text && streaming && tools`；`structuredOutput` 不是必要条件 |
 | Provider 执行粒度 | 一个 generation/attempt 覆盖一次完整工具循环；每次 Provider HTTP 请求/响应单独记录为 Provider step |
 | 上下文审计 | 上下文快照只保存 manifest、来源版本、hash、字符/Token 和裁剪策略，不复制完整正文或完整拼接结果 |
@@ -78,6 +87,7 @@
 
 - Agent 任务创建、执行、取消、重试和恢复；
 - LLM 工具定义、工具调用解析和受限执行；
+- Agent 主动搜索、网页读取、来源快照、引用和研究过程展示；
 - Markdown 文档草稿、版本、审核、发布和冲突处理；
 - 文档生成结果与会话、generation、上下文快照的关联；
 - 会话任务卡和统一任务日志页面；
@@ -94,6 +104,8 @@
 - 使用 GitHub 作为项目运行时数据同步或资料存储；
 - 通过解析普通回答中的特殊 Markdown/JSON 约定来模拟工具调用；
 - 将完整上下文、凭据、签名 URL 或完整 Provider 原始响应写入任务日志。
+- 向模型提供任意浏览器控制、任意 URL 请求、任意内网访问或通用命令执行能力；
+- 把模型参数知识描述成实时搜索结果，或在没有来源证据时伪造引用。
 
 ## 5. 当前代码与数据基线
 
@@ -107,6 +119,7 @@
 | 场次/镜头 | `scenes`、`shots` 可由界面直接保存，没有 Agent 提案和 CAS | 首期不由 Agent 直接写入；后续通过 change set 原子应用 |
 | 任务 | `generation_jobs` 主要服务图片/视频，`generation_drafts` 服务镜头参数 | 不复用为 Agent 文档任务；统一任务日志通过投影查询聚合 |
 | Provider | 模型目录已声明 `text`、`streaming`、`tools`、`structuredOutput`，但真实 Provider tool loop 和逐 step 事实记录尚未完成 | Agent 门禁使用 `text && streaming && tools`；新增工具循环、Provider step、usage 汇总和恢复 |
+| 外部研究 | Worker 已接入 `bing-html-public-v1`、`research.search/fetch`、安全 URL/DNS/重定向校验、网页正文提取、项目本地缓存和 v17 来源事实；UniCompAPI 只承担 LLM function calling，不提供托管网页搜索 | 当前网络请求仍由 Worker 受控 `fetch` 执行；P3.2 完成前还需迁移到计划中的 Native 网络桥，并补齐来源 UI、引用校验、恢复与缓存治理 |
 | 工作区 | 文档/会话可停靠、浮动并分离为 Tauri 窗口 | Worker 保持唯一持久化写入者；独立文档窗口由主窗口按文档实体维护临时编辑缓冲，并通过版本 CAS 写入 |
 | 持久化 | 项目根目录包含 `project.sqlite`、`assets/`、`exports/`、`backups/` | 文档/任务仍进 SQLite；媒体实体文件仍保存在 `assets/` |
 
@@ -233,7 +246,7 @@ ContextService 默认读取该版本
 
 ### 9.2 冻结上下文
 
-Worker 只从当前项目读取已发布权威资料、生产约束、项目记忆和相关会话，并根据项目/场次/镜头作用域和预算编译上下文。
+Worker 首先从当前项目读取已发布权威资料、生产约束、项目记忆和相关会话，并根据项目/场次/镜头作用域和预算编译基础上下文。基础上下文是任务的优先证据，不再是唯一允许的信息来源。P3.2 启用后，Agent 可在同一 attempt 内通过受控研究工具追加外部来源；这些来源进入独立、追加式 research manifest，不能回写或冒充任务开始前冻结的项目上下文。
 
 上下文 manifest 必须在 Agent generation 开始前落盘，至少包括：
 
@@ -248,18 +261,21 @@ manifest 不保存完整来源正文、完整 `systemInstruction`、完整上下
 
 当前任务若需要参考自己的草稿，必须通过显式 `includeDraftIds` 引用，并在上下文中标记“未审核候选资料”，不能伪装为权威资料。
 
+外部研究来源必须记录来源 ID、规范 URL/URL hash、标题、站点、检索/抓取时间、内容 hash、字符/Token 数、采用或排除原因、关联 search/fetch call 和引用标签。规范 URL 不保留凭据、签名参数或非必要跟踪参数；完整网页正文不进入任务事件、Provider step 或通用工具调用摘要。
+
 ### 9.3 LLM 生成和工具调用
 
 Agent 先判断用户请求是否需要持久化副作用：
 
 - 不需要：继续普通 LLM generation；
-- 需要查找资料：默认由 Worker 在模型调用前解析目标并编译上下文；只有用户明确要求浏览/搜索项目文档时才开放有界 `document.list/read`；
+- 需要项目内资料：默认由 Worker 在模型调用前解析目标并编译上下文；只有用户明确要求浏览/搜索项目文档时才开放有界 `document.list/read`；
+- 需要外部资料：当用户明确要求检索、请求依赖时效/事实核验，或模型判断基础上下文明显不足时，在 `auto` 研究模式下开放有界 `research.search/fetch`；用户选择“仅项目资料/禁止联网”时不得调用；
 - 需要创建文档：调用 `document.create_draft`；
 - 需要更新文档：调用 `document.update_draft`；目标文档和基础版本来自 Worker 可信执行信封，不由模型提供；
 - 需要归档或恢复：只有原始用户消息明确表达该动作且 Worker 已解析唯一目标时，才开放 `document.archive/restore`；已发布或被关键实体引用的文档先返回确认要求；
 - 需要多个文档：编排层拆分为多个带共同 `batchId`/父任务关联的 Agent 任务，每个任务只生成一个主要文档。
 
-一次 generation/attempt 是完整工具循环：初始 Provider 请求、工具调用、工具结果回传以及最终自然语言回答都属于同一 attempt；每次 Provider HTTP 请求/响应单独写入递增 ordinal 的 Provider step。step usage 按请求保存，attempt usage 保存所有 step 的校验后汇总。
+一次 generation/attempt 是完整工具循环：初始 Provider 请求、零到多轮只读研究工具、一次受控文档副作用、工具结果回传以及最终自然语言回答都属于同一 attempt；每次 Provider HTTP 请求/响应单独写入递增 ordinal 的 Provider step。研究调用和文档写调用不得在模型尚未看到研究结果的同一 step 混合执行；step usage 按请求保存，attempt usage 保存所有 step 的校验后汇总。
 
 工具网关在 Worker 中执行，不允许模型直接调用数据库或文件系统。Worker 在发送工具定义前先持久化 step-local 的可信预授权，Native Runtime 仅持有不透明授权 handle；收到 Provider function call 后才派生含 call ID/ordinal 的可信调用信封。模型参数不能覆盖其中任何字段。创建/更新工具成功且唯一主要产物已建立后，任务进入 `waiting_review`；只读查询任务直接完成，归档/恢复任务在事务提交后进入对应完成 outcome。
 
@@ -784,7 +800,7 @@ llm_provider_steps
 - `continuation_manifest_json` 只保存继续请求所需的有界 Provider ID、前序 step/tool call ID 和策略版本，不保存正文；
 - Worker/Native Runtime 中断后根据最后一个 step 和工具调用终态恢复，绝不能再次执行已经 `succeeded` 的工具副作用。
 
-工具配额的计数单位是“通过可信信封、白名单、Schema 和 scoped 去重后首次接受的 Provider function call”。ToolGateway 在同一个 SQLite 写事务内，以任务当前 `row_version`、任务未终态、`agent_tasks.tool_call_count < tool_call_limit` 和 `llm_provider_steps.tool_call_count < stepLimit` 为条件，先预留两个计数并将 task `row_version` 递增，再允许进入工具业务写入；任一条件失败时不得执行副作用。首次接受但业务处理失败的调用仍计入配额并写入失败事实；相同 scoped call ID 且参数 hash 相同的重放只返回首次结果，不重复消耗配额；参数 hash 不同、Schema 不合法或未通过白名单的调用不消耗执行配额。默认 `stepLimit=4`，集中配置只能下调默认值或在硬上限 8 内调整；任务 `tool_call_limit` 默认 8、硬上限 16。取消与配额预留竞争同一 task CAS，取消先赢时不预留也不写业务数据；配额或 CAS 失败后 Runtime 不得继续执行未获预留的并列调用。
+工具配额的计数单位是“通过可信信封、白名单、Schema 和 scoped 去重后首次接受的 Provider function call”。ToolGateway 在同一个 SQLite 写事务内，以任务当前 `row_version`、任务未终态、`agent_tasks.tool_call_count < tool_call_limit` 和 `llm_provider_steps.tool_call_count < stepLimit` 为条件，先预留两个计数并将 task `row_version` 递增，再允许进入工具业务写入；任一条件失败时不得执行副作用。首次接受但业务处理失败的调用仍计入配额并写入失败事实；相同 scoped call ID 且参数 hash 相同的重放只返回首次结果，不重复消耗配额；参数 hash 不同、Schema 不合法或未通过白名单的调用不消耗执行配额。v14 基线的默认 `stepLimit=4`、硬上限 8，任务 `tool_call_limit` 默认 8、硬上限 16；当前 Schema v18 的任务配额调整见 12.8。取消与配额预留竞争同一 task CAS，取消先赢时不预留也不写业务数据；配额或 CAS 失败后 Runtime 不得继续执行未获预留的并列调用。
 
 ### 12.4 Schema v14：归档、恢复、purge 和审计增量
 
@@ -857,6 +873,36 @@ swap 前必须先从 `sqlite_master` 计算受重建父表影响的完整入站 
 10. 验证新库直建、v13 -> v14、重复迁移、故障回滚、旧任务 CAS token 保持、旧索引不存在、v13 tool call 的 provider/idempotency 四种空值组合均得到唯一 `legacy:<id>` 键且不残留 Provider 身份、工具正文不残留、artifact 历史/异常报告、confirmation pending/过期/confirm/reject CAS 竞态、复合 FK mismatch、取消/提交竞态和旧项目恢复；
 11. 不重复安排或重新执行 v12/v13 的 Agent、双指针、审核、发布和基础审计迁移。
 
+### 12.7 P3.2 外部研究来源增量（Schema v17 已落地，引用闭环待补）
+
+P3.2 不修改既有 v14 工具事实的正文脱敏规则。当前已经从 Schema v16 迁移到 v17，并新增研究来源事实，避免把网页正文塞入 `agent_tool_calls`、`llm_provider_steps` 或 `context_snapshots`：
+
+- 新增 `agent_research_sources`，至少关联 `project_id/task_id/generation_id/attempt_id/provider_step_id/tool_call_id`，保存来源 ID、规范 URL、URL hash、站点、标题、可选发布时间、检索/抓取时间、内容 hash、字符/Token 数、引用标签、采用/排除状态和稳定错误码；
+- 搜索 query 的长期事实默认只保存 hash、长度、语言/时间范围和结果计数；不得复制完整项目上下文、凭据、Cookie、请求头或含敏感参数的 URL；
+- 为当前 attempt 的网页正文建立项目本地 `cache/research/{contentHash}.txt` 受限缓存，文件只含经过正文提取、字符集规范化和提示注入隔离的文本；缓存不是权威资料，不提交 GitHub，可按 TTL/容量清理；
+- 缓存索引保存 `content_hash/cache_relative_path/byte_count/expires_at`，路径必须由 Worker/Native 固定生成并验证在项目 `cache/research` 内，模型不能提供路径；
+- 研究来源通过 `source_task_id` 和引用标签与最终文档版本关联；文档正文保留人类可读引用，任务日志只展示来源元数据和有界摘要；
+- 迁移不回填或伪造旧任务的研究来源；v17 只影响启用 P3.2 后的新任务，旧 generation、文档和任务保持可读；
+- 项目备份默认包含研究来源元数据和最终文档，不要求包含可重建的研究缓存；恢复正在运行的任务时缓存缺失必须明确重新检索或终止，不得伪称已恢复相同网页内容。
+
+v17 门禁：新库直建、v16 -> v17、重复迁移、完整复合 FK、跨项目拒绝、URL/凭据脱敏、缓存路径边界、TTL/容量清理、缺失缓存恢复、研究来源与文档引用一致性以及旧任务零回填通过。
+
+当前实现边界（2026-08-18）：`agent_research_sources`、v16 -> v17 迁移、同项目/attempt/Provider step/tool call 归属触发器、URL/handle/content hash、站点、标题、检索时间、字符数、截断、缓存相对路径、状态和引用标签已落地；搜索 query 只以 hash 和有界摘要进入工具事实，网页正文只写入 `cache/research/{contentHash}.txt`。尚未实现独立缓存索引的 `byte_count/expires_at`、TTL/容量清理、来源采用/排除原因、草稿版本引用关联和缺失缓存恢复，因此 v17/P3.2 总门禁仍未完成。
+
+### 12.8 P3.2 工具配额增量（Schema v18 已落地）
+
+P3.2 首个真实桌面样本暴露了 v14-v17 配额缺陷：Agent task 默认最多 8 次工具调用，而完整研究任务需要多轮 search、fetch、一次文档写入和最终回复；模型即使已经取得有效来源，也可能在创建草稿前耗尽整任务额度。Schema v18 只重建 `agent_tasks`，把新任务默认额度调整为 16、数据库硬上限调整为 32，并保留 v17 任务的全部列值、现有 `tool_call_limit/tool_call_count`、自引用、入站外键、索引和触发器，不伪造或重置历史任务计数。
+
+当前 Worker 配额行为：
+
+- 显式 Agent 新任务写入 `tool_call_limit=16`，数据库仍强制 `1..32` 且 `tool_call_count <= tool_call_limit`；
+- 每个任务最多执行 3 次 `research.search` 和 8 次 `research.fetch`，同时始终为目标 `document.*` 操作预留 1 次整任务额度；
+- 单个 Provider step 仍最多接受 8 个并行只读研究调用；每个调用按 ordinal 独立记账，不把单步并行上限误当成整任务额度；
+- 某类研究额度耗尽后，下一 step 不再下发该研究工具；同一并行批次中超出剩余额度的调用写入受控 `RESEARCH_BUDGET_EXCEEDED` 结果并继续 continuation，不使整个任务失败，也不挤占预留的文档操作；
+- 成功抓取结果提示模型优先使用现有证据进入草稿创建，避免在证据足够后无界继续检索。
+
+v18 门禁：新库直建、v17 -> v18、重复迁移、任务数据/复合外键/索引/触发器保持、默认值与硬上限、多个 search、并行 fetch、受控额度耗尽和额度耗尽后仍能创建唯一草稿均已通过自动化。动态项目级配额配置、累计网络时间/Token/费用联动仍按后续资源治理实施。
+
 ## 13. Agent 工具与 IPC 合同
 
 ### 13.1 LLM 工具
@@ -866,13 +912,15 @@ swap 前必须先从 `sqlite_master` 计算受重建父表影响的完整入站 
 ```text
 document.list
 document.read
+research.search       -- P3.2 Worker 功能切片已实现
+research.fetch        -- P3.2 Worker 功能切片已实现
 document.create_draft
 document.update_draft
 document.archive
 document.restore
 ```
 
-默认优先由 Worker 在 Provider 调用前解析并注入所需文档；只有用户明确要求浏览或搜索项目资料时才开放 `document.list/read`。公开参数按工具分离：
+默认优先由 Worker 在 Provider 调用前解析并注入所需项目文档；只有用户明确要求浏览或搜索项目资料时才开放 `document.list/read`。P3.2 启用后，显式 Agent 任务默认使用 `researchMode=auto`：需要时开放只读 `research.search/fetch`，用户显式选择 `project_only` 或 `network_disabled` 时不注册研究工具。公开参数按工具分离：
 
 ```text
 document.list:
@@ -884,6 +932,16 @@ document.read:
   documentHandle -- list 返回的任务内短期不透明句柄
   version?       -- published（默认）| working（仅目标任务显式授权）
 
+research.search:
+  query          -- 有界检索词；不得包含完整项目上下文或凭据
+  language?      -- 受支持语言枚举
+  recencyDays?   -- 1..3650；省略表示不限定时间
+  limit?         -- 1..10，默认 5
+
+research.fetch:
+  sourceHandle   -- search 结果或 Worker 对用户显式 URL 预校验后签发的任务内短期不透明句柄
+  maxChars?      -- 1..100000，默认 50000；仍受 Provider/来源硬上限约束
+
 document.create_draft / document.update_draft:
   title
   contentMarkdown
@@ -893,7 +951,11 @@ document.archive / document.restore:
   reason?        -- 可选、有界；目标和动作授权来自可信执行信封
 ```
 
-Schema 必须设置 `additionalProperties=false`，同时按字符数和 UTF-8 字节数校验标题、正文、查询和说明。`documentHandle` 只能在当前 task/attempt 内使用并绑定项目、文档和允许版本，不是数据库 ID。公开参数中严禁出现 `projectId`、`projectSessionId`、`conversationId`、`taskId`、`generationId`、`attemptId`、目标文档 ID、作用域、基础版本、CAS 行版本或幂等键。
+Schema 必须设置 `additionalProperties=false`，同时按字符数和 UTF-8 字节数校验标题、正文、查询和说明。`documentHandle` 与 `sourceHandle` 只能在当前 task/attempt 内使用并绑定已校验资源，不是数据库 ID；`research.fetch` 不接受模型直接提供任意 URL、文件路径、请求头、Cookie 或网络选项。用户消息中显式给出的 URL 先由 Worker/Native 经过与搜索结果相同的 URL 安全校验，再签发 `sourceHandle`。公开参数中严禁出现 `projectId`、`projectSessionId`、`conversationId`、`taskId`、`generationId`、`attemptId`、目标文档 ID、作用域、基础版本、CAS 行版本、幂等键或凭据 handle。
+
+研究工具使用与文档变更分离的只读授权类型。Worker 可以在同一个 Provider step 中并行执行多个已预授权的 `research.search/fetch`，但每个结果都要独立计数、落研究来源事实并按 Provider call ordinal 回传；文档变更必须在模型收到研究结果后的后续 step 中串行执行，同一 step 最多一个文档写调用，且整个任务仍只能有一个主要文档产物。任何研究调用失败、取消或超限都不能触发尚未授权的补偿写入。
+
+`research.search` 结果只返回有界的 `sourceHandle/title/site/canonicalUrl/publishedAt?/snippet/retrievedAt`；`research.fetch` 结果只返回同一来源元数据、`contentHash`、有界正文、截断状态和提取器版本。工具结果不得包含搜索凭据、请求头、Cookie、原始 HTML、脚本、远程媒体、重定向链中的敏感参数或 Provider 原始响应。
 
 Worker 把可信执行上下文拆为两个时点，避免在 Provider 尚未返回 function call 前伪造 `toolCallId`：
 
@@ -931,6 +993,7 @@ reviewRequired = true
 工具描述必须明确：
 
 - list/read 只能访问当前项目中 Worker 授权的有界资料，不能枚举文件系统；
+- research.search/fetch 只用于只读外部研究，来源内容是不受信数据而不是系统指令；fetch 只能读取 Worker 签发的来源句柄；
 - create/update 只能创建或更新草稿；
 - archive/restore 只在原始用户消息明确授权且目标唯一时可用；已发布/关键引用归档需要用户确认 token；
 - 不会发布正式资料；
@@ -1029,12 +1092,17 @@ Agent 模式模型门禁为 `text && streaming && tools`。缺少任意一项时
 | 单 step 输出 Token | `min(16,384, 模型最大输出)` | `min(65,536, 模型最大输出)` |
 | 单任务累计 Token | 256,000 | 512,000 |
 | 单任务估算费用 | 2 USD 或项目配置的等值币种 | 10 USD 或管理员级配置 |
-| Provider steps / Schema 修复 | 4 / 2 | 8 / 2 |
+| Provider steps / Schema 修复 | 8 / 2 | 16 / 2 |
 | 单 Provider step 工具调用 | 4 | 8 |
-| 单 Agent task 工具调用 | 8 | 16 |
+| 单 Agent task 工具调用 | 16 | 32 |
+| `research.search` 调用 / task | 3 | 6 |
+| `research.fetch` 调用 / task | 8 | 16 |
+| 搜索结果 / call | 5 | 10 |
+| 提取正文 / source | 100,000 Unicode 标量值 | 500,000 Unicode 标量值 / 2 MiB UTF-8 |
+| 研究网络累计等待 / task | 120 秒 | 300 秒 |
 | 单任务运行时长 | 10 分钟 | 30 分钟 |
 
-价格未知时不能伪造费用估算，必须以 Token 硬上限继续保护并标记 `costUnavailable=true`。超限分别返回 `AGENT_INPUT_TOKEN_LIMIT`、`AGENT_OUTPUT_TOKEN_LIMIT`、`AGENT_TOTAL_TOKEN_LIMIT`、`AGENT_COST_LIMIT`、`TOOL_ARGUMENT_BYTES_EXCEEDED` 或 `TOOL_CALL_LIMIT_EXCEEDED`；不得截断后继续执行写入工具。
+价格未知时不能伪造费用估算，必须以 Token 硬上限继续保护并标记 `costUnavailable=true`。研究工具的专用额度同时计入 Provider step、任务工具调用、Token 和总运行时长；单项额度较高不放宽任何聚合硬上限。超限分别返回 `AGENT_INPUT_TOKEN_LIMIT`、`AGENT_OUTPUT_TOKEN_LIMIT`、`AGENT_TOTAL_TOKEN_LIMIT`、`AGENT_COST_LIMIT`、`TOOL_ARGUMENT_BYTES_EXCEEDED`、`TOOL_CALL_LIMIT_EXCEEDED` 或 `RESEARCH_BUDGET_EXCEEDED`；不得截断后继续执行写入工具。
 
 ## 14. LLM 上下文规则与 Token 预算
 
@@ -1044,11 +1112,13 @@ Agent 模式模型门禁为 `text && streaming && tools`。缺少任意一项时
 生产约束
 > 已发布权威资料
 > 项目记忆
+> 已核验外部研究来源
 > 相关会话
+> 模型既有知识（仅用于创意和检索方向，不作为实时来源）
 > 未审核草稿（仅显式引用）
 ```
 
-文档不再通过标题包含“大纲/计划”来决定权威优先级。优先级由来源类型、发布状态、作用域、显式关联和相关性决定。
+文档不再通过标题包含“大纲/计划”来决定权威优先级。优先级由来源类型、发布状态、作用域、显式关联和相关性决定。外部来源不能覆盖项目生产约束；同一事实发生冲突时必须保留各来源及冲突状态，不得仅按搜索排名静默选择。模型既有知识可以帮助构思和选择检索词，但时效、争议或关键事实没有来源证据时必须标记为未核验。
 
 ### 14.2 作用域
 
@@ -1056,7 +1126,8 @@ Agent 模式模型门禁为 `text && streaming && tools`。缺少任意一项时
 - 场次会话：项目级资料 + 当前场次已发布资料；
 - 镜头会话：项目级资料 + 所属场次资料 + 当前镜头资料；
 - 其他场次和镜头不进入上下文；
-- 草稿只有在当前任务显式引用时进入，并标记为候选资料。
+- 草稿只有在当前任务显式引用时进入，并标记为候选资料；
+- 外部研究来源只进入产生它的 task/attempt 的追加式 research manifest；发布前不会自动变成项目记忆或权威资料。
 
 ### 14.3 预算
 
@@ -1078,6 +1149,7 @@ Agent 模式模型门禁为 `text && streaming && tools`。缺少任意一项时
 - 生产约束不得因预算被静默裁剪；
 - 长文档可生成确定性摘要，但快照只记录原始/摘要版本 ID、hash、字符/Token 数和摘要策略，不复制原始或实际发送正文；
 - 工具调用参数和结果也占用预算，需要纳入估算；
+- 外部研究单独预留搜索摘要、抓取正文和引用元数据预算；超预算时优先减少结果数、排除低相关来源或使用确定性提取摘要，不得裁剪生产约束或隐藏来源冲突；
 - 预算不足时返回 `CONTEXT_BUDGET_EXCEEDED`，不创建半完成正式资料；
 - 任务页展示来源数量、估算 Token、裁剪状态和模型窗口。
 
@@ -1085,7 +1157,7 @@ Agent 模式模型门禁为 `text && streaming && tools`。缺少任意一项时
 
 每个 generation/attempt 使用的 manifest 至少能够回答：读取了哪些来源及版本、哪些被排除、每项 hash 是否一致、原始和纳入字符/Token 数、采用了什么摘要/裁剪策略、使用哪个编译器/策略版本以及预算如何分配。
 
-manifest 不能回答正文内容本身；正文仍从文档版本、记忆、约束和会话事实表按权限读取。Provider 请求 hash、工具 Schema hash 和系统指令模板版本可以进入 manifest，但完整请求、完整工具定义和渲染后的上下文不得进入。v14 起新增写入必须通过正文泄漏检测，legacy v13 快照按 12.5 的兼容策略清理。
+manifest 不能回答项目正文或完整网页正文本身；项目正文仍从文档版本、记忆、约束和会话事实表按权限读取，外部正文从受限研究缓存按 content hash 读取。research manifest 追加记录检索/抓取调用、来源元数据、采用/排除原因、引用标签、内容 hash、提取/截断状态和预算，不改变任务开始前的基础上下文快照。Provider 请求 hash、工具 Schema hash 和系统指令模板版本可以进入 manifest，但完整请求、完整工具定义和渲染后的上下文不得进入。v14 起新增写入必须通过正文泄漏检测，legacy v13 快照按 12.5 的兼容策略清理。
 
 ## 15. 编辑器、浮窗和并发编辑
 
@@ -1226,6 +1298,12 @@ agent.task.cancelled
 | Worker 重启 | 重建任务和 generation 状态，活动任务转 `failed` 或恢复策略指定状态 | 查看任务日志并重试 | 不产生隐式发布 |
 | 独立窗口关闭 | 仅关闭视图，业务状态继续 | 重新打开或附加 | 不改变 |
 | 上下文超预算 | `CONTEXT_BUDGET_EXCEEDED`，约束不丢失 | 缩小范围或提高预算 | 否 |
+| 任务需要联网但无已验证 Research Adapter | `RESEARCH_PROVIDER_REQUIRED`，不把模型记忆伪装为搜索 | 配置并验证研究服务，或显式改为仅项目资料 | 否 |
+| 外部搜索失败或暂时不可用 | `RESEARCH_SEARCH_FAILED`，保留已完成研究事实并标记可重试性 | 重试、缩小查询或改为仅项目资料 | 否 |
+| 来源 URL、重定向或解析地址越过网络边界 | `RESEARCH_FETCH_BLOCKED`，不发起/继续请求并记录脱敏安全事件 | 更换公开来源 | 否 |
+| 来源正文超过提取硬上限 | `RESEARCH_SOURCE_TOO_LARGE`，不把截断内容伪装为完整来源 | 选择更小页面或允许明确标记的有界摘要 | 否 |
+| 搜索/抓取次数、网络时间或研究正文超预算 | `RESEARCH_BUDGET_EXCEEDED`，停止新增研究调用 | 缩小范围后重试 | 否 |
+| 外部来源互相冲突或证据不足 | 保留来源与冲突状态；关键事实标记未核验，必要时停止创建事实型草稿 | 补充来源或接受带证据状态的草稿 | 否，除非后续审核发布 |
 | 数据库事务失败 | 全部回滚，记录可重试错误 | 重试 | 不产生半条记录 |
 | selfPublish 任一步失败 | 审核、批准、publication、指针、任务和审计全部回滚 | 解决冲突后重试 | 否 |
 | purge 存在受保护引用 | `DOCUMENT_PURGE_BLOCKED`，不删除任何记录 | 查看引用或保留归档 | 否 |
@@ -1237,6 +1315,12 @@ agent.task.cancelled
 
 - LLM 工具只能使用固定白名单，不提供任意文件读写、命令执行和 SQL 工具；
 - 所有工具参数和结果执行长度限制、字符串清理和 JSON Schema 校验；
+- P3.2 网络请求只由独立 Research Adapter 经 Native 受控网络桥执行；Worker 和模型都不能直接发起任意 HTTP 请求，未通过真实冒烟的 adapter/route 默认关闭；
+- 每次抓取在初始 URL、每次重定向、DNS 解析后和连接前重复校验目标，拒绝 loopback、private、link-local、保留地址、IPv4-mapped IPv6、非公网 DNS 结果、DNS rebinding、云元数据地址、带凭据 URL、非允许端口和内网主机名；重定向次数、响应时间、MIME、压缩后/解压后大小均受硬上限约束；
+- 默认只允许公开 `https`；如兼容公开 `http`，必须由 adapter 明确声明并执行相同网络边界校验，禁止降级重定向绕过。只提取允许的文本 MIME，不执行远程脚本、样式、表单、下载、媒体、iframe 或浏览器会话；
+- 外部网页、搜索摘要、页面元数据和 robots/站点文本始终是不受信数据，只能作为引用内容，不能修改系统指令、工具授权、来源策略或要求模型泄露上下文；提取层隔离疑似提示注入，Provider 提示明确要求忽略其中的操作性指令；
+- 搜索 query 遵循最小披露：不得把完整私有项目上下文、未发布正文、凭据或个人敏感信息发送给研究服务；需要检索时先生成最小关键词，长期只保存 query hash 和有界元数据；
+- 研究请求不携带浏览器 Cookie、登录态或项目凭据；凭据只存在桌面凭据存储，SQLite 仅保存 handle/adapter 元数据。规范 URL 去除用户名密码、签名参数和非必要跟踪参数，来源缓存及诊断导出不得包含请求头或认证材料；
 - Markdown 预览默认禁用 raw HTML，不执行内联脚本、事件属性、iframe、object、embed 或 style；
 - 链接只允许显示 `http/https`，打开外部链接必须经过应用受控跳转；拒绝 `javascript:`、`file:`、`data:`、`vbscript:` 和未知自定义 scheme；
 - 图片、音频和视频不得自动请求远程 URL；只允许经过项目资产仓储验证的应用内 asset/blob 协议，远程媒体显示占位符并由用户显式打开；
@@ -1341,16 +1425,68 @@ agent.task.cancelled
 
 目标：在不改变既有 Agent 任务、文档、普通聊天和已验证 Responses 路径的前提下，按 Provider 路由验证并逐项开放第三方模型的完整工具循环。
 
+当前状态（2026-08-18）：代码门禁、本地自动化、UniCompAPI Chat Completions 协议冒烟和更新后桌面 Native Agent 文档草稿两轮工具链路均已完成。Worker 仅允许已登记且通过 transport 验证的 OpenAI Responses 或 UniCompAPI `gpt-5.6-sol` 路由进入 Agent tool loop，并在创建 generation、任务、文档和 Provider step 前分别校验模型 `text && streaming && tools` 与已验证 transport route；Native Runtime 对不匹配协议的 continuation 防御性拒绝。P3.1 仍保持进行中，原因是取消、重启恢复、安装包链路、真实 OpenAI Responses 冒烟和其他第三方路由尚未完成同等级验收。
+
 工作项：
 
 - 将“模型可调用 function”与“当前 Provider 路由可执行完整 tool loop”视为两个独立门禁：前者来自受控模型能力目录，后者由协议适配器、endpoint 和真实冒烟证据共同决定；不得仅因模型名称或文本能力推断可用。
 - Worker 启动 Agent 时同时要求 `text && streaming && tools` 和 transport `toolLoop` 能力；任何一项缺失都稳定拒绝 Agent 请求，并保留普通聊天的纯文本路径，不得将显式草稿请求静默降级为普通聊天。
 - 为每个可开放路由登记精确的 Provider profile、协议、endpoint、模型 allowlist、工具调用格式、工具结果续写格式和验证日期；默认关闭，只有通过端到端冒烟和回归后才开放。
-- 当前 OpenAI Responses 路径是已验证基线。UniCompAPI 官方路由当前登记为 `openai-chat-completions` 且模型目录不声明 `tools`，在确认其目标模型、endpoint、工具调用事件和工具结果续写均兼容之前，只允许普通聊天，不得加入 Agent allowlist。
-- 若 UniCompAPI 或其他 Chat Completions 路由确认支持工具循环，单独实现并测试该协议的工具定义下发、function/tool-call 解析、`tool` 结果消息续写、usage 归一化、取消和 Provider step 持久化；不得复用 Responses 的 `function_call_output` 请求结构。
+- 当前 OpenAI Responses 路径是已验证基线。UniCompAPI 已登记精确路由 `unicompapi-chat-completions-gpt-5.6-sol-v1`：`https://unicompapi.com/v1`、`openai-chat-completions`、模型 `gpt-5.6-sol`；其他 UniCompAPI 模型仍不得进入 Agent allowlist。
+- UniCompAPI Chat Completions 已单独实现并测试工具定义下发、`tool_calls` 分片聚合、`tool` 结果消息续写、usage 归一化和并行调用顺序保持；点号工具名在 Provider wire 层编码为 `__dot__` 并在 Native 执行前还原，continuation 重建时再次编码；不得复用 Responses 的 `function_call_output` 请求结构。桌面 Native 已验证两个 Provider step、调用 ID、usage 和草稿持久化，取消和重启不重放仍需独立实机验收。
 - 不新增或回填既有 `agent_tasks`、Provider steps、授权、文档或项目数据库记录；新路由只影响新建 Agent generation 的选择门禁。关闭 allowlist 后，已完成任务保持可读，未启动任务明确拒绝。
 
 验收门禁：已验证 Responses 路径回归成功；未列入 allowlist 的 UniCompAPI 模型被 Worker 拒绝且无任务/文档/Provider step 副作用；每个新路由都有真实 Provider 冒烟记录，覆盖工具定义、一次 function call、工具结果续写、两个以上 Provider step、usage、取消和重启后的不重放；普通聊天在所有拒绝路径中仍不创建 Agent 任务。
+
+当前验收边界：官方 Responses 路由回归、UniCompAPI `gpt-5.6-sol` Chat Completions 真实协议冒烟、Worker/Native 路由门禁自动化和更新后桌面 Native Agent 文档草稿两轮工具链路通过；真实 OpenAI Responses 冒烟、安装包 Native 链路、取消/重启恢复人工演练及其他第三方路由仍未完成。精确 UniCompAPI 路由已开放给 Agent allowlist，但不得据此将整个 P3.1 标记为完成。
+
+#### P3.2：Agent 主动外部研究与来源引用
+
+目标：把项目上下文从“唯一允许来源”调整为“优先证据”，使显式 Agent 在资料不足、请求依赖时效信息或需要事实核验时，能够自主搜索、读取和引用外部来源，再创建可审核草稿。
+
+当前状态（2026-08-18）：P3.2 已进入进行中。Contracts/Desktop/Worker 已贯通 `researchMode=auto|project_only|network_disabled`，Desktop 当前显式发送 `auto`；Worker 已注册 `research.search/fetch`，使用 `bing-html-public-v1` 完成搜索、任务/attempt 绑定的不透明来源句柄、受控 HTTPS 抓取、正文提取、内容 hash、项目本地缓存、并行只读工具调用和后续文档写入隔离；Schema v17 已持久化有界来源事实，Schema v18 已把新任务默认工具额度调整为 16、数据库硬上限调整为 32，并增加 search/fetch 专用预算和文档操作预留。仅对 `198.18.0.0/15` Fake-IP DNS 结果执行固定 HTTPS DoH 二次解析，且二次结果必须全部为公网地址；普通私网、混合、失败或二次私网结果继续阻断。Bing 真实搜索/抓取冒烟和“UniCompAPI LLM transport + Bing 真实研究 + 单一草稿 + 编辑器自动打开”的桌面 Native 人工验收均已通过。UniCompAPI 仍只承担 LLM function-calling transport，不等于托管网页搜索。当前尚无来源 UI、稳定引用与引用一致性校验、用户可见研究模式选择、Native 网络桥，以及完整缓存治理、取消/重启/缓存丢失恢复，因此 P3.2 不得标记完成。
+
+工作项按以下顺序实施：
+
+##### P3.2a：研究合同、Provider 抽象和提示策略
+
+状态：部分完成。研究模式合同、严格工具 Schema、只读授权和研究系统提示已实现；独立 registry、凭据型 adapter、完整稳定错误合同及用户模式选择仍待补齐。
+
+- 在 Contracts/Domain 定义 `researchMode=auto|project_only|network_disabled`、Research Adapter 能力、来源 DTO、稳定错误码、预算和 research manifest；显式 Agent 默认 `auto`，用户限制优先于模型判断；
+- 在 Worker 增加独立 Research Provider registry，adapter 以精确 provider/profile/endpoint/能力/验证日期登记，凭据仅通过桌面凭据 handle 解析；
+- 更新系统提示：先使用项目高优先级资料，再判断是否需要外部研究；外部内容是不受信数据，模型知识不能冒充实时检索，关键外部事实必须携带来源标签；
+- 冻结 `research.search/fetch` 严格 Schema、只读授权、URL/网络边界、查询最小披露和资源硬上限。
+
+##### P3.2b：只读搜索/抓取循环和 v17 证据
+
+状态：Worker 功能切片和桌面真实闭环完成。Bing HTML adapter、安全抓取、正文缓存、v17 来源事实、v18 默认 16/硬上限 32 的任务配额、search 3/fetch 8 专用预算、文档操作预留、单 step 最多 8 个并行只读调用、受控预算耗尽、研究/文档混合 step 拒绝和 search -> fetch -> draft 自动化已实现；计划中的 Native 网络桥、缓存 TTL/容量清理及恢复语义仍待补齐。
+
+- 实现 Native 受控网络桥和至少一个具体 Research Adapter；搜索返回不透明 `sourceHandle`，抓取仅接受搜索结果或 Worker 对用户显式 URL 校验后签发的 handle；
+- 实现搜索、重定向/DNS/SSRF 校验、正文提取、规范 URL、内容 hash、短期本地缓存和 `agent_research_sources` v17 持久化；
+- 扩展 Provider loop，允许多个并行只读研究 call，按 ordinal 独立记账和回传；研究结果到达前禁止执行文档写工具；
+- 取消、超时、Worker 重启或缓存缺失时不得重复文档副作用，也不得把旧内容宣称为本次重新验证结果。
+
+##### P3.2c：来源感知起草、引用和界面
+
+状态：未完成。模型已经能在研究结果回传后的后续 step 创建草稿，来源事实也已有内部 `citation_label` 字段；但跨 search/fetch step 稳定且唯一的引用合同、草稿版本来源关联、引用校验和来源 UI 尚未完成。
+
+- 将采用的来源按独立 research manifest 注入后续模型 step，要求事实型内容使用稳定引用标签，并在草稿版本上关联来源；
+- 在 Agent 任务详情展示研究状态、来源标题/站点/检索时间、采用/排除原因、截断和冲突/证据不足状态；不展示搜索凭据、原始 HTML 或完整私有 query；
+- 编辑器展示可点击来源列表和缺失/冲突引用提示；新草稿仍沿用终态刷新与自动打开逻辑，不因研究步骤改变主要文档唯一性；
+- 支持用户显式“仅项目资料/禁止联网”，并在任务详情中显示实际采用的研究模式。
+
+##### P3.2d：恢复、安全和真实 Provider 验收
+
+状态：部分完成。单元/集成测试已覆盖私网阻断、task/attempt 句柄隔离、受限正文、并行搜索、并行抓取、受控预算耗尽、研究后单一草稿以及 Fake-IP 二次公网解析；真实 Bing 搜索/抓取冒烟和 UniCompAPI 桌面 Native 完整研究起草链路已通过。通用 DNS rebinding、压缩炸弹、敏感 query、取消/重启、缓存丢失和安装包链路仍待验收。
+
+桌面人工验收证据：任务 `cfdd4547-456a-433b-907b-e86b904cf674` 使用 `UniCompAPI / gpt-5.6-sol`，按 3 个 Provider 研究 step 完成 3 次 search、2 次 fetch，随后成功执行 `document.create_draft` 并以 final stop 结束，共使用 6/16 次工具额度；只产生一个文档 `ffe1cdba-58f1-4ef5-abe6-bc5a7d5ab157`，标题为 `P3.2 真实研究验收-联网成功`、正文 879 字符，包含两个实际抓取 URL，任务状态为 `waiting_review`，Desktop 自动在编辑器中打开该草稿。全过程未输出桌面端凭据或网页正文。
+
+- 完成 SSRF、DNS rebinding、重定向、超大/压缩炸弹、非文本 MIME、提示注入、隐私 query、缓存越界和凭据泄漏测试；
+- 完成取消、超时、断流、重启、缓存丢失、重复 call 和并行研究顺序恢复，不重复搜索计数或文档写入；
+- 对选定 Research Adapter 执行脱敏真实冒烟，覆盖搜索、抓取、无结果、无效凭据、被阻断 URL、限流、超时和来源引用一致性；记录环境、adapter 版本、响应事实和未验证边界；
+- 只有契约、自动化、安全测试和真实冒烟全部通过的精确 adapter route 才能进入 allowlist；关闭 route 后既有来源事实保持可读，新任务明确失败或按用户选择使用 `project_only`，不能静默用模型记忆替代。
+
+验收门禁：基础项目上下文冻结不变；`auto` 模式可完成“项目资料 -> 搜索 -> 并行抓取 -> 来源结果回传 -> 单一草稿写入 -> 最终回复”的多 step 闭环；`project_only/network_disabled` 零网络请求；引用能定位同 attempt 的来源事实；来源冲突和证据不足可见；SSRF/提示注入/敏感 query 被副作用前拒绝；取消和重启不重复文档写入；具体 Research Adapter 的脱敏真实冒烟通过。
 
 ### P4：会话触发文档草稿和编辑器闭环
 
@@ -1358,11 +1494,11 @@ agent.task.cancelled
 
 工作项：
 
-- 已增加用户显式“保存为文档草稿”入口；自动意图识别和真实 tool loop 仍待实现；
+- 已增加用户显式“创建文档草稿”入口并完成真实 Provider tool loop；自动意图识别仍待实现；
 - 生成开始时保存任务、上下文 manifest、generation、attempt 和用户消息关联；
 - 工具成功后创建唯一主要文档工作版本和任务产物；多文档请求拆成关联任务；
 - 会话显示任务卡：执行中、待审核、失败、已发布；
-- 编辑器自动打开草稿，支持标题、正文、作用域编辑；
+- Agent 进入终态后刷新文档列表，检测新增文档 ID 并自动在编辑器中打开草稿；支持标题、正文、作用域编辑；
 - 同一文档的应用内浮窗和独立窗口共享一条 Worker 保存链路；不同文档的独立窗口按实体隔离；
 - 关闭、重载、Worker 重启和项目切换不丢草稿。
 
@@ -1451,6 +1587,8 @@ agent.task.cancelled
 - 预授权 handle 生命周期、确认 token 单次消费、scoped call ID、参数哈希和重复工具调用；
 - 上下文发布版本选择、显式草稿引用和预算；
 - 上下文 manifest hash/Token/裁剪信息和正文泄漏检测；
+- Research Adapter 能力/路由门禁、`auto|project_only|network_disabled` 模式和 `research.search/fetch` 严格 Schema；
+- 搜索/抓取额度、`sourceHandle` 归属、规范 URL、来源 hash、引用标签以及来源冲突/证据不足映射；
 - Provider step 状态、ordinal、continuation 和 attempt usage 汇总；
 - 错误码、retryable 和用户行为映射；
 - 任务事件序列、去重和脱敏。
@@ -1470,10 +1608,15 @@ agent.task.cancelled
 - 只读项目和项目边界；
 - 并发版本写入、CAS、冲突和事务回滚；
 - archive/restore 幂等、purge 用户 Actor、显式确认和受保护引用阻断。
+- v16 -> v17、新库直建和重复迁移；`agent_research_sources` 复合外键、跨项目拒绝、旧任务零回填、缓存索引和来源/文档引用一致性；
+- 研究 URL/凭据脱敏、缓存路径边界、TTL/容量清理、缺失缓存恢复以及备份排除可重建正文。
 
 ### 20.3 集成测试
 
 - 用户请求 -> Agent 任务 -> generation/attempt -> Provider step-local 预授权 -> 工具调用 -> 草稿 -> selfPublish；
+- `auto` 研究模式执行“冻结项目上下文 -> 搜索 -> 并行抓取 -> 来源结果回传 -> 后续 step 单一文档写入 -> 最终回复”，研究和写入不在同一前置 step 混合；
+- `project_only/network_disabled` 零网络请求；无已验证 Research Adapter 时稳定返回 `RESEARCH_PROVIDER_REQUIRED`，不静默退化为模型记忆；
+- 真实 Research Adapter 搜索/抓取、多来源冲突、无结果、限流、超时、取消和重启恢复；已成功文档写入不重放；
 - 多文档请求拆为多个关联任务，每个任务只产生一个主要文档；
 - Provider 满足/不满足 `text && streaming && tools` 两条路径，`structuredOutput` 差异不影响门禁；
 - Worker 或 UI 在任意 Provider step 中断时恢复，已成功工具不重复执行，旧预授权 handle 不复用；
@@ -1481,6 +1624,8 @@ agent.task.cancelled
 - selfPublish 在审核、批准、publication、指针、任务和审计各步骤故障注入后全部回滚；
 - archive -> restore 和 archive -> purge 完整路径，已发布/被引用文档 purge 被阻断；
 - 项目切换后旧回调、旧窗口和旧工具结果被拒绝；
+- SSRF、DNS rebinding、重定向到私网/云元数据、非文本/超大响应、提示注入、敏感 query 和凭据泄漏在网络或文档副作用前被拒绝；
+- 草稿引用与 `agent_research_sources` 一致，失效、冲突、截断和证据不足状态在任务日志和编辑器中可见；
 - 任务日志从 Agent、图片和视频任务统一查询；
 - 任务日志与文档、素材、会话双向定位。
 
@@ -1488,6 +1633,7 @@ agent.task.cancelled
 
 - 任务卡加载、状态变化、失败和重试；
 - 文档草稿自动打开、编辑、保存、差异、selfPublish、拒绝、归档和恢复；
+- 研究模式选择、研究进度、来源列表/打开、引用缺失与冲突提示；
 - 浮窗、停靠、独立窗口单一状态；
 - 多窗口并发编辑和冲突提示；
 - 只读项目禁用所有写入按钮；
@@ -1509,6 +1655,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
 
 真实模型调用、Provider 网络、Windows 独立窗口和安装包验证必须明确记录环境、是否使用 Mock、结果和未验证边界。
+P3.2 还必须记录具体 Research Adapter、endpoint/profile、凭据来源（只记录 handle 类型，不记录 secret）、真实搜索/抓取样本、网络安全拒绝和引用一致性；未选择或未验证 adapter 时不得把合成测试写成真实联网验收。
 
 ## 21. 迁移、备份、发布与回滚
 
@@ -1538,6 +1685,12 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 任务日志重复或膨胀 | 查询慢、隐私风险 | 事件有界、摘要化、去重和保留策略；正文单独查询 |
 | 统一任务表过度耦合 | 图片/视频/Agent 领域互相影响 | 保留领域表，统一 Query DTO，不强行合表 |
 | 工具能力在不同 Provider 不一致 | 同一请求行为不一致 | Agent 固定 `text && streaming && tools` 门禁；不支持时拒绝 Agent 模式，普通聊天仍可纯文本 |
+| 把 LLM function calling 误当成网页搜索 | Agent 声称已研究但没有外部来源 | Research Adapter 与 LLM Provider 分离登记和门禁；无已验证 adapter 返回 `RESEARCH_PROVIDER_REQUIRED` |
+| 外部页面利用 SSRF、重定向或 DNS rebinding | 访问内网、云元数据或本机服务 | Native 网络桥逐跳/逐解析校验公网目标、受限端口/MIME/大小/时间，私网和元数据地址硬拒绝 |
+| 网页提示注入影响工具授权 | 泄露项目资料、改变来源策略或触发写入 | 外部内容按不受信数据隔离；只读研究授权与文档写授权分步；系统提示、Schema 和 ToolGateway 不接受网页指令改写 |
+| 搜索 query 泄露私有项目内容 | 第三方研究服务获得未发布资料 | 最小关键词生成、完整上下文禁止发送、query 长期只存 hash/有界元数据、凭据只在桌面存储 |
+| 来源不可靠、冲突或引用漂移 | 草稿事实不可验证或误导用户 | 来源元数据/内容 hash/检索时间快照、冲突与截断可见、关键事实引用校验、模型知识不得冒充来源 |
+| 研究循环消耗失控 | 成本、时延和上下文膨胀 | 搜索/抓取/网络时间/正文专用额度同时计入 task、step、Token 和总运行时硬上限 |
 | 上下文超限 | Provider 拒绝或回答空间不足 | 动态预算、模型窗口、输出预留、约束硬门禁 |
 | 上下文审计复制正文 | SQLite 膨胀和敏感内容扩散 | manifest-only、新写入泄漏检测、legacy 原位清理和引用保护 |
 | selfPublish 非原子 | 审核、权威指针、任务和审计状态分裂 | 单 Worker 事务、CAS、故障注入和全回滚测试 |
@@ -1547,7 +1700,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 ## 23. 实施细节决策
 
-以下结论于 2026-08-16 固定，当前没有待决策项：
+以下结论于 2026-08-16 和 2026-08-18 固定，当前没有待决策项：
 
 | 主题 | 固定结论 |
 |---|---|
@@ -1562,6 +1715,11 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 文档删除 | 普通删除为可恢复归档；purge 只允许用户显式确认，默认保护已发布文档且不向 LLM 暴露 |
 | 本地发布 | 用户一次操作触发原子 selfPublish；Worker 同事务完成自审、批准、publication、指针、任务和审计 |
 | Provider 事实粒度 | generation/attempt 为完整工具循环，step 为单次 Provider 请求响应，usage 按 step 保存并向 attempt 汇总 |
+| Agent 信息来源 | 项目生产约束、已发布资料和记忆是优先证据而非唯一来源；显式 Agent 默认 `auto` 研究，用户可强制 `project_only` 或 `network_disabled` |
+| 外部研究边界 | `research.search/fetch` 是独立只读工具；研究结果必须先回传给模型，后续 step 才能串行执行文档写入；模型既有知识不等于实时来源 |
+| Research Provider | 与 LLM Provider 分离登记精确 adapter route；凭据只存桌面凭据管理器，未通过真实安全冒烟的 route 默认关闭 |
+| 研究证据 | v17 保存来源元数据、hash、检索时间、采用/排除和引用关系；完整提取正文只进入本地有界 TTL 缓存，不进入 GitHub 或通用任务日志 |
+| 研究安全与额度 | 逐跳 SSRF/DNS/重定向校验、提示注入隔离、query 最小披露；使用第 13.4 节专用搜索/抓取/正文/网络时间额度并同时受聚合硬上限约束 |
 | Markdown 导出 | 默认导出已发布版本；草稿仅在用户显式选择时导出并清晰标记 `.draft` |
 
 若未来修改任一固定结论，必须先更新 ADR、本文档、Contracts 和迁移影响，不得以未记录的临时行为进入生产。
@@ -1580,6 +1738,10 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | Agent 工具 | 公开 Schema 无可信字段；未知工具、伪造 ID/CAS、越权参数和重复调用均被拒绝或幂等 | ToolGateway 契约测试 |
 | 模型门禁 | 仅 `text && streaming && tools` 可启动 Agent；`structuredOutput` 不影响结果 | Provider 能力矩阵测试 |
 | Provider 循环 | 完整 tool loop 可跨多个 step 执行/恢复，step usage 正确汇总且副作用不重放 | ProviderLoop 集成测试 |
+| 主动外部研究 | `auto` 可在项目资料不足时自主搜索/抓取后创建单一草稿；`project_only/network_disabled` 零网络请求 | Research Adapter/ProviderLoop/Desktop 集成测试 |
+| 研究来源与引用 | 来源标题、规范 URL、检索时间、content hash、引用和冲突/截断状态一致且可定位 | v17 Repository、引用校验和 UI 测试 |
+| 研究网络安全 | SSRF、私网/元数据、DNS rebinding、危险重定向、超大/非文本响应、提示注入和敏感 query 被拒绝 | Native 安全测试和真实 adapter 负向冒烟 |
+| 研究恢复 | 取消、超时、断流、Worker 重启和缓存缺失不重复文档写入，也不伪称旧来源已重新核验 | 故障注入和恢复集成测试 |
 | 任务状态 | 重启、失败、取消、拒绝和重试状态可恢复 | 状态机/恢复测试 |
 | 任务日志 | Agent、图片、视频任务可统一筛选和定位 | Query/UI 集成测试 |
 | 作用域 | 项目、场次、镜头资料不会跨范围泄漏 | Context/Worker 测试 |
@@ -1598,6 +1760,8 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 - 文档草稿、版本、审核、原子 selfPublish、归档、恢复和受控 purge 形成闭环；
 - 任务、generation/attempt、Provider step、工具调用和产物可通过 ID 互相定位；
 - Provider step usage 能正确汇总到 attempt，Worker/Native Runtime 中断不会重放已成功工具；
+- P3.2 的 `auto/project_only/network_disabled`、Research Adapter、`research.search/fetch`、v17 来源证据、引用 UI 和安全网络桥全部实现并通过真实 adapter 冒烟；
+- Agent 能在项目资料不足时主动研究，但不能把模型记忆、搜索摘要或提示注入内容伪装为已核验事实；
 - 统一任务日志可展示 Agent、图片和视频任务，并支持来源双向定位；
 - Worker 重启、项目切换、独立窗口、重复请求、并发编辑和失败重试有测试证据；
 - SQLite 迁移、备份、恢复和外键完整性通过；
@@ -1613,6 +1777,13 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 | 日期 | 阶段 | 结果 | 验证证据 | 备注 |
 |---|---|---|---|---|
+| 2026-08-18 | 计划 v1.1 / P3.2 配额与桌面真实研究验收 | 修复 v14-v17 默认 8 次工具额度会在研究后阻断草稿创建的问题；Schema v18 将新任务默认额度调整为 16、数据库硬上限调整为 32 并保留 v17 数据/FK/索引/触发器；新增 search 3 次、fetch 8 次、预留 1 次文档操作、动态移除耗尽工具和并行超额调用的受控 `RESEARCH_BUDGET_EXCEEDED`；仅对 `198.18.0.0/15` Fake-IP 执行固定 HTTPS DoH 二次公网解析 | 全量：`pnpm test`（Worker 170、Desktop 99、Persistence 22、LLM 10、Context 7、Contracts 2、Generation Adapters 16）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 49 项和 `cargo fmt --check` 全部通过。桌面真实样本任务 `cfdd4547-456a-433b-907b-e86b904cf674` 使用 `UniCompAPI / gpt-5.6-sol`，按 3 search -> 2 fetch -> 1 draft -> final stop 完成，工具计数 6/16；唯一草稿 `ffe1cdba-58f1-4ef5-abe6-bc5a7d5ab157` 标题为 `P3.2 真实研究验收-联网成功`、正文 879 字符，包含两个真实抓取 URL 并自动在编辑器打开；未输出凭据或网页正文 | P3.2 保持进行中：来源 UI、稳定引用/引用校验、用户可见研究模式、Native 网络桥、缓存 TTL/容量治理、取消/重启/缓存丢失恢复和安装包链路仍待完成 |
+| 2026-08-18 | 计划 v1.0 / P3.2 Worker 主动研究功能切片 | 新增 `researchMode` 合同、Desktop `auto` 请求、`bing-html-public-v1`、`research.search/fetch`、任务/attempt 来源句柄、受控 HTTPS 抓取、正文提取、项目本地缓存、最多 8 个并行只读调用、研究/文档 step 隔离和 Schema v17 `agent_research_sources`；研究结果可在后续 step 驱动单一草稿写入 | 自动化：Worker 167 项、Persistence 22 项、Desktop 99 项及其余 workspace 测试通过；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 49 项和 `cargo fmt --check` 通过。脱敏真实网络冒烟：Bing 返回 5 个结果；前两个来源被安全策略以受控错误阻断，第三个 `www.hanyuguoxue.com` 抓取成功，正文 4860 字符、未截断、content hash 已生成；未输出网页正文或凭据 | P3.2 保持进行中：DuckDuckGo 在当前环境因连接超时/DNS 异常未启用；来源 UI/引用校验、用户可见模式选择、Native 网络桥、缓存治理、取消/重启恢复和 UniCompAPI 桌面真实研究起草链路仍待完成 |
+| 2026-08-18 | 计划 v0.9 / P3.2 主动外部研究 | 固定“项目上下文优先但非唯一”的产品合同；新增 `auto/project_only/network_disabled`、独立 Research Adapter、`research.search/fetch`、v17 来源事实、本地 TTL 缓存、来源引用/UI、安全网络边界和 P3.2a-d 实施顺序 | Markdown/DOCX 同步；版本、阶段、工具、Schema、缓存、安全、测试、验收和表格结构校验见本轮执行结果 | 本项只更新计划；尚未选择/验证 Research Adapter，未实现搜索路由、研究工具、v17 迁移或来源 UI，P3.2 保持未开始 |
+| 2026-08-18 | P4 Agent 草稿终态刷新与自动打开 | Agent 进入终态后刷新 `document.list`，比较任务前后文档 ID，并通过统一 `openDocumentById` 链路自动打开新草稿；失败刷新保持原错误语义 | Desktop 99 项、Desktop typecheck、根 lint/format、生产 build 和 `git diff --check` 已通过；`App.test.tsx` 覆盖新增草稿自动打开 | P4 仍待自动意图识别及其他文档操作入口；本项不代表 P4 全部完成 |
+| 2026-08-18 | P3.1 UniCompAPI 桌面 Native Agent 验收 | 修复并验证 Chat Completions Native 兼容边界：wire 工具名点号使用 `__dot__` 可逆映射；`providerResponseId` 和 `authorizationHandle` 保持 camelCase 契约；缺失顶层响应 ID 时以首个 call ID 生成有界 continuation identity；每个 Provider step 使用独立 Tauri Channel，并仅在 Native `invoke` 返回后启动 Channel 投递宽限，避免把 Provider 推理时间误判为事件丢失 | 使用桌面端已保存凭据和 `UniCompAPI / gpt-5.6-sol` 在隔离项目执行真实草稿请求，未读取或输出 API Key。最终样本恰好生成 1 个 draft，标题 `UniComp Native 最终样本`、正文与请求一致；两个 `openai-chat-completions` step 均为 `complete`：step 0 `finish_reason=tool_calls`、1 个 `document.create_draft` 调用、usage 212/64/276；step 1 `finish_reason=stop`、usage 262/87/349；Provider response ID、call ID、continuation manifest 和工具成功状态均持久化。重载后 UI 显示文档数 1 和“生成完成” | 定向 Rust `llm_stream` 16 项、Desktop 99 项通过；全量 `pnpm test`（Worker 161、Desktop 99、Persistence 22、LLM 10、Context 7、Contracts 2、Generation Adapters 16）、Rust 49 项、`cargo fmt --check`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check` 和 `pnpm build` 通过；Markdown/DOCX 已同步，DOCX 结构与固定 DXA 表格几何校验通过。取消、重启恢复、真实 OpenAI Responses 和安装包 Native 链路仍未验收，P3.1 保持进行中 |
+| 2026-08-18 | P3.1 UniCompAPI Chat Completions 适配 | 精确开放 `unicompapi-chat-completions-gpt-5.6-sol-v1`（`https://unicompapi.com/v1`、模型 `gpt-5.6-sol`）；完成非流式两轮工具续写、流式 SSE `tool_calls` 分片聚合、并行双工具、`tool` 结果回传、usage/finish_reason/tool_call_id 归一化；Responses `previous_response_id` 明确拒绝，避免错误复用协议 | 脱敏真实冒烟：`/v1/models` 成功返回 32 个模型并包含目标模型；非流式工具两轮成功；流式工具调用收到完整 `[DONE]`；并行调用得到 2 个独立 call ID；无效 Token 返回 401；不存在模型返回 503；Responses `previous_response_id` 返回 400（仅支持 Responses WebSocket v2）。合成工具仅使用 `echo_probe`、`lookup_alpha`、`lookup_beta`，未调用真实业务工具或暴露凭据 | 协议适配和真实 Provider 验证完成；桌面 Native Agent 文档草稿链路已由同日后续验收记录完成，取消、重启恢复、真实 OpenAI Responses 和安装包验收仍待完成，P3.1 保持进行中 |
+| 2026-08-18 | P3.1 Provider 工具路由运行时门禁 | Worker 增加模型能力与已验证 transport route 双重门禁，开放官方 OpenAI Responses 和已验证 UniCompAPI Chat Completions allowlist；拒绝发生在 generation、任务、文档和 Provider step 持久化前；Native Runtime 对不匹配协议的工具 continuation 防御性拒绝，避免显式 Agent 请求静默降级 | 定向：Worker `provider-registry`、`handler` 和 Rust `llm_stream` 适配测试通过；全量：`pnpm test`（Worker 161、Desktop 98、Persistence 22、LLM 10、Context 7、Contracts 2、Generation Adapters 16）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 47 项和 `cargo fmt --check` 通过 | 协议层和路由门禁已完成；桌面 Native Agent 文档草稿链路已由同日后续验收记录完成。P3.1 仍待安装包链路、取消/重启恢复、真实 OpenAI Responses 和其他第三方路由验收。 |
 | 2026-08-16 | P1 / P3 基础合同 | Provider step、step-local authorization Repository 已接入；LLM Responses 适配器可解析 function-call 事件 | `pnpm --filter @ai-video/persistence test`（19 项）、`pnpm --filter @ai-video/llm test`（10 项）、相关 typecheck 通过 | 当前只完成事实持久化和事件解析；Native Runtime 的可信信封、工具执行、结果回传和确认续执行仍未开放 |
 | 2026-08-17 | P3/P4 真实工具链 | 用户确认真实 Provider 工具调用链路已验证正常 | 用户人工验证 | 真实链路冒烟证据与任务记录待补充到验收表 |
 | 2026-08-17 | P1/P3 验收审计 | 未通过真实 Provider 工具循环门禁；保留上一行人工验证记录，但不得据此勾选阶段完成 | `pnpm.cmd --filter @ai-video/llm test`（10 项）、`pnpm.cmd --filter @ai-video/worker test`（143 项）、`cargo test llm_stream`（8 项）通过；代码审计确认 `LlmGenerationRuntimeRequest`、Native `LlmRuntimeRequest` 和请求体均未携带工具定义，`LlmStreamEvent`/SSE 解析仅处理文本 delta，且不存在 ToolGateway/ProviderLoopService 调用路径 | 下一步必须实现“工具定义下发 -> step-local 预授权 -> 受限执行 -> 工具结果回传 -> 续写”的可重复端到端测试；在此之前 P1/P3 保持进行中 |
@@ -1637,5 +1808,5 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-17 | P6 | 任务日志闭环完成 | Agent 详情可打开来源会话；图片/视频详情读取 `image.generate.get`/`video.generate.get` 并展示状态、请求摘要、Provider 任务和落盘产物 | Provider step 详情和素材/镜头直接跳转待补 |
 | 2026-08-16 | P8 | 自动门禁完成 | `pnpm test`（Desktop 88、Worker 131、Persistence 18）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 41 项测试和 `cargo fmt --check` 全部通过 | Windows 独立窗口实机、端口冲突恢复、迁移备份恢复演练未在本轮自动化验证 |
 | 2026-08-17 | P4 显式草稿入口与 Agent IPC 边界 | 会话输入区新增“创建文档草稿”显式图标，仅在可写会话且存在输入时可用；点击后固定发起 `agent.generation.prepare`、`agentMode=document` 和 `document.create_draft` 意图。Agent 准备、工具执行、确认和 Provider step 已纳入 IPC 参数白名单，拒绝伪造授权字段和未声明参数 | Desktop `App`/`ChatPanel` 15 项定向测试覆盖显式入口、固定意图和只读禁用；Worker `handler`/Agent loop 23 项定向测试覆盖未信任字段拒绝；全量 `pnpm test`（Desktop 98、Worker 152）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 43 项及 `cargo fmt --check` 通过 | P4 继续进行中：尚未提供 update/read/archive/restore 的目标选择入口，且普通聊天仍按产品决策保持无副作用；P3 仍待真实 Provider 人工演练和更广泛故障注入。 |
-| 2026-08-17 | P3.1 Provider 工具路由兼容性计划 | 将模型 function calling 与 transport tool loop 分离为双重门禁；新增 OpenAI Responses 基线、UniCompAPI Chat Completions 默认不开放、allowlist、无静默降级、逐路由真实 Provider 验收和无数据回填要求 | 计划合同复核；本项尚未实施运行时代码或真实 Provider 冒烟 | P3.1 未开始；待确认 UniCompAPI 的目标模型、endpoint 和 Chat Completions 工具续写兼容性，再决定是否新增适配器。 |
-| 2026-08-17 | P3.1 计划文档同步 | Markdown 计划升级至 v0.7，并生成同内容的 `AGENT-PROJECT-DOCUMENT-WORKFLOW-IMPLEMENTATION-PLAN.docx`；DOCX 结构校验通过（段落、表格、样式、固定表格宽度和 P3.1 文本存在） | 使用 bundled Python/`python-docx` 生成；LibreOffice/soffice 不在当前 Windows 环境，未完成 PNG 渲染视觉 QA | 计划文档已同步；P3.1 运行时代码、Provider 冒烟和适配器仍未开始。 |
+| 2026-08-17 | P3.1 Provider 工具路由兼容性计划 | 将模型 function calling 与 transport tool loop 分离为双重门禁；新增 OpenAI Responses 基线、UniCompAPI Chat Completions 默认不开放、allowlist、无静默降级、逐路由真实 Provider 验收和无数据回填要求 | 计划合同复核；本项在该记录时尚未实施运行时代码或真实 Provider 冒烟 | 历史计划记录；UniCompAPI 目标模型、endpoint、适配器和桌面 Native 验收已由 2026-08-18 后续记录完成，P3.1 剩余边界以最新记录为准。 |
+| 2026-08-17 | P3.1 计划文档同步 | Markdown 计划升级至 v0.7，并生成同内容的 `AGENT-PROJECT-DOCUMENT-WORKFLOW-IMPLEMENTATION-PLAN.docx`；DOCX 结构校验通过（段落、表格、样式、固定表格宽度和 P3.1 文本存在） | 使用 bundled Python/`python-docx` 生成；LibreOffice/soffice 不在当前 Windows 环境，未完成 PNG 渲染视觉 QA | 历史同步记录；P3.1 的运行时代码、Provider 冒烟、UniCompAPI 适配器和桌面 Native 验收已由 2026-08-18 后续记录完成。 |

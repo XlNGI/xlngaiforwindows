@@ -76,6 +76,7 @@ import { VideoGenerationService } from './video-generation-service.js';
 import { MaintenanceService } from './maintenance-service.js';
 import { SampleProjectService } from './sample-project-service.js';
 import { AppSettingsService, ProviderProfileValidationError } from './app-settings-service.js';
+import { AgentProviderCapabilityError, assertAgentToolLoopSelection } from './provider-registry.js';
 import { UsageService } from './usage-service.js';
 import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
 import { executeInfrastructureCommand } from './worker-commands.js';
@@ -499,24 +500,21 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           break;
         case 'agent.generation.prepare': {
           const agentParams = params as unknown as AgentGenerationPrepareParams;
+          const profile = appSettingsService.getProfile(agentParams.providerProfileId);
+          if (!profile) {
+            throw new ProviderProfileValidationError('Provider profile was not found.');
+          }
           const model = appSettingsService
             .listModels(agentParams.providerProfileId)
             .find((candidate) => candidate.id === agentParams.modelId);
-          if (
-            !model?.capabilities.text ||
-            !model.capabilities.streaming ||
-            !model.capabilities.tools
-          ) {
-            throw new ProviderProfileValidationError(
-              'The selected Agent model must support text generation, streaming, and tools.',
-            );
-          }
+          assertAgentToolLoopSelection(profile, model);
           const prepared = generationService.prepare(agentParams);
           const agent = agentProviderLoopService.prepare(
             prepared.stream,
             agentParams.prompt,
             agentParams.title,
             agentParams.documentIntent,
+            agentParams.researchMode,
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
           result = { ...prepared, agentTaskId: agent.taskId };
@@ -524,8 +522,12 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         }
         case 'agent.generation.executeTools': {
           const executionParams = params as unknown as AgentGenerationExecuteToolsParams;
-          const execution = agentProviderLoopService.executeTools(executionParams);
-          generationService.configureAgentTools(executionParams, [], execution.continuation);
+          const execution = await agentProviderLoopService.executeTools(executionParams);
+          generationService.configureAgentTools(
+            executionParams,
+            execution.tools ?? [],
+            execution.continuation,
+          );
           result = execution;
           break;
         }
@@ -912,6 +914,9 @@ function mapWorkerError(operation: string, error: unknown): WorkerError {
   }
   if (error instanceof ProviderProfileValidationError) {
     return { code: 'INVALID_PARAMETERS', message, retryable: false, operation };
+  }
+  if (error instanceof AgentProviderCapabilityError) {
+    return { code: error.code, message, retryable: false, operation };
   }
   if (error instanceof LlmProviderError) {
     return {

@@ -117,6 +117,7 @@ describe('streamPreparedLlmGeneration', () => {
         }
         return Promise.resolve({
           continuation: {
+            protocol: 'openai-responses' as const,
             previousResponseId: 'response-tool',
             outputs: [{ callId: 'call-1', output: '{"status":"draft_created"}' }],
           },
@@ -125,6 +126,7 @@ describe('streamPreparedLlmGeneration', () => {
       if (method === 'agent.generation.confirmTool') {
         return Promise.resolve({
           continuation: {
+            protocol: 'openai-responses' as const,
             previousResponseId: 'response-tool',
             outputs: [{ callId: 'call-1', output: '{"status":"archived"}' }],
           },
@@ -187,6 +189,35 @@ describe('streamPreparedLlmGeneration', () => {
     });
   });
 
+  it('waits for a terminal channel event delivered after the native command returns', async () => {
+    native.invoke.mockImplementation((_command, args) => {
+      const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+        .onEvent;
+      setTimeout(() => {
+        channel.onmessage?.({ type: 'started' });
+        channel.onmessage?.({
+          type: 'complete',
+          providerResponseId: 'response-delayed',
+          finishReason: 'completed',
+        });
+      }, 0);
+      return Promise.resolve();
+    });
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(prepared, {
+      onDelta() {},
+      onState: (next) => states.push(next),
+    });
+
+    await run.completion;
+
+    expect(states.at(-1)).toMatchObject({ status: 'complete' });
+    expect(callWorker).toHaveBeenCalledWith(
+      'llm.generation.complete',
+      expect.objectContaining({ providerResponseId: 'response-delayed' }),
+    );
+  });
+
   it('executes Agent tool calls and starts a continuation stream before completing', async () => {
     const agentPrepared: AgentGenerationPrepareResult = {
       ...prepared,
@@ -196,31 +227,35 @@ describe('streamPreparedLlmGeneration', () => {
       .mockImplementationOnce((_command, args) => {
         const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
           .onEvent;
-        channel.onmessage?.({ type: 'started' });
-        channel.onmessage?.({
-          type: 'toolCalls',
-          providerResponseId: 'response-tool',
-          calls: [
-            {
-              id: 'call-1',
-              name: 'document.create_draft',
-              argumentsJson: '{"title":"Draft","contentMarkdown":"# Draft"}',
-              authorizationHandle: 'native-only-handle',
-            },
-          ],
-        });
+        setTimeout(() => {
+          channel.onmessage?.({ type: 'started' });
+          channel.onmessage?.({
+            type: 'toolCalls',
+            providerResponseId: 'response-tool',
+            calls: [
+              {
+                id: 'call-1',
+                name: 'document.create_draft',
+                argumentsJson: '{"title":"Draft","contentMarkdown":"# Draft"}',
+                authorizationHandle: 'native-only-handle',
+              },
+            ],
+          });
+        }, 0);
         return Promise.resolve();
       })
       .mockImplementationOnce((_command, args) => {
         const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
           .onEvent;
-        channel.onmessage?.({ type: 'started' });
-        channel.onmessage?.({ type: 'delta', delta: 'Draft created.' });
-        channel.onmessage?.({
-          type: 'complete',
-          providerResponseId: 'response-final',
-          finishReason: 'completed',
-        });
+        setTimeout(() => {
+          channel.onmessage?.({ type: 'started' });
+          channel.onmessage?.({ type: 'delta', delta: 'Draft created.' });
+          channel.onmessage?.({
+            type: 'complete',
+            providerResponseId: 'response-final',
+            finishReason: 'completed',
+          });
+        }, 0);
         return Promise.resolve();
       });
 
@@ -232,6 +267,9 @@ describe('streamPreparedLlmGeneration', () => {
     await run.completion;
 
     expect(native.invoke).toHaveBeenCalledTimes(2);
+    expect((native.invoke.mock.calls[0]?.[1] as { onEvent: unknown }).onEvent).not.toBe(
+      (native.invoke.mock.calls[1]?.[1] as { onEvent: unknown }).onEvent,
+    );
     expect(callWorker).toHaveBeenCalledWith(
       'agent.generation.executeTools',
       expect.objectContaining({ providerResponseId: 'response-tool' }),

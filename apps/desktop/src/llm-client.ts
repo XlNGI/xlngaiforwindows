@@ -13,6 +13,9 @@ import { callWorker } from './worker-client';
 
 const FLUSH_INTERVAL_MS = 250;
 const FLUSH_CHARACTER_THRESHOLD = 512;
+const CHANNEL_DELIVERY_GRACE_MS = 1_000;
+
+type InvocationBoundaryOutcome = 'continue' | 'terminal' | 'missing';
 
 export interface LlmStreamCallbacks {
   onDelta(content: string): void;
@@ -36,11 +39,44 @@ export function streamPreparedLlmGeneration(
   let terminal = false;
   let closing = false;
   let cancelRequested = false;
-  let continueRequested = false;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  let invocationBoundary:
+    { receive(): void; complete(outcome: InvocationBoundaryOutcome): void } | undefined;
   let events = Promise.resolve();
   let writes = Promise.resolve();
-  const channel = new Channel<LlmNativeStreamEvent>();
+
+  const prepareInvocationBoundary = () => {
+    let armDeliveryTimeout = () => {};
+    const promise = new Promise<InvocationBoundaryOutcome>((resolve) => {
+      let settled = false;
+      let received = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (outcome: InvocationBoundaryOutcome) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (invocationBoundary === boundary) invocationBoundary = undefined;
+        resolve(outcome);
+      };
+      const boundary = {
+        receive() {
+          if (settled) return;
+          received = true;
+          if (timer) clearTimeout(timer);
+        },
+        complete(outcome: InvocationBoundaryOutcome) {
+          if (received) settle(outcome);
+        },
+      };
+      invocationBoundary = boundary;
+      armDeliveryTimeout = () => {
+        if (!settled && !received) {
+          timer = setTimeout(() => settle('missing'), CHANNEL_DELIVERY_GRACE_MS);
+        }
+      };
+    });
+    return { promise, armDeliveryTimeout };
+  };
 
   const clearFlushTimer = () => {
     if (!flushTimer) return;
@@ -109,7 +145,9 @@ export function streamPreparedLlmGeneration(
     }
   };
 
-  const handleEvent = async (event: LlmNativeStreamEvent) => {
+  const handleEvent = async (
+    event: LlmNativeStreamEvent,
+  ): Promise<InvocationBoundaryOutcome | undefined> => {
     if (terminal || closing) return;
     switch (event.type) {
       case 'started':
@@ -126,9 +164,13 @@ export function streamPreparedLlmGeneration(
         break;
       case 'toolCalls': {
         const agentTaskId = (prepared as Partial<AgentGenerationPrepareResult>).agentTaskId;
-        if (!agentTaskId || !event.providerResponseId) {
+        if (!agentTaskId) {
           await fail('Provider returned tool calls outside an Agent generation.', false);
-          break;
+          return 'terminal';
+        }
+        if (!event.providerResponseId) {
+          await fail('Provider tool calls did not include a continuation identity.', false);
+          return 'terminal';
         }
         const execution = await callWorker('agent.generation.executeTools', {
           ...identity,
@@ -149,10 +191,9 @@ export function streamPreparedLlmGeneration(
         }
         if (!continuation) {
           await fail('This document action requires explicit user confirmation.', false);
-          break;
+          return 'terminal';
         }
-        continueRequested = true;
-        break;
+        return 'continue';
       }
       case 'complete': {
         closing = true;
@@ -179,25 +220,43 @@ export function streamPreparedLlmGeneration(
         } finally {
           closing = false;
         }
-        break;
+        return 'terminal';
       }
       case 'failed':
         await fail(event.error, event.retryable, event.usage);
-        break;
+        return 'terminal';
       case 'cancelled':
         await cancelWorker();
-        break;
+        return 'terminal';
     }
   };
 
-  channel.onmessage = (event) => {
-    events = events
-      .then(() => handleEvent(event))
-      .catch(async (error: unknown) => {
-        await fail(error instanceof Error ? error.message : 'LLM stream event failed.', true).catch(
-          () => undefined,
+  const createInvocationChannel = () => {
+    const channel = new Channel<LlmNativeStreamEvent>();
+    channel.onmessage = (event) => {
+      const boundary = ['toolCalls', 'complete', 'failed', 'cancelled'].includes(event.type)
+        ? invocationBoundary
+        : undefined;
+      boundary?.receive();
+      let outcome: InvocationBoundaryOutcome | undefined;
+      events = events
+        .then(async () => {
+          outcome = await handleEvent(event);
+        })
+        .catch(async (error: unknown) => {
+          await fail(
+            error instanceof Error ? error.message : 'LLM stream event failed.',
+            true,
+          ).catch(() => undefined);
+          outcome = 'terminal';
+        });
+      if (boundary) {
+        events = events.finally(() =>
+          boundary.complete(outcome ?? (terminal ? 'terminal' : 'missing')),
         );
-      });
+      }
+    };
+    return channel;
   };
 
   const completion = (async () => {
@@ -206,11 +265,17 @@ export function streamPreparedLlmGeneration(
       return;
     }
     try {
-      do {
-        continueRequested = false;
-        await invoke<void>('llm_stream', { request: identity, onEvent: channel });
+      while (true) {
+        const boundary = prepareInvocationBoundary();
+        await invoke<void>('llm_stream', {
+          request: identity,
+          onEvent: createInvocationChannel(),
+        });
+        boundary.armDeliveryTimeout();
+        const outcome = await boundary.promise;
         await events;
-      } while (continueRequested && !terminal && !cancelRequested);
+        if (outcome !== 'continue' || terminal || cancelRequested) break;
+      }
       if (!terminal) {
         if (cancelRequested) await cancelWorker();
         else await fail('Native LLM stream ended without a terminal event.', true);

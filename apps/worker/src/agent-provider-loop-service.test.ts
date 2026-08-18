@@ -9,6 +9,7 @@ import { ContextService } from './context-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { GenerationService, type LlmSelectionResolver } from './generation-service.js';
 import { ProjectService } from './project-service.js';
+import { ResearchService } from './research-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -18,7 +19,10 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
 
-async function setup() {
+async function setup(
+  protocol: 'openai-responses' | 'openai-chat-completions' = 'openai-responses',
+  research?: ResearchService,
+) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-provider-loop-'));
   directories.push(directory);
   const project = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
@@ -37,7 +41,7 @@ async function setup() {
       modelId: '123e4567-e89b-42d3-a456-426614174001',
       modelName: 'Mock Model',
       remoteModelId: 'mock-model',
-      protocol: 'openai-responses',
+      protocol,
       baseUrl: 'https://mock.invalid/v1',
     }),
   };
@@ -49,11 +53,395 @@ async function setup() {
     { selectionResolver },
   );
   const workflow = new DocumentWorkflowService(project);
-  const loop = new AgentProviderLoopService(project, workflow);
+  const loop = new AgentProviderLoopService(project, workflow, research);
   return { conversation, generations, loop, project, workflow };
 }
 
 describe('AgentProviderLoopService', () => {
+  it('searches and fetches external evidence before creating one document draft', async () => {
+    const research = new ResearchService({
+      searchEndpoint: 'https://search.test/',
+      lookup: () => Promise.resolve([{ address: '93.184.216.34', family: 4 }]),
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).startsWith('https://search.test/')
+            ? new Response(
+                JSON.stringify({
+                  Heading: 'Verified biography',
+                  AbstractURL: 'https://source.test/biography',
+                  AbstractText: 'A public biographical source.',
+                }),
+                { headers: { 'content-type': 'application/json' } },
+              )
+            : new Response('<main><h1>Biography</h1><p>Verified external facts.</p></main>', {
+                headers: { 'content-type': 'text/html' },
+              }),
+        ),
+    });
+    const { conversation, generations, loop, project, workflow } = await setup(
+      'openai-responses',
+      research,
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Create a sourced biography.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Create a sourced biography.');
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'document.create_draft',
+      'research.search',
+      'research.fetch',
+    ]);
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+      '# Agent external research policy',
+    );
+    loop.startProviderStep(prepared.stream);
+
+    const searchTool = agent.tools.find((tool) => tool.name === 'research.search')!;
+    const searched = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_search',
+      calls: [
+        {
+          id: 'call_search',
+          name: 'research.search',
+          authorizationHandle: searchTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ query: 'verified biography', limit: 3 }),
+        },
+      ],
+    });
+    const searchOutput = JSON.parse(searched.continuation!.outputs[0]!.output) as {
+      sources: Array<{ sourceHandle: string }>;
+    };
+    expect(searchOutput.sources).toHaveLength(1);
+    generations.configureAgentTools(prepared.stream, searched.tools ?? [], searched.continuation);
+    loop.startProviderStep(prepared.stream);
+
+    const fetchTool = searched.tools?.find((tool) => tool.name === 'research.fetch');
+    const fetched = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_fetch',
+      calls: [
+        {
+          id: 'call_fetch',
+          name: 'research.fetch',
+          authorizationHandle: fetchTool?.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            sourceHandle: searchOutput.sources[0]!.sourceHandle,
+          }),
+        },
+      ],
+    });
+    expect(fetched.continuation?.outputs[0]?.output).toContain('Verified external facts.');
+    expect(fetched.continuation?.outputs[0]?.output).toContain('untrusted evidence');
+    generations.configureAgentTools(prepared.stream, fetched.tools ?? [], fetched.continuation);
+    loop.startProviderStep(prepared.stream);
+
+    const createTool = fetched.tools?.find((tool) => tool.name === 'document.create_draft');
+    const drafted = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_draft',
+      calls: [
+        {
+          id: 'call_draft',
+          name: 'document.create_draft',
+          authorizationHandle: createTool?.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: 'Sourced biography',
+            contentMarkdown:
+              '# Sourced biography\n\nVerified external facts.\n\nSources: https://source.test/biography',
+          }),
+        },
+      ],
+    });
+    expect(drafted.continuation?.outputs[0]?.output).toContain('draft_created');
+    loop.startProviderStep(prepared.stream);
+    loop.completeProviderStep({
+      ...prepared.stream,
+      providerResponseId: 'resp_final',
+      finishReason: 'completed',
+    });
+
+    expect(workflow.listDocuments()).toHaveLength(1);
+    project.access(false, (database) => {
+      expect(
+        database
+          .prepare('SELECT status, COUNT(*) AS count FROM agent_research_sources GROUP BY status')
+          .all(),
+      ).toEqual([
+        { status: 'fetched', count: 1 },
+        { status: 'searched', count: 1 },
+      ]);
+      const summaries = database
+        .prepare(
+          `SELECT arguments_summary_json, result_summary_json FROM agent_tool_calls
+           WHERE tool_name LIKE 'research.%' ORDER BY tool_ordinal`,
+        )
+        .all() as Array<{ arguments_summary_json: string; result_summary_json: string }>;
+      expect(JSON.stringify(summaries)).not.toContain('verified biography');
+      expect(JSON.stringify(summaries)).not.toContain('Verified external facts.');
+    });
+  });
+
+  it('executes parallel read-only searches under one step authorization', async () => {
+    const research = new ResearchService({
+      searchEndpoint: 'https://search.test/',
+      lookup: () => Promise.resolve([{ address: '93.184.216.34', family: 4 }]),
+      fetch: (input) => {
+        const query = new URL(requestUrl(input)).searchParams.get('q') ?? 'source';
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              Heading: query,
+              AbstractURL: `https://source.test/${encodeURIComponent(query)}`,
+              AbstractText: `Result for ${query}`,
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          ),
+        );
+      },
+    });
+    const { conversation, generations, loop, project } = await setup(
+      'openai-chat-completions',
+      research,
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Compare two factual sources.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Compare two factual sources.');
+    const searchTool = agent.tools.find((tool) => tool.name === 'research.search')!;
+    loop.startProviderStep(prepared.stream);
+
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'chatcmpl_parallel_search',
+      calls: ['alpha', 'beta'].map((query, index) => ({
+        id: `call_search_${index}`,
+        name: 'research.search',
+        authorizationHandle: searchTool.authorizationHandle,
+        argumentsJson: JSON.stringify({ query }),
+      })),
+    });
+
+    expect(result.continuation?.outputs).toHaveLength(2);
+    expect(result.tools?.map((tool) => tool.name)).toEqual([
+      'document.create_draft',
+      'research.search',
+      'research.fetch',
+    ]);
+    project.access(false, (database) => {
+      expect(
+        database
+          .prepare(
+            `SELECT used_call_count FROM agent_tool_authorizations
+             WHERE provider_step_id = (SELECT id FROM llm_provider_steps WHERE ordinal = 0)
+               AND allowed_operation = 'research.search'`,
+          )
+          .get(),
+      ).toEqual({ used_call_count: 2 });
+      expect(
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM agent_tool_calls WHERE tool_name = 'research.search'",
+          )
+          .get(),
+      ).toEqual({ count: 2 });
+    });
+  });
+
+  it('preserves the document call after research budget exhaustion', async () => {
+    const research = new ResearchService({
+      searchEndpoint: 'https://search.test/',
+      lookup: () => Promise.resolve([{ address: '93.184.216.34', family: 4 }]),
+      fetch: (input) => {
+        const url = new URL(requestUrl(input));
+        if (url.hostname === 'search.test') {
+          const query = url.searchParams.get('q') ?? 'source';
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                Results: Array.from({ length: 3 }, (_, index) => ({
+                  FirstURL: `https://source.test/${encodeURIComponent(query)}/${index}`,
+                  Text: `${query} source ${index}`,
+                })),
+              }),
+              { headers: { 'content-type': 'application/json' } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(`<main><p>Fetched evidence from ${url.pathname}.</p></main>`, {
+            headers: { 'content-type': 'text/html' },
+          }),
+        );
+      },
+    });
+    const { conversation, generations, loop, project, workflow } = await setup(
+      'openai-chat-completions',
+      research,
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Research several sources and create one cited draft.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Research several sources and create one draft.');
+    expect(
+      project.access(false, (database) =>
+        database
+          .prepare('SELECT tool_call_limit, tool_call_count FROM agent_tasks WHERE id = ?')
+          .get(agent.taskId),
+      ),
+    ).toEqual({ tool_call_limit: 16, tool_call_count: 0 });
+
+    loop.startProviderStep(prepared.stream);
+    const searchTool = agent.tools.find((tool) => tool.name === 'research.search')!;
+    const searched = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_search_budget',
+      calls: ['alpha evidence', 'beta evidence', 'gamma evidence'].map((query, index) => ({
+        id: `call_search_budget_${index}`,
+        name: 'research.search',
+        authorizationHandle: searchTool.authorizationHandle,
+        argumentsJson: JSON.stringify({ query, limit: 3 }),
+      })),
+    });
+    const sourceHandles = searched.continuation!.outputs.flatMap((output) => {
+      const parsed = JSON.parse(output.output) as {
+        sources: Array<{ sourceHandle: string }>;
+      };
+      return parsed.sources.map((source) => source.sourceHandle);
+    });
+    expect(sourceHandles).toHaveLength(9);
+    expect(searched.tools?.map((tool) => tool.name)).toEqual([
+      'document.create_draft',
+      'research.fetch',
+    ]);
+
+    loop.startProviderStep(prepared.stream);
+    const firstFetchTool = searched.tools?.find((tool) => tool.name === 'research.fetch');
+    const firstFetch = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_fetch_budget_1',
+      calls: sourceHandles.slice(0, 2).map((sourceHandle, index) => ({
+        id: `call_fetch_budget_first_${index}`,
+        name: 'research.fetch',
+        authorizationHandle: firstFetchTool?.authorizationHandle,
+        argumentsJson: JSON.stringify({ sourceHandle }),
+      })),
+    });
+    expect(firstFetch.continuation?.outputs).toHaveLength(2);
+    expect(firstFetch.continuation?.outputs[0]?.output).toContain('Prefer creating');
+
+    loop.startProviderStep(prepared.stream);
+    const finalFetchTool = firstFetch.tools?.find((tool) => tool.name === 'research.fetch');
+    const exhausted = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_fetch_budget_2',
+      calls: Array.from({ length: 8 }, (_, index) => ({
+        id: `call_fetch_budget_final_${index}`,
+        name: 'research.fetch',
+        authorizationHandle: finalFetchTool?.authorizationHandle,
+        argumentsJson: JSON.stringify({
+          sourceHandle: sourceHandles[(index + 2) % sourceHandles.length],
+        }),
+      })),
+    });
+    const finalFetchOutputs = exhausted.continuation!.outputs.map((output) => {
+      return JSON.parse(output.output) as { status: string; errorCode?: string };
+    });
+    expect(finalFetchOutputs.filter((output) => output.status === 'fetched')).toHaveLength(6);
+    expect(
+      finalFetchOutputs.filter(
+        (output) => output.status === 'failed' && output.errorCode === 'RESEARCH_BUDGET_EXCEEDED',
+      ),
+    ).toHaveLength(2);
+    expect(exhausted.tools?.map((tool) => tool.name)).toEqual(['document.create_draft']);
+
+    loop.startProviderStep(prepared.stream);
+    const createTool = exhausted.tools?.[0];
+    const drafted = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_draft_after_budget',
+      calls: [
+        {
+          id: 'call_draft_after_budget',
+          name: 'document.create_draft',
+          authorizationHandle: createTool?.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: 'Research budget draft',
+            contentMarkdown:
+              '# Research budget draft\n\nFetched evidence.\n\nSource: https://source.test/alpha%20evidence/0',
+          }),
+        },
+      ],
+    });
+    expect(drafted.continuation?.outputs[0]?.output).toContain('draft_created');
+    loop.startProviderStep(prepared.stream);
+    loop.completeProviderStep({
+      ...prepared.stream,
+      providerResponseId: 'resp_final_after_budget',
+      finishReason: 'completed',
+    });
+
+    const documents = workflow.listDocuments();
+    expect(documents).toHaveLength(1);
+    expect(workflow.getDocument(documents[0]!.id).currentVersion?.contentMarkdown).toContain(
+      'https://source.test/',
+    );
+    project.access(false, (database) => {
+      expect(
+        database
+          .prepare('SELECT status, phase, tool_call_limit, tool_call_count FROM agent_tasks')
+          .get(),
+      ).toEqual({
+        status: 'waiting_review',
+        phase: 'waiting_review',
+        tool_call_limit: 16,
+        tool_call_count: 12,
+      });
+      expect(
+        database
+          .prepare(
+            `SELECT tool_name, error_code FROM agent_tool_calls
+             ORDER BY provider_step_id, tool_ordinal`,
+          )
+          .all()
+          .filter((row) => (row as { error_code: string | null }).error_code),
+      ).toEqual([
+        { tool_name: 'research.fetch', error_code: 'RESEARCH_BUDGET_EXCEEDED' },
+        { tool_name: 'research.fetch', error_code: 'RESEARCH_BUDGET_EXCEEDED' },
+      ]);
+    });
+  });
+
+  it('does not authorize research tools in project-only mode', async () => {
+    const { conversation, generations, loop } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Use project evidence only.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+
+    const agent = loop.prepare(
+      prepared.stream,
+      'Use project evidence only.',
+      undefined,
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['document.create_draft']);
+  });
+
   it('persists authorization, executes a restricted draft tool, and prepares continuation', async () => {
     const { conversation, generations, loop, project } = await setup();
     const prepared = generations.prepare({
@@ -67,7 +455,7 @@ describe('AgentProviderLoopService', () => {
     expect(generations.runtime(prepared.stream).tools?.[0]?.name).toBe('document.create_draft');
     loop.startProviderStep(prepared.stream);
 
-    const executed = loop.executeTools({
+    const executed = await loop.executeTools({
       ...prepared.stream,
       providerResponseId: 'resp_tool',
       calls: [
@@ -85,7 +473,10 @@ describe('AgentProviderLoopService', () => {
     });
     generations.configureAgentTools(prepared.stream, [], executed.continuation);
     expect(generations.runtime(prepared.stream).continuation).toEqual(
-      expect.objectContaining({ previousResponseId: 'resp_tool' }),
+      expect.objectContaining({
+        protocol: 'openai-responses',
+        previousResponseId: 'resp_tool',
+      }),
     );
     loop.startProviderStep(prepared.stream);
 
@@ -135,6 +526,51 @@ describe('AgentProviderLoopService', () => {
     });
   });
 
+  it('prepares a Chat Completions tool-message continuation without the authorization handle', async () => {
+    const { conversation, generations, loop } = await setup('openai-chat-completions');
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Create a production brief.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Create a production brief.', 'Production brief');
+    const call = {
+      id: 'call_chat_1',
+      name: 'document.create_draft',
+      authorizationHandle: agent.tools[0]?.authorizationHandle,
+      argumentsJson: JSON.stringify({
+        title: 'Production brief',
+        contentMarkdown: '# Production brief',
+      }),
+    };
+    const executed = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'chatcmpl_tool',
+      calls: [call],
+    });
+
+    expect(executed.continuation).toEqual({
+      protocol: 'openai-chat-completions',
+      providerResponseId: 'chatcmpl_tool',
+      calls: [
+        {
+          id: call.id,
+          name: call.name,
+          argumentsJson: call.argumentsJson,
+        },
+      ],
+      outputs: [
+        expect.objectContaining({
+          callId: call.id,
+        }),
+      ],
+    });
+    expect(JSON.stringify(executed.continuation)).not.toContain(
+      agent.tools[0]?.authorizationHandle,
+    );
+  });
+
   it('rejects extra tool fields before consuming authorization or writing a document', async () => {
     const { conversation, generations, loop, project } = await setup();
     const prepared = generations.prepare({
@@ -145,7 +581,7 @@ describe('AgentProviderLoopService', () => {
     });
     const agent = loop.prepare(prepared.stream, 'Create a draft.');
 
-    expect(() =>
+    await expect(
       loop.executeTools({
         ...prepared.stream,
         providerResponseId: 'resp_tool',
@@ -162,9 +598,9 @@ describe('AgentProviderLoopService', () => {
           },
         ],
       }),
-    ).toThrow('unsupported fields');
+    ).rejects.toThrow('unsupported fields');
 
-    expect(() =>
+    await expect(
       loop.executeTools({
         ...prepared.stream,
         providerResponseId: 'resp_tool',
@@ -177,7 +613,7 @@ describe('AgentProviderLoopService', () => {
           },
         ],
       }),
-    ).toThrow('not authorized');
+    ).rejects.toThrow('not authorized');
 
     project.access(false, (database) => {
       expect(
@@ -211,7 +647,7 @@ describe('AgentProviderLoopService', () => {
       documentId: document.id,
     });
 
-    const result = loop.executeTools({
+    const result = await loop.executeTools({
       ...prepared.stream,
       providerResponseId: 'resp_read',
       calls: [
@@ -249,7 +685,7 @@ describe('AgentProviderLoopService', () => {
       operation: 'document.update_draft',
       documentId: target.id,
     });
-    const result = loop.executeTools({
+    const result = await loop.executeTools({
       ...prepared.stream,
       providerResponseId: 'resp_update',
       calls: [
@@ -286,7 +722,7 @@ describe('AgentProviderLoopService', () => {
       operation: 'document.archive',
       documentId: document.id,
     });
-    const pending = loop.executeTools({
+    const pending = await loop.executeTools({
       ...prepared.stream,
       providerResponseId: 'resp_archive',
       calls: [
@@ -335,7 +771,7 @@ describe('AgentProviderLoopService', () => {
         .prepare("UPDATE agent_tool_authorizations SET expires_at = '2000-01-01T00:00:00.000Z'")
         .run();
     });
-    expect(() =>
+    await expect(
       loop.executeTools({
         ...prepared.stream,
         providerResponseId: 'expired',
@@ -348,10 +784,10 @@ describe('AgentProviderLoopService', () => {
           },
         ],
       }),
-    ).toThrow('not authorized');
+    ).rejects.toThrow('not authorized');
 
     const second = loop.prepare(prepared.stream, 'Create a draft.');
-    expect(() =>
+    await expect(
       loop.executeTools({
         ...prepared.stream,
         providerResponseId: 'revoked',
@@ -364,7 +800,7 @@ describe('AgentProviderLoopService', () => {
           },
         ],
       }),
-    ).toThrow('not authorized');
+    ).rejects.toThrow('not authorized');
     expect(second.tools[0]?.authorizationHandle).not.toBe(first.tools[0]?.authorizationHandle);
     project.access(false, (database) => {
       expect(database.prepare('SELECT COUNT(*) AS count FROM documents').get()).toEqual({
@@ -384,7 +820,7 @@ describe('AgentProviderLoopService', () => {
     const agent = loop.prepare(prepared.stream, 'Create a draft.');
     await generations.cancel(prepared.stream.generationId);
 
-    expect(() =>
+    await expect(
       loop.executeTools({
         ...prepared.stream,
         providerResponseId: 'late-response',
@@ -397,7 +833,7 @@ describe('AgentProviderLoopService', () => {
           },
         ],
       }),
-    ).toThrow('no longer active');
+    ).rejects.toThrow('no longer active');
 
     expect(loop.terminateGeneration(prepared.stream.generationId, 'cancelled')).toBe(1);
     project.access(false, (database) => {
@@ -438,3 +874,7 @@ describe('AgentProviderLoopService', () => {
     });
   });
 });
+
+function requestUrl(input: string | URL | Request): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}

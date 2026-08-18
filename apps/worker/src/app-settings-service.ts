@@ -536,8 +536,10 @@ export class AppSettingsService {
         remoteModelId: remote.id,
         displayName: remote.displayName ?? existing?.displayName ?? remote.id,
         capabilitiesJson:
-          existing?.capabilitiesJson ??
-          JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)),
+          existing?.source === 'manual' || existing?.source === 'built-in'
+            ? (existing.capabilitiesJson ??
+              JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)))
+            : JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)),
         source:
           existing?.source === 'manual' || existing?.source === 'built-in'
             ? existing.source

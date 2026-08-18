@@ -77,6 +77,7 @@ const agentDocumentOperations = new Set([
   'document.archive',
   'document.restore',
 ]);
+const agentResearchModes = new Set(['auto', 'project_only', 'network_disabled']);
 
 export class RequestValidationError extends Error {}
 
@@ -336,6 +337,7 @@ export function validateSessionRequestParams(
         'modelId',
         'idempotencyKey',
         'agentMode',
+        'researchMode',
         'title',
         'documentIntent',
       ]);
@@ -346,6 +348,7 @@ export function validateSessionRequestParams(
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
       requireEnum(params, 'agentMode', new Set(['document']));
+      optionalEnum(params, 'researchMode', agentResearchModes);
       optionalString(params, 'title', MAX_TITLE_LENGTH);
       validateAgentDocumentIntent(params.documentIntent);
       break;
@@ -441,15 +444,20 @@ function validateAgentDocumentIntent(input: unknown): void {
 }
 
 function validateAgentToolCalls(input: unknown): void {
-  if (!Array.isArray(input) || input.length !== 1) {
-    throw new RequestValidationError('calls must contain exactly one tool call.');
+  if (!Array.isArray(input) || input.length < 1 || input.length > 8) {
+    throw new RequestValidationError('calls must contain between one and eight tool calls.');
   }
-  const call = requireObject(input[0], 'calls[0]');
-  rejectUnknown(call, ['id', 'name', 'argumentsJson', 'authorizationHandle']);
-  requireId(call, 'id');
-  requireString(call, 'name', MAX_ID_LENGTH);
-  requireString(call, 'argumentsJson', MAX_DOCUMENT_LENGTH, true);
-  requireString(call, 'authorizationHandle', MAX_ID_LENGTH);
+  const ids = new Set<string>();
+  for (const [index, value] of input.entries()) {
+    const call = requireObject(value, `calls[${index}]`);
+    rejectUnknown(call, ['id', 'name', 'argumentsJson', 'authorizationHandle']);
+    const id = requireId(call, 'id');
+    if (ids.has(id)) throw new RequestValidationError('calls contains a duplicate tool call ID.');
+    ids.add(id);
+    requireString(call, 'name', MAX_ID_LENGTH);
+    requireString(call, 'argumentsJson', MAX_DOCUMENT_LENGTH, true);
+    requireString(call, 'authorizationHandle', MAX_ID_LENGTH);
+  }
 }
 
 function validateUsage(input: unknown): NormalizedLlmUsage | undefined {

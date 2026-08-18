@@ -202,6 +202,41 @@ describe('AppSettingsService', () => {
     service.close();
   });
 
+  it('refreshes known remote capabilities when the controlled catalog gains tools', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'UniCompAPI',
+      category: 'multi',
+      providerType: 'unicompapi',
+      accessType: 'official',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    });
+    const first = service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'gpt-5.6-sol' }],
+    });
+    const model = first.models[0]!;
+    expect(model.capabilities.tools).toBe(true);
+
+    service.updateModel({
+      profileId: profile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: { ...emptyModelCapabilities(), text: true, streaming: true },
+      enabled: false,
+    });
+    const refreshed = service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'gpt-5.6-sol' }],
+    });
+    expect(refreshed.models[0]?.capabilities.tools).toBe(true);
+    expect(refreshed.models[0]?.enabled).toBe(false);
+    service.close();
+  });
+
   it('rejects altered official endpoints while retaining failed profile configuration', async () => {
     const service = await createService();
     expect(() =>

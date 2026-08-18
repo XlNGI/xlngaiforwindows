@@ -1,10 +1,63 @@
 import type {
   ProviderDefinitionInfo,
   ProviderModelCapabilities,
+  ProviderModelInfo,
+  ProviderProfileInfo,
   ProviderProfileCreateParams,
 } from '@ai-video/contracts';
 
 export class ProviderRegistryValidationError extends Error {}
+
+export type AgentProviderCapabilityErrorCode =
+  'MODEL_TOOLS_REQUIRED' | 'PROVIDER_TOOL_LOOP_REQUIRED';
+
+export class AgentProviderCapabilityError extends Error {
+  constructor(
+    readonly code: AgentProviderCapabilityErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export type ProviderToolLoopRoute = {
+  id: 'openai-responses-official-v1' | 'unicompapi-chat-completions-gpt-5.6-sol-v1';
+  providerType: 'openai' | 'unicompapi';
+  accessType: 'official';
+  protocol: 'openai-responses' | 'openai-chat-completions';
+  baseUrl: 'https://api.openai.com/v1' | 'https://unicompapi.com/v1';
+  toolCallFormat: 'responses-function-call' | 'chat-completions-tool-calls';
+  toolResultFormat: 'responses-function-call-output' | 'chat-completions-tool-message';
+  verifiedAt: '2026-08-17' | '2026-08-18';
+};
+
+const VERIFIED_AGENT_TOOL_LOOP_ROUTE: ProviderToolLoopRoute = {
+  id: 'openai-responses-official-v1',
+  providerType: 'openai',
+  accessType: 'official',
+  protocol: 'openai-responses',
+  baseUrl: 'https://api.openai.com/v1',
+  toolCallFormat: 'responses-function-call',
+  toolResultFormat: 'responses-function-call-output',
+  verifiedAt: '2026-08-17',
+};
+
+const VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE: ProviderToolLoopRoute = {
+  id: 'unicompapi-chat-completions-gpt-5.6-sol-v1',
+  providerType: 'unicompapi',
+  accessType: 'official',
+  protocol: 'openai-chat-completions',
+  baseUrl: 'https://unicompapi.com/v1',
+  toolCallFormat: 'chat-completions-tool-calls',
+  toolResultFormat: 'chat-completions-tool-message',
+  verifiedAt: '2026-08-18',
+};
+
+const OPENAI_RESPONSES_AGENT_MODEL_ALLOWLIST = [
+  /^(?:gpt-4o|gpt-4\.1)(?:-|$)/,
+  /^gpt-5(?:[-.].*)?$/,
+  /^o[134](?:-|$)/,
+] as const;
 
 const OFFICIAL_PROVIDER_DEFINITIONS: readonly ProviderDefinitionInfo[] = [
   {
@@ -159,6 +212,7 @@ function inferUniCompApiCapabilities(modelId: string): ProviderModelCapabilities
   capabilities.text = features.has('text_chat');
   capabilities.streaming = capabilities.text;
   capabilities.reasoning = features.has('text_reasoning');
+  capabilities.tools = features.has('tools');
   capabilities.imageGeneration = features.has('text_to_image');
   capabilities.imageEditing = features.has('image_edit');
   capabilities.videoGeneration = features.has('text_to_video') || features.has('image_to_video');
@@ -181,7 +235,7 @@ const UNICOMPAPI_MODEL_FEATURES: Record<string, readonly string[]> = {
   'glm-5.1': ['text_chat', 'text_reasoning'],
   'glm-5.2': ['text_chat', 'text_reasoning'],
   'gpt-5.6-luna': ['text_chat'],
-  'gpt-5.6-sol': ['text_chat'],
+  'gpt-5.6-sol': ['text_chat', 'tools'],
   'gpt-5.6-terra': ['text_chat'],
   'happyhorse-1.0-i2v': ['image_to_video'],
   'happyhorse-1.0-r2v': [],
@@ -204,6 +258,61 @@ const UNICOMPAPI_MODEL_FEATURES: Record<string, readonly string[]> = {
 
 export function hasAnyModelCapability(capabilities: ProviderModelCapabilities): boolean {
   return Object.values(capabilities).some(Boolean);
+}
+
+/**
+ * Resolves the independently verified transport gate for Agent tool loops.
+ * Model capabilities are intentionally checked separately so a manually
+ * labelled model can never grant an unverified provider route access.
+ */
+export function resolveAgentToolLoopRoute(
+  profile: ProviderProfileInfo,
+  model: ProviderModelInfo,
+): ProviderToolLoopRoute | undefined {
+  if (
+    profile.providerType !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.providerType ||
+    profile.accessType !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.accessType ||
+    profile.protocol !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.protocol ||
+    profile.baseUrl !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.baseUrl ||
+    model.providerProfileId !== profile.id
+  ) {
+    if (
+      profile.providerType === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.providerType &&
+      profile.accessType === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.accessType &&
+      profile.protocol === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.protocol &&
+      profile.baseUrl === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.baseUrl &&
+      model.providerProfileId === profile.id &&
+      model.remoteModelId.trim().toLowerCase() === 'gpt-5.6-sol'
+    ) {
+      return VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE;
+    }
+    return undefined;
+  }
+  return OPENAI_RESPONSES_AGENT_MODEL_ALLOWLIST.some((pattern) =>
+    pattern.test(model.remoteModelId.trim().toLowerCase()),
+  )
+    ? VERIFIED_AGENT_TOOL_LOOP_ROUTE
+    : undefined;
+}
+
+export function assertAgentToolLoopSelection(
+  profile: ProviderProfileInfo,
+  model: ProviderModelInfo | undefined,
+): ProviderToolLoopRoute {
+  if (!model?.capabilities.text || !model.capabilities.streaming || !model.capabilities.tools) {
+    throw new AgentProviderCapabilityError(
+      'MODEL_TOOLS_REQUIRED',
+      'The selected Agent model must support text generation, streaming, and tools.',
+    );
+  }
+  const route = resolveAgentToolLoopRoute(profile, model);
+  if (!route) {
+    throw new AgentProviderCapabilityError(
+      'PROVIDER_TOOL_LOOP_REQUIRED',
+      'The selected Provider route has not passed the Agent tool-loop verification gate.',
+    );
+  }
+  return route;
 }
 
 function viduModel(
