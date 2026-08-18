@@ -29,6 +29,7 @@ import type {
   ChatMessageInfo,
   ConversationScopeType,
   DocumentKind,
+  DocumentSummary,
   DocumentVersionInfo,
   HealthResult,
   LlmGenerationInfo,
@@ -79,7 +80,7 @@ import type { WorkspacePanelId } from './workspace/workspace-types';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'shots' | 'assets' | 'tasks';
+type WorkspaceView = 'documents' | 'characters' | 'shots' | 'assets' | 'tasks';
 type NavigationMode = 'project' | 'production';
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
 
@@ -1515,6 +1516,143 @@ export function App() {
     />
   );
 
+  const characterSceneDocuments = documents.filter(
+    (item) => item.kind === 'character' || item.kind === 'scene',
+  );
+
+  const renderDocumentToolbar = (
+    eyebrow: string,
+    fallbackTitle: string,
+    stayView?: WorkspaceView,
+  ) => (
+    <div className="workspace-toolbar">
+      <div>
+        <span className="eyebrow">{eyebrow}</span>
+        <h1>{document?.title ?? fallbackTitle}</h1>
+      </div>
+      <div className="toolbar-actions">
+        <button
+          className="button secondary markdown-import-button"
+          type="button"
+          aria-label="导入 Markdown"
+          title="导入 Markdown"
+          onClick={() =>
+            void importMarkdownDocument().then(() => {
+              if (stayView) setView(stayView);
+            })
+          }
+          disabled={!writable || contentBusy}
+        >
+          <FileUp size={15} />
+          <span>导入 Markdown</span>
+        </button>
+        <button
+          className="button secondary"
+          type="button"
+          onClick={() => {
+            newDocument();
+            if (stayView) setView(stayView);
+          }}
+          disabled={!writable}
+        >
+          <FilePlus2 size={15} />
+          新建
+        </button>
+        <button
+          className="button primary"
+          type="button"
+          onClick={() => void saveDocument()}
+          disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
+        >
+          <Save size={15} />
+          保存草稿
+        </button>
+        {document?.currentVersion &&
+          ['draft', 'changes_requested'].includes(document.currentVersion.state) && (
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => void submitDocumentReview()}
+              disabled={!documentEditorWritable || contentBusy || documentDirty}
+            >
+              提交审核
+            </button>
+          )}
+        {document?.currentVersion?.state === 'in_review' && (
+          <>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => void requestDocumentChanges()}
+              disabled={!writable || contentBusy}
+            >
+              退回修改
+            </button>
+            <button
+              className="button primary"
+              type="button"
+              onClick={() => void publishDocument()}
+              disabled={!writable || contentBusy}
+            >
+              发布权威版本
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderDocumentEditor = () => (
+    <div className="document-workspace">
+      <div className="document-fields">
+        <label className="title-field">
+          标题
+          <input
+            value={documentTitle}
+            onChange={(event) => setDocumentTitle(event.target.value)}
+            placeholder="输入文档标题"
+            readOnly={!documentEditorWritable}
+          />
+        </label>
+        <span
+          className={`document-state document-state-${document?.currentVersion?.state ?? 'new'}`}
+        >
+          {documentStateLabel(document?.currentVersion?.state ?? 'new')}
+        </span>
+      </div>
+      <textarea
+        className="markdown-editor"
+        aria-label="文档内容"
+        value={documentContent}
+        onChange={(event) => setDocumentContent(event.target.value)}
+        placeholder="使用 Markdown 编写项目内容…"
+        readOnly={!documentEditorWritable}
+      />
+      {contentMessage && <div className="inline-status">{contentMessage}</div>}
+      {versions.length > 0 && (
+        <div className="version-strip">
+          <span>历史版本</span>
+          {versions.map((version) => (
+            <button
+              type="button"
+              key={version.id}
+              title={new Date(version.createdAt).toLocaleString()}
+              onClick={() => void restoreVersion(version.id)}
+              disabled={!documentEditorWritable || version.id === document?.currentVersionId}
+            >
+              <RotateCcw size={12} />v{version.version}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  const openCharacterSceneDocument = async (item: DocumentSummary) => {
+    await openDocumentById(item.id);
+    setView('characters');
+  };
+
   return (
     <div className="app-shell" data-left-open={leftOpen} data-navigation-mode={navigationMode}>
       <header
@@ -1745,10 +1883,25 @@ export function App() {
                 <span>场次与镜头</span>
                 <span className="count">{shots.length}</span>
               </button>
-              <button className="nav-item" type="button">
+              <button
+                className={`nav-item ${
+                  navigationMode === 'project' &&
+                  (view === 'characters' ||
+                    (view === 'documents' &&
+                      document?.kind &&
+                      (document.kind === 'character' || document.kind === 'scene')))
+                    ? 'active'
+                    : ''
+                }`}
+                type="button"
+                onClick={() => {
+                  setNavigationMode('project');
+                  setView('characters');
+                }}
+              >
                 <Aperture size={16} />
                 <span>角色与场景</span>
-                <span className="count">0</span>
+                <span className="count">{characterSceneDocuments.length}</span>
               </button>
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'assets' ? 'active' : ''}`}
@@ -1782,124 +1935,6 @@ export function App() {
                 setNavigationMode('production');
               }}
             />
-
-            {project && (
-              <div className="content-tree">
-                {view === 'documents' ? (
-                  <>
-                    <div className="tree-heading">
-                      <span>文档</span>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="新建文档"
-                        onClick={newDocument}
-                        disabled={!writable}
-                      >
-                        <FilePlus2 size={14} />
-                      </button>
-                    </div>
-                    {documents.map((item) => (
-                      <button
-                        className={`tree-item ${document?.id === item.id ? 'selected' : ''}`}
-                        type="button"
-                        key={item.id}
-                        onClick={() => void selectDocument(item)}
-                      >
-                        <FileText size={13} />
-                        <span>{item.title}</span>
-                      </button>
-                    ))}
-                    {documents.length === 0 && <small className="tree-empty">暂无正式文档</small>}
-                  </>
-                ) : view === 'shots' ? (
-                  <>
-                    <div className="tree-heading">
-                      <span>场次</span>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="新建场次"
-                        onClick={() => void addScene()}
-                        disabled={!writable}
-                      >
-                        <Plus size={14} />
-                      </button>
-                    </div>
-                    {scenes.map((item) => (
-                      <button
-                        className={`tree-item ${scene?.id === item.id ? 'selected' : ''}`}
-                        type="button"
-                        key={item.id}
-                        onClick={() => void selectScene(item)}
-                      >
-                        <Clapperboard size={13} />
-                        <span>{item.title}</span>
-                      </button>
-                    ))}
-                    {scene && (
-                      <>
-                        <div className="tree-heading nested">
-                          <span>镜头</span>
-                          <button
-                            className="icon-button subtle"
-                            type="button"
-                            title="新建镜头"
-                            onClick={() => void addShot()}
-                            disabled={!writable}
-                          >
-                            <Plus size={14} />
-                          </button>
-                        </div>
-                        {shots.map((item) => (
-                          <button
-                            className={`tree-item nested ${shot?.id === item.id ? 'selected' : ''}`}
-                            type="button"
-                            key={item.id}
-                            onClick={() => {
-                              conversationRequest.current += 1;
-                              setShot(item);
-                            }}
-                          >
-                            <Aperture size={13} />
-                            <span>{item.title}</span>
-                          </button>
-                        ))}
-                      </>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <div className="tree-heading">
-                      <span>素材</span>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="打开素材文件夹"
-                        onClick={() =>
-                          asset && void callWorker('asset.reveal', { assetId: asset.id })
-                        }
-                        disabled={!asset}
-                      >
-                        <FolderOpen size={14} />
-                      </button>
-                    </div>
-                    {assets.map((item) => (
-                      <button
-                        className={`tree-item ${asset?.id === item.id ? 'selected' : ''}`}
-                        type="button"
-                        key={item.id}
-                        onClick={() => setAsset(item)}
-                      >
-                        <Image size={13} />
-                        <span>{item.relativePath.split(/[\\/]/).pop() ?? item.relativePath}</span>
-                      </button>
-                    ))}
-                    {assets.length === 0 && <small className="tree-empty">暂无本地素材</small>}
-                  </>
-                )}
-              </div>
-            )}
 
             <section className="project-manager" aria-label="项目管理">
               {project ? (
@@ -2079,123 +2114,78 @@ export function App() {
           >
             {view === 'documents' ? (
               <>
-                <div className="workspace-toolbar">
-                  <div>
-                    <span className="eyebrow">
-                      {document?.currentVersion?.state === 'published'
-                        ? '已发布项目资料'
-                        : '项目文档草稿'}
-                    </span>
-                    <h1>{document?.title ?? '文档编辑器'}</h1>
-                  </div>
-                  <div className="toolbar-actions">
-                    <button
-                      className="button secondary markdown-import-button"
-                      type="button"
-                      aria-label="导入 Markdown"
-                      title="导入 Markdown"
-                      onClick={() => void importMarkdownDocument()}
-                      disabled={!writable || contentBusy}
-                    >
-                      <FileUp size={15} />
-                      <span>导入 Markdown</span>
-                    </button>
-                    <button
-                      className="button secondary"
-                      type="button"
-                      onClick={newDocument}
-                      disabled={!writable}
-                    >
-                      <FilePlus2 size={15} />
-                      新建
-                    </button>
-                    <button
-                      className="button primary"
-                      type="button"
-                      onClick={() => void saveDocument()}
-                      disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
-                    >
-                      <Save size={15} />
-                      保存草稿
-                    </button>
-                    {document?.currentVersion &&
-                      ['draft', 'changes_requested'].includes(document.currentVersion.state) && (
-                        <button
-                          className="button secondary"
-                          type="button"
-                          onClick={() => void submitDocumentReview()}
-                          disabled={!documentEditorWritable || contentBusy || documentDirty}
-                        >
-                          提交审核
-                        </button>
-                      )}
-                    {document?.currentVersion?.state === 'in_review' && (
-                      <>
-                        <button
-                          className="button secondary"
-                          type="button"
-                          onClick={() => void requestDocumentChanges()}
-                          disabled={!writable || contentBusy}
-                        >
-                          退回修改
-                        </button>
-                        <button
-                          className="button primary"
-                          type="button"
-                          onClick={() => void publishDocument()}
-                          disabled={!writable || contentBusy}
-                        >
-                          发布权威版本
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
+                {renderDocumentToolbar(
+                  document?.currentVersion?.state === 'published' ? '已发布项目资料' : '项目文档草稿',
+                  '文档编辑器',
+                )}
                 {project ? (
-                  <div className="document-workspace">
-                    <div className="document-fields">
-                      <label className="title-field">
-                        标题
-                        <input
-                          value={documentTitle}
-                          onChange={(event) => setDocumentTitle(event.target.value)}
-                          placeholder="输入文档标题"
-                          readOnly={!documentEditorWritable}
-                        />
-                      </label>
-                      <span
-                        className={`document-state document-state-${document?.currentVersion?.state ?? 'new'}`}
-                      >
-                        {documentStateLabel(document?.currentVersion?.state ?? 'new')}
-                      </span>
-                    </div>
-                    <textarea
-                      className="markdown-editor"
-                      aria-label="文档内容"
-                      value={documentContent}
-                      onChange={(event) => setDocumentContent(event.target.value)}
-                      placeholder="使用 Markdown 编写项目内容…"
-                      readOnly={!documentEditorWritable}
-                    />
-                    {contentMessage && <div className="inline-status">{contentMessage}</div>}
-                    {versions.length > 0 && (
-                      <div className="version-strip">
-                        <span>历史版本</span>
-                        {versions.map((version) => (
-                          <button
-                            type="button"
-                            key={version.id}
-                            title={new Date(version.createdAt).toLocaleString()}
-                            onClick={() => void restoreVersion(version.id)}
-                            disabled={
-                              !documentEditorWritable || version.id === document?.currentVersionId
-                            }
-                          >
-                            <RotateCcw size={12} />v{version.version}
-                          </button>
-                        ))}
+                  <div className="directory-layout">
+                    <aside className="directory-index" aria-label="项目文档目录">
+                      <div className="tree-heading">
+                        <span>文档</span>
+                        <button
+                          className="icon-button subtle"
+                          type="button"
+                          title="新建文档"
+                          onClick={newDocument}
+                          disabled={!writable}
+                        >
+                          <FilePlus2 size={14} />
+                        </button>
                       </div>
-                    )}
+                      {documents.map((item) => (
+                        <button
+                          className={`tree-item ${document?.id === item.id ? 'selected' : ''}`}
+                          type="button"
+                          key={item.id}
+                          onClick={() => void selectDocument(item)}
+                        >
+                          <FileText size={13} />
+                          <span>{item.title}</span>
+                        </button>
+                      ))}
+                      {documents.length === 0 && (
+                        <small className="tree-empty">暂无正式文档</small>
+                      )}
+                    </aside>
+                    <div className="directory-pane">{renderDocumentEditor()}</div>
+                  </div>
+                ) : (
+                  <EmptyWorkspace />
+                )}
+              </>
+            ) : view === 'characters' ? (
+              <>
+                {renderDocumentToolbar('角色与场景', '角色与场景', 'characters')}
+                {project ? (
+                  <div className="directory-layout">
+                    <aside className="directory-index" aria-label="角色与场景目录">
+                      <div className="tree-heading">
+                        <span>角色与场景</span>
+                      </div>
+                      {characterSceneDocuments.map((item) => (
+                        <button
+                          className={`tree-item ${document?.id === item.id ? 'selected' : ''}`}
+                          type="button"
+                          key={item.id}
+                          onClick={() => void openCharacterSceneDocument(item)}
+                        >
+                          <FileText size={13} />
+                          <span>{item.title}</span>
+                        </button>
+                      ))}
+                      {characterSceneDocuments.length === 0 && (
+                        <small className="tree-empty">暂无角色与场景文档</small>
+                      )}
+                    </aside>
+                    <div className="directory-pane">
+                      {document?.kind &&
+                      (document.kind === 'character' || document.kind === 'scene') ? (
+                        renderDocumentEditor()
+                      ) : (
+                        <EmptyWorkspace title="请选择角色或场景文档" />
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <EmptyWorkspace />
@@ -2218,26 +2208,90 @@ export function App() {
                     新建镜头
                   </button>
                 </div>
-                {shot ? (
-                  <div className="shot-workspace">
-                    <div className="shot-header">
-                      <Aperture size={26} />
-                      <div>
-                        <strong>{shot.title}</strong>
-                        <span>
-                          状态：{shot.status} · 镜头 #{shot.position + 1}
-                        </span>
+                {project ? (
+                  <div className="directory-layout">
+                    <aside className="directory-index" aria-label="场次与镜头目录">
+                      <div className="tree-heading">
+                        <span>场次与镜头</span>
+                        <button
+                          className="icon-button subtle"
+                          type="button"
+                          title="新建场次"
+                          onClick={() => void addScene()}
+                          disabled={!writable}
+                        >
+                          <Plus size={14} />
+                        </button>
                       </div>
-                    </div>
-                    <div className="shot-section">
-                      <h2>镜头内容</h2>
-                      <p>
-                        在项目会话中完善镜头描述，再通过明确操作保存为分镜文档。普通会话不会修改正式资料。
-                      </p>
+                      {scenes.map((item) => (
+                        <button
+                          className={`tree-item ${scene?.id === item.id ? 'selected' : ''}`}
+                          type="button"
+                          key={item.id}
+                          onClick={() => void selectScene(item)}
+                        >
+                          <Clapperboard size={13} />
+                          <span>{item.title}</span>
+                        </button>
+                      ))}
+                      {scene && (
+                        <>
+                          <div className="tree-heading nested">
+                            <span>镜头</span>
+                            <button
+                              className="icon-button subtle"
+                              type="button"
+                              title="新建镜头"
+                              onClick={() => void addShot()}
+                              disabled={!writable}
+                            >
+                              <Plus size={14} />
+                            </button>
+                          </div>
+                          {shots.map((item) => (
+                            <button
+                              className={`tree-item nested ${shot?.id === item.id ? 'selected' : ''}`}
+                              type="button"
+                              key={item.id}
+                              onClick={() => {
+                                conversationRequest.current += 1;
+                                setShot(item);
+                              }}
+                            >
+                              <Aperture size={13} />
+                              <span>{item.title}</span>
+                            </button>
+                          ))}
+                        </>
+                      )}
+                      {scenes.length === 0 && <small className="tree-empty">暂无场次</small>}
+                    </aside>
+                    <div className="directory-pane">
+                      {shot ? (
+                        <div className="shot-workspace">
+                          <div className="shot-header">
+                            <Aperture size={26} />
+                            <div>
+                              <strong>{shot.title}</strong>
+                              <span>
+                                状态：{shot.status} · 镜头 #{shot.position + 1}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="shot-section">
+                            <h2>镜头内容</h2>
+                            <p>
+                              在项目会话中完善镜头描述，再通过明确操作保存为分镜文档。普通会话不会修改正式资料。
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <EmptyWorkspace title={scene ? '还没有镜头' : '还没有场次'} />
+                      )}
                     </div>
                   </div>
                 ) : (
-                  <EmptyWorkspace title={scene ? '还没有镜头' : '还没有场次'} />
+                  <EmptyWorkspace />
                 )}
               </>
             ) : view === 'tasks' ? (

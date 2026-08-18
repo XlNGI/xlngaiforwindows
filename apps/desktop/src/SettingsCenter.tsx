@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react';
-import { BarChart3, Database, Server, Settings2, X } from 'lucide-react';
+import { BarChart3, Database, Moon, Palette, Server, Settings2, Sun, X } from 'lucide-react';
 import { ProviderConnectionsView } from './settings/ProviderConnectionsView';
 import { UsageDashboard } from './settings/UsageDashboard';
+import { THEME_OPTIONS, useTheme, type ThemeId } from './theme';
 
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
 
@@ -23,7 +24,13 @@ export function SettingsCenter({
   onClose,
 }: SettingsCenterProps) {
   const [page, setPage] = useState<SettingsPage>(initialPage);
+  const { theme, setTheme } = useTheme();
   const dialogLabel = initialPage === 'maintenance' ? '项目维护' : undefined;
+  const themeIcons: Record<ThemeId, typeof Moon> = {
+    dark: Moon,
+    light: Sun,
+    midnight: Palette,
+  };
 
   return (
     <div className="dialog-backdrop settings-backdrop" role="presentation">
@@ -41,6 +48,28 @@ export function SettingsCenter({
           <div>
             <span className="eyebrow">AI 影视工作台</span>
             <h2 id="settings-center-title">设置中心</h2>
+          </div>
+          <div className="theme-switcher" role="group" aria-label="界面主题">
+            <span className="theme-switcher-label">主题</span>
+            <div className="theme-switcher-options">
+              {THEME_OPTIONS.map((option) => {
+                const Icon = themeIcons[option.id];
+                return (
+                  <button
+                    key={option.id}
+                    className={theme === option.id ? 'active' : ''}
+                    type="button"
+                    aria-pressed={theme === option.id}
+                    aria-label={option.label}
+                    title={option.label}
+                    onClick={() => setTheme(option.id)}
+                  >
+                    <Icon size={13} />
+                    <span>{option.label}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <button
             className="icon-button subtle"
