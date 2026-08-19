@@ -10,6 +10,7 @@ import { DocumentWorkflowService } from './document-workflow-service.js';
 import { GenerationService, type LlmSelectionResolver } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ResearchService } from './research-service.js';
+import { NovelService } from './novel-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -58,6 +59,122 @@ async function setup(
 }
 
 describe('AgentProviderLoopService', () => {
+  it('authorizes the novel chapter draft tool only for an exact chapter document target', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const novel = new NovelService(project);
+    const chapter = novel.saveChapter({ title: '雾港来客' });
+    const seeded = workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: '旧稿。',
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '续写当前章节',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '续写当前章节',
+      '续写',
+      { operation: 'novel.chapter.submit_draft', documentId: chapter.documentId },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.chapter.submit_draft']);
+    loop.startProviderStep(prepared.stream);
+    const tool = agent.tools[0]!;
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_novel',
+      calls: [
+        {
+          id: 'call_novel',
+          name: 'novel.chapter.submit_draft',
+          authorizationHandle: tool.authorizationHandle,
+          argumentsJson: JSON.stringify({ title: '雾港来客', contentMarkdown: '新稿。' }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain('novel_draft_submitted');
+    expect(workflow.getDocument(chapter.documentId).currentVersion?.contentMarkdown).toBe('新稿。');
+    expect(seeded.currentVersion?.contentMarkdown).toBe('旧稿。');
+  });
+
+  it('creates an adaptation proposal from a published chapter without creating drama structure', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const novel = new NovelService(project);
+    const chapter = novel.saveChapter({ title: 'Published chapter' });
+    const draft = workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: 'Published source content',
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    workflow.submitReview({
+      documentId: chapter.documentId,
+      documentVersionId: draft.currentVersion!.id,
+      expectedDocumentRowVersion: draft.rowVersion,
+    });
+    workflow.publish({
+      documentId: chapter.documentId,
+      documentVersionId: draft.currentVersion!.id,
+      expectedDocumentRowVersion: draft.rowVersion + 1,
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Create an adaptation proposal',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      'Create an adaptation proposal',
+      'Adaptation proposal',
+      { operation: 'novel.adaptation.submit_proposal', documentId: chapter.documentId },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.adaptation.submit_proposal']);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_adaptation',
+      calls: [
+        {
+          id: 'call_adaptation',
+          name: 'novel.adaptation.submit_proposal',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: 'Adaptation proposal',
+            contentMarkdown: 'Scene candidates and character beats.',
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain('adaptation_proposal_submitted');
+    const stored = project.access(false, (database) => ({
+      proposal: database.prepare('SELECT * FROM novel_adaptation_proposals').get() as Record<
+        string,
+        unknown
+      >,
+      binding: database
+        .prepare(
+          "SELECT role, domain_scope FROM document_bindings WHERE role = 'adaptation-proposal'",
+        )
+        .get() as Record<string, unknown>,
+      scenes: database.prepare('SELECT COUNT(*) AS count FROM scenes').get() as { count: number },
+      shots: database.prepare('SELECT COUNT(*) AS count FROM shots').get() as { count: number },
+    }));
+    expect(stored.proposal.source_chapter_id).toBe(chapter.id);
+    expect(typeof stored.proposal.adaptation_task_id).toBe('string');
+    expect(stored.binding).toEqual({ role: 'adaptation-proposal', domain_scope: 'short-drama' });
+    expect(stored.scenes.count).toBe(0);
+    expect(stored.shots.count).toBe(0);
+  });
+
   it('searches and fetches external evidence before creating one document draft', async () => {
     const research = new ResearchService({
       searchEndpoint: 'https://search.test/',
@@ -137,10 +254,28 @@ describe('AgentProviderLoopService', () => {
     });
     expect(fetched.continuation?.outputs[0]?.output).toContain('Verified external facts.');
     expect(fetched.continuation?.outputs[0]?.output).toContain('untrusted evidence');
+    expect(fetched.continuation?.outputs[0]?.output).toContain('R2');
     generations.configureAgentTools(prepared.stream, fetched.tools ?? [], fetched.continuation);
     loop.startProviderStep(prepared.stream);
 
     const createTool = fetched.tools?.find((tool) => tool.name === 'document.create_draft');
+    await expect(
+      loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'resp_draft_invalid',
+        calls: [
+          {
+            id: 'call_draft_invalid',
+            name: 'document.create_draft',
+            authorizationHandle: createTool?.authorizationHandle,
+            argumentsJson: JSON.stringify({
+              title: 'Invalid sourced biography',
+              contentMarkdown: '# Invalid\n\nUnknown source [R99]',
+            }),
+          },
+        ],
+      }),
+    ).rejects.toThrow('RESEARCH_CITATION_INVALID');
     const drafted = await loop.executeTools({
       ...prepared.stream,
       providerResponseId: 'resp_draft',
@@ -152,7 +287,7 @@ describe('AgentProviderLoopService', () => {
           argumentsJson: JSON.stringify({
             title: 'Sourced biography',
             contentMarkdown:
-              '# Sourced biography\n\nVerified external facts.\n\nSources: https://source.test/biography',
+              '# Sourced biography\n\nVerified external facts. [R2]\n\nSources: https://source.test/biography',
           }),
         },
       ],
@@ -175,6 +310,27 @@ describe('AgentProviderLoopService', () => {
         { status: 'fetched', count: 1 },
         { status: 'searched', count: 1 },
       ]);
+      expect(
+        database
+          .prepare(
+            `SELECT adoption_status, adoption_reason, citation_label
+             FROM agent_research_sources WHERE status = 'fetched'`,
+          )
+          .get(),
+      ).toMatchObject({ adoption_status: 'adopted', citation_label: 'R2' });
+      expect(
+        database
+          .prepare(
+            `SELECT citation_label FROM document_version_research_sources
+             WHERE document_version_id = (SELECT current_version_id FROM documents LIMIT 1)`,
+          )
+          .get(),
+      ).toEqual({ citation_label: 'R2' });
+      const cache = database
+        .prepare('SELECT byte_count, status FROM agent_research_cache')
+        .get() as { byte_count: number; status: string };
+      expect(cache.status).toBe('present');
+      expect(cache.byte_count).toBeGreaterThan(0);
       const summaries = database
         .prepare(
           `SELECT arguments_summary_json, result_summary_json FROM agent_tool_calls
@@ -443,7 +599,7 @@ describe('AgentProviderLoopService', () => {
   });
 
   it('persists authorization, executes a restricted draft tool, and prepares continuation', async () => {
-    const { conversation, generations, loop, project } = await setup();
+    const { conversation, generations, loop, project, workflow } = await setup();
     const prepared = generations.prepare({
       conversationId: conversation.id,
       prompt: 'Create a production brief.',
@@ -524,6 +680,24 @@ describe('AgentProviderLoopService', () => {
         source_task_id: agent.taskId,
       });
     });
+    expect(workflow.getTask({ taskId: agent.taskId }).providerSteps).toEqual([
+      expect.objectContaining({
+        ordinal: 0,
+        protocol: 'openai-responses',
+        status: 'complete',
+        toolCallCount: 1,
+        finishReason: 'tool_calls',
+        totalTokens: 10,
+      }),
+      expect.objectContaining({
+        ordinal: 1,
+        protocol: 'openai-responses',
+        status: 'complete',
+        toolCallCount: 0,
+        finishReason: 'completed',
+        totalTokens: 14,
+      }),
+    ]);
   });
 
   it('prepares a Chat Completions tool-message continuation without the authorization handle', async () => {
@@ -742,6 +916,7 @@ describe('AgentProviderLoopService', () => {
       approved: true,
     });
     expect(confirmed.continuation?.outputs[0]?.output).toContain('archived');
+    expect(confirmed.tools?.map((tool) => tool.name)).toEqual(['document.archive']);
     expect(workflow.getDocument(document.id).lifecycleStatus).toBe('archived');
     expect(() =>
       loop.confirmTool({

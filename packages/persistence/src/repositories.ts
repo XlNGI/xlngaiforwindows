@@ -48,6 +48,14 @@ import type {
   LlmProviderStepRepository,
   MemoryRecord,
   MemoryRepository,
+  DocumentBindingRecord,
+  DocumentBindingRepository,
+  NovelChapterRecord,
+  NovelChapterRepository,
+  NovelProfileRecord,
+  NovelProfileRepository,
+  NovelVolumeRecord,
+  NovelVolumeRepository,
   ProjectRecord,
   ProjectRepository,
   SceneRecord,
@@ -70,6 +78,357 @@ export class SqliteProjectRepository implements ProjectRepository {
   touch(updatedAt: string): void {
     this.database.prepare('UPDATE projects SET updated_at = ?').run(updatedAt);
   }
+}
+
+export class SqliteNovelProfileRepository implements NovelProfileRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  get(projectId: string): NovelProfileRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM novel_profiles WHERE project_id = ?')
+      .get(projectId) as NovelProfileRow | undefined;
+    return row ? mapNovelProfile(row) : undefined;
+  }
+
+  save(record: NovelProfileRecord, expectedRowVersion?: number): boolean {
+    if (this.get(record.projectId)) {
+      const result = this.database
+        .prepare(
+          `UPDATE novel_profiles SET language = ?, status = ?, updated_at = ?, row_version = row_version + 1
+           WHERE project_id = ? AND row_version = ?`,
+        )
+        .run(
+          record.language,
+          record.status,
+          record.updatedAt,
+          record.projectId,
+          expectedRowVersion ?? record.rowVersion,
+        );
+      return result.changes === 1;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO novel_profiles (project_id, language, status, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.projectId,
+        record.language,
+        record.status,
+        record.rowVersion,
+        record.createdAt,
+        record.updatedAt,
+      );
+    return true;
+  }
+}
+
+interface NovelProfileRow {
+  project_id: string;
+  language: string;
+  status: NovelProfileRecord['status'];
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapNovelProfile(row: NovelProfileRow): NovelProfileRecord {
+  return {
+    projectId: row.project_id,
+    language: row.language,
+    status: row.status,
+    rowVersion: row.row_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export class SqliteNovelVolumeRepository implements NovelVolumeRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  get(id: string): NovelVolumeRecord | undefined {
+    const row = this.database.prepare('SELECT * FROM novel_volumes WHERE id = ?').get(id) as
+      NovelVolumeRow | undefined;
+    return row ? mapNovelVolume(row) : undefined;
+  }
+
+  listByProject(projectId: string, includeArchived = false): NovelVolumeRecord[] {
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM novel_volumes WHERE project_id = ? ${includeArchived ? '' : "AND status = 'active'"}
+         ORDER BY position, id`,
+      )
+      .all(projectId) as NovelVolumeRow[];
+    return rows.map(mapNovelVolume);
+  }
+
+  save(record: NovelVolumeRecord, expectedRowVersion?: number): boolean {
+    if (this.get(record.id)) {
+      const result = this.database
+        .prepare(
+          `UPDATE novel_volumes SET title = ?, position = ?, status = ?, updated_at = ?, row_version = row_version + 1
+           WHERE id = ? AND project_id = ? AND row_version = ?`,
+        )
+        .run(
+          record.title,
+          record.position,
+          record.status,
+          record.updatedAt,
+          record.id,
+          record.projectId,
+          expectedRowVersion ?? record.rowVersion,
+        );
+      return result.changes === 1;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO novel_volumes
+         (id, project_id, title, position, status, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.projectId,
+        record.title,
+        record.position,
+        record.status,
+        record.rowVersion,
+        record.createdAt,
+        record.updatedAt,
+      );
+    return true;
+  }
+}
+
+interface NovelVolumeRow {
+  id: string;
+  project_id: string;
+  title: string;
+  position: number;
+  status: NovelVolumeRecord['status'];
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapNovelVolume(row: NovelVolumeRow): NovelVolumeRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    position: row.position,
+    status: row.status,
+    rowVersion: row.row_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export class SqliteNovelChapterRepository implements NovelChapterRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  get(id: string): NovelChapterRecord | undefined {
+    const row = this.database.prepare('SELECT * FROM novel_chapters WHERE id = ?').get(id) as
+      NovelChapterRow | undefined;
+    return row ? mapNovelChapter(row) : undefined;
+  }
+
+  listByProject(projectId: string, includeArchived = false): NovelChapterRecord[] {
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM novel_chapters WHERE project_id = ? ${includeArchived ? '' : "AND lifecycle_status != 'archived'"}
+         ORDER BY CASE WHEN volume_id IS NULL THEN 0 ELSE 1 END, volume_id, position, id`,
+      )
+      .all(projectId) as NovelChapterRow[];
+    return rows.map(mapNovelChapter);
+  }
+
+  save(record: NovelChapterRecord, expectedRowVersion?: number): boolean {
+    if (this.get(record.id)) {
+      const result = this.database
+        .prepare(
+          `UPDATE novel_chapters SET volume_id = ?, position = ?, display_label = ?, lifecycle_status = ?,
+             archive_reason = ?, updated_at = ?, row_version = row_version + 1
+           WHERE id = ? AND project_id = ? AND row_version = ?`,
+        )
+        .run(
+          record.volumeId ?? null,
+          record.position,
+          record.displayLabel,
+          record.lifecycleStatus,
+          record.archiveReason ?? null,
+          record.updatedAt,
+          record.id,
+          record.projectId,
+          expectedRowVersion ?? record.rowVersion,
+        );
+      return result.changes === 1;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO novel_chapters
+         (id, project_id, volume_id, document_id, position, display_label, lifecycle_status,
+          archive_reason, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.projectId,
+        record.volumeId ?? null,
+        record.documentId,
+        record.position,
+        record.displayLabel,
+        record.lifecycleStatus,
+        record.archiveReason ?? null,
+        record.rowVersion,
+        record.createdAt,
+        record.updatedAt,
+      );
+    return true;
+  }
+}
+
+interface NovelChapterRow {
+  id: string;
+  project_id: string;
+  volume_id: string | null;
+  document_id: string;
+  position: number;
+  display_label: string;
+  lifecycle_status: NovelChapterRecord['lifecycleStatus'];
+  archive_reason: NovelChapterRecord['archiveReason'] | null;
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapNovelChapter(row: NovelChapterRow): NovelChapterRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    volumeId: row.volume_id ?? undefined,
+    documentId: row.document_id,
+    position: row.position,
+    displayLabel: row.display_label,
+    lifecycleStatus: row.lifecycle_status,
+    archiveReason: row.archive_reason ?? undefined,
+    rowVersion: row.row_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export class SqliteDocumentBindingRepository implements DocumentBindingRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  get(id: string): DocumentBindingRecord | undefined {
+    const row = this.database.prepare('SELECT * FROM document_bindings WHERE id = ?').get(id) as
+      DocumentBindingRow | undefined;
+    return row ? mapDocumentBinding(row) : undefined;
+  }
+
+  getByDocument(documentId: string): DocumentBindingRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM document_bindings WHERE document_id = ?')
+      .get(documentId) as DocumentBindingRow | undefined;
+    return row ? mapDocumentBinding(row) : undefined;
+  }
+
+  listByProject(projectId: string, includeNeedsReview = false): DocumentBindingRecord[] {
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM document_bindings WHERE project_id = ? ${includeNeedsReview ? '' : "AND status != 'needs_review'"}
+         ORDER BY created_at, id`,
+      )
+      .all(projectId) as DocumentBindingRow[];
+    return rows.map(mapDocumentBinding);
+  }
+
+  save(record: DocumentBindingRecord, expectedRowVersion?: number): boolean {
+    if (this.get(record.id)) {
+      const result = this.database
+        .prepare(
+          `UPDATE document_bindings SET volume_id = ?, chapter_id = ?, scene_id = ?, shot_id = ?, role = ?,
+             domain_scope = ?, status = ?, migration_issue_code = ?, updated_at = ?, row_version = row_version + 1
+           WHERE id = ? AND project_id = ? AND row_version = ?`,
+        )
+        .run(
+          record.volumeId ?? null,
+          record.chapterId ?? null,
+          record.sceneId ?? null,
+          record.shotId ?? null,
+          record.role,
+          record.domainScope,
+          record.status,
+          record.migrationIssueCode ?? null,
+          record.updatedAt,
+          record.id,
+          record.projectId,
+          expectedRowVersion ?? record.rowVersion,
+        );
+      return result.changes === 1;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO document_bindings
+         (id, project_id, document_id, volume_id, chapter_id, scene_id, shot_id, role, domain_scope,
+          status, migration_issue_code, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.projectId,
+        record.documentId,
+        record.volumeId ?? null,
+        record.chapterId ?? null,
+        record.sceneId ?? null,
+        record.shotId ?? null,
+        record.role,
+        record.domainScope,
+        record.status,
+        record.migrationIssueCode ?? null,
+        record.rowVersion,
+        record.createdAt,
+        record.updatedAt,
+      );
+    return true;
+  }
+}
+
+interface DocumentBindingRow {
+  id: string;
+  project_id: string;
+  document_id: string;
+  volume_id: string | null;
+  chapter_id: string | null;
+  scene_id: string | null;
+  shot_id: string | null;
+  role: DocumentBindingRecord['role'];
+  domain_scope: DocumentBindingRecord['domainScope'];
+  status: DocumentBindingRecord['status'];
+  migration_issue_code: string | null;
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapDocumentBinding(row: DocumentBindingRow): DocumentBindingRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    documentId: row.document_id,
+    volumeId: row.volume_id ?? undefined,
+    chapterId: row.chapter_id ?? undefined,
+    sceneId: row.scene_id ?? undefined,
+    shotId: row.shot_id ?? undefined,
+    role: row.role,
+    domainScope: row.domain_scope,
+    status: row.status,
+    migrationIssueCode: row.migration_issue_code ?? undefined,
+    rowVersion: row.row_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface ProjectRow {
@@ -689,11 +1048,13 @@ function mapAgentTaskDocumentVersion(
 
 class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepository {
   save(record: SceneRecord): void {
-    this.database
+    const result = this.database
       .prepare(
-        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at`,
+        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
+           row_version = scenes.row_version + 1
+         WHERE scenes.row_version = excluded.row_version`,
       )
       .run(
         record.id,
@@ -702,7 +1063,9 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.position,
         record.updatedAt ?? record.createdAt,
         record.updatedAt,
+        record.rowVersion,
       );
+    if (result.changes !== 1) throw new Error('SCENE_ROW_VERSION_CONFLICT');
   }
 
   get(id: string): SceneRecord | undefined {
@@ -727,6 +1090,7 @@ interface SceneRow {
   position: number;
   created_at: string;
   updated_at: string;
+  row_version: number;
 }
 
 function mapScene(row: SceneRow): SceneRecord {
@@ -735,6 +1099,7 @@ function mapScene(row: SceneRow): SceneRecord {
     projectId: row.project_id,
     title: row.title,
     position: row.position,
+    rowVersion: row.row_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -742,12 +1107,14 @@ function mapScene(row: SceneRow): SceneRecord {
 
 class SqliteShotRepository extends ProjectScopedRepository implements ShotRepository {
   save(record: ShotRecord): void {
-    this.database
+    const result = this.database
       .prepare(
-        `INSERT INTO shots (id, scene_id, title, position, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO shots (id, scene_id, title, position, status, created_at, updated_at, row_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-           title = excluded.title, status = excluded.status, updated_at = excluded.updated_at`,
+           title = excluded.title, status = excluded.status, updated_at = excluded.updated_at,
+           row_version = shots.row_version + 1
+         WHERE shots.row_version = excluded.row_version`,
       )
       .run(
         record.id,
@@ -757,7 +1124,9 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
         record.status,
         record.createdAt,
         record.updatedAt,
+        record.rowVersion,
       );
+    if (result.changes !== 1) throw new Error('SHOT_ROW_VERSION_CONFLICT');
   }
 
   get(id: string): ShotRecord | undefined {
@@ -783,6 +1152,7 @@ interface ShotRow {
   status: string;
   created_at: string;
   updated_at: string;
+  row_version: number;
 }
 
 function mapShot(row: ShotRow): ShotRecord {
@@ -792,6 +1162,7 @@ function mapShot(row: ShotRow): ShotRecord {
     title: row.title,
     position: row.position,
     status: row.status,
+    rowVersion: row.row_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2721,6 +3092,10 @@ function mapJob(row: JobRow): JobRecord {
 
 export function createRepositories(database: Database.Database): {
   projects: ProjectRepository;
+  novelProfiles: NovelProfileRepository;
+  novelVolumes: NovelVolumeRepository;
+  novelChapters: NovelChapterRepository;
+  documentBindings: DocumentBindingRepository;
   documents: DocumentRepository;
   documentWorkflowAudits: DocumentWorkflowAuditRepository;
   documentReviews: DocumentReviewRepository;
@@ -2748,6 +3123,10 @@ export function createRepositories(database: Database.Database): {
 } {
   return {
     projects: new SqliteProjectRepository(database),
+    novelProfiles: new SqliteNovelProfileRepository(database),
+    novelVolumes: new SqliteNovelVolumeRepository(database),
+    novelChapters: new SqliteNovelChapterRepository(database),
+    documentBindings: new SqliteDocumentBindingRepository(database),
     documents: new SqliteDocumentRepository(database),
     documentWorkflowAudits: new SqliteDocumentWorkflowAuditRepository(database),
     documentReviews: new SqliteDocumentReviewRepository(database),

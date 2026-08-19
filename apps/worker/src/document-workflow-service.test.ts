@@ -110,6 +110,101 @@ describe('DocumentWorkflowService', () => {
     ).toEqual(['published', 'review_submitted', 'draft_saved']);
   });
 
+  it('self-publishes a draft atomically and rolls back review creation on conflict', async () => {
+    const { projects, workflow, assistant } = await setup();
+    const created = workflow.createDocumentDraftFromMessage({
+      messageId: assistant.id,
+      idempotencyKey: 'self-publish-success',
+    });
+    const published = workflow.selfPublish({
+      documentId: created.document.id,
+      expectedDocumentRowVersion: created.document.rowVersion,
+      expectedPublishedVersionId: created.document.publishedVersionId,
+    });
+    expect(published.document.currentVersion?.state).toBe('published');
+    expect(published.document.publishedVersionId).toBe(published.document.currentVersion?.id);
+    expect(
+      projects.access(false, (database) =>
+        database
+          .prepare('SELECT status FROM document_reviews WHERE document_id = ?')
+          .get(created.document.id),
+      ),
+    ).toMatchObject({ status: 'approved' });
+
+    const second = workflow.createDocumentDraftFromMessage({
+      messageId: assistant.id,
+      targetDocumentId: created.document.id,
+      expectedDocumentRowVersion: published.document.rowVersion,
+      idempotencyKey: 'self-publish-conflict',
+    });
+    expect(() =>
+      workflow.selfPublish({
+        documentId: second.document.id,
+        expectedDocumentRowVersion: second.document.rowVersion,
+        expectedPublishedVersionId: 'stale-publication',
+      }),
+    ).toThrow('DOCUMENT_BASE_CONFLICT');
+    expect(workflow.getDocument(second.document.id).currentVersion?.state).toBe('draft');
+    expect(
+      projects.access(
+        false,
+        (database) =>
+          (
+            database
+              .prepare(
+                'SELECT COUNT(*) AS count FROM document_reviews WHERE document_version_id = ?',
+              )
+              .get(second.document.currentVersionId) as { count: number }
+          ).count,
+      ),
+    ).toBe(0);
+  });
+
+  it('replays task events with a sequence cursor and bounded pages', async () => {
+    const { workflow, assistant } = await setup();
+    const created = workflow.createDocumentDraftFromMessage({
+      messageId: assistant.id,
+      idempotencyKey: 'event-replay',
+    });
+
+    const first = workflow.getTaskEvents({ taskId: created.task.id, limit: 2 });
+    expect(first.events.map((event) => event.sequence)).toEqual([0, 1]);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextSequence).toBe(1);
+
+    const second = workflow.getTaskEvents({
+      taskId: created.task.id,
+      afterSequence: first.nextSequence,
+      limit: 10,
+    });
+    expect(second.events.map((event) => event.eventType)).toEqual([
+      'document.draft.created',
+      'agent.task.waiting_review',
+    ]);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextSequence).toBe(3);
+  });
+
+  it('does not replay task events across project boundaries', async () => {
+    const { workflow, assistant } = await setup();
+    const created = workflow.createDocumentDraftFromMessage({
+      messageId: assistant.id,
+      idempotencyKey: 'event-project-isolation',
+    });
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-document-workflow-isolation-'));
+    directories.push(directory);
+    const isolatedProjects = new ProjectService({
+      recentProjectsPath: join(directory, 'recent.json'),
+    });
+    services.push(isolatedProjects);
+    isolatedProjects.create(join(directory, 'project'), 'Isolated Project');
+    const isolatedWorkflow = new DocumentWorkflowService(isolatedProjects);
+
+    expect(() => isolatedWorkflow.getTaskEvents({ taskId: created.task.id })).toThrow(
+      'Agent task was not found.',
+    );
+  });
+
   it('reuses an idempotent task and rejects a stale editor', async () => {
     const { workflow, assistant } = await setup();
     const first = workflow.createDocumentDraftFromMessage({

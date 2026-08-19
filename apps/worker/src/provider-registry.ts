@@ -110,6 +110,10 @@ const VIDU_BUILT_IN_MODELS: readonly BuiltInProviderModelDefinition[] = [
   viduModel('viduq3', 'Vidu Q3', 'video'),
   viduModel('viduq3-pro', 'Vidu Q3 Pro', 'video'),
   viduModel('viduq3-drama', 'Vidu Q3-Drama', 'video'),
+  viduModel('viduq3-ad', 'Vidu Q3-Ad', 'video'),
+  viduModel('viduq3-mix', 'Vidu Q3-Mix', 'video'),
+  viduModel('viduq3-turbo', 'Vidu Q3-Turbo', 'video'),
+  viduModel('viduq2-pro', 'Vidu Q2 Pro', 'video'),
   viduModel('vidu2.0', 'Vidu 2.0', 'video'),
 ];
 

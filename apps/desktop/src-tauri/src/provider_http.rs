@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Networking::WinHttp::{
@@ -6,8 +9,8 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
     WinHttpSetTimeouts, ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_SECURE_FAILURE,
     ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_REDIRECTS,
-    WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_TYPE,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +71,16 @@ pub(crate) struct JsonHttpResponse {
 pub(crate) struct RawHttpResponse {
     pub status: u32,
     pub body: Vec<u8>,
+    pub content_type: Option<String>,
+    pub location: Option<String>,
+}
+
+pub(crate) struct PublicHttpRequest<'a> {
+    pub host: &'a str,
+    pub path: &'a str,
+    pub accept: &'a str,
+    pub response_body_limit: usize,
+    pub cancellation: Option<&'a AtomicBool>,
 }
 
 struct WinHttpHandle(*mut core::ffi::c_void);
@@ -228,7 +241,218 @@ pub(crate) fn request_bytes(
     Ok(RawHttpResponse {
         status,
         body: response,
+        content_type: query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE),
+        location: query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION),
     })
+}
+
+pub(crate) fn request_public_bytes(
+    request: PublicHttpRequest<'_>,
+) -> Result<RawHttpResponse, JsonHttpError> {
+    let check_cancelled = || {
+        request
+            .cancellation
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    };
+    let cancelled = || {
+        Err(JsonHttpError::new(
+            JsonHttpErrorKind::Transport,
+            "Public research request was cancelled",
+        ))
+    };
+    if check_cancelled() {
+        return cancelled();
+    }
+    if request.host.is_empty()
+        || !request.host.is_ascii()
+        || request
+            .host
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+        || !request.path.starts_with('/')
+        || request.path.contains(['\r', '\n', '\0'])
+        || request.path.contains("//")
+        || !matches!(
+            request.accept,
+            "text/html,application/xhtml+xml,application/json;q=0.8"
+                | "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.5"
+        )
+        || request.response_body_limit == 0
+    {
+        return Err(JsonHttpError::new(
+            JsonHttpErrorKind::InvalidRequest,
+            "Public research request is invalid",
+        ));
+    }
+    let agent = wide("XLNGAI-Research/1.0");
+    let host = wide(request.host);
+    let path = wide(request.path);
+    let verb = wide("GET");
+    let session = WinHttpHandle::new(
+        unsafe {
+            WinHttpOpen(
+                agent.as_ptr(),
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
+        },
+        "Unable to initialize research transport",
+    )?;
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, 15_000) } == 0 {
+        return Err(winhttp_error("Unable to configure research timeouts"));
+    }
+    let connection = WinHttpHandle::new(
+        unsafe { WinHttpConnect(session.0, host.as_ptr(), 443, 0) },
+        "Unable to connect research transport",
+    )?;
+    let native_request = WinHttpHandle::new(
+        unsafe {
+            WinHttpOpenRequest(
+                connection.0,
+                verb.as_ptr(),
+                path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            )
+        },
+        "Unable to create research request",
+    )?;
+    let disabled_features = WINHTTP_DISABLE_REDIRECTS;
+    if unsafe {
+        WinHttpSetOption(
+            native_request.0,
+            WINHTTP_OPTION_DISABLE_FEATURE,
+            (&disabled_features as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    } == 0
+    {
+        return Err(winhttp_error("Unable to disable research redirects"));
+    }
+    let mut headers: Vec<u16> = format!("Accept: {}\r\n", request.accept)
+        .encode_utf16()
+        .collect();
+    let sent = unsafe {
+        WinHttpSendRequest(
+            native_request.0,
+            headers.as_ptr(),
+            headers.len() as u32,
+            std::ptr::null(),
+            0,
+            0,
+            0,
+        )
+    };
+    if check_cancelled() {
+        return cancelled();
+    }
+    headers.fill(0);
+    if sent == 0 {
+        return Err(winhttp_error("Research request could not be sent"));
+    }
+    if unsafe { WinHttpReceiveResponse(native_request.0, std::ptr::null_mut()) } == 0 {
+        return Err(winhttp_error("Research response could not be received"));
+    }
+    if check_cancelled() {
+        return cancelled();
+    }
+    let mut status = 0_u32;
+    let mut status_size = std::mem::size_of::<u32>() as u32;
+    let mut header_index = 0_u32;
+    if unsafe {
+        WinHttpQueryHeaders(
+            native_request.0,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            std::ptr::null(),
+            (&mut status as *mut u32).cast(),
+            &mut status_size,
+            &mut header_index,
+        )
+    } == 0
+    {
+        return Err(winhttp_error("Research status could not be read"));
+    }
+    let content_type = query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE);
+    let location = query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION);
+    let mut body = Vec::new();
+    loop {
+        if check_cancelled() {
+            return cancelled();
+        }
+        let mut chunk = [0_u8; 8192];
+        let mut read = 0_u32;
+        if unsafe {
+            WinHttpReadData(
+                native_request.0,
+                chunk.as_mut_ptr().cast(),
+                chunk.len() as u32,
+                &mut read,
+            )
+        } == 0
+        {
+            return Err(winhttp_error("Research response body could not be read"));
+        }
+        if read == 0 {
+            break;
+        }
+        if check_cancelled() {
+            return cancelled();
+        }
+        body.extend_from_slice(&chunk[..read as usize]);
+        if body.len() > request.response_body_limit {
+            return Err(JsonHttpError::new(
+                JsonHttpErrorKind::ResponseTooLarge,
+                "Research response exceeds the native transport limit",
+            ));
+        }
+    }
+    Ok(RawHttpResponse {
+        status,
+        body,
+        content_type,
+        location,
+    })
+}
+
+fn query_optional_header(request: *mut core::ffi::c_void, header: u32) -> Option<String> {
+    let mut size = 0_u32;
+    let mut index = 0_u32;
+    unsafe {
+        WinHttpQueryHeaders(
+            request,
+            header,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut size,
+            &mut index,
+        );
+    }
+    if size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; (size as usize).div_ceil(2)];
+    if unsafe {
+        WinHttpQueryHeaders(
+            request,
+            header,
+            std::ptr::null(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            &mut index,
+        )
+    } == 0
+    {
+        return None;
+    }
+    let value = String::from_utf16_lossy(&buffer)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 pub(crate) fn request_json(

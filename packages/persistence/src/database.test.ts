@@ -28,7 +28,6 @@ const temporaryDirectories: string[] = [];
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })));
 });
-
 async function temporaryDatabase() {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-persistence-'));
   temporaryDirectories.push(directory);
@@ -39,8 +38,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(18);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 18 });
+    expect(migrateDatabase(database)).toBe(27);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 27 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -80,6 +79,21 @@ describe('project database', () => {
     expect(
       database
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_research_cache'),
+    ).toMatchObject({ name: 'agent_research_cache' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('document_version_research_sources'),
+    ).toMatchObject({ name: 'document_version_research_sources' });
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('agent_research_sources') WHERE name = ?")
+        .get('adoption_status'),
+    ).toMatchObject({ name: 'adoption_status' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('document_audit_events'),
     ).toMatchObject({ name: 'document_audit_events' });
     expect(
@@ -87,6 +101,46 @@ describe('project database', () => {
         .prepare("SELECT name FROM pragma_table_info('documents') WHERE name = ?")
         .get('published_version_id'),
     ).toMatchObject({ name: 'published_version_id' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_pending_intents'),
+    ).toMatchObject({ name: 'agent_pending_intents' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_task_targets'),
+    ).toMatchObject({ name: 'agent_task_targets' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('novel_chapter_task_locks'),
+    ).toMatchObject({ name: 'novel_chapter_task_locks' });
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('agent_tool_calls') WHERE name = ?")
+        .get('target_chapter_id'),
+    ).toMatchObject({ name: 'target_chapter_id' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_partial_artifacts'),
+    ).toMatchObject({ name: 'agent_partial_artifacts' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_change_sets'),
+    ).toMatchObject({ name: 'agent_change_sets' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_change_set_items'),
+    ).toMatchObject({ name: 'agent_change_set_items' });
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('scenes') WHERE name = ?")
+        .get('row_version'),
+    ).toMatchObject({ name: 'row_version' });
     database.close();
   });
 
@@ -313,7 +367,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(27);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -340,7 +394,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(27);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -402,7 +456,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(27);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -450,7 +504,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(27);
     expect(
       database
         .prepare(
@@ -523,8 +577,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(18);
-    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(27);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -679,7 +733,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(18);
+    expect(migrateDatabase(database)).toBe(27);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -717,7 +771,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 18 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 27 });
     database.close();
   });
 });

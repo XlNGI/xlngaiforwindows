@@ -71,6 +71,7 @@ export interface CompileContextInput {
   sources: ContextSourceInput[];
   budgetTokens?: number;
   summaries?: Record<string, string>;
+  systemInstruction?: string;
 }
 
 export class ContextBudgetError extends Error {}
@@ -118,12 +119,13 @@ export function extractiveSummaryByTokens(content: string, maxTokens: number): s
 }
 
 export function compileProductionContext(input: CompileContextInput): ProductionContext {
+  const instruction = input.systemInstruction ?? systemInstruction;
   const budgetTokens = Math.min(Math.max(input.budgetTokens ?? 24_000, 1_000), 200_000);
   const relevant = input.sources
     .filter((source) => isRelevant(source, input.scope))
     .sort((left, right) => sourcePriority(left) - sourcePriority(right));
   const references: ContextSourceReference[] = [];
-  let usedTokens = estimateTokenCount(systemInstruction);
+  let usedTokens = estimateTokenCount(instruction);
 
   const constraints = relevant.filter((source) => source.type === 'constraint');
   if (constraints.some((source) => !source.content.trim())) {
@@ -132,7 +134,7 @@ export function compileProductionContext(input: CompileContextInput): Production
   const renderedConstraints = constraints
     .map((source) => renderSource(source, source.content))
     .join('\n\n');
-  const requiredConstraintTokens = estimateTokenCount(`${systemInstruction}${renderedConstraints}`);
+  const requiredConstraintTokens = estimateTokenCount(`${instruction}${renderedConstraints}`);
   if (requiredConstraintTokens > budgetTokens) {
     throw new ContextBudgetError(
       `Production constraints require approximately ${requiredConstraintTokens} tokens, exceeding the ${budgetTokens} token context budget.`,
@@ -173,9 +175,9 @@ export function compileProductionContext(input: CompileContextInput): Production
     projectId: input.projectId,
     projectName: input.projectName,
     scope: input.scope,
-    systemInstruction,
+    systemInstruction: instruction,
     sources: references,
-    estimatedTokens: estimateTokenCount(`${systemInstruction}${rendered}`),
+    estimatedTokens: estimateTokenCount(`${instruction}${rendered}`),
     budgetTokens,
     rendered,
   };

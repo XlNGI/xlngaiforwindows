@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { IntegrityReport } from '@ai-video/domain';
 import {
@@ -19,6 +20,15 @@ import {
   MIGRATION_V13,
   MIGRATION_V15,
   MIGRATION_V17,
+  MIGRATION_V19,
+  MIGRATION_V20,
+  MIGRATION_V21,
+  MIGRATION_V22,
+  MIGRATION_V23,
+  MIGRATION_V24,
+  MIGRATION_V25,
+  MIGRATION_V26,
+  MIGRATION_V27,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
@@ -44,6 +54,9 @@ export function openProjectDatabase(
   }
   const database = new Database(databasePath, databaseOptions);
   try {
+    database.function('sha256', { deterministic: true }, (value: unknown) =>
+      createHash('sha256').update(String(value), 'utf8').digest('hex'),
+    );
     database.pragma('foreign_keys = ON');
     database.pragma('busy_timeout = 5000');
     if (!options.readonly) {
@@ -212,6 +225,78 @@ export function migrateDatabase(
   }
   if (getSchemaVersion(database) === 17) {
     widenAgentTaskToolCallLimit(database, now);
+  }
+  if (getSchemaVersion(database) === 18) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V19);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(19, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 19) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V20);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(20, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 20) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V21);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(21, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 21) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V22);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(22, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 22) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V23);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(23, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 23) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V24);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(24, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 24) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V25);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(25, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 25) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V26);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(26, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 26) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V27);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(27, now);
+    })();
   }
   return getSchemaVersion(database);
 }

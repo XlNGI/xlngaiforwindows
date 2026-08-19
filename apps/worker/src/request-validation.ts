@@ -39,9 +39,27 @@ const sessionMethods = new Set<WorkerMethod>([
   'document.review.requestChanges',
   'document.review.reject',
   'document.publish',
+  'document.selfPublish',
+  'novel.profile.get',
+  'novel.profile.update',
+  'novel.volume.list',
+  'novel.volume.save',
+  'novel.chapter.list',
+  'novel.chapter.save',
+  'novel.chapter.archive',
+  'novel.chapter.restore',
+  'novel.binding.list',
+  'novel.binding.save',
+  'novel.intent.list',
+  'novel.intent.cancel',
+  'novel.export.prepare',
+  'agent.partial.list',
+  'agent.partial.recover',
+  'agent.partial.discard',
   'agent.task.createDocumentDraft',
   'agent.task.list',
   'agent.task.get',
+  'agent.task.events',
   'task.log.list',
   'context.preview',
   'llm.generate',
@@ -56,11 +74,17 @@ const sessionMethods = new Set<WorkerMethod>([
   'llm.generation.retryPrepare',
   'agent.generation.prepare',
   'agent.generation.executeTools',
+  'agent.generation.cancel',
   'agent.generation.confirmTool',
   'agent.providerStep.complete',
   'agent.providerStep.start',
+  'agent.changeSet.create',
+  'agent.changeSet.list',
+  'agent.changeSet.apply',
+  'agent.changeSet.reject',
   'maintenance.metrics',
   'maintenance.contextSnapshots.cleanup',
+  'maintenance.researchCache.cleanup',
 ]);
 
 const scopes = new Set<ConversationScopeType>(['project', 'scene', 'shot']);
@@ -76,6 +100,9 @@ const agentDocumentOperations = new Set([
   'document.update_draft',
   'document.archive',
   'document.restore',
+  'novel.chapter.submit_draft',
+  'novel.reference.submit_draft',
+  'novel.adaptation.submit_proposal',
 ]);
 const agentResearchModes = new Set(['auto', 'project_only', 'network_disabled']);
 
@@ -91,6 +118,160 @@ export function validateSessionRequestParams(
   switch (method) {
     case 'document.list':
       rejectUnknown(params, []);
+      break;
+    case 'novel.profile.get':
+      rejectUnknown(params, ['createIfMissing']);
+      optionalBoolean(params, 'createIfMissing');
+      break;
+    case 'novel.profile.update':
+      rejectUnknown(params, ['language', 'status', 'expectedRowVersion']);
+      optionalString(params, 'language', 35);
+      optionalEnum(params, 'status', new Set(['active', 'archived']));
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'novel.volume.list':
+      rejectUnknown(params, ['includeArchived']);
+      optionalBoolean(params, 'includeArchived');
+      break;
+    case 'novel.volume.save':
+      rejectUnknown(params, ['volumeId', 'title', 'position', 'status', 'expectedRowVersion']);
+      optionalId(params, 'volumeId');
+      requireString(params, 'title', MAX_TITLE_LENGTH);
+      optionalInteger(params, 'position', 0, Number.MAX_SAFE_INTEGER);
+      optionalEnum(params, 'status', new Set(['active', 'archived']));
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'novel.chapter.list':
+      rejectUnknown(params, ['volumeId', 'includeArchived']);
+      optionalId(params, 'volumeId');
+      optionalBoolean(params, 'includeArchived');
+      break;
+    case 'novel.chapter.save':
+      rejectUnknown(params, [
+        'chapterId',
+        'volumeId',
+        'title',
+        'displayLabel',
+        'position',
+        'lifecycleStatus',
+        'archiveReason',
+        'expectedRowVersion',
+      ]);
+      optionalId(params, 'chapterId');
+      optionalId(params, 'volumeId');
+      requireString(params, 'title', MAX_TITLE_LENGTH);
+      optionalString(params, 'displayLabel', 80);
+      optionalInteger(params, 'position', 0, Number.MAX_SAFE_INTEGER);
+      optionalEnum(params, 'lifecycleStatus', new Set(['reserved', 'active', 'archived']));
+      optionalEnum(params, 'archiveReason', new Set(['user_archive', 'generation_placeholder']));
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'novel.chapter.archive':
+      rejectUnknown(params, ['chapterId', 'expectedRowVersion', 'reason']);
+      requireId(params, 'chapterId');
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      optionalEnum(params, 'reason', new Set(['user_archive', 'generation_placeholder']));
+      break;
+    case 'novel.chapter.restore':
+      rejectUnknown(params, ['chapterId', 'expectedRowVersion']);
+      requireId(params, 'chapterId');
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'novel.binding.list':
+      rejectUnknown(params, ['includeNeedsReview']);
+      optionalBoolean(params, 'includeNeedsReview');
+      break;
+    case 'novel.binding.save':
+      rejectUnknown(params, [
+        'bindingId',
+        'documentId',
+        'volumeId',
+        'chapterId',
+        'sceneId',
+        'shotId',
+        'role',
+        'domainScope',
+        'status',
+        'expectedRowVersion',
+      ]);
+      optionalId(params, 'bindingId');
+      requireId(params, 'documentId');
+      optionalId(params, 'volumeId');
+      optionalId(params, 'chapterId');
+      optionalId(params, 'sceneId');
+      optionalId(params, 'shotId');
+      requireEnum(
+        params,
+        'role',
+        new Set([
+          'work-outline',
+          'volume-outline',
+          'character-bible',
+          'world-bible',
+          'timeline',
+          'style-guide',
+          'adaptation-proposal',
+          'screenplay',
+          'scene-outline',
+          'shot-plan',
+          'research',
+          'note',
+        ]),
+      );
+      requireEnum(params, 'domainScope', new Set(['shared', 'novel', 'short-drama']));
+      optionalEnum(params, 'status', new Set(['active', 'archived', 'needs_review']));
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'novel.intent.list':
+      rejectUnknown(params, ['includeResolved']);
+      optionalBoolean(params, 'includeResolved');
+      break;
+    case 'novel.intent.cancel':
+      rejectUnknown(params, ['intentId']);
+      requireId(params, 'intentId');
+      break;
+    case 'novel.export.prepare':
+      rejectUnknown(params, [
+        'exportType',
+        'exportFormat',
+        'chapterId',
+        'chapterIds',
+        'volumeId',
+        'includeDraft',
+      ]);
+      requireEnum(params, 'exportType', new Set(['chapter', 'selection', 'volume', 'work']));
+      optionalEnum(params, 'exportFormat', new Set(['files', 'merged']));
+      optionalId(params, 'chapterId');
+      optionalId(params, 'volumeId');
+      optionalBoolean(params, 'includeDraft');
+      if (params.chapterIds !== undefined) {
+        if (
+          !Array.isArray(params.chapterIds) ||
+          params.chapterIds.length === 0 ||
+          params.chapterIds.length > 200
+        ) {
+          throw new RequestValidationError('chapterIds must contain between one and 200 IDs.');
+        }
+        for (const chapterId of params.chapterIds) {
+          if (typeof chapterId !== 'string' || !chapterId.trim())
+            throw new RequestValidationError('chapterIds must contain non-empty IDs.');
+        }
+      }
+      break;
+    case 'agent.partial.list':
+      rejectUnknown(params, ['includeTerminal']);
+      optionalBoolean(params, 'includeTerminal');
+      break;
+    case 'agent.partial.recover':
+      rejectUnknown(params, ['artifactId', 'expectedRowVersion', 'expectedDocumentRowVersion']);
+      requireId(params, 'artifactId');
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      requireInteger(params, 'expectedDocumentRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'agent.partial.discard':
+      rejectUnknown(params, ['artifactId', 'expectedRowVersion']);
+      requireId(params, 'artifactId');
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
       break;
     case 'document.get':
     case 'document.versions':
@@ -126,6 +307,7 @@ export function validateSessionRequestParams(
       optionalString(params, 'comment', 2_000);
       break;
     case 'document.publish':
+    case 'document.selfPublish':
       rejectUnknown(params, [
         'documentId',
         'documentVersionId',
@@ -159,6 +341,23 @@ export function validateSessionRequestParams(
     case 'agent.task.get':
       rejectUnknown(params, ['taskId']);
       requireId(params, 'taskId');
+      break;
+    case 'agent.task.events':
+      rejectUnknown(params, ['taskId', 'afterSequence', 'limit']);
+      requireId(params, 'taskId');
+      optionalInteger(params, 'afterSequence', 0, Number.MAX_SAFE_INTEGER);
+      optionalInteger(params, 'limit', 1, 100);
+      break;
+    case 'agent.changeSet.create':
+      validateAgentChangeSetCreate(params);
+      break;
+    case 'agent.changeSet.list':
+      rejectUnknown(params, ['includeTerminal']);
+      optionalBoolean(params, 'includeTerminal');
+      break;
+    case 'agent.changeSet.apply':
+    case 'agent.changeSet.reject':
+      validateAgentChangeSetMutation(params);
       break;
     case 'task.log.list':
       rejectUnknown(params, ['limit', 'cursor', 'kind', 'status']);
@@ -259,6 +458,9 @@ export function validateSessionRequestParams(
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
       break;
+    case 'novel.context.consistencyReport':
+      rejectUnknown(params, []);
+      break;
     case 'llm.generate':
       rejectUnknown(params, ['conversationId', 'budgetTokens', 'prompt', 'idempotencyKey']);
       requireId(params, 'conversationId');
@@ -340,6 +542,7 @@ export function validateSessionRequestParams(
         'researchMode',
         'title',
         'documentIntent',
+        'novelIntent',
       ]);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
@@ -347,10 +550,24 @@ export function validateSessionRequestParams(
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
-      requireEnum(params, 'agentMode', new Set(['document']));
+      requireEnum(params, 'agentMode', new Set(['document', 'novel-writing']));
       optionalEnum(params, 'researchMode', agentResearchModes);
       optionalString(params, 'title', MAX_TITLE_LENGTH);
-      validateAgentDocumentIntent(params.documentIntent);
+      if (params.agentMode === 'document') {
+        validateAgentDocumentIntent(params.documentIntent);
+        if (params.novelIntent !== undefined) {
+          throw new RequestValidationError('novelIntent is only allowed in novel-writing mode.');
+        }
+      } else {
+        if (params.documentIntent !== undefined) {
+          throw new RequestValidationError('documentIntent is not allowed in novel-writing mode.');
+        }
+        validateNovelWritingIntent(params.novelIntent);
+      }
+      break;
+    case 'agent.generation.cancel':
+      rejectUnknown(params, ['generationId']);
+      requireId(params, 'generationId');
       break;
     case 'agent.generation.executeTools':
       validateIdentity(params, ['providerResponseId', 'calls', 'usage']);
@@ -372,9 +589,28 @@ export function validateSessionRequestParams(
     case 'agent.providerStep.start':
       validateIdentity(params);
       break;
+    case 'maintenance.researchCache.cleanup':
+      rejectUnknown(params, ['maxBytes']);
+      optionalInteger(params, 'maxBytes', 0, 512 * 1024 * 1024);
+      break;
   }
 
   return params;
+}
+
+function validateNovelWritingIntent(input: unknown): void {
+  if (input === undefined) return;
+  const intent = requireObject(input, 'novelIntent');
+  rejectUnknown(intent, ['action', 'chapterId', 'volumeId', 'chapterTitle', 'displayLabel']);
+  optionalEnum(
+    intent,
+    'action',
+    new Set(['create_chapter', 'continue_chapter', 'rewrite_chapter']),
+  );
+  optionalId(intent, 'chapterId');
+  optionalId(intent, 'volumeId');
+  optionalString(intent, 'chapterTitle', MAX_TITLE_LENGTH);
+  optionalString(intent, 'displayLabel', 80);
 }
 
 function validateIdentity(params: Record<string, unknown>, additional: string[] = []): void {
@@ -432,7 +668,10 @@ function validateAgentDocumentIntent(input: unknown): void {
     operation === 'document.read' ||
     operation === 'document.update_draft' ||
     operation === 'document.archive' ||
-    operation === 'document.restore';
+    operation === 'document.restore' ||
+    operation === 'novel.chapter.submit_draft' ||
+    operation === 'novel.reference.submit_draft' ||
+    operation === 'novel.adaptation.submit_proposal';
   if (requiresDocument && !documentId) {
     throw new RequestValidationError('documentIntent.documentId is required for this operation.');
   }
@@ -610,4 +849,73 @@ function requireBoolean(value: Record<string, unknown>, key: string): boolean {
 function optionalBoolean(value: Record<string, unknown>, key: string): boolean | undefined {
   if (value[key] === undefined) return undefined;
   return requireBoolean(value, key);
+}
+
+function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
+  rejectUnknown(params, ['taskId', 'title', 'items']);
+  optionalId(params, 'taskId');
+  requireString(params, 'title', MAX_TITLE_LENGTH);
+  const items = params.items;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 100) {
+    throw new RequestValidationError('items must contain between one and 100 proposals.');
+  }
+  items.forEach((raw, ordinal) => {
+    const item = requireObject(raw, `items[${ordinal}]`);
+    rejectUnknown(item, [
+      'entityType',
+      'action',
+      'targetId',
+      'parentSceneId',
+      'parentItemOrdinal',
+      'title',
+      'shotStatus',
+      'documentKind',
+      'contentMarkdown',
+      'scopeType',
+      'scopeId',
+      'expectedRowVersion',
+      'expectedCurrentVersionId',
+    ]);
+    requireEnum(item, 'entityType', new Set(['scene', 'shot']));
+    requireEnum(item, 'action', new Set(['create', 'update']));
+    optionalId(item, 'targetId');
+    optionalId(item, 'parentSceneId');
+    optionalInteger(item, 'parentItemOrdinal', 0, items.length - 1);
+    requireString(item, 'title', MAX_TITLE_LENGTH);
+    optionalString(item, 'shotStatus', 80);
+    optionalEnum(item, 'documentKind', documentKinds);
+    if (item.contentMarkdown !== undefined) {
+      requireString(item, 'contentMarkdown', MAX_DOCUMENT_LENGTH, true);
+    }
+    const scope = optionalScope(item, 'scopeType');
+    const scopeId = optionalId(item, 'scopeId');
+    if (scope === 'project' && scopeId !== undefined) {
+      throw new RequestValidationError('scopeId is not allowed for project documents.');
+    }
+    if (scope && scope !== 'project' && scopeId === undefined) {
+      throw new RequestValidationError('scopeId is required for scene and shot documents.');
+    }
+    optionalInteger(item, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+    optionalId(item, 'expectedCurrentVersionId');
+  });
+}
+
+function validateAgentChangeSetMutation(params: Record<string, unknown>): void {
+  rejectUnknown(params, ['changeSetId', 'expectedRowVersion', 'itemIds']);
+  requireId(params, 'changeSetId');
+  requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+  if (params.itemIds !== undefined) {
+    if (
+      !Array.isArray(params.itemIds) ||
+      params.itemIds.length < 1 ||
+      params.itemIds.length > 100
+    ) {
+      throw new RequestValidationError('itemIds must contain between one and 100 IDs.');
+    }
+    for (const itemId of params.itemIds) {
+      if (typeof itemId !== 'string' || !itemId.trim() || itemId.length > MAX_ID_LENGTH) {
+        throw new RequestValidationError('itemIds must contain valid IDs.');
+      }
+    }
+  }
 }

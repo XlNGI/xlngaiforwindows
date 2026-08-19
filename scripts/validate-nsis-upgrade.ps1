@@ -5,6 +5,8 @@ param(
 
   [string]$PreviousInstallerPath = $UpgradeInstallerPath,
 
+  [switch]$AllowSameInstallerBaseline,
+
   [string]$ValidationRoot = (Join-Path `
     $(if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }) `
     ('ai-video-nsis-upgrade-' + [guid]::NewGuid().ToString('N')))
@@ -14,6 +16,12 @@ $ErrorActionPreference = 'Stop'
 
 $resolvedPreviousInstaller = (Resolve-Path -LiteralPath $PreviousInstallerPath).Path
 $resolvedUpgradeInstaller = (Resolve-Path -LiteralPath $UpgradeInstallerPath).Path
+$previousInstallerHash = (Get-FileHash -LiteralPath $resolvedPreviousInstaller -Algorithm SHA256).Hash
+$upgradeInstallerHash = (Get-FileHash -LiteralPath $resolvedUpgradeInstaller -Algorithm SHA256).Hash
+$sameInstallerBaseline = $previousInstallerHash -eq $upgradeInstallerHash
+if ($sameInstallerBaseline -and -not $AllowSameInstallerBaseline) {
+  throw 'A distinct previous-version installer is required. Pass -AllowSameInstallerBaseline only for an explicit same-package overwrite smoke test.'
+}
 $validationRoot = [IO.Path]::GetFullPath($ValidationRoot)
 $expectedRootPrefix = Join-Path `
   $(if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }) `
@@ -199,7 +207,8 @@ try {
   [pscustomobject]@{
     PreviousInstaller = $resolvedPreviousInstaller
     UpgradeInstaller = $resolvedUpgradeInstaller
-    SameInstallerBaseline = $resolvedPreviousInstaller -eq $resolvedUpgradeInstaller
+    SameInstallerBaseline = $sameInstallerBaseline
+    SameInstallerBaselineAllowed = [bool]$AllowSameInstallerBaseline
     ProjectIdentityPreserved = $true
     DocumentDigestPreserved = $true
     IntegrityBeforeAndAfter = $true

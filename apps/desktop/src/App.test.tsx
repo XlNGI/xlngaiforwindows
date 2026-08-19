@@ -393,6 +393,7 @@ describe('App', () => {
             projectId: 'project',
             title: '场次一',
             position: 0,
+            rowVersion: 0,
             createdAt: 'now',
             updatedAt: 'now',
           },

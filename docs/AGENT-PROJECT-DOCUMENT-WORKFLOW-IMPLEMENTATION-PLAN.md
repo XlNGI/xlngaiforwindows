@@ -1,8 +1,8 @@
 # Agent 项目文档生成、审核与任务日志实施计划
 
-版本：1.1  
-日期：2026-08-18  
-状态：实施中（v14 核心闭环和 UniCompAPI 桌面 Native 两轮工具验收已完成；P3.2 Worker 主动研究、Schema v18 配额治理、Fake-IP DNS 兼容和“UniCompAPI + 真实研究 + 自动打开草稿”桌面链路已完成，来源 UI、稳定引用与校验、用户可见研究模式、Native 网络桥及缓存/取消/重启恢复加固待完成）  
+版本：1.2  
+日期：2026-08-19  
+状态：实施中（v14 核心闭环和 UniCompAPI 桌面 Native 两轮工具验收已完成；P3.2 Worker 主动研究、Schema v18 配额治理、Schema v19 缓存索引/引用关联、来源 UI、用户可见研究模式、Fake-IP DNS 兼容、“UniCompAPI + 真实研究 + 自动打开草稿”桌面链路和 Native 研究网络桥基础实现已完成；Worker 到 Native 的请求 ID/取消注册表/WinHTTP 分段取消已完成；崩溃后 in-flight 恢复、真实研究冒烟和安装包链路待完成）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档是 Agent 项目资料生成工作流的实施依据和执行记录。已完成项必须附验证证据；未完成项保留明确边界，不得以 UI 已接入代替后端能力。
@@ -14,11 +14,11 @@
 - [x] P2 文档工作版本与权威版本模型
 - [~] P3 Agent 工具协议和安全执行网关（`document.create_draft/list/read/update_draft/archive/restore` 均已具备工具定义下发、step-local 不透明授权、受限执行与结果回传；archive/restore 通过一次性确认记录和 Desktop 本地确认续执行。恢复、取消与延迟工具回调已覆盖，P3.1 本地路由门禁、UniCompAPI 协议适配和桌面 Native 草稿两轮工具验收已落地，仍待更广泛的故障注入、取消/重启恢复实机演练和其他第三方路由兼容性验证）
   - [~] P3.1 Provider 工具路由兼容性（官方 OpenAI Responses 与 UniCompAPI Chat Completions 精确路由的模型能力/transport 双重门禁、工具循环适配、真实协议冒烟和桌面 Native Agent 草稿链路已完成；取消/重启恢复、安装包链路及其他第三方适配器仍待完成）
-  - [~] P3.2 Agent 主动外部研究（`researchMode`、Bing HTML Research Adapter、受控 `research.search/fetch`、并行只读工具循环、项目本地正文缓存、Schema v17 来源事实、Schema v18 工具配额和 UniCompAPI 桌面真实研究起草链路已落地；来源 UI、稳定引用与校验、用户可见模式选择、Native 网络桥及缓存/取消/重启恢复加固待完成）
-- [~] P4 会话触发文档草稿与编辑器审核闭环（显式 Agent 创建、终态刷新和新草稿自动打开已完成；自动意图触发及其他文档操作入口待实现）
+- [~] P3.2 Agent 主动外部研究（`researchMode`、Bing HTML Research Adapter、受控 `research.search/fetch`、并行只读工具循环、项目本地正文缓存、Schema v17 来源事实、Schema v18 工具配额、Schema v19 缓存索引/TTL/容量治理/采用状态/草稿引用关联、来源 UI、用户可见模式选择、UniCompAPI 桌面真实研究起草链路和 Native 研究网络桥基础实现已落地；Worker 无桥时 fail-closed，并有 Native 令牌/公网 URL/响应上限回归；Worker 到 Native 的请求 ID/取消注册表/WinHTTP 分段取消已落地；崩溃后 in-flight 恢复、真实研究冒烟和安装包链路待完成）
+- [~] P4 会话触发文档草稿与编辑器审核闭环（显式 Agent 创建、终态刷新和新草稿自动打开已完成；普通聊天已支持保守的创建/读取/更新/归档/恢复意图识别、唯一目标绑定和无目标阻断；更完整的持久化 pending intent、其他文档入口和端到端 Provider 验收待完成）
 - [~] P5 审核、发布、上下文治理和冲突处理（核心闭环和文档工作流审计完成，差异视图和动态模型预算待实现）
-- [~] P6 统一任务日志页面与来源定位（聚合列表、Agent 详情、事件时间线、文档产物、筛选、游标分页、自动刷新、来源会话跳转和图片/视频完整详情已完成；Provider step 详情待补）
-- [ ] P7 场次/镜头结构化提案扩展
+- [x] P6 统一任务日志页面与来源定位（聚合列表、Agent 详情、事件时间线、文档产物、Provider step 详情、筛选、游标分页、自动刷新、来源会话跳转和图片/视频完整详情已完成；2026-08-19 验证：Contracts build、Worker/Desktop typecheck、Worker 194 tests、Desktop 108 tests 通过）
+- [~] P7 场次/镜头结构化提案扩展（Worker change set/CAS/事务应用、结构化差异 UI 和关联文档原子变更已完成；真实 Windows 人工验收和安装包链路待完成）
 - [~] P8 性能、安全、迁移和发布门禁（自动化质量门禁通过，Windows 多窗口实机和恢复演练待完成）
 
 ## 2. 计划目的
@@ -119,7 +119,7 @@
 | 场次/镜头 | `scenes`、`shots` 可由界面直接保存，没有 Agent 提案和 CAS | 首期不由 Agent 直接写入；后续通过 change set 原子应用 |
 | 任务 | `generation_jobs` 主要服务图片/视频，`generation_drafts` 服务镜头参数 | 不复用为 Agent 文档任务；统一任务日志通过投影查询聚合 |
 | Provider | 模型目录已声明 `text`、`streaming`、`tools`、`structuredOutput`，但真实 Provider tool loop 和逐 step 事实记录尚未完成 | Agent 门禁使用 `text && streaming && tools`；新增工具循环、Provider step、usage 汇总和恢复 |
-| 外部研究 | Worker 已接入 `bing-html-public-v1`、`research.search/fetch`、安全 URL/DNS/重定向校验、网页正文提取、项目本地缓存和 v17 来源事实；UniCompAPI 只承担 LLM function calling，不提供托管网页搜索 | 当前网络请求仍由 Worker 受控 `fetch` 执行；P3.2 完成前还需迁移到计划中的 Native 网络桥，并补齐来源 UI、引用校验、恢复与缓存治理 |
+| 外部研究 | Worker 已接入 `bing-html-public-v1`、`research.search/fetch`、来源事实、缓存和 Native 研究桥客户端；UniCompAPI 只承担 LLM function calling，不提供托管网页搜索 | 正式桌面 Worker 通过一次性 loopback Native 桥执行公开 HTTPS 研究；无桥时 fail-closed；仍需补齐请求取消贯穿、崩溃后 in-flight 恢复、真实研究和安装包验收 |
 | 工作区 | 文档/会话可停靠、浮动并分离为 Tauri 窗口 | Worker 保持唯一持久化写入者；独立文档窗口由主窗口按文档实体维护临时编辑缓冲，并通过版本 CAS 写入 |
 | 持久化 | 项目根目录包含 `project.sqlite`、`assets/`、`exports/`、`backups/` | 文档/任务仍进 SQLite；媒体实体文件仍保存在 `assets/` |
 
@@ -873,7 +873,7 @@ swap 前必须先从 `sqlite_master` 计算受重建父表影响的完整入站 
 10. 验证新库直建、v13 -> v14、重复迁移、故障回滚、旧任务 CAS token 保持、旧索引不存在、v13 tool call 的 provider/idempotency 四种空值组合均得到唯一 `legacy:<id>` 键且不残留 Provider 身份、工具正文不残留、artifact 历史/异常报告、confirmation pending/过期/confirm/reject CAS 竞态、复合 FK mismatch、取消/提交竞态和旧项目恢复；
 11. 不重复安排或重新执行 v12/v13 的 Agent、双指针、审核、发布和基础审计迁移。
 
-### 12.7 P3.2 外部研究来源增量（Schema v17 已落地，引用闭环待补）
+### 12.7 P3.2 外部研究来源增量（Schema v17/v19 与来源展示已落地，端到端门禁待补）
 
 P3.2 不修改既有 v14 工具事实的正文脱敏规则。当前已经从 Schema v16 迁移到 v17，并新增研究来源事实，避免把网页正文塞入 `agent_tool_calls`、`llm_provider_steps` 或 `context_snapshots`：
 
@@ -887,7 +887,7 @@ P3.2 不修改既有 v14 工具事实的正文脱敏规则。当前已经从 Sch
 
 v17 门禁：新库直建、v16 -> v17、重复迁移、完整复合 FK、跨项目拒绝、URL/凭据脱敏、缓存路径边界、TTL/容量清理、缺失缓存恢复、研究来源与文档引用一致性以及旧任务零回填通过。
 
-当前实现边界（2026-08-18）：`agent_research_sources`、v16 -> v17 迁移、同项目/attempt/Provider step/tool call 归属触发器、URL/handle/content hash、站点、标题、检索时间、字符数、截断、缓存相对路径、状态和引用标签已落地；搜索 query 只以 hash 和有界摘要进入工具事实，网页正文只写入 `cache/research/{contentHash}.txt`。尚未实现独立缓存索引的 `byte_count/expires_at`、TTL/容量清理、来源采用/排除原因、草稿版本引用关联和缺失缓存恢复，因此 v17/P3.2 总门禁仍未完成。
+当前实现边界（2026-08-19）：`agent_research_sources`、v16 -> v17 -> v19 迁移、同项目/attempt/Provider step/tool call 归属触发器、URL/handle/content hash、站点、标题、检索时间、字符数、截断、缓存相对路径、稳定任务级引用标签、采用/排除原因、缓存 `byte_count/expires_at` 索引、TTL/容量清理、缺失缓存标记、草稿版本引用关联、任务详情来源 UI 和用户可见 `auto/project_only/network_disabled` 模式选择已落地；Worker 在项目打开/恢复时自动执行缓存治理，研究缓存清空会同步将来源标记为缺失。搜索 query 只以 hash 和有界摘要进入工具事实，网页正文只写入 `cache/research/{contentHash}.txt`。Native 研究桥已由 Desktop 创建一次性 loopback 端点和进程级令牌，Worker 只通过该桥提交公开 HTTPS GET；Native 层独立校验主机、DNS、公网地址、重定向禁用、MIME 请求白名单和响应体上限，无桥时 Worker fail-closed。Worker 到 Native 的请求 ID、取消 endpoint、取消注册表和 WinHTTP 分段取消已完成；崩溃后 in-flight 恢复、真实研究/安装包链路仍未完成，因此 P3.2 总门禁仍未完成。
 
 ### 12.8 P3.2 工具配额增量（Schema v18 已落地）
 
@@ -1444,13 +1444,13 @@ agent.task.cancelled
 
 目标：把项目上下文从“唯一允许来源”调整为“优先证据”，使显式 Agent 在资料不足、请求依赖时效信息或需要事实核验时，能够自主搜索、读取和引用外部来源，再创建可审核草稿。
 
-当前状态（2026-08-18）：P3.2 已进入进行中。Contracts/Desktop/Worker 已贯通 `researchMode=auto|project_only|network_disabled`，Desktop 当前显式发送 `auto`；Worker 已注册 `research.search/fetch`，使用 `bing-html-public-v1` 完成搜索、任务/attempt 绑定的不透明来源句柄、受控 HTTPS 抓取、正文提取、内容 hash、项目本地缓存、并行只读工具调用和后续文档写入隔离；Schema v17 已持久化有界来源事实，Schema v18 已把新任务默认工具额度调整为 16、数据库硬上限调整为 32，并增加 search/fetch 专用预算和文档操作预留。仅对 `198.18.0.0/15` Fake-IP DNS 结果执行固定 HTTPS DoH 二次解析，且二次结果必须全部为公网地址；普通私网、混合、失败或二次私网结果继续阻断。Bing 真实搜索/抓取冒烟和“UniCompAPI LLM transport + Bing 真实研究 + 单一草稿 + 编辑器自动打开”的桌面 Native 人工验收均已通过。UniCompAPI 仍只承担 LLM function-calling transport，不等于托管网页搜索。当前尚无来源 UI、稳定引用与引用一致性校验、用户可见研究模式选择、Native 网络桥，以及完整缓存治理、取消/重启/缓存丢失恢复，因此 P3.2 不得标记完成。
+当前状态（2026-08-19）：P3.2 仍在进行中。Contracts/Desktop/Worker 已贯通 `researchMode=auto|project_only|network_disabled`，用户可在主窗口和独立会话窗口选择并持久化模式；Worker 已注册 `research.search/fetch`，使用 `bing-html-public-v1` 完成搜索、任务/attempt 绑定的不透明来源句柄、受控 HTTPS 抓取、正文提取、内容 hash、项目本地缓存、并行只读工具调用和后续文档写入隔离。Schema v19 已持久化稳定 `R1..Rn` 引用、版本来源关联、缓存索引与 TTL/容量/缺失治理；任务详情可展示脱敏来源元数据、采用状态、截断和缓存状态。Schema v18 的工具预算与 Fake-IP DoH 防护保持有效。Bing 真实搜索/抓取冒烟和“UniCompAPI LLM transport + Bing 真实研究 + 单一草稿 + 编辑器自动打开”的桌面 Native 人工验收均已通过。Worker 到 Native 的请求 ID/取消注册表/WinHTTP 分段取消已加入并通过 Rust/Worker 回归；UniCompAPI 仍只承担 LLM function-calling transport，不等于托管网页搜索。崩溃后 in-flight 恢复、真实研究/安装包链路尚未完成，因此 P3.2 不得标记完成。
 
 工作项按以下顺序实施：
 
 ##### P3.2a：研究合同、Provider 抽象和提示策略
 
-状态：部分完成。研究模式合同、严格工具 Schema、只读授权和研究系统提示已实现；独立 registry、凭据型 adapter、完整稳定错误合同及用户模式选择仍待补齐。
+状态：部分完成。研究模式合同、严格工具 Schema、只读授权、研究系统提示和用户模式选择已实现；独立 registry、凭据型 adapter 与完整稳定错误合同仍待补齐。
 
 - 在 Contracts/Domain 定义 `researchMode=auto|project_only|network_disabled`、Research Adapter 能力、来源 DTO、稳定错误码、预算和 research manifest；显式 Agent 默认 `auto`，用户限制优先于模型判断；
 - 在 Worker 增加独立 Research Provider registry，adapter 以精确 provider/profile/endpoint/能力/验证日期登记，凭据仅通过桌面凭据 handle 解析；
@@ -1459,16 +1459,16 @@ agent.task.cancelled
 
 ##### P3.2b：只读搜索/抓取循环和 v17 证据
 
-状态：Worker 功能切片和桌面真实闭环完成。Bing HTML adapter、安全抓取、正文缓存、v17 来源事实、v18 默认 16/硬上限 32 的任务配额、search 3/fetch 8 专用预算、文档操作预留、单 step 最多 8 个并行只读调用、受控预算耗尽、研究/文档混合 step 拒绝和 search -> fetch -> draft 自动化已实现；计划中的 Native 网络桥、缓存 TTL/容量清理及恢复语义仍待补齐。
+状态：Worker 功能切片和桌面真实闭环完成，Native 研究桥基础实现已完成。Bing HTML adapter、安全抓取、正文缓存、v17 来源事实、v18 默认 16/硬上限 32 的任务配额、search 3/fetch 8 专用预算、文档操作预留、单 step 最多 8 个并行只读调用、受控预算耗尽、研究/文档混合 step 拒绝和 search -> fetch -> draft 自动化已实现；v19 已补齐缓存 TTL/容量/缺失治理。Native 桥令牌、公开 URL/DNS/MIME/响应上限和无桥 fail-closed 已有回归，取消/重启恢复完整语义仍待补齐。
 
-- 实现 Native 受控网络桥和至少一个具体 Research Adapter；搜索返回不透明 `sourceHandle`，抓取仅接受搜索结果或 Worker 对用户显式 URL 校验后签发的 handle；
+- 实现 Native 受控网络桥和至少一个具体 Research Adapter；搜索返回不透明 `sourceHandle`，抓取仅接受搜索结果或 Worker 对用户显式 URL 校验后签发的 handle；Native 桥已提供一次性 loopback 端点和进程级令牌，正式 Worker 无桥时拒绝联网；
 - 实现搜索、重定向/DNS/SSRF 校验、正文提取、规范 URL、内容 hash、短期本地缓存和 `agent_research_sources` v17 持久化；
 - 扩展 Provider loop，允许多个并行只读研究 call，按 ordinal 独立记账和回传；研究结果到达前禁止执行文档写工具；
 - 取消、超时、Worker 重启或缓存缺失时不得重复文档副作用，也不得把旧内容宣称为本次重新验证结果。
 
 ##### P3.2c：来源感知起草、引用和界面
 
-状态：未完成。模型已经能在研究结果回传后的后续 step 创建草稿，来源事实也已有内部 `citation_label` 字段；但跨 search/fetch step 稳定且唯一的引用合同、草稿版本来源关联、引用校验和来源 UI 尚未完成。
+状态：部分完成。跨 search/fetch step 稳定且唯一的 `R1..Rn` 引用合同、草稿版本来源关联、未知引用副作用前拒绝和任务详情来源 UI 已完成；编辑器级来源面板以及缺失/冲突引用提示仍待完成。
 
 - 将采用的来源按独立 research manifest 注入后续模型 step，要求事实型内容使用稳定引用标签，并在草稿版本上关联来源；
 - 在 Agent 任务详情展示研究状态、来源标题/站点/检索时间、采用/排除原因、截断和冲突/证据不足状态；不展示搜索凭据、原始 HTML 或完整私有 query；
@@ -1477,7 +1477,7 @@ agent.task.cancelled
 
 ##### P3.2d：恢复、安全和真实 Provider 验收
 
-状态：部分完成。单元/集成测试已覆盖私网阻断、task/attempt 句柄隔离、受限正文、并行搜索、并行抓取、受控预算耗尽、研究后单一草稿以及 Fake-IP 二次公网解析；真实 Bing 搜索/抓取冒烟和 UniCompAPI 桌面 Native 完整研究起草链路已通过。通用 DNS rebinding、压缩炸弹、敏感 query、取消/重启、缓存丢失和安装包链路仍待验收。
+状态：部分完成。单元/集成测试已覆盖私网阻断、task/attempt 句柄隔离、受限正文、并行搜索、并行抓取、受控预算耗尽、研究后单一草稿、Fake-IP 二次公网解析、Native 桥令牌/公网 URL/响应上限和无桥 fail-closed；真实 Bing 搜索/抓取冒烟和 UniCompAPI 桌面 Native 完整研究起草链路已通过。通用 DNS rebinding、压缩炸弹、敏感 query、Native 请求取消贯穿、崩溃后 in-flight 恢复、缓存丢失和安装包链路仍待验收。
 
 桌面人工验收证据：任务 `cfdd4547-456a-433b-907b-e86b904cf674` 使用 `UniCompAPI / gpt-5.6-sol`，按 3 个 Provider 研究 step 完成 3 次 search、2 次 fetch，随后成功执行 `document.create_draft` 并以 final stop 结束，共使用 6/16 次工具额度；只产生一个文档 `ffe1cdba-58f1-4ef5-abe6-bc5a7d5ab157`，标题为 `P3.2 真实研究验收-联网成功`、正文 879 字符，包含两个实际抓取 URL，任务状态为 `waiting_review`，Desktop 自动在编辑器中打开该草稿。全过程未输出桌面端凭据或网页正文。
 
@@ -1553,6 +1553,8 @@ agent.task.cancelled
 - 在编辑器中展示结构化差异和批量批准；
 - 用户批准后在一个事务中应用场次、镜头和关联文档变更；
 - 失败、部分批准和重新生成保留原提案，不污染正式表。
+
+2026-08-19 实施记录：Schema v26 为 `scenes`、`shots` 增加 `row_version`，新增带项目/任务边界和父项约束的 `agent_change_sets`、`agent_change_set_items`；Schema v27 扩展 `agent_change_set_items` 的 `document` 类型和文档 create/update 提案字段。Worker 暴露 `agent.changeSet.create/list/apply/reject`，支持 scene/shot/document create/update、父级场次提案依赖、选定 item 部分应用/拒绝、文档与场次/镜头在同一 SQLite 事务中原子应用、文档 row-version/current-version CAS 冲突整批回滚和冲突标记；Desktop `shots` 工作区新增结构化差异审阅面板，可逐 item 勾选批准/拒绝并显示冲突。Persistence 22 项、Worker 211 项、Desktop 116 项、全仓 `pnpm.cmd test`、`pnpm.cmd typecheck`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`pnpm.cmd build`、`git diff --check` 通过。真实 Windows 多窗口并发、跨场次人工验收和安装包链路仍保持 HOLD。
 
 退出门禁：跨场次误写、镜头顺序冲突、批量事务回滚、部分批准、并发编辑和场次/镜头上下文隔离测试通过。
 
@@ -1777,6 +1779,9 @@ P3.2 还必须记录具体 Research Adapter、endpoint/profile、凭据来源（
 
 | 日期 | 阶段 | 结果 | 验证证据 | 备注 |
 |---|---|---|---|---|
+| 2026-08-19 | P3.2 用户可见研究模式与桌面窗口同步 | ChatPanel 增加 `auto/project_only/network_disabled` 选择器，当前选择按本地 LLM 选择偏好保存；Agent 草稿请求使用用户选择，主窗口与独立会话窗口通过快照/动作协议同步，运行中的 generation 禁止切换模式 | `pnpm.cmd --filter @ai-video/contracts build`、`pnpm.cmd --filter @ai-video/desktop typecheck`、Desktop ChatPanel/DetachedPanel 聚焦测试（3 个文件/7 项）通过；Desktop 全量测试 18 个文件/101 项通过 | Native 网络桥和取消/重启完整实机语义仍未完成；模式选择只影响显式 Agent 草稿任务，普通问答保持无副作用 |
+| 2026-08-19 | P3.2 研究来源 UI 与任务详情关联 | `agent.task.get` 按项目/任务返回来源元数据和缓存状态；Desktop 任务详情展示引用标签、标题、规范 URL、站点、抓取时间、采用状态、截断和缓存缺失/过期提示；正文、缓存路径、凭据和原始响应不进入公开 DTO | `pnpm.cmd --filter @ai-video/contracts build`、`pnpm.cmd --filter @ai-video/worker test`（21 个文件/172 项）、`pnpm.cmd --filter @ai-video/worker typecheck`、`pnpm.cmd --filter @ai-video/desktop exec vitest run src/TaskLogView.test.tsx`（8 项）、`pnpm.cmd --filter @ai-video/desktop typecheck`、Desktop 全量测试（18 文件/101 项）通过；`git diff --check` 通过 | P3.2 仍待 Native 网络桥、取消/重启恢复完整实机语义和安装包链路；DOCX 渲染仍受环境缺少 LibreOffice 限制 |
+| 2026-08-19 | P3.2 Native 研究网络桥基础切片 | Desktop 为每个 Worker 进程创建一次性 loopback Native bridge 和随机能力令牌；Worker 正式研究客户端只通过桥提交公开 HTTPS GET，无桥时 fail-closed；Native 独立执行主机/DNS/公网地址、HTTPS、重定向禁用、MIME 请求白名单和响应体上限，桥不接收 Provider 凭据 | `pnpm.cmd test`（Worker 194、Desktop 108、Persistence 22 及其余 workspace 通过）、`pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`git diff --check`、`cargo fmt --check`、Rust 55 项通过；新增 Native 令牌/URL/公网边界/无桥 fail-closed 回归 | P3.2 仍待 Native 请求取消贯穿、Worker 崩溃后 in-flight 研究恢复、通用 DNS rebinding/压缩炸弹/敏感 query 验收、真实研究冒烟和安装包链路；不得据此标记总项完成 |
 | 2026-08-18 | 计划 v1.1 / P3.2 配额与桌面真实研究验收 | 修复 v14-v17 默认 8 次工具额度会在研究后阻断草稿创建的问题；Schema v18 将新任务默认额度调整为 16、数据库硬上限调整为 32 并保留 v17 数据/FK/索引/触发器；新增 search 3 次、fetch 8 次、预留 1 次文档操作、动态移除耗尽工具和并行超额调用的受控 `RESEARCH_BUDGET_EXCEEDED`；仅对 `198.18.0.0/15` Fake-IP 执行固定 HTTPS DoH 二次公网解析 | 全量：`pnpm test`（Worker 170、Desktop 99、Persistence 22、LLM 10、Context 7、Contracts 2、Generation Adapters 16）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 49 项和 `cargo fmt --check` 全部通过。桌面真实样本任务 `cfdd4547-456a-433b-907b-e86b904cf674` 使用 `UniCompAPI / gpt-5.6-sol`，按 3 search -> 2 fetch -> 1 draft -> final stop 完成，工具计数 6/16；唯一草稿 `ffe1cdba-58f1-4ef5-abe6-bc5a7d5ab157` 标题为 `P3.2 真实研究验收-联网成功`、正文 879 字符，包含两个真实抓取 URL 并自动在编辑器打开；未输出凭据或网页正文 | P3.2 保持进行中：来源 UI、稳定引用/引用校验、用户可见研究模式、Native 网络桥、缓存 TTL/容量治理、取消/重启/缓存丢失恢复和安装包链路仍待完成 |
 | 2026-08-18 | 计划 v1.0 / P3.2 Worker 主动研究功能切片 | 新增 `researchMode` 合同、Desktop `auto` 请求、`bing-html-public-v1`、`research.search/fetch`、任务/attempt 来源句柄、受控 HTTPS 抓取、正文提取、项目本地缓存、最多 8 个并行只读调用、研究/文档 step 隔离和 Schema v17 `agent_research_sources`；研究结果可在后续 step 驱动单一草稿写入 | 自动化：Worker 167 项、Persistence 22 项、Desktop 99 项及其余 workspace 测试通过；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 49 项和 `cargo fmt --check` 通过。脱敏真实网络冒烟：Bing 返回 5 个结果；前两个来源被安全策略以受控错误阻断，第三个 `www.hanyuguoxue.com` 抓取成功，正文 4860 字符、未截断、content hash 已生成；未输出网页正文或凭据 | P3.2 保持进行中：DuckDuckGo 在当前环境因连接超时/DNS 异常未启用；来源 UI/引用校验、用户可见模式选择、Native 网络桥、缓存治理、取消/重启恢复和 UniCompAPI 桌面真实研究起草链路仍待完成 |
 | 2026-08-18 | 计划 v0.9 / P3.2 主动外部研究 | 固定“项目上下文优先但非唯一”的产品合同；新增 `auto/project_only/network_disabled`、独立 Research Adapter、`research.search/fetch`、v17 来源事实、本地 TTL 缓存、来源引用/UI、安全网络边界和 P3.2a-d 实施顺序 | Markdown/DOCX 同步；版本、阶段、工具、Schema、缓存、安全、测试、验收和表格结构校验见本轮执行结果 | 本项只更新计划；尚未选择/验证 Research Adapter，未实现搜索路由、研究工具、v17 迁移或来源 UI，P3.2 保持未开始 |
@@ -1810,3 +1815,6 @@ P3.2 还必须记录具体 Research Adapter、endpoint/profile、凭据来源（
 | 2026-08-17 | P4 显式草稿入口与 Agent IPC 边界 | 会话输入区新增“创建文档草稿”显式图标，仅在可写会话且存在输入时可用；点击后固定发起 `agent.generation.prepare`、`agentMode=document` 和 `document.create_draft` 意图。Agent 准备、工具执行、确认和 Provider step 已纳入 IPC 参数白名单，拒绝伪造授权字段和未声明参数 | Desktop `App`/`ChatPanel` 15 项定向测试覆盖显式入口、固定意图和只读禁用；Worker `handler`/Agent loop 23 项定向测试覆盖未信任字段拒绝；全量 `pnpm test`（Desktop 98、Worker 152）、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、Rust 43 项及 `cargo fmt --check` 通过 | P4 继续进行中：尚未提供 update/read/archive/restore 的目标选择入口，且普通聊天仍按产品决策保持无副作用；P3 仍待真实 Provider 人工演练和更广泛故障注入。 |
 | 2026-08-17 | P3.1 Provider 工具路由兼容性计划 | 将模型 function calling 与 transport tool loop 分离为双重门禁；新增 OpenAI Responses 基线、UniCompAPI Chat Completions 默认不开放、allowlist、无静默降级、逐路由真实 Provider 验收和无数据回填要求 | 计划合同复核；本项在该记录时尚未实施运行时代码或真实 Provider 冒烟 | 历史计划记录；UniCompAPI 目标模型、endpoint、适配器和桌面 Native 验收已由 2026-08-18 后续记录完成，P3.1 剩余边界以最新记录为准。 |
 | 2026-08-17 | P3.1 计划文档同步 | Markdown 计划升级至 v0.7，并生成同内容的 `AGENT-PROJECT-DOCUMENT-WORKFLOW-IMPLEMENTATION-PLAN.docx`；DOCX 结构校验通过（段落、表格、样式、固定表格宽度和 P3.1 文本存在） | 使用 bundled Python/`python-docx` 生成；LibreOffice/soffice 不在当前 Windows 环境，未完成 PNG 渲染视觉 QA | 历史同步记录；P3.1 的运行时代码、Provider 冒烟、UniCompAPI 适配器和桌面 Native 验收已由 2026-08-18 后续记录完成。 |
+| 2026-08-19 | P3.2 Native 研究取消贯穿 | Worker 研究请求携带请求 ID；AbortSignal 触发 Native `/research/cancel`，桥维护进程级取消注册表并将取消标记传入 WinHTTP 分段读取；取消后不写入研究缓存或草稿 | Worker 26 个测试文件/198 项、Desktop 20 个测试文件/111 项、Worker/Desktop typecheck、Rust 55 项、`cargo fmt --check`、`git diff --check` 通过 | Worker 崩溃后 in-flight 恢复、真实研究冒烟、安装包链路和 Windows 实机取消演练仍待完成 |
+| 2026-08-19 | P4 普通聊天文档意图切片 | Chat 模式仅对明确的创建/读取/更新/归档/恢复表达升级 Agent；目标文档操作必须绑定当前唯一文档，缺少目标只提示且零写入；否定表达和普通问答保持原聊天路径 | 新增 `inferDocumentIntent` 3 项回归；Desktop 全量 20 个测试文件/111 项和 typecheck 通过 | 持久化 pending intent、更多目标选择入口和真实 Provider 端到端验收仍待完成 |
+| 2026-08-19 | P7 场次/镜头/关联文档原子 change set | Schema v26 增加 scene/shot `row_version` 与项目/任务隔离的 change set 表；Schema v27 增加 `document` item 及文档 create/update 提案字段；Worker 在单一 SQLite 事务中应用场次、镜头和关联文档变更，文档 CAS 冲突整批回滚并保留冲突状态；Desktop `shots` 工作区保留 item 级差异审阅、批准/拒绝和冲突提示。Persistence 22 项、Worker 211 项、Desktop 116 项，且全仓 `pnpm.cmd test`、`pnpm.cmd typecheck`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`pnpm.cmd build`、`git diff --check` 通过 | 真实 Windows 多窗口并发、跨场次人工验收和安装包链路仍待完成；P7 保持进行中 |

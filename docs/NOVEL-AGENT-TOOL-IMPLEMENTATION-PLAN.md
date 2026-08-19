@@ -2,7 +2,7 @@
 
 版本：0.7  
 日期：2026-08-16  
-状态：P0 决策与业务合同完成，P1-P9 待实施  
+状态：P0 决策与业务合同完成，P1 已实现，P2 已实现核心工具边界，P3 已实现意图/目标/章节锁与最小 Desktop 创作模式，P5 partial 采集/恢复基础已实现，P6 小说章节工作区基础已实现，P8 Markdown export v23/job 基础已实现；P3 Native runtime 恢复闭环及 P4-P9 其余工作待实施  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档定义“用户通过会话或小说工作区发出创作指令，Agent 自动生成可审阅章节草稿”的企业级业务逻辑与实施顺序。本文档只规划尚未完成的小说领域和真实 Provider 工具调用能力，不重复实现现有文档草稿、审核、发布、CAS、幂等、任务事件和不可变审计能力。
@@ -82,7 +82,7 @@
 | 文档工作流 | 已有草稿、CAS、审核、发布和审计 | 作为章节正文及小说资料正文的唯一版本系统 |
 | 上下文 | 默认只读取已发布文档 | 增加小说来源优先级、摘要缓存和动态 Token 预算 |
 | Desktop | 已有普通会话、手工“从回复创建草稿”和独立文档窗口 | 增加小说工作区、创作模式、任务进度和自动打开草稿 |
-| 小说领域 | 尚不存在 | Schema v15 新增项目一对一小说资料、卷、章节和通用文档绑定 |
+| 小说领域 | 已实现 P1 基础 | Schema v20 新增项目一对一小说资料、卷、章节和通用文档绑定 |
 | Markdown | 已有安全导入，没有章节级固定版本导出 | 新增 Worker 受控导出、清单和原子写入 |
 
 关键基线文件：
@@ -496,7 +496,7 @@ received -> chat
 ### 12.1 增量 Schema 原则
 
 - v14 由通用 Agent 文档工作流计划独占，小说计划复用其 v13 `agent_tasks.version` 无损迁移而来的唯一 task `row_version`、CRUD task type、证据保留、step-local 工具预授权、Provider step/tool 关联、脱敏工具摘要、归档/审计和 manifest 能力；
-- v15 只新增小说领域必要字段和表，不重复重建通用 v14 已完成的任务/工具表；
+- v20 只新增小说领域必要字段和表，不重复重建通用 v14 已完成的任务/工具表；（原计划 v15 因通用迁移已推进至 v19 顺延）
 - 底层使用通用 `document-create | document-update | document-query | document-archive | document-restore`，小说语义由 `intent_type` 和带具体 FK 的 `agent_task_targets` 表达；
 - 正文和正文版本继续复用现有文档工作流；
 - 新表全部包含项目边界、外键、唯一约束、索引和迁移测试；
@@ -602,7 +602,7 @@ novel_chapter_publication_snapshots
 - created_at
 ```
 
-v15 在 `document_publications` 的章节文档插入路径上安装同事务触发器：它必须在 publication 写入时创建完整 `native` 结构快照，或中止整个 publication，不能让应用层遗漏快照。触发器校验 publication、chapter、document version 和 project 对应。迁移前已有当前发布版本只能按迁移时结构回填为 `migrated-current`，UI 和 manifest 必须显示该来源，不能伪称原始发布时快照。Schema v15 可以在通用 v14 后先迁移，但小说章节的发布 feature flag 必须等通用计划 P5 的原子 `document.selfPublish` 通过故障注入与本触发器集成测试后才启用；旧的非原子发布入口不得用于章节文档。
+v20 在 `document_publications` 的章节文档插入路径上安装同事务触发器：它必须在 publication 写入时创建完整 `native` 结构快照，或中止整个 publication，不能让应用层遗漏快照。触发器校验 publication、chapter、document version 和 project 对应。迁移前已有当前发布版本只能按迁移时结构回填为 `migrated-current`，UI 和 manifest 必须显示该来源，不能伪称原始发布时快照。小说章节的发布 feature flag 必须等通用计划 P5 的原子 `document.selfPublish` 通过故障注入与本触发器集成测试后才启用；旧的非原子发布入口不得用于章节文档。
 
 ### 12.6 `document_bindings`
 
@@ -837,14 +837,15 @@ job 和 items 在开始写文件前冻结。manifest 只由 items 生成；任�
 | 迁移 | 阶段 | 内容 |
 |---|---|---|
 | v14 | 通用计划前置 | task `row_version`/CRUD 类型、证据 RESTRICT 外键、`llm_provider_steps`、tool-step 关联、文档归档/审计和 manifest-only 治理；本计划只复用 |
-| v15 | P1；章节发布启用依赖通用 P5 | `novel_profiles`、`novel_volumes`、`novel_chapters`、发布结构快照 trigger、`document_bindings` 及约束/索引 |
-| v16 | P3-P4 | `agent_pending_intents`、AgentIntent、`agent_task_targets`、`novel_chapter_task_locks` 以及 `agent_tool_calls` 的小说具体目标 FK；phase 复用通用 v14 |
-| v17 | P5 | `agent_partial_artifacts` |
-| v18 | P8 | `markdown_export_jobs`、`markdown_export_items` |
+| v20 | P1；章节发布启用依赖通用 P5 | `novel_profiles`、`novel_volumes`、`novel_chapters`、发布结构快照 trigger、`document_bindings` 及约束/索引；原计划 v15 顺延 |
+| v21 | P3-P4 | `agent_pending_intents`、AgentIntent、`agent_task_targets`、`novel_chapter_task_locks` 以及 `agent_tool_calls` 的小说具体目标 FK；phase 复用通用 v14 |
+| v22 | P5 | `agent_partial_artifacts` |
+| v23 | P8 | `markdown_export_jobs`、`markdown_export_items` |
+| v24 | P8 | `novel_adaptation_proposals` immutable source/proposal/task provenance |
 
 迁移版本号由仓库唯一迁移登记表串行分配。若其他已批准功能需要插入版本，必须先同步更新两个计划和 ADR 后整体顺延，禁止在代码中静默占号。依赖顺序不得改变。每次迁移都必须先 checkpoint、创建一致性备份并对备份执行 `quick_check` 与 `foreign_key_check`。v14 的父子表重建只能调用通用计划定义的 `runV14Rebuild` SQLite 12-step 路径；小说 v15-v18 不得自行关闭 FK、直接删除通用表或重新定义通用授权/工具表。
 
-v13/v14 旧项目进入小说 Schema v15 时的迁移规则：
+v13/v14/现有 v19 旧项目进入小说 Schema v20 时的迁移规则：
 
 1. 不增加或回填 ProjectType，不拆分现有小说/短剧项目；
 2. `novel_profiles` 可在首次进入小说工作区时懒初始化，`projects.name` 始终是唯一作品名；
@@ -1658,7 +1659,7 @@ export.completed
 
 退出门禁：D1-D17 全部已确认，本计划所有相关章节、检查清单和决策登记采用同一合同。状态：通过。
 
-### P1：小说领域与 Schema v15
+### P1：小说领域与 Schema v20
 
 目标：建立项目一对一小说资料、卷、章节和通用文档绑定，不改变现有文档权威模型。
 
@@ -1675,7 +1676,7 @@ export.completed
 工作项：
 
 - 新增 NovelProfile、NovelVolume、NovelChapter 和 DocumentBinding 合同；
-- 在通用 Schema v14 前置迁移完成后，Schema v15 新增小说核心表、具体 binding FK、project-or-exactly-one-target CHECK、role/domain 矩阵、索引和触发器；章节发布 feature flag 还必须等待通用计划 P5 的原子 `document.selfPublish` 完成；
+- 在通用 Schema v14 前置迁移完成后，Schema v20 新增小说核心表、具体 binding FK、project-or-exactly-one-target CHECK、role/domain 矩阵、索引和触发器；章节发布 feature flag 还必须等待通用计划 P5 的原子 `document.selfPublish` 完成；
 - 旧项目不回填 ProjectType，首次进入小说工作区时懒初始化唯一 `novel_profiles`；
 - 实现小说资料、卷、章节创建、列表、`position/display_label` 编辑、排序、归档和 CAS；未分卷/分卷 position 分别使用 partial unique index，并以事务化重排处理冲突；
 - 实现章节占位与唯一文档绑定；以 database trigger 保证每次章节 publication 同事务写入不可变结构快照，缺失快照必须使 publication 回滚；旧非原子发布入口在章节文档上被拒绝；
@@ -1684,11 +1685,11 @@ export.completed
 - 实施 12.13 的旧文档固定映射和维护报告；
 - 保证正文和审核状态不在小说表重复保存。
 
-测试门禁：新库直建、v13 -> v14 -> v15、v14 -> v15、重复迁移、旧文档映射、未知 kind、无效/跨项目 scope 隔离为 needs_review 且不进上下文、约束不复制、只读项目、项目隔离、卷 position 唯一性、序章/终章/番外 label、分卷与未分卷 position partial unique/并发重排、正常归档恢复 active、仅 generation-placeholder 恢复生成回到 reserved、唯一正文绑定、publication snapshot trigger 原子性、旧发布入口对章节拒绝、通用 P5 selfPublish 集成、具体 FK、role/domain 矩阵、级联/限制删除和完整性检查通过。
+测试门禁：新库直建、v13/v14/v19 -> v20、重复迁移、旧文档映射、未知 kind、无效/跨项目 scope 隔离为 needs_review 且不进上下文、约束不复制、只读项目、项目隔离、卷 position 唯一性、序章/终章/番外 label、分卷与未分卷 position partial unique/并发重排、正常归档恢复 active、唯一正文绑定、publication snapshot trigger 原子性、旧发布入口对章节拒绝、通用 P5 selfPublish 集成、具体 FK、role/domain 矩阵、级联/限制删除和完整性检查通过。
 
 ### P2：Agent Intent、Tool Schema 与 Tool Gateway
 
-目标：建立可审计、无越权的工具执行边界。
+目标：建立可审计、无越权的工具执行边界。当前状态：已实现通用文档工具授权基础上的小说章节/资料草稿工具核心切片；完整确认 token、pending intent 和领域目标 FK 仍属于 P3 后续工作。
 
 主要文件：
 
@@ -1925,8 +1926,8 @@ export.completed
 
 ### 27.2 Persistence 测试
 
-- v13 -> v14 -> v15 和新库直建；
-- v14 -> v15、v16-v18 顺序迁移、经双计划/ADR 登记后的版本号顺延和逐阶段回滚；
+- v13 -> v14 -> v19 -> v20 和新库直建；
+- v19 -> v20、后续 v21-v23 顺序迁移、经双计划/ADR 登记后的版本号顺延和逐阶段回滚；
 - v13 task `version` 到唯一 `row_version` 的无损迁移、provider step/预授权复合 FK、task target/export item 同项目触发器、旧 tool-call 索引替换、唯一索引和 CAS；
 - 同卷章节并发预留；
 - 同章活动任务互斥；
@@ -2023,7 +2024,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 1. 迁移前 checkpoint 并备份项目数据库；
 2. 备份执行 `quick_check` 和 `foreign_key_check`；
-3. 先完成通用计划 v14，再按 12.13 的 v15-v18 顺序迁移；每个阶段完成后执行完整性检查，不跨阶段回填未启用表。v15 Schema 可先部署，但章节发布 feature flag 必须等通用计划 P5 的原子 `document.selfPublish` 与 snapshot trigger 集成验证通过；
+3. 先完成通用计划 v14，再按 12.13 的 v20-v23 顺序迁移；每个阶段完成后执行完整性检查，不跨阶段回填未启用表。v20 Schema 可先部署，但章节发布 feature flag 必须等通用计划 P5 的原子 `document.selfPublish` 与 snapshot trigger 集成验证通过；
 4. 不增加 ProjectType；旧项目首次进入小说工作区时建立唯一 `novel_profiles`，作品名称继承 `projects.name`；
 5. 旧文档仅按固定 kind/scope 映射绑定，不根据标题、文件名、H1 或正文猜测章节；
 6. 旧约束和记忆保持专用权威表，不复制为普通文档；
@@ -2058,14 +2059,14 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 ## 31. 实施检查清单
 
 - [x] P0 产品决策与 ADR 冻结
-- [ ] P1 小说领域与 Schema v15
-- [ ] P2 Agent Intent、Tool Schema 与 Tool Gateway
-- [ ] P3 显式创作模式与任务编排
+- [x] P1 小说领域与 Schema v20（原计划 v15，因通用计划已推进至 v19 顺延）
+- [x] P2 Agent Intent、Tool Schema 与 Tool Gateway（核心小说草稿工具边界；确认/领域目标迁移随 P3）
+- [ ] P3 显式创作模式与任务编排（核心编排已实现，Native runtime 恢复闭环待完成）
 - [ ] P4 Responses 原生工具调用循环
-- [ ] P5 章节草稿自动落库与失败恢复
-- [ ] P6 小说工作区与编辑器闭环
-- [ ] P7 小说上下文、摘要与一致性
-- [ ] P8 Markdown 导出与同项目短剧改编
+- [ ] P5 章节草稿自动落库与失败恢复（partial 采集、恢复、丢弃、过期基础已实现，完整重启/取消/UI 待完成）
+- [ ] P6 小说工作区与编辑器闭环（章节树、自动打开、CAS 草稿编辑基础已实现，卷分组/冲突/多窗口待完成）
+- [ ] P7 小说上下文、摘要与一致性（摘要缓存、动态预算、章节选择和只读报告基础已实现；性能验收与更丰富的相关性策略待完成）
+- [ ] P8 Markdown 导出与同项目短剧改编（v23 export job/item、files/merged、路径/输出完整性和 adaptation proposal 基础已实现；Windows 句柄竞态与完整人工验收待完成）
 - [ ] P9 企业级硬化与发布门禁
 
 ## 32. 完成定义
@@ -2085,7 +2086,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 - 长篇上下文预算和章节摘要通过性能验证；
 - Markdown export job/items 绑定固定内容与结构快照，并通过 files/merged、staging/manifest-last、复合归属、Windows handle/file ID 和崩溃对账测试；
 - 面板关闭不终止后台任务，应用退出和项目重开恢复通过实机验证；
-- 通用 Schema v14 前置能力和小说 Schema v15-v18 增量迁移、备份、恢复及完整性检查通过；
+- 通用 Schema v14 前置能力和小说 Schema v20-v23 增量迁移、备份、恢复及完整性检查通过；
 - 全量 TypeScript、Rust、构建和 Windows 实机质量门禁通过；
 - 所有阶段均记录验证命令、结果和未验证边界。
 
@@ -2093,6 +2094,18 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 | 日期 | 阶段 | 状态 | 验证命令/证据 | 未验证边界 | 负责人 |
 |---|---|---|---|---|---|
+| 2026-08-19 | P3 Native runtime event replay slice | Partial | Added `agent.task.events` contract, project-scoped Worker query with cursor and bounded paging, request validation and handler dispatch; Desktop Native Agent generation now polls by task ID and clears the subscription on terminal state. Worker/Desktop focused tests and typechecks passed. | Native runtime start/subscribe/query/cancel, bounded interrupted recovery on app exit, real Provider and Windows acceptance remain open. | Codex |
+| 2026-08-19 | P5 partial cleanup audit slice | Partial | Partial expiry now uses the planned 7-day default and emits a task event without正文泄露; focused partial-artifact tests cover expiry state and audit summary. Worker typecheck and focused tests passed. | Tool-linked partials, complete restart/recovery races, cleanup accounting audit and full cancellation semantics remain open. | Codex |
+| 2026-08-19 | P5 partial idempotency and audit slice | Partial | Repeated failure/cancellation capture for the same task, generation, attempt, Provider step and content hash now returns the original recoverable artifact instead of consuming additional quota. Capture records a redacted task event; expiry audit is grouped by task with a count. A partial created while a same-step tool call is executing records its scoped tool-call FK. Worker tests and typecheck passed. | Full process-restart/cancel/recover fault injection, tool-execution interruption simulation, cross-window recovery races and Windows manual acceptance remain open. | Codex |
+| 2026-08-19 | P6 chapter editor CAS conflict slice | Partial | Novel workspace now refreshes the latest document after a draft-save row-version conflict while preserving local editor text for explicit merge/retry; regression test and Desktop typecheck passed. | Multi-window same-chapter conflict UX, detached chapter editor and full manual acceptance remain open. | Codex |
+| 2026-08-19 | P6 explicit conflict resolution slice | Partial | Novel workspace now exposes explicit server-version and keep-local-edits actions after a document row-version conflict; both choices are covered by Desktop regression tests, with the latest row version retained for a subsequent CAS retry. | Detached chapter editor, real two-window Windows acceptance and richer line-level diff remain open. | Codex |
+| 2026-08-19 | P8 merged export regression slice | Partial | Added Worker regression coverage for `merged` Markdown packages, frozen chapter ordering and chapter content; Worker typecheck passed. | Windows handle/file-ID path hardening, startup reconciliation, external-modification isolation and adaptation proposal remain open. | Codex |
+| 2026-08-19 | P8 export startup reconciliation slice | Partial | Project recovery now reconciles interrupted Markdown export jobs: only a final package with a matching manifest hash, matching job ID and frozen item count becomes succeeded; incomplete staging or unverifiable output becomes `EXPORT_RECOVERY_FAILED`. Worker tests and typecheck passed. | Windows handle/file-ID path hardening, per-item output hashes, external-modification isolation and adaptation proposal remain open. | Codex |
+| 2026-08-19 | P8 export path and output-integrity slice | Partial | Export preparation rejects unsafe relative segments, UNC/drive/ADS forms, traversal and Windows-reserved names; existing symlink path segments are rejected before staging. Manifest items now persist output hashes and recovery verifies file item hashes, frozen item ordering and stored relative paths. Worker export tests and typecheck passed. | Windows handle/file-ID/reparse-point replacement races, merged-package byte-level external modification detection and adaptation proposal remain open. | Codex |
+| 2026-08-19 | P8 adaptation proposal slice | Partial | Schema v24 adds immutable `novel_adaptation_proposals` provenance linking a published chapter version/content hash, proposal document version and adaptation task. `novel.adaptation.submit_proposal` creates only a reviewable `short-drama/adaptation-proposal` document and never creates scenes or shots; Worker regression coverage passed. | Windows handle/file-ID/reparse-point replacement races, merged-package byte-level external modification detection, proposal review/change-set application and real Windows acceptance remain open. | Codex |
+| 2026-08-19 | P3 Native-owned Agent runtime slice | Partial | Added Native-owned Agent runtime commands for non-confirmation task runs. Rust now owns Provider step start, delta persistence, tool execution, continuation and terminal Worker writes; Desktop subscribes without duplicating side effects. The old Desktop-owned route remains for confirmation interactions. Rust, Worker and Desktop focused tests passed. | Native confirmation handoff, app-exit bounded interruption, process-restart subscription/recovery and real Windows acceptance remain open. | Codex |
+| 2026-08-19 | P3 Native confirmation handoff slice | Partial | Native-owned Agent runs now emit confirmation requests to Desktop, wait on an attempt-scoped Native waiter, verify the matching response before Worker token consumption, and resume the same Provider loop with Worker-configured continuation tools. Cancellation wakes pending confirmation waits. Contracts, Worker, Desktop and focused Rust tests passed. | App-exit bounded interruption, process-restart subscription/recovery, complete runtime event replay and real Windows acceptance remain open. | Codex |
+| 2026-08-19 | P3 Native runtime lifecycle slice | Partial | Native-owned Agent attempts now have bounded Native event replay and subscription, with subscriber delivery failures isolated from Provider/Worker execution; Desktop reattaches to an already-running attempt instead of failing a duplicate start. App exit cancels active Native Agent attempts, requests Worker persistence of cancellation, and permits exit after a two-second bound. Rust, Desktop and Worker focused tests passed. | Process-crash recovery cannot resume an in-flight Provider connection; recovery remains an interrupted task with partial-artifact handling. Full Windows packaged-app acceptance and broader lifecycle fault injection remain open. | Codex |
 | 2026-08-16 | 计划 v0.7 | 完成 | 复用通用唯一 phase 与确认续执行合同；补齐 task target 精确派生、chapter lock、分卷/未分卷排序唯一性、手工 partial 恢复发布闭环；最终格式、链接和结构校验见本轮执行结果 | 仅完成计划合同，P1-P9 代码仍待实施 | Codex |
 | 2026-08-16 | 计划 v0.6 | 完成 | 继承通用 `waiting_confirmation`/confirm-reject/重新授权合同；partial 绑定同项目 step/call/ordinal，恢复强制 draft/目标/hash/长度一致；手工章节 selfPublish 不创建伪任务；最终格式、链接和结构校验见本轮执行结果 | 仅完成计划合同，P1-P9 代码仍待实施 | Codex |
 | 2026-08-16 | 计划 v0.5 | 完成 | Agent CRUD、scoped 去重、取消 CAS、task target/export 复合归属、Native 后台 Runtime、资源/保留上限、Markdown 网络隔离和 Windows 原子导出合同已补齐；最终格式/链接验证见本轮执行结果 | 仅完成计划合同，P1-P9 代码仍待实施 | Codex |
@@ -2100,7 +2113,14 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-16 | 计划审计 | 完成 | 审阅 Contracts、GenerationService、DocumentWorkflowService、ContextService、Schema v13 和 Native LLM stream | 真实 Provider 工具调用尚未实现 | Codex |
 | 2026-08-16 | P0 决策登记 | 完成 | D1-D17 全部确认；本文第 5-9、12-23 节固化项目/作品、命名、binding、约束、pending、受控 CRUD、后台任务、自审发布和导出合同 | 代码和跨计划实现仍由 P1-P9 执行 | 用户 / Codex |
 | 2026-08-16 | P0 | 完成 | 决策表、CRUD 矩阵、不变量、迁移顺序、阶段门禁和完成定义已同步 | 尚未开始代码实现 | Codex |
-| 待填写 | P1 | 未开始 |  |  |  |
+| 2026-08-19 | P1 小说领域与 Schema v20 | 完成 | 新增一对一 `novel_profiles`、卷、章节、非章节 `document_bindings`、旧文档固定 scope/kind 映射；章节位置 partial unique 与事务化重排；Worker `NovelService` 提供懒初始化、CAS CRUD、归档/恢复、binding；章节发布由 SQLite trigger 生成不可变结构快照。`pnpm.cmd --filter @ai-video/persistence test`（22 项）、`pnpm.cmd --filter @ai-video/worker test -- novel-service.test.ts project-service.test.ts`（177 项总套件通过）、Worker typecheck 通过 | Windows 原生小说工作区 UI、P3-P9 仍未实施；v20 迁移已通过新库及旧 v1-v13 fixture 完整性测试 | Codex |
+| 2026-08-19 | P2 小说 Agent 工具核心切片 | 完成 | Contracts/请求校验新增 `novel.chapter.submit_draft` 与 `novel.reference.submit_draft`；Native Provider tool registry 使用严格 `additionalProperties=false` Schema；Worker 复用 step-local authorization、参数规范化 hash、scoped provider-call 去重和 CAS；chapter 工具强制目标 document 必须精确映射 `novel_chapters.document_id`，reference 工具仅允许已授权资料文档。Agent loop 测试覆盖 14 个文件/178 项总套件通过，Worker typecheck 通过 | P3 尚未接入结构化小说意图、pending intent、`agent_task_targets`、chapter locks、桌面创作模式和真实 Provider 工具链；P2 的完整 archive/restore confirmation 仍复用通用文档路径 | Codex |
+| 2026-08-19 | P3 意图与任务编排核心 | 部分完成 | Schema v21 新增 `agent_pending_intents`、`agent_task_targets`、`novel_chapter_task_locks` 与工具目标字段/触发器；Worker 在 generation 之前原子创建章节占位、任务目标与同章锁，歧义/否定请求只持久化 pending，任务终态释放锁；小说工具调用对 v21 task 执行精确 chapter/document target 校验。Desktop 增加持久化的会话/文档/小说创作模式，小说创作文字请求直达 Worker，创建章节动作只提供目标 hint。Persistence 22 项、Worker 181 项、Desktop 101 项测试及三端 typecheck 通过 | Native runtime 的 start/subscribe/query/cancel、事件补播、应用退出 interrupted 恢复、完整章节树/自动打开编辑器和 Windows 实机验收仍待完成；P3 不标记完成 | Codex |
+| 2026-08-19 | P5 草稿落库基础 | 部分完成 | `novel.chapter.submit_draft` 成功后在同一 Worker 事务把 `reserved` 章节激活；generation 启动前失败且没有任何正文版本的占位章节/文档会自动归档并由任务终态触发器释放锁。Schema v22 新增有界 `agent_partial_artifacts`，用 project/task/generation/attempt/step/tool/目标触发器与 content hash/UTF-8 字节数校验约束来源，不允许跨项目或无效正文片段。Persistence 22 项、Worker 182 项测试及 Worker typecheck 通过 | 未完成产物 API、TTL/配额、恢复/丢弃竞争、运行中取消/重启恢复、已存草稿后的失败分支和 TaskLog UI 仍待完成；P5 不标记完成 | Codex |
+| 2026-08-19 | P5 partial 采集与恢复基础 | 部分完成 | 修复 partial 恢复 CAS 结果检查；新增 Worker 中断正文采集（失败/取消路径、仅小说 task target、validated text、单条 1 MiB、项目 32 MiB recoverable 配额），项目打开/恢复时执行过期标记；TaskLog 展示 partial 摘要并提供恢复/丢弃入口；新增测试，Worker 184 项聚焦套件、Desktop 101 项及两端 typecheck 通过 | tool-linked partial、清理审计、完整重启/恢复竞争、P5 全量故障注入仍待完成 | Codex |
+| 2026-08-19 | P6 小说工作区基础 | 部分完成 | 新增 Desktop `NovelWorkspace` 章节树和 Markdown 编辑器入口；章节选择自动打开关联文档，用户草稿保存复用 `document.draft.save` 的 document row-version CAS，提交审核复用现有 review 链路；新增组件测试，Desktop 102 项测试及 typecheck 通过 | 卷分组、章节归档/恢复入口、多窗口同章冲突提示、完整原生人工验收仍待完成 | Codex |
+| 2026-08-19 | P6/P8 工作区与导出基础 | 部分完成 | 小说章节树增加可选卷分组、归档显示、章节归档/恢复和 Markdown 导出入口。Schema v23 新增 `markdown_export_jobs/items` 及项目/章节/版本/发布快照触发器；Worker 导出器冻结 source state/hash/title/position/display label/publication/version，使用 staging package、manifest、files/merged 输出和原子 rename；Persistence 23 项、Worker 185 项、Desktop 103 项测试及三端 typecheck 通过 | P3 Native runtime 补播/退出恢复、P5 tool-linked partial/清理审计、P6 多窗口冲突提示、P8 Windows 路径句柄硬化/启动对账/短剧 adaptation、P9 仍待完成 | Codex |
+| 2026-08-19 | P7 小说上下文、摘要与一致性基础 | 部分完成 | Schema v25 新增 `novel_chapter_summaries`，已发布章节按内容 hash/version 生成确定性摘要并由 publication trigger 标记旧摘要 stale；小说 Agent generation 使用专用 system instruction。上下文默认预算按来源规模和选中章节数动态计算，章节选择聚焦最新章节、前四章和会话命中的相关章节；新增只读 `novel.context.consistencyReport` Worker 查询。`pnpm.cmd test`（全仓通过，Worker 197 项）、`pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`cargo fmt --check`、`git diff --check` 均通过 | 章节相关性仍为确定性标题命中，尚未完成任务意图驱动选择、长篇性能基准、完整一致性规则和 Desktop context.preview 展示增强 | Codex |
 | 待填写 | P2 | 未开始 |  |  |  |
 | 待填写 | P3 | 未开始 |  |  |  |
 | 待填写 | P4 | 未开始 |  |  |  |

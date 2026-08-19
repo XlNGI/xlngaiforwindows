@@ -9,6 +9,77 @@ export interface ProjectRecord {
   updatedAt: string;
 }
 
+export type NovelProfileStatus = 'active' | 'archived';
+export type NovelVolumeStatus = 'active' | 'archived';
+export type NovelChapterLifecycleStatus = 'reserved' | 'active' | 'archived';
+export type NovelChapterArchiveReason = 'user_archive' | 'generation_placeholder';
+export type DocumentBindingRole =
+  | 'work-outline'
+  | 'volume-outline'
+  | 'character-bible'
+  | 'world-bible'
+  | 'timeline'
+  | 'style-guide'
+  | 'adaptation-proposal'
+  | 'screenplay'
+  | 'scene-outline'
+  | 'shot-plan'
+  | 'research'
+  | 'note';
+export type DocumentBindingDomain = 'shared' | 'novel' | 'short-drama';
+export type DocumentBindingStatus = 'active' | 'archived' | 'needs_review';
+
+export interface NovelProfileRecord {
+  projectId: string;
+  language: string;
+  status: NovelProfileStatus;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelVolumeRecord {
+  id: string;
+  projectId: string;
+  title: string;
+  position: number;
+  status: NovelVolumeStatus;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelChapterRecord {
+  id: string;
+  projectId: string;
+  volumeId?: string;
+  documentId: string;
+  position: number;
+  displayLabel: string;
+  lifecycleStatus: NovelChapterLifecycleStatus;
+  archiveReason?: NovelChapterArchiveReason;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DocumentBindingRecord {
+  id: string;
+  projectId: string;
+  documentId: string;
+  volumeId?: string;
+  chapterId?: string;
+  sceneId?: string;
+  shotId?: string;
+  role: DocumentBindingRole;
+  domainScope: DocumentBindingDomain;
+  status: DocumentBindingStatus;
+  migrationIssueCode?: string;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface OpenProject extends ProjectRecord {
   mode: ProjectOpenMode;
   schemaVersion: number;
@@ -363,6 +434,7 @@ export interface SceneRecord {
   projectId: string;
   title: string;
   position: number;
+  rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -373,6 +445,7 @@ export interface ShotRecord {
   title: string;
   position: number;
   status: string;
+  rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -628,6 +701,30 @@ export interface JobRecord {
 export interface ProjectRepository {
   get(): ProjectRecord;
   touch(updatedAt: string): void;
+}
+
+export interface NovelProfileRepository {
+  get(projectId: string): NovelProfileRecord | undefined;
+  save(record: NovelProfileRecord, expectedRowVersion?: number): boolean;
+}
+
+export interface NovelVolumeRepository {
+  get(id: string): NovelVolumeRecord | undefined;
+  listByProject(projectId: string, includeArchived?: boolean): NovelVolumeRecord[];
+  save(record: NovelVolumeRecord, expectedRowVersion?: number): boolean;
+}
+
+export interface NovelChapterRepository {
+  get(id: string): NovelChapterRecord | undefined;
+  listByProject(projectId: string, includeArchived?: boolean): NovelChapterRecord[];
+  save(record: NovelChapterRecord, expectedRowVersion?: number): boolean;
+}
+
+export interface DocumentBindingRepository {
+  get(id: string): DocumentBindingRecord | undefined;
+  getByDocument(documentId: string): DocumentBindingRecord | undefined;
+  listByProject(projectId: string, includeNeedsReview?: boolean): DocumentBindingRecord[];
+  save(record: DocumentBindingRecord, expectedRowVersion?: number): boolean;
 }
 
 export interface DocumentRepository {

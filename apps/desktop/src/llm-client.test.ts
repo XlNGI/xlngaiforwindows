@@ -103,6 +103,9 @@ describe('streamPreparedLlmGeneration', () => {
       if (method === 'llm.generation.cancel') {
         return Promise.resolve(state('cancelled', ''));
       }
+      if (method === 'agent.generation.cancel') return Promise.resolve({ cancelled: true });
+      if (method === 'llm.generation.get')
+        return Promise.resolve(state('complete', 'Native draft'));
       if (method === 'agent.generation.executeTools') {
         if (requiresConfirmation) {
           return Promise.resolve({
@@ -279,6 +282,116 @@ describe('streamPreparedLlmGeneration', () => {
       expect.objectContaining({ providerResponseId: 'response-final' }),
     );
     expect(states.at(-1)).toMatchObject({ status: 'complete' });
+  });
+
+  it('subscribes to a Native-owned Agent runtime without duplicating Worker tool execution', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'native-agent',
+    };
+    native.invoke.mockImplementation((command, args) => {
+      expect(command).toBe('agent_runtime_start');
+      const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+        .onEvent;
+      setTimeout(() => {
+        channel.onmessage?.({ type: 'started' });
+        channel.onmessage?.({ type: 'delta', delta: 'Native draft' });
+        channel.onmessage?.({ type: 'complete', providerResponseId: 'response-final' });
+      }, 0);
+      return Promise.resolve();
+    });
+    const deltas: string[] = [];
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta: (content) => deltas.push(content),
+      onState: (next) => states.push(next),
+    });
+    await run.completion;
+
+    expect(deltas).toEqual(['Native draft']);
+    expect(states.at(-1)).toMatchObject({
+      status: 'complete',
+      assistantMessage: { content: 'Native draft' },
+    });
+    expect(callWorker).toHaveBeenCalledWith('llm.generation.get', { generationId: 'generation' });
+    expect(callWorker).not.toHaveBeenCalledWith('agent.generation.executeTools', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith('agent.providerStep.complete', expect.anything());
+  });
+
+  it('returns a Native-owned Agent confirmation to the Native runtime without calling the Worker', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'native-agent',
+    };
+    native.invoke.mockImplementation((command, args) => {
+      if (command === 'agent_runtime_confirm') return Promise.resolve(true);
+      expect(command).toBe('agent_runtime_start');
+      const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+        .onEvent;
+      setTimeout(() => {
+        channel.onmessage?.({
+          type: 'confirmation',
+          confirmation: {
+            confirmationToken: 'one-time-token',
+            action: 'document.archive',
+            documentId: 'document',
+            documentTitle: 'Draft',
+            expiresAt: '2099-01-01T00:00:00.000Z',
+          },
+        });
+        channel.onmessage?.({ type: 'complete', providerResponseId: 'response-final' });
+      }, 0);
+      return Promise.resolve();
+    });
+
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState() {},
+      onConfirmation: () => Promise.resolve(true),
+    });
+    await run.completion;
+
+    expect(native.invoke).toHaveBeenCalledWith(
+      'agent_runtime_confirm',
+      expect.objectContaining({ confirmationToken: 'one-time-token', approved: true }),
+    );
+    expect(callWorker).not.toHaveBeenCalledWith('agent.generation.confirmTool', expect.anything());
+  });
+
+  it('re-subscribes when the Native-owned Agent attempt is already running', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'native-agent',
+    };
+    native.invoke
+      .mockRejectedValueOnce(new Error('The LLM attempt is already streaming.'))
+      .mockImplementationOnce((command, args) => {
+        expect(command).toBe('agent_runtime_subscribe');
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        setTimeout(() => {
+          channel.onmessage?.({ type: 'started' });
+          channel.onmessage?.({ type: 'delta', delta: 'Resumed draft' });
+          channel.onmessage?.({ type: 'complete', providerResponseId: 'response-final' });
+        }, 0);
+        return Promise.resolve(true);
+      });
+    const deltas: string[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta: (content) => deltas.push(content),
+      onState() {},
+    });
+    await run.completion;
+
+    expect(deltas).toEqual(['Resumed draft']);
+    expect(native.invoke).toHaveBeenNthCalledWith(
+      2,
+      'agent_runtime_subscribe',
+      expect.objectContaining({ attemptId: 'attempt' }),
+    );
   });
 
   it('confirms a high-impact Agent tool locally before continuing the same Provider loop', async () => {

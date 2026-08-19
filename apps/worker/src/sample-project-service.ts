@@ -115,6 +115,7 @@ function seedSampleProject(database: Database.Database, project: OpenProject): v
       projectId: project.id,
       title: input.title,
       position: scenePosition,
+      rowVersion: 0,
       createdAt: now,
       updatedAt: now,
     });
@@ -125,6 +126,7 @@ function seedSampleProject(database: Database.Database, project: OpenProject): v
         title,
         position: shotPosition,
         status: 'draft',
+        rowVersion: 0,
         createdAt: now,
         updatedAt: now,
       });

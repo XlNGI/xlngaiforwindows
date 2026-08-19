@@ -1,6 +1,5 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type {
-  AgentGenerationPrepareResult,
   AgentToolConfirmationRequest,
   LlmGenerationCompleteParams,
   LlmGenerationFailParams,
@@ -16,6 +15,10 @@ const FLUSH_CHARACTER_THRESHOLD = 512;
 const CHANNEL_DELIVERY_GRACE_MS = 1_000;
 
 type InvocationBoundaryOutcome = 'continue' | 'terminal' | 'missing';
+type AgentCapablePrepared = LlmGenerationPrepareResult & {
+  agentTaskId?: string;
+  runtimeOwner?: 'desktop' | 'native-agent';
+};
 
 export interface LlmStreamCallbacks {
   onDelta(content: string): void;
@@ -34,6 +37,9 @@ export function streamPreparedLlmGeneration(
   callbacks: LlmStreamCallbacks,
 ): LlmStreamRun {
   const identity = prepared.stream;
+  const nativeAgentRuntime =
+    Boolean((prepared as AgentCapablePrepared).agentTaskId) &&
+    (prepared as AgentCapablePrepared).runtimeOwner === 'native-agent';
   let aggregate = prepared.generation.assistantMessage.content;
   let persisted = aggregate;
   let terminal = false;
@@ -44,6 +50,12 @@ export function streamPreparedLlmGeneration(
     { receive(): void; complete(outcome: InvocationBoundaryOutcome): void } | undefined;
   let events = Promise.resolve();
   let writes = Promise.resolve();
+  let resolveNativeRuntimeTerminal: (() => void) | undefined;
+  const nativeRuntimeTerminal = nativeAgentRuntime
+    ? new Promise<void>((resolve) => {
+        resolveNativeRuntimeTerminal = resolve;
+      })
+    : undefined;
 
   const prepareInvocationBoundary = () => {
     let armDeliveryTimeout = () => {};
@@ -151,19 +163,35 @@ export function streamPreparedLlmGeneration(
     if (terminal || closing) return;
     switch (event.type) {
       case 'started':
-        if ((prepared as Partial<AgentGenerationPrepareResult>).agentTaskId) {
+        if ((prepared as AgentCapablePrepared).agentTaskId && !nativeAgentRuntime) {
           await callWorker('agent.providerStep.start', identity);
         }
-        await observe(true);
+        if (!nativeAgentRuntime) await observe(true);
         break;
       case 'delta':
         if (cancelRequested || !event.delta) return;
         aggregate += event.delta;
         callbacks.onDelta(aggregate);
-        queueObserve();
+        if (!nativeAgentRuntime) queueObserve();
         break;
+      case 'confirmation': {
+        if (!nativeAgentRuntime) {
+          await fail('Native confirmation was received outside an Agent runtime.', false);
+          return 'terminal';
+        }
+        const approved = callbacks.onConfirmation
+          ? await callbacks.onConfirmation(event.confirmation)
+          : false;
+        const accepted = await invoke<boolean>('agent_runtime_confirm', {
+          attemptId: identity.attemptId,
+          confirmationToken: event.confirmation.confirmationToken,
+          approved,
+        });
+        if (!accepted) throw new Error('Native Agent confirmation was no longer pending.');
+        break;
+      }
       case 'toolCalls': {
-        const agentTaskId = (prepared as Partial<AgentGenerationPrepareResult>).agentTaskId;
+        const agentTaskId = (prepared as AgentCapablePrepared).agentTaskId;
         if (!agentTaskId) {
           await fail('Provider returned tool calls outside an Agent generation.', false);
           return 'terminal';
@@ -199,6 +227,17 @@ export function streamPreparedLlmGeneration(
         closing = true;
         clearFlushTimer();
         await writes;
+        if (nativeAgentRuntime) {
+          try {
+            callbacks.onState(
+              await callWorker('llm.generation.get', { generationId: identity.generationId }),
+            );
+            terminal = true;
+          } finally {
+            closing = false;
+          }
+          return 'terminal';
+        }
         const params: LlmGenerationCompleteParams = {
           ...identity,
           content: aggregate,
@@ -207,7 +246,7 @@ export function streamPreparedLlmGeneration(
           usage: event.usage,
         };
         try {
-          if ((prepared as Partial<AgentGenerationPrepareResult>).agentTaskId) {
+          if ((prepared as AgentCapablePrepared).agentTaskId) {
             await callWorker('agent.providerStep.complete', {
               ...identity,
               providerResponseId: event.providerResponseId,
@@ -223,9 +262,34 @@ export function streamPreparedLlmGeneration(
         return 'terminal';
       }
       case 'failed':
+        if (nativeAgentRuntime) {
+          const current = await callWorker('llm.generation.get', {
+            generationId: identity.generationId,
+          });
+          callbacks.onState(
+            ['complete', 'failed', 'cancelled'].includes(current.status)
+              ? current
+              : await callWorker('llm.generation.fail', {
+                  ...identity,
+                  content: aggregate,
+                  error: event.error,
+                  retryable: event.retryable,
+                  usage: event.usage,
+                }),
+          );
+          terminal = true;
+          return 'terminal';
+        }
         await fail(event.error, event.retryable, event.usage);
         return 'terminal';
       case 'cancelled':
+        if (nativeAgentRuntime) {
+          callbacks.onState(
+            await callWorker('llm.generation.get', { generationId: identity.generationId }),
+          );
+          terminal = true;
+          return 'terminal';
+        }
         await cancelWorker();
         return 'terminal';
     }
@@ -255,6 +319,9 @@ export function streamPreparedLlmGeneration(
           boundary.complete(outcome ?? (terminal ? 'terminal' : 'missing')),
         );
       }
+      if (nativeAgentRuntime && ['complete', 'failed', 'cancelled'].includes(event.type)) {
+        events = events.finally(() => resolveNativeRuntimeTerminal?.());
+      }
     };
     return channel;
   };
@@ -265,6 +332,24 @@ export function streamPreparedLlmGeneration(
       return;
     }
     try {
+      if (nativeAgentRuntime) {
+        const channel = createInvocationChannel();
+        try {
+          await invoke<void>('agent_runtime_start', {
+            request: identity,
+            onEvent: channel,
+          });
+        } catch (startError) {
+          const attached = await invoke<boolean>('agent_runtime_subscribe', {
+            attemptId: identity.attemptId,
+            onEvent: channel,
+          });
+          if (!attached) throw startError;
+        }
+        await nativeRuntimeTerminal;
+        await events;
+        return;
+      }
       while (true) {
         const boundary = prepareInvocationBoundary();
         await invoke<void>('llm_stream', {
@@ -294,11 +379,18 @@ export function streamPreparedLlmGeneration(
       if (terminal) return;
       cancelRequested = true;
       try {
+        if (nativeAgentRuntime) {
+          await callWorker('agent.generation.cancel', {
+            generationId: identity.generationId,
+          }).catch(() => undefined);
+        }
         if (isTauri()) {
-          await invoke<boolean>('llm_stream_cancel', { attemptId: identity.attemptId });
+          await invoke<boolean>(nativeAgentRuntime ? 'agent_runtime_cancel' : 'llm_stream_cancel', {
+            attemptId: identity.attemptId,
+          });
         }
       } finally {
-        await cancelWorker();
+        if (!nativeAgentRuntime) await cancelWorker();
       }
     },
   };

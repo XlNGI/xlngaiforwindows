@@ -19,6 +19,10 @@ Registry 来自 Vidu 官方 [Model Map](https://platform.vidu.com/docs/model-map
 | `TEXT_TO_VIDEO` | `viduq3-pro` | 无输入图片，1–16 秒，540p/720p/1080p |
 | `REFERENCE_TO_VIDEO` | `viduq3` | 1–7 张参考图，3–16 秒，540p/720p/1080p |
 | `REFERENCE_TO_VIDEO` | `viduq3-drama` | 1–7 张参考图，2–15 秒，720p/1080p，仅 9:16/16:9，支持音画直出 |
+| `REFERENCE_TO_VIDEO` | `viduq3-ad` | 1–7 张参考图，3–15 秒，720p/1080p；参数边界在真实官方样本复核前保持暂定 |
+| `REFERENCE_TO_VIDEO` | `viduq3-mix` | 1–7 张参考图，3–16 秒，720p/1080p；不支持 `off_peak` |
+| `REFERENCE_TO_VIDEO` | `viduq3-turbo` | 1–7 张参考图，3–16 秒，540p/720p/1080p；`off_peak=true` 时要求 `audio=true` |
+| `REFERENCE_TO_VIDEO` | `viduq2-pro` | 1–7 张参考图，1–10 秒，540p/720p/1080p；`off_peak=true` 时要求 `audio=false` |
 | `START_END_TO_VIDEO` | `viduq3-pro` | 严格 2 张首尾帧，1–16 秒，540p/720p/1080p |
 | `IMAGE_TO_VIDEO` | `vidu2.0` | 1 张起始帧；4 秒支持 360p/720p/1080p，8 秒仅支持 720p |
 

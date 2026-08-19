@@ -260,6 +260,35 @@ export interface PathResult {
   path: string;
 }
 
+export type NovelMarkdownExportType = 'chapter' | 'selection' | 'volume' | 'work';
+export type NovelMarkdownExportFormat = 'files' | 'merged';
+export type NovelMarkdownExportStatus =
+  'queued' | 'writing' | 'verifying' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface NovelMarkdownExportPrepareParams {
+  exportType: NovelMarkdownExportType;
+  exportFormat?: NovelMarkdownExportFormat;
+  chapterId?: string;
+  chapterIds?: string[];
+  volumeId?: string;
+  includeDraft?: boolean;
+}
+
+export interface NovelMarkdownExportJobInfo {
+  id: string;
+  projectId: string;
+  exportType: NovelMarkdownExportType;
+  exportFormat: NovelMarkdownExportFormat;
+  packagePath: string;
+  status: NovelMarkdownExportStatus;
+  itemCount: number;
+  manifestHash?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
 export interface CacheInspectionResult {
   fileCount: number;
   directoryCount: number;
@@ -272,6 +301,18 @@ export interface CacheClearResult {
   removedDirectories: number;
   freedBytes: number;
   removedLinks: number;
+}
+
+export interface ResearchCacheCleanupParams {
+  maxBytes?: number;
+}
+
+export interface ResearchCacheCleanupResult {
+  missingCount: number;
+  expiredCount: number;
+  evictedCount: number;
+  removedBytes: number;
+  retainedBytes: number;
 }
 
 export interface ContextSnapshotCleanupParams {
@@ -425,6 +466,166 @@ export interface DocumentDetail extends DocumentSummary {
   publishedVersion?: DocumentVersionInfo;
 }
 
+export type NovelProfileStatus = 'active' | 'archived';
+export type NovelVolumeStatus = 'active' | 'archived';
+export type NovelChapterLifecycleStatus = 'reserved' | 'active' | 'archived';
+export type NovelChapterArchiveReason = 'user_archive' | 'generation_placeholder';
+export type DocumentBindingRole =
+  | 'work-outline'
+  | 'volume-outline'
+  | 'character-bible'
+  | 'world-bible'
+  | 'timeline'
+  | 'style-guide'
+  | 'adaptation-proposal'
+  | 'screenplay'
+  | 'scene-outline'
+  | 'shot-plan'
+  | 'research'
+  | 'note';
+export type DocumentBindingDomain = 'shared' | 'novel' | 'short-drama';
+export type DocumentBindingStatus = 'active' | 'archived' | 'needs_review';
+
+export interface NovelProfileInfo {
+  projectId: string;
+  projectName: string;
+  language: string;
+  status: NovelProfileStatus;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelProfileGetParams {
+  createIfMissing?: boolean;
+}
+
+export interface NovelProfileUpdateParams {
+  language?: string;
+  status?: NovelProfileStatus;
+  expectedRowVersion: number;
+}
+
+export interface NovelVolumeInfo {
+  id: string;
+  projectId: string;
+  title: string;
+  position: number;
+  status: NovelVolumeStatus;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelVolumeListParams {
+  includeArchived?: boolean;
+}
+
+export interface NovelVolumeSaveParams {
+  volumeId?: string;
+  title: string;
+  position?: number;
+  status?: NovelVolumeStatus;
+  expectedRowVersion?: number;
+}
+
+export interface NovelChapterInfo {
+  id: string;
+  projectId: string;
+  volumeId?: string;
+  documentId: string;
+  title: string;
+  position: number;
+  displayLabel: string;
+  lifecycleStatus: NovelChapterLifecycleStatus;
+  archiveReason?: NovelChapterArchiveReason;
+  documentRowVersion: number;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelChapterListParams {
+  volumeId?: string;
+  includeArchived?: boolean;
+}
+
+export interface NovelChapterSaveParams {
+  chapterId?: string;
+  volumeId?: string;
+  title: string;
+  displayLabel?: string;
+  position?: number;
+  lifecycleStatus?: NovelChapterLifecycleStatus;
+  archiveReason?: NovelChapterArchiveReason;
+  expectedRowVersion?: number;
+}
+
+export interface NovelChapterArchiveParams {
+  chapterId: string;
+  expectedRowVersion: number;
+  reason?: NovelChapterArchiveReason;
+}
+
+export interface NovelChapterRestoreParams {
+  chapterId: string;
+  expectedRowVersion: number;
+}
+
+export interface NovelBindingInfo {
+  id: string;
+  projectId: string;
+  documentId: string;
+  volumeId?: string;
+  chapterId?: string;
+  sceneId?: string;
+  shotId?: string;
+  role: DocumentBindingRole;
+  domainScope: DocumentBindingDomain;
+  status: DocumentBindingStatus;
+  migrationIssueCode?: string;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelBindingListParams {
+  includeNeedsReview?: boolean;
+}
+
+export interface NovelConsistencyIssueInfo {
+  code:
+    | 'missing-published-version'
+    | 'duplicate-position'
+    | 'duplicate-display-label'
+    | 'stale-summary';
+  severity: 'warning' | 'error';
+  chapterId?: string;
+  message: string;
+}
+
+export interface NovelConsistencyReport {
+  projectId: string;
+  generatedAt: string;
+  chapterCount: number;
+  currentSummaryCount: number;
+  staleSummaryCount: number;
+  issues: NovelConsistencyIssueInfo[];
+}
+
+export interface NovelBindingSaveParams {
+  bindingId?: string;
+  documentId: string;
+  volumeId?: string;
+  chapterId?: string;
+  sceneId?: string;
+  shotId?: string;
+  role: DocumentBindingRole;
+  domainScope: DocumentBindingDomain;
+  status?: DocumentBindingStatus;
+  expectedRowVersion?: number;
+}
+
 export interface DocumentGetParams {
   documentId: string;
 }
@@ -483,6 +684,8 @@ export interface DocumentPublishParams {
   expectedDocumentRowVersion: number;
   expectedPublishedVersionId?: string;
 }
+
+export type DocumentSelfPublishParams = DocumentPublishParams;
 
 export interface DocumentPublicationInfo {
   id: string;
@@ -559,10 +762,52 @@ export interface AgentTaskDocumentArtifact {
   createdAt: string;
 }
 
+/** A redacted, task-scoped view of one Provider request/response step. */
+export interface AgentProviderStepInfo {
+  id: string;
+  generationId: string;
+  attemptId: string;
+  ordinal: number;
+  protocol: string;
+  status: 'prepared' | 'in_flight' | 'complete' | 'failed' | 'interrupted';
+  toolCallCount: number;
+  finishReason?: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  providerReportedCost?: string;
+  currency?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface AgentResearchSourceInfo {
+  id: string;
+  title: string;
+  site: string;
+  canonicalUrl: string;
+  retrievedAt: string;
+  contentHash?: string;
+  characterCount?: number;
+  truncated: boolean;
+  status: 'searched' | 'fetched' | 'excluded' | 'failed';
+  citationLabel?: string;
+  adoptionStatus: 'unreviewed' | 'adopted' | 'excluded';
+  adoptionReason?: string;
+  cacheStatus?: 'present' | 'missing' | 'expired';
+  cacheErrorCode?: string;
+}
+
 export interface AgentTaskDetail {
   task: AgentTaskInfo;
   events: AgentTaskEventInfo[];
   documents: AgentTaskDocumentArtifact[];
+  providerSteps: AgentProviderStepInfo[];
+  researchSources: AgentResearchSourceInfo[];
 }
 
 export interface AgentTaskListParams {
@@ -572,6 +817,19 @@ export interface AgentTaskListParams {
 
 export interface AgentTaskGetParams {
   taskId: string;
+}
+
+export interface AgentTaskEventsParams {
+  taskId: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+export interface AgentTaskEventsResult {
+  task: AgentTaskInfo;
+  events: AgentTaskEventInfo[];
+  nextSequence: number;
+  hasMore: boolean;
 }
 
 /** Explicit user action that converts a completed assistant response into a reviewable draft. */
@@ -635,6 +893,7 @@ export interface SceneInfo {
   projectId: string;
   title: string;
   position: number;
+  rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -642,6 +901,7 @@ export interface SceneInfo {
 export interface SceneSaveParams {
   sceneId?: string;
   title: string;
+  expectedRowVersion?: number;
 }
 
 export interface ShotInfo {
@@ -650,6 +910,7 @@ export interface ShotInfo {
   title: string;
   position: number;
   status: string;
+  rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -663,7 +924,67 @@ export interface ShotSaveParams {
   sceneId: string;
   title: string;
   status?: string;
+  expectedRowVersion?: number;
 }
+
+export type AgentChangeSetStatus =
+  'proposed' | 'partially_applied' | 'applied' | 'rejected' | 'conflicted';
+export type AgentChangeSetItemStatus = 'pending' | 'applied' | 'rejected' | 'conflicted';
+
+export interface AgentChangeSetItemDraft {
+  entityType: 'scene' | 'shot' | 'document';
+  action: 'create' | 'update';
+  targetId?: string;
+  parentSceneId?: string;
+  parentItemOrdinal?: number;
+  title: string;
+  shotStatus?: string;
+  documentKind?: DocumentKind;
+  contentMarkdown?: string;
+  scopeType?: ConversationScopeType;
+  scopeId?: string;
+  expectedRowVersion?: number;
+  expectedCurrentVersionId?: string;
+}
+
+export interface AgentChangeSetItemInfo extends AgentChangeSetItemDraft {
+  id: string;
+  ordinal: number;
+  status: AgentChangeSetItemStatus;
+  appliedEntityId?: string;
+  errorCode?: string;
+}
+
+export interface AgentChangeSetInfo {
+  id: string;
+  projectId: string;
+  taskId?: string;
+  title: string;
+  status: AgentChangeSetStatus;
+  rowVersion: number;
+  items: AgentChangeSetItemInfo[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface AgentChangeSetCreateParams {
+  taskId?: string;
+  title: string;
+  items: AgentChangeSetItemDraft[];
+}
+
+export interface AgentChangeSetListParams {
+  includeTerminal?: boolean;
+}
+
+export interface AgentChangeSetApplyParams {
+  changeSetId: string;
+  expectedRowVersion: number;
+  itemIds?: string[];
+}
+
+export type AgentChangeSetRejectParams = AgentChangeSetApplyParams;
 
 export type ConversationScopeType = 'project' | 'scene' | 'shot';
 
@@ -910,7 +1231,7 @@ export interface LlmChatCompletionsToolContinuation {
 export type LlmToolContinuation = LlmResponsesToolContinuation | LlmChatCompletionsToolContinuation;
 
 export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
-  agentMode: 'document';
+  agentMode: 'document' | 'novel-writing';
   /**
    * External research is opt-out for explicit Agent document tasks. The Worker
    * still enforces the selected mode when deciding which tools to authorize.
@@ -922,12 +1243,89 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
    * resolved and frozen by the Worker before the Provider sees any tool.
    */
   documentIntent?: AgentDocumentIntent;
+  /** Trusted Desktop intent. Provider tool arguments never carry these targets. */
+  novelIntent?: NovelWritingIntent;
 }
 
 export type AgentResearchMode = 'auto' | 'project_only' | 'network_disabled';
 
-export interface AgentGenerationPrepareResult extends LlmGenerationPrepareResult {
-  agentTaskId: string;
+export type AgentGenerationPrepareResult =
+  | (LlmGenerationPrepareResult & {
+      agentTaskId: string;
+      /** Native-owned runs keep executing when a Desktop view unsubscribes. */
+      runtimeOwner?: 'desktop' | 'native-agent';
+    })
+  | { pendingIntent: AgentPendingIntentInfo };
+
+export type NovelWritingAction = 'create_chapter' | 'continue_chapter' | 'rewrite_chapter';
+
+export interface NovelWritingIntent {
+  action?: NovelWritingAction;
+  chapterId?: string;
+  volumeId?: string;
+  chapterTitle?: string;
+  displayLabel?: string;
+}
+
+export interface AgentPendingIntentInfo {
+  id: string;
+  projectId: string;
+  conversationId: string;
+  requestedAction?: NovelWritingAction;
+  reasonCode: 'NEGATED_ACTION' | 'AMBIGUOUS_ACTION' | 'TARGET_REQUIRED' | 'TARGET_NOT_UNIQUE';
+  status: 'pending' | 'resolved' | 'cancelled' | 'expired';
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NovelPendingIntentListParams {
+  includeResolved?: boolean;
+}
+
+export interface NovelPendingIntentCancelParams {
+  intentId: string;
+}
+
+export interface AgentPartialArtifactInfo {
+  id: string;
+  taskId: string;
+  chapterId?: string;
+  documentId?: string;
+  targetKind: 'chapter' | 'reference-create' | 'reference-update';
+  contentLength: number;
+  status: 'recoverable' | 'recovered' | 'discarded' | 'expired';
+  rowVersion: number;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentPartialArtifactListParams {
+  includeTerminal?: boolean;
+}
+
+export interface AgentPartialArtifactRecoverParams {
+  artifactId: string;
+  expectedRowVersion: number;
+  expectedDocumentRowVersion: number;
+}
+
+export interface AgentPartialArtifactDiscardParams {
+  artifactId: string;
+  expectedRowVersion: number;
+}
+
+export interface NovelAdaptationProposalInfo {
+  id: string;
+  projectId: string;
+  sourceChapterId: string;
+  sourceDocumentVersionId: string;
+  sourceContentHash: string;
+  proposalDocumentId: string;
+  proposalDocumentVersionId: string;
+  adaptationTaskId: string;
+  createdAt: string;
 }
 
 export type AgentDocumentOperation =
@@ -936,7 +1334,10 @@ export type AgentDocumentOperation =
   | 'document.read'
   | 'document.update_draft'
   | 'document.archive'
-  | 'document.restore';
+  | 'document.restore'
+  | 'novel.chapter.submit_draft'
+  | 'novel.reference.submit_draft'
+  | 'novel.adaptation.submit_proposal';
 
 export interface AgentDocumentIntent {
   operation: AgentDocumentOperation;
@@ -972,6 +1373,8 @@ export interface AgentGenerationConfirmToolParams extends LlmGenerationIdentity 
 
 export interface AgentGenerationConfirmToolResult {
   continuation?: LlmToolContinuation;
+  /** Tools authorized for the Provider step created after confirmation. */
+  tools?: LlmToolDefinition[];
 }
 
 export interface AgentProviderStepCompleteParams extends LlmGenerationIdentity {
@@ -1048,6 +1451,7 @@ export interface LlmGenerationFailParams extends LlmGenerationObserveParams {
 export type LlmNativeStreamEvent =
   | { type: 'started' }
   | { type: 'delta'; delta: string }
+  | { type: 'confirmation'; confirmation: AgentToolConfirmationRequest }
   | {
       type: 'toolCalls';
       calls: LlmToolCall[];
@@ -1614,6 +2018,10 @@ export interface WorkerMethodMap {
     result: CacheInspectionResult;
   };
   'maintenance.cache.clear': { params: Record<string, never>; result: CacheClearResult };
+  'maintenance.researchCache.cleanup': {
+    params: ResearchCacheCleanupParams;
+    result: ResearchCacheCleanupResult;
+  };
   'maintenance.metrics': { params: Record<string, never>; result: WorkerMetricsSnapshot };
   'maintenance.contextSnapshots.cleanup': {
     params: ContextSnapshotCleanupParams;
@@ -1628,6 +2036,35 @@ export interface WorkerMethodMap {
     result: PathResult;
   };
   'document.list': { params: Record<string, never>; result: DocumentSummary[] };
+  'novel.profile.get': { params: NovelProfileGetParams; result: NovelProfileInfo | null };
+  'novel.profile.update': { params: NovelProfileUpdateParams; result: NovelProfileInfo };
+  'novel.volume.list': { params: NovelVolumeListParams; result: NovelVolumeInfo[] };
+  'novel.volume.save': { params: NovelVolumeSaveParams; result: NovelVolumeInfo };
+  'novel.chapter.list': { params: NovelChapterListParams; result: NovelChapterInfo[] };
+  'novel.chapter.save': { params: NovelChapterSaveParams; result: NovelChapterInfo };
+  'novel.chapter.archive': { params: NovelChapterArchiveParams; result: NovelChapterInfo };
+  'novel.chapter.restore': { params: NovelChapterRestoreParams; result: NovelChapterInfo };
+  'novel.binding.list': { params: NovelBindingListParams; result: NovelBindingInfo[] };
+  'novel.context.consistencyReport': {
+    params: Record<string, never>;
+    result: NovelConsistencyReport;
+  };
+  'novel.binding.save': { params: NovelBindingSaveParams; result: NovelBindingInfo };
+  'novel.export.prepare': {
+    params: NovelMarkdownExportPrepareParams;
+    result: NovelMarkdownExportJobInfo;
+  };
+  'novel.intent.list': { params: NovelPendingIntentListParams; result: AgentPendingIntentInfo[] };
+  'novel.intent.cancel': { params: NovelPendingIntentCancelParams; result: AgentPendingIntentInfo };
+  'agent.partial.list': {
+    params: AgentPartialArtifactListParams;
+    result: AgentPartialArtifactInfo[];
+  };
+  'agent.partial.recover': { params: AgentPartialArtifactRecoverParams; result: DocumentDetail };
+  'agent.partial.discard': {
+    params: AgentPartialArtifactDiscardParams;
+    result: AgentPartialArtifactInfo;
+  };
   'document.get': { params: DocumentGetParams; result: DocumentDetail };
   'document.save': { params: DocumentSaveParams; result: DocumentDetail };
   'document.draft.save': { params: DocumentDraftSaveParams; result: DocumentDetail };
@@ -1643,12 +2080,17 @@ export interface WorkerMethodMap {
     params: DocumentPublishParams;
     result: { document: DocumentDetail; publication: DocumentPublicationInfo };
   };
+  'document.selfPublish': {
+    params: DocumentSelfPublishParams;
+    result: { document: DocumentDetail; publication: DocumentPublicationInfo };
+  };
   'agent.task.createDocumentDraft': {
     params: AgentTaskCreateDocumentDraftParams;
     result: AgentTaskCreateDocumentDraftResult;
   };
   'agent.task.list': { params: AgentTaskListParams; result: AgentTaskInfo[] };
   'agent.task.get': { params: AgentTaskGetParams; result: AgentTaskDetail };
+  'agent.task.events': { params: AgentTaskEventsParams; result: AgentTaskEventsResult };
   'agent.generation.prepare': {
     params: AgentGenerationPrepareParams;
     result: AgentGenerationPrepareResult;
@@ -1657,6 +2099,7 @@ export interface WorkerMethodMap {
     params: AgentGenerationExecuteToolsParams;
     result: AgentGenerationExecuteToolsResult;
   };
+  'agent.generation.cancel': { params: LlmGenerationGetParams; result: { cancelled: boolean } };
   'agent.generation.confirmTool': {
     params: AgentGenerationConfirmToolParams;
     result: AgentGenerationConfirmToolResult;
@@ -1674,6 +2117,22 @@ export interface WorkerMethodMap {
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
   'shot.save': { params: ShotSaveParams; result: ShotInfo };
+  'agent.changeSet.create': {
+    params: AgentChangeSetCreateParams;
+    result: AgentChangeSetInfo;
+  };
+  'agent.changeSet.list': {
+    params: AgentChangeSetListParams;
+    result: AgentChangeSetInfo[];
+  };
+  'agent.changeSet.apply': {
+    params: AgentChangeSetApplyParams;
+    result: AgentChangeSetInfo;
+  };
+  'agent.changeSet.reject': {
+    params: AgentChangeSetRejectParams;
+    result: AgentChangeSetInfo;
+  };
   'conversation.list': { params: ConversationListParams; result: ConversationPage };
   'conversation.create': { params: ConversationCreateParams; result: ConversationInfo };
   'conversation.update': { params: ConversationUpdateParams; result: ConversationInfo };

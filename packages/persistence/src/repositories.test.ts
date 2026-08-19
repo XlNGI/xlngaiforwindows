@@ -80,6 +80,7 @@ describe('repositories', () => {
       projectId: 'project',
       title: 'Scene 1',
       position: 0,
+      rowVersion: 0,
       createdAt: 'now',
       updatedAt: 'now',
     });
@@ -89,6 +90,7 @@ describe('repositories', () => {
       title: 'Shot 1',
       position: 0,
       status: 'draft',
+      rowVersion: 0,
       createdAt: 'now',
       updatedAt: 'now',
     });

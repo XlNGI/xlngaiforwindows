@@ -4,7 +4,9 @@ import type { AgentProviderLoopService } from './agent-provider-loop-service.js'
 import type { GenerationService } from './generation-service.js';
 import type { ImageGenerationService } from './image-generation-service.js';
 import type { MaintenanceService } from './maintenance-service.js';
+import type { MarkdownExportService } from './markdown-export-service.js';
 import type { ProjectService } from './project-service.js';
+import type { PartialArtifactService } from './partial-artifact-service.js';
 import type { SampleProjectService } from './sample-project-service.js';
 import type { UsageService } from './usage-service.js';
 import type { VideoGenerationService } from './video-generation-service.js';
@@ -19,6 +21,8 @@ export interface InfrastructureCommandServices {
   imageGenerationService: ImageGenerationService;
   videoGenerationService: VideoGenerationService;
   agentProviderLoopService: AgentProviderLoopService;
+  partialArtifactService: PartialArtifactService;
+  markdownExportService: MarkdownExportService;
 }
 
 export interface InfrastructureCommandResult {
@@ -40,10 +44,14 @@ async function resetRuntime(services: InfrastructureCommandServices): Promise<vo
 }
 
 function recoverRuntime(services: InfrastructureCommandServices): void {
+  services.partialArtifactService.recoverInterrupted();
   services.generationService.recoverInterrupted();
   services.agentProviderLoopService.recoverInterrupted();
   services.imageGenerationService.recoverInterrupted();
   services.videoGenerationService.recoverInterrupted();
+  services.partialArtifactService.expire();
+  services.markdownExportService.reconcile();
+  services.maintenanceService.cleanupResearchCache();
 }
 
 export async function executeInfrastructureCommand(
@@ -214,6 +222,13 @@ export async function executeInfrastructureCommand(
       return { handled: true, result: services.maintenanceService.inspectCache() };
     case 'maintenance.cache.clear':
       return { handled: true, result: services.maintenanceService.clearCache() };
+    case 'maintenance.researchCache.cleanup':
+      return {
+        handled: true,
+        result: services.maintenanceService.cleanupResearchCache(
+          typeof params.maxBytes === 'number' ? params.maxBytes : undefined,
+        ),
+      };
     case 'maintenance.metrics':
       return { handled: true, result: services.maintenanceService.getMetrics() };
     case 'maintenance.contextSnapshots.cleanup':

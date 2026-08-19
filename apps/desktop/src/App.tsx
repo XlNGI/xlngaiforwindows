@@ -24,8 +24,11 @@ import {
   Square,
   WandSparkles,
   X,
+  BookOpen,
 } from 'lucide-react';
 import type {
+  AgentDocumentIntent,
+  AgentResearchMode,
   ChatMessageInfo,
   ConversationScopeType,
   DocumentKind,
@@ -52,12 +55,14 @@ import { useAssetWorkspace } from './use-asset-workspace';
 import { useProductionState } from './use-production-state';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
-import { ChatPanel } from './ChatPanel';
+import { ChatPanel, type ComposerMode } from './ChatPanel';
 import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { TaskLogView } from './TaskLogView';
+import { NovelWorkspace } from './NovelWorkspace';
+import { ChangeSetReviewPanel } from './ChangeSetReviewPanel';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
 import { ResizableAppLayout } from './workspace/ResizableAppLayout';
@@ -80,7 +85,7 @@ import type { WorkspacePanelId } from './workspace/workspace-types';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'characters' | 'shots' | 'assets' | 'tasks';
+type WorkspaceView = 'documents' | 'novel' | 'characters' | 'shots' | 'assets' | 'tasks';
 type NavigationMode = 'project' | 'production';
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
 
@@ -109,6 +114,61 @@ function detachedConfigMatchesSnapshot(
 const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
 const LLM_SELECTION_STORAGE_KEY = 'ai-video.llm-selection';
 
+export function inferDocumentIntent(
+  prompt: string,
+  targetDocumentId?: string,
+): { intent?: AgentDocumentIntent; needsTarget: boolean } {
+  const value = prompt.trim().toLocaleLowerCase();
+  if (!value) return { needsTarget: false };
+  if (
+    /\b(?:don't|do not|never|without)\b.*\b(?:document|draft|update|archive|restore)\b/i.test(value)
+  ) {
+    return { needsTarget: false };
+  }
+  const hasDocumentNoun =
+    /\b(?:document|draft|brief|outline|plan|memo)\b/i.test(value) ||
+    /[\u6587\u6863\u8349\u7a3f\u7b80\u62a5\u5927\u7eb2\u8ba1\u5212\u5907\u5fd8]/u.test(value);
+  if (/\barchive\b/i.test(value) || /[\u5f52\u6863]/u.test(value)) {
+    return targetDocumentId
+      ? {
+          intent: { operation: 'document.archive', documentId: targetDocumentId },
+          needsTarget: false,
+        }
+      : { needsTarget: true };
+  }
+  if (/\b(?:restore|unarchive)\b/i.test(value) || /[\u6062\u590d]/u.test(value)) {
+    return targetDocumentId
+      ? {
+          intent: { operation: 'document.restore', documentId: targetDocumentId },
+          needsTarget: false,
+        }
+      : { needsTarget: true };
+  }
+  if (
+    /\b(?:update|edit|revise|rewrite|modify)\b/i.test(value) ||
+    /[\u66f4\u65b0\u4fee\u6539\u7f16\u8f91\u91cd\u5199]/u.test(value)
+  ) {
+    return targetDocumentId
+      ? {
+          intent: { operation: 'document.update_draft', documentId: targetDocumentId },
+          needsTarget: false,
+        }
+      : { needsTarget: true };
+  }
+  if (
+    /\b(?:read|show|open|summari[sz]e)\b/i.test(value) ||
+    /[\u8bfb\u53d6\u67e5\u770b\u9605\u8bfb\u603b\u7ed3]/u.test(value)
+  ) {
+    return targetDocumentId
+      ? { intent: { operation: 'document.read', documentId: targetDocumentId }, needsTarget: false }
+      : { needsTarget: true };
+  }
+  if (hasDocumentNoun && /\b(?:create|draft|write|generate|make)\b/i.test(value)) {
+    return { intent: { operation: 'document.create_draft' }, needsTarget: false };
+  }
+  return { needsTarget: false };
+}
+
 function initialLlmSelection(): { providerProfileId?: string; modelId?: string } {
   try {
     const stored = window.localStorage.getItem(LLM_SELECTION_STORAGE_KEY);
@@ -121,6 +181,32 @@ function initialLlmSelection(): { providerProfileId?: string; modelId?: string }
     };
   } catch {
     return {};
+  }
+}
+
+function initialResearchMode(): AgentResearchMode {
+  try {
+    const stored = window.localStorage.getItem(LLM_SELECTION_STORAGE_KEY);
+    if (!stored) return 'auto';
+    const value = JSON.parse(stored) as { researchMode?: unknown };
+    return value.researchMode === 'project_only' || value.researchMode === 'network_disabled'
+      ? value.researchMode
+      : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+function initialComposerMode(): ComposerMode {
+  try {
+    const stored = window.localStorage.getItem(LLM_SELECTION_STORAGE_KEY);
+    if (!stored) return 'chat';
+    const value = JSON.parse(stored) as { composerMode?: unknown };
+    return value.composerMode === 'document' || value.composerMode === 'novel-writing'
+      ? value.composerMode
+      : 'chat';
+  } catch {
+    return 'chat';
   }
 }
 
@@ -205,6 +291,8 @@ export function App() {
   const [selectedLlmModelId, setSelectedLlmModelId] = useState(
     initialLlmSelectionValue.modelId ?? '',
   );
+  const [researchMode, setResearchMode] = useState<AgentResearchMode>(initialResearchMode);
+  const [composerMode, setComposerMode] = useState<ComposerMode>(initialComposerMode);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
@@ -215,6 +303,15 @@ export function App() {
     generationId: undefined as string | undefined,
   });
   const nativeLlmRun = useRef<LlmStreamRun | undefined>(undefined);
+  const agentTaskEventPollRef = useRef<
+    | {
+        version: number;
+        taskId: string;
+        timer?: number;
+        afterSequence: number;
+      }
+    | undefined
+  >(undefined);
   const sceneRequest = useRef(0);
   const detachedSnapshotRef = useRef<Record<string, DetachedPanelSnapshot>>({});
   const detachedRegistryRef = useRef<Record<string, DetachedPanelRegistration>>({});
@@ -298,7 +395,6 @@ export function App() {
   const {
     assets,
     setAssets,
-    asset,
     setAsset,
     assetLibrarySelectedId,
     setAssetLibrarySelectedId,
@@ -394,8 +490,63 @@ export function App() {
     );
   };
 
+  const stopAgentTaskEventPolling = () => {
+    const poll = agentTaskEventPollRef.current;
+    if (poll?.timer !== undefined) window.clearInterval(poll.timer);
+    agentTaskEventPollRef.current = undefined;
+  };
+
+  const startAgentTaskEventPolling = (taskId: string) => {
+    stopAgentTaskEventPolling();
+    const poll = {
+      version: Date.now(),
+      taskId,
+      afterSequence: -1,
+      timer: undefined as number | undefined,
+    };
+    agentTaskEventPollRef.current = poll;
+    let requestPending = false;
+    const readEvents = () => {
+      if (requestPending || agentTaskEventPollRef.current !== poll) return;
+      requestPending = true;
+      void Promise.resolve()
+        .then(() =>
+          callWorker('agent.task.events', {
+            taskId,
+            afterSequence: poll.afterSequence,
+            limit: 100,
+          }),
+        )
+        .then((result) => {
+          if (agentTaskEventPollRef.current !== poll) return;
+          poll.afterSequence = result.nextSequence;
+          const latest = result.events.at(-1);
+          if (latest?.level === 'error') setChatMessage(latest.summary);
+          if (['completed', 'failed', 'cancelled'].includes(result.task.status)) {
+            if (result.task.errorMessage) setChatMessage(result.task.errorMessage);
+            stopAgentTaskEventPolling();
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          requestPending = false;
+        });
+    };
+    readEvents();
+    poll.timer = window.setInterval(readEvents, 400);
+  };
+
   const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
-    const isAgentGeneration = 'agentTaskId' in prepared;
+    const agentTaskId =
+      'agentTaskId' in prepared && typeof prepared.agentTaskId === 'string'
+        ? prepared.agentTaskId
+        : undefined;
+    const isAgentGeneration = agentTaskId !== undefined;
+    if (agentTaskId) {
+      startAgentTaskEventPolling(agentTaskId);
+    } else {
+      stopAgentTaskEventPolling();
+    }
     const previousDocumentIds = new Set(documents.map((item) => item.id));
     let agentDocumentRefreshStarted = false;
     const refreshAgentDocuments = () => {
@@ -477,6 +628,7 @@ export function App() {
         }
       })
       .finally(() => {
+        stopAgentTaskEventPolling();
         if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
           nativeLlmRun.current = undefined;
         }
@@ -485,8 +637,12 @@ export function App() {
 
   const cancelNativeLlmRun = async () => {
     const run = nativeLlmRun.current;
-    if (!run) return;
+    if (!run) {
+      stopAgentTaskEventPolling();
+      return;
+    }
     await run.cancel().catch(() => undefined);
+    stopAgentTaskEventPolling();
     if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
       nativeLlmRun.current = undefined;
     }
@@ -624,12 +780,14 @@ export function App() {
         JSON.stringify({
           providerProfileId: selectedLlmProfileId || undefined,
           modelId: selectedLlmModelId || undefined,
+          researchMode,
+          composerMode,
         }),
       );
     } catch {
       // The selection remains available for the current session when storage is unavailable.
     }
-  }, [selectedLlmProfileId, selectedLlmModelId]);
+  }, [selectedLlmProfileId, selectedLlmModelId, researchMode, composerMode]);
 
   useEffect(
     () => () => {
@@ -863,8 +1021,38 @@ export function App() {
     if (!composerValue.trim() || !conversation) return;
     const prompt = composerValue;
     setComposer('');
+    if (composerMode === 'novel-writing') {
+      await createNovelDraft(prompt);
+      return;
+    }
     if (selectedLlmProfile && selectedLlmModel) {
       try {
+        if (composerMode === 'chat') {
+          const inferred = inferDocumentIntent(prompt, document?.id);
+          if (inferred.needsTarget) {
+            setComposer(prompt);
+            setChatMessage('请先打开唯一的目标文档，再执行文档读取、更新、归档或恢复。');
+            return;
+          }
+          if (inferred.intent) {
+            const prepared = await callWorker('agent.generation.prepare', {
+              conversationId: conversation.id,
+              prompt,
+              providerProfileId: selectedLlmProfile.id,
+              modelId: selectedLlmModel.id,
+              agentMode: 'document',
+              researchMode,
+              documentIntent: inferred.intent,
+            });
+            if ('pendingIntent' in prepared) {
+              setComposer(prompt);
+              setChatMessage('文档目标需要进一步澄清；本次没有创建或修改文档。');
+              return;
+            }
+            launchPreparedGeneration(prepared);
+            return;
+          }
+        }
         const prepared = await callWorker('llm.generation.prepare', {
           conversationId: conversation.id,
           prompt,
@@ -917,14 +1105,69 @@ export function App() {
         providerProfileId: selectedLlmProfile.id,
         modelId: selectedLlmModel.id,
         agentMode: 'document',
-        researchMode: 'auto',
+        researchMode,
         documentIntent: { operation: 'document.create_draft' },
       });
+      if ('pendingIntent' in prepared) {
+        setComposer(prompt);
+        setChatMessage('文档目标需要澄清；补充目标后再提交。');
+        return;
+      }
       launchPreparedGeneration(prepared);
     } catch (reason) {
       setComposer(prompt);
       setChatMessage(reason instanceof Error ? reason.message : '文档草稿任务启动失败');
     }
+  };
+
+  const createNovelDraft = async (
+    prompt: string,
+    novelIntent?: {
+      action?: 'create_chapter' | 'continue_chapter' | 'rewrite_chapter';
+      chapterTitle?: string;
+      displayLabel?: string;
+    },
+  ) => {
+    if (!conversation) return;
+    if (!selectedLlmProfile || !selectedLlmModel) {
+      setComposer(prompt);
+      setChatMessage('小说创作需要已配置支持工具调用的 LLM 模型。');
+      return;
+    }
+    try {
+      const prepared = await callWorker('agent.generation.prepare', {
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: selectedLlmProfile.id,
+        modelId: selectedLlmModel.id,
+        agentMode: 'novel-writing',
+        researchMode,
+        novelIntent,
+      });
+      if ('pendingIntent' in prepared) {
+        setComposer(prompt);
+        setChatMessage('创作目标需要澄清；补充章节或动作后再提交。');
+        return;
+      }
+      launchPreparedGeneration(prepared);
+    } catch (reason) {
+      setComposer(prompt);
+      setChatMessage(reason instanceof Error ? reason.message : '小说草稿任务启动失败');
+    }
+  };
+
+  const createNovelChapter = async () => {
+    if (!conversation) return;
+    const title = window.prompt('章节名称');
+    if (!title?.trim()) return;
+    const label = window.prompt('章节显示标签', '');
+    const prompt = composer.trim() || `创作章节《${title.trim()}》。`;
+    setComposer('');
+    await createNovelDraft(prompt, {
+      action: 'create_chapter',
+      chapterTitle: title.trim(),
+      displayLabel: label?.trim() || undefined,
+    });
   };
 
   const cancelGeneration = async () => {
@@ -975,6 +1218,17 @@ export function App() {
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : '操作失败');
     }
+  };
+
+  const openNovelDocument = async (documentId: string) => {
+    await openDocumentById(documentId);
+    const existingLabel = Object.values(detachedRegistryRef.current).find(
+      (registration) =>
+        registration.config.panelId === 'document' &&
+        registration.config.projectId === project?.id &&
+        registration.config.entityId === documentId,
+    )?.config.label;
+    if (existingLabel) await focusDetachedPanelWindow(existingLabel);
   };
 
   const detachPanel = async (panelId: WorkspacePanelId) => {
@@ -1100,6 +1354,7 @@ export function App() {
         llmModels,
         selectedLlmProfileId,
         selectedLlmModelId,
+        researchMode,
         contextPreview,
         generation,
       }
@@ -1348,6 +1603,8 @@ export function App() {
       );
     } else if (action.type === 'conversation-model') {
       setSelectedLlmModelId(action.modelId);
+    } else if (action.type === 'conversation-research-mode') {
+      setResearchMode(action.mode);
     } else if (action.type === 'conversation-open-settings') {
       openSettings('providers');
       void getCurrentWindow().setFocus();
@@ -1400,6 +1657,7 @@ export function App() {
     scopeType,
     selectedLlmProfileId,
     selectedLlmModelId,
+    researchMode,
   ]);
 
   useEffect(() => {
@@ -1453,6 +1711,8 @@ export function App() {
       llmModels={llmModels}
       selectedLlmProfileId={selectedLlmProfileId}
       selectedLlmModelId={selectedLlmModelId}
+      researchMode={researchMode}
+      composerMode={composerMode}
       contextPreview={contextPreview}
       generation={generation}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
@@ -1482,6 +1742,8 @@ export function App() {
         );
       }}
       onLlmModelChange={setSelectedLlmModelId}
+      onResearchModeChange={setResearchMode}
+      onComposerModeChange={setComposerMode}
       onOpenProviderSettings={() => {
         setSettingsInitialPage('providers');
         setSettingsOpen(true);
@@ -1490,6 +1752,7 @@ export function App() {
       onCancelGeneration={() => void cancelGeneration()}
       onSendMessage={() => void sendMessage()}
       onCreateDocumentDraft={() => void createDocumentDraft()}
+      onCreateNovelChapter={() => void createNovelChapter()}
     />
   );
 
@@ -1860,6 +2123,17 @@ export function App() {
             </div>
             <nav className="project-nav" aria-label="项目导航">
               <button
+                className={`nav-item ${navigationMode === 'project' && view === 'novel' ? 'active' : ''}`}
+                type="button"
+                onClick={() => {
+                  setNavigationMode('project');
+                  setView('novel');
+                }}
+              >
+                <BookOpen size={16} />
+                <span>Novel chapters</span>
+              </button>
+              <button
                 className={`nav-item ${navigationMode === 'project' && view === 'documents' ? 'active' : ''}`}
                 type="button"
                 onClick={() => {
@@ -2112,10 +2386,18 @@ export function App() {
             onDetachDocument={() => void detachPanel('document')}
             onDetachConversation={() => void detachPanel('conversation')}
           >
-            {view === 'documents' ? (
+            {view === 'novel' ? (
+              <NovelWorkspace
+                projectId={project?.id}
+                writable={writable}
+                onOpenDocument={(documentId) => void openNovelDocument(documentId)}
+              />
+            ) : view === 'documents' ? (
               <>
                 {renderDocumentToolbar(
-                  document?.currentVersion?.state === 'published' ? '已发布项目资料' : '项目文档草稿',
+                  document?.currentVersion?.state === 'published'
+                    ? '已发布项目资料'
+                    : '项目文档草稿',
                   '文档编辑器',
                 )}
                 {project ? (
@@ -2144,9 +2426,7 @@ export function App() {
                           <span>{item.title}</span>
                         </button>
                       ))}
-                      {documents.length === 0 && (
-                        <small className="tree-empty">暂无正式文档</small>
-                      )}
+                      {documents.length === 0 && <small className="tree-empty">暂无正式文档</small>}
                     </aside>
                     <div className="directory-pane">{renderDocumentEditor()}</div>
                   </div>
@@ -2293,6 +2573,7 @@ export function App() {
                 ) : (
                   <EmptyWorkspace />
                 )}
+                <ChangeSetReviewPanel projectId={project?.id} writable={writable} />
               </>
             ) : view === 'tasks' ? (
               <TaskLogView

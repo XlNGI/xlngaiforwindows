@@ -6,6 +6,9 @@ import type {
   AgentTaskDetail,
   AgentTaskEventInfo,
   AgentTaskGetParams,
+  AgentProviderStepInfo,
+  AgentTaskEventsParams,
+  AgentTaskEventsResult,
   AgentTaskInfo,
   AgentTaskListParams,
   DocumentDetail,
@@ -178,6 +181,45 @@ interface TaskDocumentRow {
   document_version_id: string;
   operation: 'create' | 'update' | 'regenerate';
   created_at: string;
+}
+
+interface AgentProviderStepRow {
+  id: string;
+  generation_id: string;
+  attempt_id: string;
+  ordinal: number;
+  protocol: string;
+  status: AgentProviderStepInfo['status'];
+  tool_call_count: number;
+  finish_reason: string | null;
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_tokens: number | null;
+  total_tokens: number | null;
+  provider_reported_cost: string | null;
+  currency: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+interface AgentResearchSourceRow {
+  id: string;
+  title: string;
+  site: string;
+  canonical_url: string;
+  retrieved_at: string;
+  content_hash: string | null;
+  character_count: number | null;
+  truncated: number;
+  status: string;
+  citation_label: string | null;
+  adoption_status: string;
+  adoption_reason: string | null;
+  cache_status: string | null;
+  cache_error_code: string | null;
 }
 
 export interface TrustedAgentDraftParams {
@@ -713,6 +755,15 @@ export class DocumentWorkflowService {
     publication: DocumentPublicationInfo;
   } {
     return this.projects.access(true, (database, project) =>
+      database.transaction(() => this.publishInTransaction(database, project, params))(),
+    );
+  }
+
+  selfPublish(params: DocumentPublishParams): {
+    document: DocumentDetail;
+    publication: DocumentPublicationInfo;
+  } {
+    return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const document = this.requireDocument(database, project, params.documentId);
         this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
@@ -723,131 +774,217 @@ export class DocumentWorkflowService {
         );
         this.requireCurrentVersion(document, version);
         if (version.state !== 'in_review') {
-          throw new DocumentWorkflowError(
-            'Document version must be approved through review before publishing.',
-            'INVALID_STATE',
-          );
-        }
-        const review = database
-          .prepare('SELECT * FROM document_reviews WHERE document_version_id = ?')
-          .get(version.id) as ReviewRow | undefined;
-        if (!review || review.status !== 'pending') {
-          throw new DocumentWorkflowError(
-            'No pending review exists for this document version.',
-            'INVALID_STATE',
-          );
-        }
-        const expectedPublished = params.expectedPublishedVersionId ?? undefined;
-        const actualPublished = document.published_version_id ?? undefined;
-        if (
-          expectedPublished !== actualPublished ||
-          (version.base_version_id ?? undefined) !== actualPublished
-        ) {
+          if (!['draft', 'changes_requested'].includes(version.state)) {
+            throw new DocumentWorkflowError(
+              'Document version is not ready for self-publication.',
+              'INVALID_STATE',
+            );
+          }
+          const now = new Date().toISOString();
+          const existing = database
+            .prepare('SELECT * FROM document_reviews WHERE document_version_id = ?')
+            .get(version.id) as ReviewRow | undefined;
+          if (existing && !['changes_requested', 'withdrawn'].includes(existing.status)) {
+            throw new DocumentWorkflowError(
+              'A review already exists for this document version.',
+              'CONFLICT',
+            );
+          }
+          const reviewId = existing?.id ?? randomUUID();
+          if (existing) {
+            database
+              .prepare(
+                `UPDATE document_reviews
+                 SET status = 'pending', requested_by_type = ?, requested_by_id = ?, requested_at = ?,
+                     decided_by_type = NULL, decided_by_id = NULL, decided_at = NULL, comment = NULL,
+                     version = version + 1
+                 WHERE id = ?`,
+              )
+              .run(LOCAL_USER, LOCAL_USER, now, reviewId);
+          } else {
+            database
+              .prepare(
+                `INSERT INTO document_reviews
+                 (id, project_id, document_id, document_version_id, task_id, status,
+                  requested_by_type, requested_by_id, requested_at, version)
+                 VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, 0)`,
+              )
+              .run(
+                reviewId,
+                project.id,
+                document.id,
+                version.id,
+                version.source_task_id,
+                LOCAL_USER,
+                LOCAL_USER,
+                now,
+              );
+          }
+          this.updateVersionState(database, version, 'in_review', now);
           this.appendEvent(
             database,
             project.id,
             version.source_task_id,
-            'document.publish.conflicted',
-            'warning',
-            'The draft was based on an outdated published version.',
-            { documentId: document.id, documentVersionId: version.id },
-            new Date().toISOString(),
+            'document.review.started',
+            'info',
+            'Draft entered local self-review.',
+            { documentId: document.id, documentVersionId: version.id, reviewId },
+            now,
           );
-          throw new DocumentWorkflowError(
-            'DOCUMENT_BASE_CONFLICT: The published document changed while this draft was being reviewed.',
-            'DOCUMENT_BASE_CONFLICT',
-          );
+          this.appendAudit(database, project.id, {
+            action: 'review_submitted',
+            actorType: 'user',
+            actorId: LOCAL_USER,
+            documentId: document.id,
+            documentVersionId: version.id,
+            reviewId,
+            taskId: version.source_task_id ?? undefined,
+            metadata: { mode: 'self_publish' },
+            createdAt: now,
+          });
         }
-        const now = new Date().toISOString();
-        const nextPublicationNo =
-          ((
-            database
-              .prepare(
-                'SELECT MAX(publication_no) AS value FROM document_publications WHERE document_id = ?',
-              )
-              .get(document.id) as { value: number | null }
-          ).value ?? 0) + 1;
-        const publicationId = randomUUID();
+        return this.publishInTransaction(database, project, params);
+      })(),
+    );
+  }
+
+  private publishInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    params: DocumentPublishParams,
+  ): { document: DocumentDetail; publication: DocumentPublicationInfo } {
+    const document = this.requireDocument(database, project, params.documentId);
+    this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+    const version = this.requireVersion(
+      database,
+      document.id,
+      params.documentVersionId ?? document.current_version_id,
+    );
+    this.requireCurrentVersion(document, version);
+    if (version.state !== 'in_review') {
+      throw new DocumentWorkflowError(
+        'Document version must be approved through review before publishing.',
+        'INVALID_STATE',
+      );
+    }
+    const review = database
+      .prepare('SELECT * FROM document_reviews WHERE document_version_id = ?')
+      .get(version.id) as ReviewRow | undefined;
+    if (!review || review.status !== 'pending') {
+      throw new DocumentWorkflowError(
+        'No pending review exists for this document version.',
+        'INVALID_STATE',
+      );
+    }
+    const expectedPublished = params.expectedPublishedVersionId ?? undefined;
+    const actualPublished = document.published_version_id ?? undefined;
+    if (
+      expectedPublished !== actualPublished ||
+      (version.base_version_id ?? undefined) !== actualPublished
+    ) {
+      this.appendEvent(
+        database,
+        project.id,
+        version.source_task_id,
+        'document.publish.conflicted',
+        'warning',
+        'The draft was based on an outdated published version.',
+        { documentId: document.id, documentVersionId: version.id },
+        new Date().toISOString(),
+      );
+      throw new DocumentWorkflowError(
+        'DOCUMENT_BASE_CONFLICT: The published document changed while this draft was being reviewed.',
+        'DOCUMENT_BASE_CONFLICT',
+      );
+    }
+    const now = new Date().toISOString();
+    const nextPublicationNo =
+      ((
         database
           .prepare(
-            `UPDATE document_reviews
+            'SELECT MAX(publication_no) AS value FROM document_publications WHERE document_id = ?',
+          )
+          .get(document.id) as { value: number | null }
+      ).value ?? 0) + 1;
+    const publicationId = randomUUID();
+    database
+      .prepare(
+        `UPDATE document_reviews
              SET status = 'approved', decided_by_type = ?, decided_by_id = ?, decided_at = ?,
                  version = version + 1
              WHERE id = ?`,
-          )
-          .run(LOCAL_USER, LOCAL_USER, now, review.id);
-        this.updateVersionState(database, version, 'published', now);
-        database
-          .prepare(
-            `INSERT INTO document_publications
+      )
+      .run(LOCAL_USER, LOCAL_USER, now, review.id);
+    this.updateVersionState(database, version, 'published', now);
+    database
+      .prepare(
+        `INSERT INTO document_publications
              (id, project_id, document_id, document_version_id, previous_version_id, publication_no,
               review_id, task_id, published_by_type, published_by_id, published_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            publicationId,
-            project.id,
-            document.id,
-            version.id,
-            document.published_version_id,
-            nextPublicationNo,
-            review.id,
-            version.source_task_id,
-            LOCAL_USER,
-            LOCAL_USER,
-            now,
-          );
-        const update = database
-          .prepare(
-            `UPDATE documents
+      )
+      .run(
+        publicationId,
+        project.id,
+        document.id,
+        version.id,
+        document.published_version_id,
+        nextPublicationNo,
+        review.id,
+        version.source_task_id,
+        LOCAL_USER,
+        LOCAL_USER,
+        now,
+      );
+    const update = database
+      .prepare(
+        `UPDATE documents
              SET published_version_id = ?, current_version_id = ?, updated_at = ?, row_version = row_version + 1
              WHERE id = ? AND row_version = ?`,
-          )
-          .run(version.id, version.id, now, document.id, params.expectedDocumentRowVersion);
-        if (update.changes !== 1) {
-          throw new DocumentWorkflowError('Document was changed in another window.', 'CONFLICT');
-        }
-        this.completeSourceTask(
-          database,
-          project.id,
-          version.source_task_id,
-          version.id,
-          'published',
-          now,
-        );
-        this.appendEvent(
-          database,
-          project.id,
-          version.source_task_id,
-          'document.published',
-          'info',
-          'Document version was published as project authority.',
-          { documentId: document.id, documentVersionId: version.id, publicationId },
-          now,
-        );
-        this.appendAudit(database, project.id, {
-          action: 'published',
-          actorType: 'user',
-          actorId: LOCAL_USER,
-          documentId: document.id,
-          documentVersionId: version.id,
-          reviewId: review.id,
-          publicationId,
-          taskId: version.source_task_id ?? undefined,
-          metadata: { previousVersionId: document.published_version_id ?? null },
-          createdAt: now,
-        });
-        this.touchProject(database, project, now);
-        return {
-          document: this.getDocumentInProject(database, project, document.id),
-          publication: toPublication(
-            database
-              .prepare('SELECT * FROM document_publications WHERE id = ?')
-              .get(publicationId) as PublicationRow,
-          ),
-        };
-      })(),
+      )
+      .run(version.id, version.id, now, document.id, params.expectedDocumentRowVersion);
+    if (update.changes !== 1) {
+      throw new DocumentWorkflowError('Document was changed in another window.', 'CONFLICT');
+    }
+    this.completeSourceTask(
+      database,
+      project.id,
+      version.source_task_id,
+      version.id,
+      'published',
+      now,
     );
+    this.appendEvent(
+      database,
+      project.id,
+      version.source_task_id,
+      'document.published',
+      'info',
+      'Document version was published as project authority.',
+      { documentId: document.id, documentVersionId: version.id, publicationId },
+      now,
+    );
+    this.appendAudit(database, project.id, {
+      action: 'published',
+      actorType: 'user',
+      actorId: LOCAL_USER,
+      documentId: document.id,
+      documentVersionId: version.id,
+      reviewId: review.id,
+      publicationId,
+      taskId: version.source_task_id ?? undefined,
+      metadata: { previousVersionId: document.published_version_id ?? null },
+      createdAt: now,
+    });
+    this.touchProject(database, project, now);
+    return {
+      document: this.getDocumentInProject(database, project, document.id),
+      publication: toPublication(
+        database
+          .prepare('SELECT * FROM document_publications WHERE id = ?')
+          .get(publicationId) as PublicationRow,
+      ),
+    };
   }
 
   createDocumentDraftFromMessage(
@@ -1000,6 +1137,39 @@ export class DocumentWorkflowService {
     return document;
   }
 
+  writeRecoveredUserDraftInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    params: {
+      documentId: string;
+      title: string;
+      contentMarkdown: string;
+      expectedDocumentRowVersion: number;
+      baseVersionId?: string;
+    },
+  ): DocumentDetail {
+    const document = this.writeDraft(database, project, {
+      documentId: params.documentId,
+      title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
+      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      expectedDocumentRowVersion: params.expectedDocumentRowVersion,
+      baseVersionId: params.baseVersionId,
+      authorType: 'user',
+    });
+    const version = document.currentVersion;
+    if (!version) throw new DocumentWorkflowError('EXPECTED_ARTIFACT_MISSING', 'CONFLICT');
+    this.appendAudit(database, project.id, {
+      action: 'draft_saved',
+      actorType: 'user',
+      actorId: LOCAL_USER,
+      documentId: document.id,
+      documentVersionId: version.id,
+      metadata: { operation: 'partial-recovery' },
+      createdAt: version.createdAt,
+    });
+    return document;
+  }
+
   applyTrustedAgentLifecycleInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1115,7 +1285,103 @@ export class DocumentWorkflowService {
         operation: item.operation,
         createdAt: item.created_at,
       }));
-      return { task: toTask(task), events, documents };
+      const providerSteps = (
+        database
+          .prepare(
+            `SELECT steps.id, steps.generation_id, steps.attempt_id, steps.ordinal, steps.protocol,
+                    steps.status, steps.tool_call_count, steps.finish_reason, steps.input_tokens,
+                    steps.cached_input_tokens, steps.output_tokens, steps.reasoning_tokens,
+                    steps.total_tokens, steps.provider_reported_cost, steps.currency,
+                    steps.error_code, steps.error_message, steps.started_at, steps.completed_at
+             FROM llm_provider_steps steps
+             INNER JOIN agent_task_generations links ON links.generation_id = steps.generation_id
+             WHERE links.task_id = ? AND steps.project_id = ?
+             ORDER BY steps.started_at, steps.ordinal, steps.id`,
+          )
+          .all(task.id, project.id) as AgentProviderStepRow[]
+      ).map((step) => ({
+        id: step.id,
+        generationId: step.generation_id,
+        attemptId: step.attempt_id,
+        ordinal: step.ordinal,
+        protocol: step.protocol,
+        status: step.status,
+        toolCallCount: step.tool_call_count,
+        ...(step.finish_reason ? { finishReason: step.finish_reason } : {}),
+        ...(step.input_tokens !== null ? { inputTokens: step.input_tokens } : {}),
+        ...(step.cached_input_tokens !== null
+          ? { cachedInputTokens: step.cached_input_tokens }
+          : {}),
+        ...(step.output_tokens !== null ? { outputTokens: step.output_tokens } : {}),
+        ...(step.reasoning_tokens !== null ? { reasoningTokens: step.reasoning_tokens } : {}),
+        ...(step.total_tokens !== null ? { totalTokens: step.total_tokens } : {}),
+        ...(step.provider_reported_cost
+          ? { providerReportedCost: step.provider_reported_cost }
+          : {}),
+        ...(step.currency ? { currency: step.currency } : {}),
+        ...(step.error_code ? { errorCode: step.error_code } : {}),
+        ...(step.error_message ? { errorMessage: step.error_message } : {}),
+        startedAt: step.started_at,
+        ...(step.completed_at ? { completedAt: step.completed_at } : {}),
+      }));
+      const researchSources = (
+        database
+          .prepare(
+            `SELECT sources.id, sources.title, sources.site, sources.canonical_url,
+                    sources.retrieved_at, sources.content_hash, sources.character_count,
+                    sources.truncated, sources.status, sources.citation_label,
+                    sources.adoption_status, sources.adoption_reason,
+                    cache.status AS cache_status, cache.last_error_code AS cache_error_code
+             FROM agent_research_sources sources
+             LEFT JOIN agent_research_cache cache
+               ON cache.project_id = sources.project_id
+              AND cache.content_hash = sources.content_hash
+             WHERE sources.project_id = ? AND sources.task_id = ?
+             ORDER BY sources.created_at, sources.id`,
+          )
+          .all(project.id, task.id) as AgentResearchSourceRow[]
+      ).map((source) => ({
+        id: source.id,
+        title: source.title,
+        site: source.site,
+        canonicalUrl: source.canonical_url,
+        retrievedAt: source.retrieved_at,
+        ...(source.content_hash ? { contentHash: source.content_hash } : {}),
+        ...(source.character_count !== null ? { characterCount: source.character_count } : {}),
+        truncated: source.truncated === 1,
+        status: source.status as 'searched' | 'fetched' | 'excluded' | 'failed',
+        ...(source.citation_label ? { citationLabel: source.citation_label } : {}),
+        adoptionStatus: source.adoption_status as 'unreviewed' | 'adopted' | 'excluded',
+        ...(source.adoption_reason ? { adoptionReason: source.adoption_reason } : {}),
+        ...(source.cache_status
+          ? { cacheStatus: source.cache_status as 'present' | 'missing' | 'expired' }
+          : {}),
+        ...(source.cache_error_code ? { cacheErrorCode: source.cache_error_code } : {}),
+      }));
+      return { task: toTask(task), events, documents, providerSteps, researchSources };
+    });
+  }
+
+  getTaskEvents(params: AgentTaskEventsParams): AgentTaskEventsResult {
+    return this.projects.access(false, (database, project) => {
+      const task = this.requireTask(database, project, params.taskId);
+      const afterSequence = Math.max(-1, params.afterSequence ?? -1);
+      const limit = Math.min(Math.max(params.limit ?? 32, 1), 100);
+      const rows = database
+        .prepare(
+          `SELECT * FROM agent_task_events
+         WHERE task_id = ? AND sequence > ?
+         ORDER BY sequence, id LIMIT ?`,
+        )
+        .all(task.id, afterSequence, limit + 1) as AgentTaskEventRow[];
+      const hasMore = rows.length > limit;
+      const events = rows.slice(0, limit).map(toEvent);
+      return {
+        task: toTask(task),
+        events,
+        nextSequence: events.length > 0 ? events[events.length - 1]!.sequence : afterSequence,
+        hasMore,
+      };
     });
   }
 

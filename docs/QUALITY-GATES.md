@@ -68,6 +68,8 @@ created -> streaming -> complete
 | Provider 忽略 Abort | 关闭和切换在固定时限内完成，旧回调不能再写数据库 |
 | Worker stderr 持续输出 | 后台排空且有界保留，不阻塞 stdout 响应 |
 | Worker 请求无响应 | IPC 超时，终止并在下次请求重建 Worker |
+| Native 研究桥缺少或令牌错误 | Worker 研究 fail-closed；不回退到 Worker 直接外网请求 |
+| Native 研究请求取消或 Worker 崩溃 | 当前桥请求不得产生草稿或伪造成功；恢复语义需在任务日志中明确为失败/重试 |
 | 中文上下文接近预算 | 中文保守估算与裁剪共用规则，不绕过 token 门禁 |
 | 同模型存在多个 API Version | UI 使用完整 adapter key，解析显式携带版本 |
 | 快速切换项目/场次/镜头/会话 | 过期请求结果和错误不得覆盖当前选择 |
@@ -167,6 +169,9 @@ created -> streaming -> complete
 - 本轮 M7 未验证：真实 OpenAI/Vidu 发布候选成功请求、正式签名、上一正式版本升级、干净 Windows 虚拟机、断网/联网切换和真实系统休眠恢复。既有 M6 真实参考生视频证据不替代当前发布候选验证。
 - UniCompAPI 自动门禁：官方单卡片、搜索式平铺模型列表、未知模型默认关闭、精确能力合同、聊天/图片/编辑/视频固定路由、Bearer 原生桥、鉴权视频下载、Base64 脱敏和 Vidu 回归均有自动测试。模型同步到启用再到原生路由的 Worker/Rust 集成测试通过；真实 UniCompAPI 凭据与额度请求尚未执行，状态保持 `HOLD`。
 - UniCompAPI Vidu 兼容视频请求体：2026-08-12 新增 `viduq3` 参考生视频和 `viduq3-pro` 首尾帧生视频目录项；两者复用 Vidu 官方 Schema，经 `/v1/videos` 发送时保留 `images` 数组、首尾顺序和已声明字段。generation-adapters 16 项、ProductionPanel 23 项、Rust 40 项测试及相关 TypeScript 类型检查通过；真实 UniCompAPI 额度请求尚未执行，状态保持 `HOLD`。
+- 积分定价与参考生视频扩展：2026-08-19 完成 A1/A2 定价/用量回归、A3 sidecar ABI 硬门禁和 `viduq3-ad`、`viduq3-mix`、`viduq3-turbo`、`viduq2-pro` 扩展。配置工厂、Worker 内置模型补种、Rust 精确模型注入和视频任务白名单均已同步；mix 在 TypeScript Schema 与 Rust 字段白名单双侧拒绝 `off_peak`。generation-adapters 17 项、Worker 21 文件/172 项、Rust 49 项、sidecar build 与 M7 SQLite lifecycle 验证均通过；真实 Vidu/UniCompAPI 额度成功请求仍为 `HOLD`。
+- Agent 研究取消与普通文档意图：2026-08-19 Worker 研究请求已带请求 ID，Native bridge 提供 `/research/cancel`、进程级取消注册表和 WinHTTP 分段取消检查；普通聊天仅对明确文档动作升级 Agent，目标操作必须绑定当前文档，否定表达/无目标请求零写入。Worker 198 项、Desktop 111 项、Rust 55 项、全仓测试/类型/lint/format/build 通过；Worker 崩溃后研究恢复、真实研究冒烟、安装包和 Windows 实机取消演练仍未验证。
+- 发布升级门禁硬化：`validate-nsis-upgrade.ps1` 现在默认拒绝相同内容的“上一版本”安装包；同包覆盖只能显式使用 `-AllowSameInstallerBaseline`，CI 未配置 `PREVIOUS_INSTALLER_PATH` 时记录 HOLD，不再把覆盖测试当作跨版本升级证据。
 - Markdown 文档导入：2026-08-13 新增项目文档工具栏一键导入；只接受用户明确选择的 UTF-8 `.md`/`.markdown` 文件，原生读取边界限制为 5 MiB，并覆盖 BOM、非法扩展、非法编码和超限拒绝。导入内容通过既有 `document.save` 创建“创作笔记”正式版本，可进入后续 LLM 上下文；Desktop 63 项、Worker 117 项、Rust 41 项测试，以及全仓类型检查、Lint、Prettier、Rust fmt/check 和桌面生产构建通过，1280×720 与 390×844 工具栏无越界或水平溢出。
 - 素材类型下拉筛选：2026-08-13 将“全部素材 / 图片 / 视频”三段按钮合并为单选下拉菜单，保留 `all/image/video` 查询合同及与素材组、日期、排序的组合筛选；真实项目 9/6/3 项切换正确，1440×900、1280×720 与 390×844 无越界、重叠或水平溢出。
 - UniCompAPI 发布候选本机门禁：2026-08-11 重新打包 Worker Sidecar、M7 Sidecar 生命周期、Tauri Release、NSIS 和临时目录干净安装均通过；候选安装包为 `20,551,685` 字节，SHA-256 `C47BAF6404964609583D20ACF532A5D24CE326C2FA629D16350D2A99C739156D`。安装包仍为 `NotSigned`，本次结果不替代 Hosted Windows、正式签名或真实 UniCompAPI 请求。

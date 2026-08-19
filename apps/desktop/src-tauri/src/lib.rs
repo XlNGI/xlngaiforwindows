@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError},
         Arc, Mutex,
     },
@@ -19,6 +20,7 @@ mod credential_store;
 mod llm_stream;
 mod provider_connector;
 mod provider_http;
+mod research_bridge;
 
 use credential_store::{
     credential_copy, credential_delete, credential_exists, credential_read, credential_set,
@@ -28,9 +30,13 @@ use credential_store::{
 use credential_store::{
     credential_target, ensure_credential_subject, validate_credential_provider,
 };
-use llm_stream::{llm_stream, llm_stream_cancel, LlmStreamState};
+use llm_stream::{
+    agent_runtime_cancel, agent_runtime_confirm, agent_runtime_start, agent_runtime_subscribe,
+    llm_stream, llm_stream_cancel, LlmStreamState,
+};
 use provider_connector::provider_test_connection;
 use provider_http::{request_bytes, request_json, JsonHttpRequest};
+use research_bridge::NativeResearchBridge;
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
@@ -42,6 +48,7 @@ const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_TASK_ID_LIMIT: usize = 256;
 const MARKDOWN_IMPORT_LIMIT: u64 = 5 * 1024 * 1024;
+const NATIVE_AGENT_EXIT_GRACE: Duration = Duration::from_secs(2);
 const UNICOMPAPI_HOST: &str = "unicompapi.com";
 const UNICOMPAPI_AUTHORIZATION_SCHEME: &str = "Bearer";
 #[cfg(any(not(debug_assertions), test))]
@@ -76,6 +83,15 @@ const REFERENCE_VIDEO_FIELDS: &[&str] = &[
     "audio",
     "seed",
     "off_peak",
+];
+const REFERENCE_VIDEO_NO_OFF_PEAK_FIELDS: &[&str] = &[
+    "images",
+    "prompt",
+    "duration",
+    "aspect_ratio",
+    "resolution",
+    "audio",
+    "seed",
 ];
 const Q3_VIDEO_FIELDS: &[&str] = &[
     "images",
@@ -117,7 +133,7 @@ const UNICOMPAPI_IMAGE_TO_VIDEO_MODELS: &[&str] = &[
     "viduq3-mix",
     "viduq3-turbo",
 ];
-const UNICOMPAPI_REFERENCE_TO_VIDEO_MODELS: &[&str] = &["viduq3"];
+const UNICOMPAPI_REFERENCE_TO_VIDEO_MODELS: &[&str] = &["viduq3", "viduq3-ad", "viduq3-mix"];
 const UNICOMPAPI_START_END_TO_VIDEO_MODELS: &[&str] = &["viduq3-pro"];
 const UNICOMPAPI_IMAGE_FIELDS: &[&str] = &["prompt", "size", "n", "response_format", "watermark"];
 const UNICOMPAPI_IMAGE_EDIT_FIELDS: &[&str] = &["images", "prompt", "size", "response_format"];
@@ -205,11 +221,20 @@ fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderT
             model: "viduq3-pro",
             allowed_fields: TEXT_VIDEO_FIELDS,
         },
-        "REFERENCE_TO_VIDEO:vidu:viduq3:v2" | "IMAGE_TO_VIDEO:vidu:viduq3:v2" => ProviderTarget {
+        "REFERENCE_TO_VIDEO:vidu:viduq3:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3-ad:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3-turbo:v2"
+        | "IMAGE_TO_VIDEO:vidu:viduq3:v2" => ProviderTarget {
             credential_provider,
             host,
             path: "/ent/v2/reference2video",
-            model: "viduq3",
+            model: if adapter_key.contains(":viduq3-ad:") {
+                "viduq3-ad"
+            } else if adapter_key.contains(":viduq3-turbo:") {
+                "viduq3-turbo"
+            } else {
+                "viduq3"
+            },
             allowed_fields: REFERENCE_VIDEO_FIELDS,
         },
         "REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2" => ProviderTarget {
@@ -217,6 +242,20 @@ fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderT
             host,
             path: "/ent/v2/reference2video",
             model: "viduq3-drama",
+            allowed_fields: REFERENCE_VIDEO_FIELDS,
+        },
+        "REFERENCE_TO_VIDEO:vidu:viduq3-mix:v2" => ProviderTarget {
+            credential_provider,
+            host,
+            path: "/ent/v2/reference2video",
+            model: "viduq3-mix",
+            allowed_fields: REFERENCE_VIDEO_NO_OFF_PEAK_FIELDS,
+        },
+        "REFERENCE_TO_VIDEO:vidu:viduq2-pro:v2" => ProviderTarget {
+            credential_provider,
+            host,
+            path: "/ent/v2/reference2video",
+            model: "viduq2-pro",
             allowed_fields: REFERENCE_VIDEO_FIELDS,
         },
         "START_END_TO_VIDEO:vidu:viduq3-pro:v2" | "IMAGE_TO_VIDEO:vidu:viduq3-pro:v2" => {
@@ -667,6 +706,10 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
     match adapter_key {
         "TEXT_TO_VIDEO:vidu:viduq3-pro:v2"
         | "REFERENCE_TO_VIDEO:vidu:viduq3:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3-ad:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3-mix:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq3-turbo:v2"
+        | "REFERENCE_TO_VIDEO:vidu:viduq2-pro:v2"
         | "REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2"
         | "START_END_TO_VIDEO:vidu:viduq3-pro:v2"
         | "IMAGE_TO_VIDEO:vidu:viduq3:v2"
@@ -1244,9 +1287,14 @@ impl WorkerProcess {
         Self::spawn_command(worker_command()?)
     }
 
-    fn spawn_for_app(app_data_dir: &Path) -> Result<Self, String> {
+    fn spawn_for_app(
+        app_data_dir: &Path,
+        research_bridge: &NativeResearchBridge,
+    ) -> Result<Self, String> {
         let mut command = worker_command()?;
         command.env("AI_VIDEO_APP_DATA_DIR", app_data_dir);
+        command.env("AI_VIDEO_RESEARCH_BRIDGE_URL", research_bridge.url());
+        command.env("AI_VIDEO_RESEARCH_BRIDGE_TOKEN", research_bridge.token());
         Self::spawn_command(command)
     }
 
@@ -1399,6 +1447,7 @@ fn bundled_worker_path(application_dir: &Path) -> PathBuf {
 struct WorkerState {
     process: Mutex<Option<WorkerProcess>>,
     app_data_dir: PathBuf,
+    research_bridge: NativeResearchBridge,
 }
 
 #[derive(Clone, Serialize)]
@@ -1419,6 +1468,12 @@ struct LegacyProviderMigrationReport {
 }
 
 struct LegacyProviderMigrationState(LegacyProviderMigrationReport);
+
+#[derive(Clone, Default)]
+struct NativeRuntimeExitState {
+    started: Arc<AtomicBool>,
+    completed: Arc<AtomicBool>,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1483,17 +1538,21 @@ fn markdown_import(path: String) -> Result<MarkdownImportResult, String> {
 }
 
 impl WorkerState {
-    fn new(app_data_dir: PathBuf) -> Self {
-        Self {
+    fn new(app_data_dir: PathBuf) -> Result<Self, String> {
+        Ok(Self {
             process: Mutex::new(None),
             app_data_dir,
-        }
+            research_bridge: NativeResearchBridge::start()?,
+        })
     }
 
     fn request(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
         let mut guard = self.process.lock().map_err(|_| "Worker lock is poisoned")?;
         if guard.is_none() {
-            *guard = Some(WorkerProcess::spawn_for_app(&self.app_data_dir)?);
+            *guard = Some(WorkerProcess::spawn_for_app(
+                &self.app_data_dir,
+                &self.research_bridge,
+            )?);
         }
         let result = guard
             .as_mut()
@@ -1512,6 +1571,39 @@ fn worker_request(
     state: tauri::State<'_, WorkerState>,
 ) -> Result<serde_json::Value, String> {
     state.request(&request)
+}
+
+fn interrupt_native_agent_runtimes(app: tauri::AppHandle, exit_state: NativeRuntimeExitState) {
+    let generation_ids = app.state::<LlmStreamState>().interrupt_agent_runtimes();
+    if generation_ids.is_empty() {
+        exit_state.completed.store(true, Ordering::Release);
+        app.exit(0);
+        return;
+    }
+
+    let worker_app = app.clone();
+    let worker_exit_state = exit_state.clone();
+    thread::spawn(move || {
+        let worker = worker_app.state::<WorkerState>();
+        for generation_id in generation_ids {
+            let _ = worker.request(&serde_json::json!({
+                "id": format!("native-agent-exit-{generation_id}"),
+                "protocolVersion": 1,
+                "method": "llm.generation.cancel",
+                "params": { "generationId": generation_id },
+            }));
+        }
+        if !worker_exit_state.completed.swap(true, Ordering::AcqRel) {
+            worker_app.exit(0);
+        }
+    });
+
+    thread::spawn(move || {
+        thread::sleep(NATIVE_AGENT_EXIT_GRACE);
+        if !exit_state.completed.swap(true, Ordering::AcqRel) {
+            app.exit(0);
+        }
+    });
 }
 
 fn migrate_legacy_provider_credentials(state: &WorkerState) -> LegacyProviderMigrationReport {
@@ -1658,11 +1750,12 @@ pub fn run() {
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             create_dir_all(&app_data_dir)?;
-            let worker_state = WorkerState::new(app_data_dir);
+            let worker_state = WorkerState::new(app_data_dir)?;
             let migration_report = migrate_legacy_provider_credentials(&worker_state);
             app.manage(LegacyProviderMigrationState(migration_report));
             app.manage(worker_state);
             app.manage(LlmStreamState::default());
+            app.manage(NativeRuntimeExitState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1675,14 +1768,28 @@ pub fn run() {
             provider_test_connection,
             llm_stream,
             llm_stream_cancel,
+            agent_runtime_start,
+            agent_runtime_cancel,
+            agent_runtime_confirm,
+            agent_runtime_subscribe,
             provider_submit,
             provider_submit_task,
             provider_poll_task,
             provider_download_task,
             provider_cancel_task
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running unicomp");
+        .build(tauri::generate_context!())
+        .expect("error while building unicomp")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let exit_state = app.state::<NativeRuntimeExitState>().inner().clone();
+                if exit_state.started.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                api.prevent_exit();
+                interrupt_native_agent_runtimes(app.clone(), exit_state);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1825,7 +1932,8 @@ mod tests {
         create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
 
         {
-            let state = WorkerState::new(app_data_dir.clone());
+            let state =
+                WorkerState::new(app_data_dir.clone()).expect("research bridge should start");
             let missing_id = "123e4567-e89b-42d3-a456-426614174000";
             assert!(ensure_credential_subject("vidu", &state).is_ok());
             assert!(ensure_credential_subject(missing_id, &state).is_err());
@@ -1880,7 +1988,8 @@ mod tests {
         create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
 
         {
-            let state = WorkerState::new(app_data_dir.clone());
+            let state =
+                WorkerState::new(app_data_dir.clone()).expect("research bridge should start");
             let first = state
                 .request(&json!({
                     "id": "rust-legacy-profile-first",
@@ -1925,7 +2034,8 @@ mod tests {
         create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
 
         {
-            let state = WorkerState::new(app_data_dir.clone());
+            let state =
+                WorkerState::new(app_data_dir.clone()).expect("research bridge should start");
             let created = state
                 .request(&json!({
                     "id": "rust-media-profile-create",
@@ -2017,7 +2127,8 @@ mod tests {
         create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
 
         {
-            let state = WorkerState::new(app_data_dir.clone());
+            let state =
+                WorkerState::new(app_data_dir.clone()).expect("research bridge should start");
             let created = state
                 .request(&json!({
                     "id": "rust-unicompapi-profile-create",
@@ -2156,6 +2267,24 @@ mod tests {
         let parsed_drama: serde_json::Value =
             serde_json::from_slice(&drama_body).expect("valid Q3-Drama JSON");
         assert_eq!(parsed_drama["model"], "viduq3-drama");
+        for model in ["viduq3-ad", "viduq3-turbo", "viduq2-pro"] {
+            let target = provider_target(&format!("REFERENCE_TO_VIDEO:vidu:{model}:v2"), "global")
+                .expect("new Vidu reference-video adapter should resolve");
+            assert_eq!(target.path, "/ent/v2/reference2video");
+            assert_eq!(target.model, model);
+        }
+        let mix = provider_target("REFERENCE_TO_VIDEO:vidu:viduq3-mix:v2", "global")
+            .expect("Q3-Mix reference video adapter should resolve");
+        assert_eq!(mix.model, "viduq3-mix");
+        assert!(provider_payload(
+            mix,
+            json!({
+                "images": ["https://example.com/reference.png"],
+                "prompt": "mixed scene",
+                "off_peak": true
+            }),
+        )
+        .is_err());
         let text = provider_target("TEXT_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("text video adapter should resolve");
         assert_eq!(text.path, "/ent/v2/text2video");
@@ -2418,6 +2547,10 @@ mod tests {
     fn video_task_contract_extracts_only_declared_task_fields() {
         assert!(ensure_video_adapter("TEXT_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3:v2").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3-ad:v2").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3-mix:v2").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3-turbo:v2").is_ok());
+        assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq2-pro:v2").is_ok());
         assert!(ensure_video_adapter("REFERENCE_TO_VIDEO:vidu:viduq3-drama:v2").is_ok());
         assert!(ensure_video_adapter("START_END_TO_VIDEO:vidu:viduq3-pro:v2").is_ok());
         assert!(ensure_video_adapter("IMAGE_TO_VIDEO:vidu:viduq3:v2").is_ok());

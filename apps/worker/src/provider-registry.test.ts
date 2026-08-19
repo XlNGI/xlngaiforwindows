@@ -71,6 +71,10 @@ describe('provider registry', () => {
       'viduq3',
       'viduq3-pro',
       'viduq3-drama',
+      'viduq3-ad',
+      'viduq3-mix',
+      'viduq3-turbo',
+      'viduq2-pro',
       'vidu2.0',
     ]);
     expect(models.find((model) => model.remoteModelId === 'viduq2')?.capabilities).toMatchObject({

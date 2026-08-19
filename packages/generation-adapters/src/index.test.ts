@@ -58,6 +58,10 @@ describe('adapter registry', () => {
         { model: 'viduq3', modelLabel: 'Vidu Q3' },
         { model: 'viduq3-pro', modelLabel: 'Vidu Q3 Pro' },
         { model: 'viduq3-drama', modelLabel: 'Vidu Q3-Drama' },
+        { model: 'viduq3-ad', modelLabel: 'Vidu Q3-Ad' },
+        { model: 'viduq3-mix', modelLabel: 'Vidu Q3-Mix' },
+        { model: 'viduq3-turbo', modelLabel: 'Vidu Q3-Turbo' },
+        { model: 'viduq2-pro', modelLabel: 'Vidu Q2 Pro' },
         { model: 'vidu2.0', modelLabel: 'Vidu 2.0' },
       ]),
     );
@@ -95,6 +99,40 @@ describe('adapter registry', () => {
         prompt: '保持角色一致',
         aspect_ratio: '16:9',
         resolution: '2K',
+      }),
+    ).toMatchObject({ valid: false });
+  });
+
+  it('generates model-specific reference video schemas and off-peak constraints', () => {
+    const valid = {
+      images: ['https://example.com/reference.png'],
+      prompt: '保持角色一致',
+      duration: 5,
+      aspect_ratio: '16:9',
+      resolution: '720p',
+      audio: true,
+    };
+    expect(validateAdapterParameters('REFERENCE_TO_VIDEO:vidu:viduq3-ad:v2', valid)).toMatchObject({
+      valid: true,
+    });
+    expect(
+      validateAdapterParameters('REFERENCE_TO_VIDEO:vidu:viduq3-ad:v2', {
+        ...valid,
+        off_peak: true,
+        audio: false,
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters('REFERENCE_TO_VIDEO:vidu:viduq2-pro:v2', {
+        ...valid,
+        off_peak: true,
+        audio: true,
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters('REFERENCE_TO_VIDEO:vidu:viduq3-mix:v2', {
+        ...valid,
+        off_peak: true,
       }),
     ).toMatchObject({ valid: false });
   });

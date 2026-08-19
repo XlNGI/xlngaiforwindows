@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AgentGenerationPrepareParams,
   ChatMessageInfo,
   LlmAttemptInfo,
   LlmGenerationCompleteParams,
@@ -29,6 +30,7 @@ import { createRepositories } from '@ai-video/persistence';
 import type { ResolvedLlmSelection } from './app-settings-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService, toContextInfo } from './context-service.js';
+import type { NovelContextService } from './novel-context-service.js';
 import { ProjectService } from './project-service.js';
 import { calculateEstimatedCost, normalizeCurrency, normalizeDecimalPrice } from './usage-cost.js';
 
@@ -61,6 +63,7 @@ export interface GenerationServiceOptions {
   selectionResolver?: LlmSelectionResolver;
   usageIndexer?: LlmUsageIndexer;
   generationMetricReporter?: (metric: WorkerGenerationMetric) => void;
+  novelContextService?: NovelContextService;
 }
 
 export interface LlmUsageIndexer {
@@ -89,7 +92,10 @@ export class GenerationService {
     this.selectionResolver = options.selectionResolver;
     this.usageIndexer = options.usageIndexer;
     this.generationMetricReporter = options.generationMetricReporter;
+    this.novelContexts = options.novelContextService;
   }
+
+  private readonly novelContexts?: NovelContextService;
 
   status() {
     const status = this.legacyProvider.status();
@@ -131,7 +137,9 @@ export class GenerationService {
     });
   }
 
-  prepare(params: LlmGenerationPrepareParams): LlmGenerationPrepareResult {
+  prepare(
+    params: LlmGenerationPrepareParams | AgentGenerationPrepareParams,
+  ): LlmGenerationPrepareResult {
     const existing = this.findIdempotent(params.idempotencyKey);
     if (existing) return prepareResultOf(existing);
     const selection = this.resolveSelection(params.providerProfileId, params.modelId);
@@ -142,6 +150,8 @@ export class GenerationService {
       params.budgetTokens,
       undefined,
       { idempotencyKey: params.idempotencyKey },
+      'agentMode' in params && params.agentMode === 'novel-writing',
+      'agentMode' in params ? params.novelIntent?.chapterId : undefined,
     );
   }
 
@@ -496,6 +506,8 @@ export class GenerationService {
     budgetTokens?: number,
     existingUser?: ChatMessageInfo,
     options: GenerationCreationOptions = {},
+    novelMode = false,
+    novelFocusChapterId?: string,
   ): LlmGenerationPrepareResult {
     const existing = this.findIdempotent(options.idempotencyKey);
     if (existing) return prepareResultOf(existing);
@@ -507,6 +519,8 @@ export class GenerationService {
       'native',
       selection,
       options,
+      novelMode,
+      novelFocusChapterId,
     );
     const { state, systemInstruction, context } = prepared;
     state.runtimeRequest = {
@@ -563,12 +577,17 @@ export class GenerationService {
     executionMode: 'legacy' | 'native',
     selection?: ResolvedLlmSelection,
     options: GenerationCreationOptions = {},
+    novelMode = false,
+    novelFocusChapterId?: string,
   ): { state: GenerationState; systemInstruction: string; context: string } {
     if (!prompt) throw new Error('Prompt is required.');
     const projectId = this.projects.current()?.id;
     const projectSessionId = this.projects.currentSessionId();
     if (!projectId || !projectSessionId) throw new Error('No project is open.');
-    const compiled = this.contexts.compile(conversationId, budgetTokens);
+    const compiled =
+      novelMode && this.novelContexts
+        ? this.novelContexts.compile(conversationId, budgetTokens, novelFocusChapterId)
+        : this.contexts.compile(conversationId, budgetTokens);
     const snapshotId = randomUUID();
     const generationId = randomUUID();
     const attemptId = randomUUID();

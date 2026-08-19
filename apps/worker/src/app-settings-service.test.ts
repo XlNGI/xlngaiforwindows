@@ -100,7 +100,7 @@ describe('AppSettingsService', () => {
       baseUrl: 'https://api.vidu.cn',
     });
     const models = service.listModels(profile.id);
-    expect(models).toHaveLength(6);
+    expect(models).toHaveLength(10);
     expect(models.every((model) => model.source === 'built-in' && model.enabled)).toBe(true);
     expect(models.find((model) => model.remoteModelId === 'viduq2')?.capabilities).toMatchObject({
       imageGeneration: true,
@@ -409,7 +409,7 @@ describe('AppSettingsService', () => {
         connectionStatus: 'draft',
       },
     });
-    expect(first.profile && service.listModels(first.profile.id)).toHaveLength(6);
+    expect(first.profile && service.listModels(first.profile.id)).toHaveLength(10);
     expect(service.migrateLegacyProfile({ source: 'vidu-cn' })).toMatchObject({
       state: 'existing',
       profile: { id: first.profile?.id },

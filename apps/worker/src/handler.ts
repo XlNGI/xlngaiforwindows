@@ -12,6 +12,7 @@ import {
   type AgentProviderStepCompleteParams,
   type AgentProviderStepStartParams,
   type AgentTaskGetParams,
+  type AgentTaskEventsParams,
   type AdapterResolveParams,
   type AdapterValidateParams,
   type ConversationArchiveParams,
@@ -52,8 +53,21 @@ import {
   type LlmGenerationObserveParams,
   type LlmGenerationPrepareParams,
   type LlmGenerationRetryPrepareParams,
+  type NovelBindingSaveParams,
+  type NovelPendingIntentCancelParams,
+  type AgentPartialArtifactRecoverParams,
+  type AgentPartialArtifactDiscardParams,
+  type NovelChapterArchiveParams,
+  type NovelChapterRestoreParams,
+  type NovelChapterSaveParams,
+  type NovelProfileUpdateParams,
+  type NovelVolumeSaveParams,
+  type NovelMarkdownExportPrepareParams,
   type SceneSaveParams,
   type ShotSaveParams,
+  type AgentChangeSetCreateParams,
+  type AgentChangeSetApplyParams,
+  type AgentChangeSetRejectParams,
   type SqliteProbeResult,
   type WorkerError,
   type WorkerMethod,
@@ -68,6 +82,7 @@ import {
 } from './adapter-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
+import { NovelContextService } from './novel-context-service.js';
 import { DocumentWorkflowError, DocumentWorkflowService } from './document-workflow-service.js';
 import { GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
@@ -81,6 +96,14 @@ import { UsageService } from './usage-service.js';
 import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
 import { executeInfrastructureCommand } from './worker-commands.js';
 import { AgentProviderLoopService } from './agent-provider-loop-service.js';
+import { NovelService, NovelServiceError } from './novel-service.js';
+import {
+  AgentOrchestrationError,
+  AgentOrchestrationService,
+} from './agent-orchestration-service.js';
+import { PartialArtifactService } from './partial-artifact-service.js';
+import { MarkdownExportService } from './markdown-export-service.js';
+import { ChangeSetService } from './change-set-service.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -116,11 +139,29 @@ const methods = new Set<WorkerMethod>([
   'usage.rebuild',
   'maintenance.cache.inspect',
   'maintenance.cache.clear',
+  'maintenance.researchCache.cleanup',
   'maintenance.metrics',
   'maintenance.contextSnapshots.cleanup',
   'maintenance.diagnostics.export',
   'maintenance.diagnostics.reveal',
   'document.list',
+  'novel.profile.get',
+  'novel.profile.update',
+  'novel.volume.list',
+  'novel.volume.save',
+  'novel.chapter.list',
+  'novel.chapter.save',
+  'novel.chapter.archive',
+  'novel.chapter.restore',
+  'novel.binding.list',
+  'novel.binding.save',
+  'novel.context.consistencyReport',
+  'novel.intent.list',
+  'novel.intent.cancel',
+  'novel.export.prepare',
+  'agent.partial.list',
+  'agent.partial.recover',
+  'agent.partial.discard',
   'document.get',
   'document.save',
   'document.draft.save',
@@ -130,15 +171,22 @@ const methods = new Set<WorkerMethod>([
   'document.review.requestChanges',
   'document.review.reject',
   'document.publish',
+  'document.selfPublish',
   'agent.task.createDocumentDraft',
   'agent.task.list',
   'agent.task.get',
+  'agent.task.events',
   'agent.generation.prepare',
   'agent.generation.executeTools',
+  'agent.generation.cancel',
   'agent.generation.confirmTool',
   'agent.providerStep.complete',
   'agent.providerStep.start',
   'task.log.list',
+  'agent.changeSet.create',
+  'agent.changeSet.list',
+  'agent.changeSet.apply',
+  'agent.changeSet.reject',
   'scene.list',
   'scene.save',
   'shot.list',
@@ -220,6 +268,11 @@ const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding
 const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqliteBinding });
 const contentService = new ContentService(projectService);
 const documentWorkflowService = new DocumentWorkflowService(projectService);
+const novelService = new NovelService(projectService);
+const agentOrchestrationService = new AgentOrchestrationService(projectService);
+const partialArtifactService = new PartialArtifactService(projectService, documentWorkflowService);
+const markdownExportService = new MarkdownExportService(projectService);
+const changeSetService = new ChangeSetService(projectService);
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
 const videoGenerationService = new VideoGenerationService(
@@ -230,6 +283,7 @@ const videoGenerationService = new VideoGenerationService(
 const maintenanceService = new MaintenanceService(projectService);
 const sampleProjectService = new SampleProjectService(projectService);
 const contextService = new ContextService(projectService);
+const novelContextService = new NovelContextService(projectService);
 const usageService = new UsageService(projectService, appSettingsService, {
   nativeBinding: packagedSqliteBinding,
 });
@@ -244,6 +298,7 @@ const generationService = new GenerationService(
   contextService,
   llmProvider,
   {
+    novelContextService,
     selectionResolver: appSettingsService,
     usageIndexer: appSettingsService,
     generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
@@ -444,6 +499,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       maintenanceService,
       generationService,
       agentProviderLoopService,
+      partialArtifactService,
+      markdownExportService,
       imageGenerationService,
       videoGenerationService,
     });
@@ -453,6 +510,65 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       switch (request.method) {
         case 'document.list':
           result = documentWorkflowService.listDocuments();
+          break;
+        case 'novel.profile.get':
+          result = novelService.getProfile(params) ?? null;
+          break;
+        case 'novel.profile.update':
+          result = novelService.updateProfile(params as unknown as NovelProfileUpdateParams);
+          break;
+        case 'novel.volume.list':
+          result = novelService.listVolumes(params);
+          break;
+        case 'novel.volume.save':
+          result = novelService.saveVolume(params as unknown as NovelVolumeSaveParams);
+          break;
+        case 'novel.chapter.list':
+          result = novelService.listChapters(params);
+          break;
+        case 'novel.chapter.save':
+          result = novelService.saveChapter(params as unknown as NovelChapterSaveParams);
+          break;
+        case 'novel.chapter.archive':
+          result = novelService.archiveChapter(params as unknown as NovelChapterArchiveParams);
+          break;
+        case 'novel.chapter.restore':
+          result = novelService.restoreChapter(params as unknown as NovelChapterRestoreParams);
+          break;
+        case 'novel.binding.list':
+          result = novelService.listBindings(params);
+          break;
+        case 'novel.binding.save':
+          result = novelService.saveBinding(params as unknown as NovelBindingSaveParams);
+          break;
+        case 'novel.context.consistencyReport':
+          result = novelContextService.consistencyReport();
+          break;
+        case 'novel.intent.list':
+          result = agentOrchestrationService.listPending(params);
+          break;
+        case 'novel.intent.cancel':
+          result = agentOrchestrationService.cancelPending(
+            params as unknown as NovelPendingIntentCancelParams,
+          );
+          break;
+        case 'novel.export.prepare':
+          result = markdownExportService.prepare(
+            params as unknown as NovelMarkdownExportPrepareParams,
+          );
+          break;
+        case 'agent.partial.list':
+          result = partialArtifactService.list(params);
+          break;
+        case 'agent.partial.recover':
+          result = partialArtifactService.recover(
+            params as unknown as AgentPartialArtifactRecoverParams,
+          );
+          break;
+        case 'agent.partial.discard':
+          result = partialArtifactService.discard(
+            params as unknown as AgentPartialArtifactDiscardParams,
+          );
           break;
         case 'document.get':
           result = documentWorkflowService.getDocument(requireString(params, 'documentId'));
@@ -487,6 +603,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'document.publish':
           result = documentWorkflowService.publish(params as unknown as DocumentPublishParams);
           break;
+        case 'document.selfPublish':
+          result = documentWorkflowService.selfPublish(params as unknown as DocumentPublishParams);
+          break;
         case 'agent.task.createDocumentDraft':
           result = documentWorkflowService.createDocumentDraftFromMessage(
             params as unknown as AgentTaskCreateDocumentDraftParams,
@@ -498,8 +617,73 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'agent.task.get':
           result = documentWorkflowService.getTask(params as unknown as AgentTaskGetParams);
           break;
+        case 'agent.task.events':
+          result = documentWorkflowService.getTaskEvents(
+            params as unknown as AgentTaskEventsParams,
+          );
+          break;
         case 'agent.generation.prepare': {
           const agentParams = params as unknown as AgentGenerationPrepareParams;
+          if (agentParams.agentMode === 'novel-writing') {
+            const orchestration = agentOrchestrationService.prepareNovelTask({
+              conversationId: agentParams.conversationId,
+              projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
+              prompt: agentParams.prompt,
+              title: agentParams.title,
+              intent: agentParams.novelIntent,
+              idempotencyKey: agentParams.idempotencyKey,
+            });
+            if ('pendingIntent' in orchestration) {
+              result = { pendingIntent: orchestration.pendingIntent };
+              break;
+            }
+            const profile = appSettingsService.getProfile(agentParams.providerProfileId);
+            if (!profile) {
+              agentOrchestrationService.failTaskBeforeGeneration(
+                orchestration.taskId,
+                'Provider profile was not found.',
+              );
+              throw new ProviderProfileValidationError('Provider profile was not found.');
+            }
+            const model = appSettingsService
+              .listModels(agentParams.providerProfileId)
+              .find((candidate) => candidate.id === agentParams.modelId);
+            try {
+              assertAgentToolLoopSelection(profile, model);
+            } catch (error) {
+              agentOrchestrationService.failTaskBeforeGeneration(
+                orchestration.taskId,
+                error instanceof Error ? error.message : 'Provider cannot run Agent tools.',
+              );
+              throw error;
+            }
+            try {
+              const prepared = generationService.prepare({
+                ...agentParams,
+                novelIntent: {
+                  ...agentParams.novelIntent,
+                  chapterId: orchestration.chapterId,
+                },
+              });
+              const agent = agentProviderLoopService.prepare(
+                prepared.stream,
+                agentParams.prompt,
+                agentParams.title,
+                orchestration.documentIntent,
+                agentParams.researchMode,
+                orchestration.taskId,
+              );
+              generationService.configureAgentTools(prepared.stream, agent.tools);
+              result = { ...prepared, agentTaskId: agent.taskId, runtimeOwner: 'native-agent' };
+            } catch (error) {
+              agentOrchestrationService.failTaskBeforeGeneration(
+                orchestration.taskId,
+                error instanceof Error ? error.message : 'Generation preparation failed.',
+              );
+              throw error;
+            }
+            break;
+          }
           const profile = appSettingsService.getProfile(agentParams.providerProfileId);
           if (!profile) {
             throw new ProviderProfileValidationError('Provider profile was not found.');
@@ -517,7 +701,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             agentParams.researchMode,
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
-          result = { ...prepared, agentTaskId: agent.taskId };
+          result = { ...prepared, agentTaskId: agent.taskId, runtimeOwner: 'native-agent' };
           break;
         }
         case 'agent.generation.executeTools': {
@@ -531,11 +715,24 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = execution;
           break;
         }
-        case 'agent.generation.confirmTool':
-          result = agentProviderLoopService.confirmTool(
-            params as unknown as AgentGenerationConfirmToolParams,
-          );
+        case 'agent.generation.cancel':
+          result = {
+            cancelled: agentProviderLoopService.cancelGeneration(
+              requireString(params, 'generationId'),
+            ),
+          };
           break;
+        case 'agent.generation.confirmTool': {
+          const confirmationParams = params as unknown as AgentGenerationConfirmToolParams;
+          const confirmation = agentProviderLoopService.confirmTool(confirmationParams);
+          generationService.configureAgentTools(
+            confirmationParams,
+            confirmation.tools ?? [],
+            confirmation.continuation,
+          );
+          result = confirmation;
+          break;
+        }
         case 'agent.providerStep.complete':
           agentProviderLoopService.completeProviderStep(
             params as unknown as AgentProviderStepCompleteParams,
@@ -547,6 +744,18 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             params as unknown as AgentProviderStepStartParams,
           );
           result = {};
+          break;
+        case 'agent.changeSet.create':
+          result = changeSetService.create(params as unknown as AgentChangeSetCreateParams);
+          break;
+        case 'agent.changeSet.list':
+          result = changeSetService.list(params);
+          break;
+        case 'agent.changeSet.apply':
+          result = changeSetService.apply(params as unknown as AgentChangeSetApplyParams);
+          break;
+        case 'agent.changeSet.reject':
+          result = changeSetService.reject(params as unknown as AgentChangeSetRejectParams);
           break;
         case 'task.log.list':
           result = documentWorkflowService.listTaskLog(params);
@@ -623,11 +832,18 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'llm.generation.observe':
           result = generationService.observe(params as unknown as LlmGenerationObserveParams);
           break;
-        case 'llm.generation.complete':
-          result = generationService.complete(params as unknown as LlmGenerationCompleteParams);
+        case 'llm.generation.complete': {
+          const completed = generationService.complete(
+            params as unknown as LlmGenerationCompleteParams,
+          );
+          agentProviderLoopService.clearGeneration(completed.generationId);
+          result = completed;
           break;
+        }
         case 'llm.generation.fail': {
-          const failed = generationService.failNative(params as unknown as LlmGenerationFailParams);
+          const failParams = params as unknown as LlmGenerationFailParams;
+          partialArtifactService.captureInterrupted(failParams, failParams.content);
+          const failed = generationService.failNative(failParams);
           agentProviderLoopService.terminateGeneration(failed.generationId, 'failed');
           result = failed;
           break;
@@ -637,6 +853,13 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           break;
         case 'llm.generation.cancel': {
           const generationId = requireString(params, 'generationId');
+          const current = generationService.get(generationId);
+          if (current.executionMode === 'native' && current.assistantMessage.content) {
+            partialArtifactService.captureInterruptedByGeneration(
+              generationId,
+              current.assistantMessage.content,
+            );
+          }
           result = await generationService.cancel(generationId);
           agentProviderLoopService.terminateGeneration(generationId, 'cancelled');
           break;
@@ -899,6 +1122,15 @@ function mapWorkerError(operation: string, error: unknown): WorkerError {
       retryable: false,
       operation,
     };
+  }
+  if (error instanceof NovelServiceError) {
+    return { code: error.code, message, retryable: false, operation };
+  }
+  if (error instanceof AgentOrchestrationError) {
+    return { code: error.code, message, retryable: false, operation };
+  }
+  if (message === 'AGENT_PARTIAL_ARTIFACT_UNAVAILABLE') {
+    return { code: 'CONFLICT', message, retryable: false, operation };
   }
   if (error instanceof AdapterNotFoundError) {
     return { code: 'ADAPTER_NOT_FOUND', message, retryable: false, operation };

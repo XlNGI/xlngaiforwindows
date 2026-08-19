@@ -23,6 +23,7 @@ import {
   type ResearchFetchResult,
   type ResearchSearchResult,
 } from './research-service.js';
+import { registerResearchCache } from './research-cache.js';
 
 const TOOL_SCHEMA_VERSION = 'agent-tools.v2';
 const POLICY_VERSION = 'agent-policy.v2';
@@ -85,6 +86,47 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
     description:
       'Request restoration of the Worker-authorized document. User confirmation is required.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'novel.chapter.submit_draft',
+    description: 'Submit one reviewable draft revision for the authorized novel chapter.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['title', 'contentMarkdown'],
+      properties: {
+        title: { type: 'string', minLength: 1, maxLength: 200 },
+        contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+      },
+    },
+  },
+  {
+    name: 'novel.reference.submit_draft',
+    description:
+      'Submit one reviewable draft revision for the authorized novel reference document.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['title', 'contentMarkdown'],
+      properties: {
+        title: { type: 'string', minLength: 1, maxLength: 200 },
+        contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+      },
+    },
+  },
+  {
+    name: 'novel.adaptation.submit_proposal',
+    description:
+      'Create one short-drama adaptation proposal draft from the authorized published novel chapter. This never creates scenes or shots.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['title', 'contentMarkdown'],
+      properties: {
+        title: { type: 'string', minLength: 1, maxLength: 200 },
+        contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+      },
+    },
   },
 ];
 
@@ -209,11 +251,24 @@ type ResearchExecutionOutcome =
     };
 
 export class AgentProviderLoopService {
+  private readonly researchCancellations = new Map<string, AbortController>();
+
   constructor(
     private readonly projects: ProjectService,
     private readonly documents: DocumentWorkflowService,
     private readonly research: ResearchService = new ResearchService(),
   ) {}
+
+  cancelGeneration(generationId: string): boolean {
+    const controller = this.researchCancellations.get(generationId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
+  }
+
+  clearGeneration(generationId: string): void {
+    this.researchCancellations.delete(generationId);
+  }
 
   prepare(
     identity: LlmGenerationIdentity,
@@ -221,6 +276,7 @@ export class AgentProviderLoopService {
     title?: string,
     intent: AgentDocumentIntent = { operation: 'document.create_draft' },
     researchMode: AgentResearchMode = 'auto',
+    existingTaskId?: string,
   ): PreparedAgentLoop {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -281,6 +337,56 @@ export class AgentProviderLoopService {
             taskId: existing.task_id,
             tools: this.toolsForStep(step.authorizationHandles),
           };
+        }
+
+        if (existingTaskId) {
+          const task = database
+            .prepare(
+              `SELECT id, status FROM agent_tasks
+               WHERE id = ? AND project_id = ?`,
+            )
+            .get(existingTaskId, project.id) as { id: string; status: string } | undefined;
+          if (!task || task.status !== 'queued') {
+            throw new Error('Pre-created novel task is no longer available.');
+          }
+          const now = new Date().toISOString();
+          const authorization = this.resolveAuthorization(
+            database,
+            project.id,
+            conversation,
+            intent,
+          );
+          database
+            .prepare(
+              `INSERT INTO agent_task_generations (task_id, generation_id, ordinal, purpose, created_at)
+               VALUES (?, ?, 0, 'primary', ?)`,
+            )
+            .run(task.id, identity.generationId, now);
+          const started = database
+            .prepare(
+              `UPDATE agent_tasks SET status = 'running', phase = 'model_running', started_at = ?,
+               updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'queued'`,
+            )
+            .run(now, now, task.id);
+          if (started.changes !== 1) throw new Error('Novel task could not be started.');
+          this.appendEvent(
+            database,
+            project.id,
+            task.id,
+            'agent.novel.task.started',
+            'Novel writing task attached to its Provider generation.',
+            now,
+          );
+          const preparedStep = this.createStep(
+            database,
+            project.id,
+            identity,
+            task.id,
+            0,
+            now,
+            authorizationSpecsForTask(database, task.id, authorization, researchMode),
+          );
+          return { taskId: task.id, tools: this.toolsForStep(preparedStep.authorizationHandles) };
         }
 
         const now = new Date().toISOString();
@@ -424,14 +530,26 @@ export class AgentProviderLoopService {
 
         const toolCallId = randomUUID();
         const content = typeof args.contentMarkdown === 'string' ? args.contentMarkdown : undefined;
+        const novelTarget =
+          call.name === 'novel.chapter.submit_draft'
+            ? (database
+                .prepare(
+                  `SELECT chapter_id, document_id FROM agent_task_targets
+                 WHERE task_id = ? AND target_kind = 'novel-chapter'`,
+                )
+                .get(task.id) as { chapter_id: string; document_id: string } | undefined)
+            : undefined;
+        if (novelTarget && novelTarget.document_id !== authorization.targetDocumentId) {
+          throw new Error('Novel chapter authorization does not match the task target.');
+        }
         database
           .prepare(
             `INSERT INTO agent_tool_calls
              (id, project_id, task_id, generation_id, attempt_id, authorization_id, provider_step_id,
               provider_call_id, tool_ordinal, tool_name, normalized_arguments_hash,
               arguments_summary_json, content_hash, content_length, status, created_at, started_at,
-              version, redaction_state)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'native')`,
+              target_chapter_id, target_document_id, version, redaction_state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'native')`,
           )
           .run(
             toolCallId,
@@ -454,6 +572,8 @@ export class AgentProviderLoopService {
             awaitsConfirmation ? 'awaiting_confirmation' : 'executing',
             now,
             now,
+            novelTarget?.chapter_id ?? null,
+            novelTarget?.document_id ?? null,
           );
         if (lifecycleAction) {
           const token = randomBytes(32).toString('base64url');
@@ -528,6 +648,14 @@ export class AgentProviderLoopService {
             sourceMessageId: task.user_message_id ?? undefined,
             contextSnapshotId: task.context_snapshot_id ?? undefined,
           });
+          linkResearchCitations(
+            database,
+            project.id,
+            task.id,
+            document.currentVersion?.id,
+            args.contentMarkdown as string,
+            now,
+          );
           result = JSON.stringify({
             status: 'draft_created',
             documentId: document.id,
@@ -535,13 +663,23 @@ export class AgentProviderLoopService {
             reviewRequired: true,
           });
           resultSummary = result;
-        } else if (call.name === 'document.update_draft') {
+        } else if (
+          call.name === 'document.update_draft' ||
+          call.name === 'novel.chapter.submit_draft' ||
+          call.name === 'novel.reference.submit_draft'
+        ) {
           if (
             !authorization.targetDocumentId ||
             !authorization.baseVersionId ||
             authorization.expectedDocumentRowVersion === undefined
           ) {
             throw new Error('Update authorization is missing its trusted target or CAS.');
+          }
+          if (call.name === 'novel.chapter.submit_draft') {
+            const chapter = database
+              .prepare('SELECT id FROM novel_chapters WHERE document_id = ? AND project_id = ?')
+              .get(authorization.targetDocumentId, project.id);
+            if (!chapter) throw new Error('Authorized document is not a novel chapter.');
           }
           document = this.documents.writeTrustedAgentUpdateInTransaction(database, project, {
             taskId: task.id,
@@ -555,10 +693,84 @@ export class AgentProviderLoopService {
             sourceMessageId: task.user_message_id ?? undefined,
             contextSnapshotId: task.context_snapshot_id ?? undefined,
           });
+          linkResearchCitations(
+            database,
+            project.id,
+            task.id,
+            document.currentVersion?.id,
+            args.contentMarkdown as string,
+            now,
+          );
           result = JSON.stringify({
-            status: 'draft_updated',
+            status:
+              call.name === 'document.update_draft' ? 'draft_updated' : 'novel_draft_submitted',
             documentId: document.id,
             documentVersionId: document.currentVersion?.id,
+            reviewRequired: true,
+          });
+          resultSummary = result;
+        } else if (call.name === 'novel.adaptation.submit_proposal') {
+          if (!authorization.targetDocumentId) {
+            throw new Error('Adaptation proposal authorization is missing its source chapter.');
+          }
+          const source = database
+            .prepare(
+              `SELECT chapters.id AS chapter_id, versions.id AS version_id, versions.content_markdown
+               FROM novel_chapters chapters
+               INNER JOIN documents documents ON documents.id = chapters.document_id
+               INNER JOIN document_versions versions ON versions.id = documents.published_version_id
+               WHERE chapters.document_id = ? AND chapters.project_id = ?`,
+            )
+            .get(authorization.targetDocumentId, project.id) as
+            { chapter_id: string; version_id: string; content_markdown: string } | undefined;
+          if (!source) {
+            throw new Error(
+              'Adaptation proposals require an authorized novel chapter with a published version.',
+            );
+          }
+          document = this.documents.writeTrustedAgentDraftInTransaction(database, project, {
+            taskId: task.id,
+            title: args.title as string,
+            contentMarkdown: args.contentMarkdown as string,
+            scopeType: 'project',
+            sourceMessageId: task.user_message_id ?? undefined,
+            contextSnapshotId: task.context_snapshot_id ?? undefined,
+          });
+          if (!document.currentVersion?.id)
+            throw new Error('Adaptation proposal draft version is missing.');
+          database
+            .prepare(
+              `INSERT INTO document_bindings
+               (id, project_id, document_id, role, domain_scope, status, row_version, created_at, updated_at)
+               VALUES (?, ?, ?, 'adaptation-proposal', 'short-drama', 'active', 0, ?, ?)`,
+            )
+            .run(randomUUID(), project.id, document.id, now, now);
+          const proposalId = randomUUID();
+          database
+            .prepare(
+              `INSERT INTO novel_adaptation_proposals
+               (id, project_id, source_chapter_id, source_document_version_id, source_content_hash,
+                proposal_document_id, proposal_document_version_id, adaptation_task_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              proposalId,
+              project.id,
+              source.chapter_id,
+              source.version_id,
+              hash(source.content_markdown),
+              document.id,
+              document.currentVersion.id,
+              task.id,
+              now,
+            );
+          result = JSON.stringify({
+            status: 'adaptation_proposal_submitted',
+            proposalId,
+            documentId: document.id,
+            documentVersionId: document.currentVersion.id,
+            sourceChapterId: source.chapter_id,
+            sourceDocumentVersionId: source.version_id,
             reviewRequired: true,
           });
           resultSummary = result;
@@ -615,6 +827,16 @@ export class AgentProviderLoopService {
             .run(now, now, task.id);
         } else {
           throw new Error('Provider tool is not supported.');
+        }
+        if (call.name === 'novel.chapter.submit_draft' && document) {
+          const activated = database
+            .prepare(
+              `UPDATE novel_chapters SET lifecycle_status = 'active', archive_reason = NULL,
+               updated_at = ?, row_version = row_version + 1
+               WHERE project_id = ? AND document_id = ? AND lifecycle_status = 'reserved'`,
+            )
+            .run(now, project.id, document.id);
+          if (activated.changes > 1) throw new Error('Novel chapter activation was not unique.');
         }
         database
           .prepare(
@@ -678,6 +900,9 @@ export class AgentProviderLoopService {
     if (params.calls.length < 1 || params.calls.length > 8) {
       throw new Error('A research Provider step must contain between one and eight calls.');
     }
+    const cancellation =
+      this.researchCancellations.get(params.generationId) ?? new AbortController();
+    this.researchCancellations.set(params.generationId, cancellation);
     const staged = this.projects.access(true, (database, project) =>
       database.transaction(() => {
         if (!params.providerResponseId.trim()) throw new Error('Provider response ID is required.');
@@ -803,6 +1028,7 @@ export class AgentProviderLoopService {
                     language: toolArguments.language,
                     recencyDays: toolArguments.recencyDays,
                     limit: toolArguments.limit,
+                    signal: cancellation.signal,
                   })
                 : await this.research.fetchSource({
                     projectRoot: staged.projectRoot,
@@ -810,6 +1036,7 @@ export class AgentProviderLoopService {
                     attemptId: params.attemptId,
                     sourceHandle: toolArguments.sourceHandle,
                     maxChars: toolArguments.maxChars,
+                    signal: cancellation.signal,
                   });
             return { ok: true, result };
           } catch (error) {
@@ -885,10 +1112,11 @@ export class AgentProviderLoopService {
                completed_at = ?, version = version + 1 WHERE id = ? AND status = 'executing'`,
             )
             .run(JSON.stringify(resultSummary), now, stagedCall.toolCallId);
-          persistResearchSources(
+          const citationLabels = persistResearchSources(
             database,
             {
               projectId: project.id,
+              projectRoot: project.rootPath,
               taskId: task.id,
               generationId: params.generationId,
               attemptId: params.attemptId,
@@ -898,9 +1126,10 @@ export class AgentProviderLoopService {
             },
             researchResult,
           );
+          const labeledResult = addCitationLabels(researchResult, citationLabels);
           outputs.push({
             callId: stagedCall.call.id,
-            output: JSON.stringify(toProviderResearchResult(researchResult)),
+            output: JSON.stringify(toProviderResearchResult(labeledResult)),
           });
         }
         this.completeStep(
@@ -1062,7 +1291,7 @@ export class AgentProviderLoopService {
             )
             .get(params.attemptId) as { value: number }
         ).value;
-        this.createStep(database, project.id, params, task.id, ordinal, now, {
+        const nextStep = this.createStep(database, project.id, params, task.id, ordinal, now, {
           operation: confirmation.operation,
           targetDocumentId: confirmation.targetDocumentId,
           scopeType: confirmation.scopeType,
@@ -1083,6 +1312,7 @@ export class AgentProviderLoopService {
             ],
             [{ callId: descriptor.callId, output }],
           ),
+          tools: this.toolsForStep(nextStep.authorizationHandles),
         };
       })(),
     );
@@ -1129,6 +1359,8 @@ export class AgentProviderLoopService {
   }
 
   terminateGeneration(generationId: string, reason: 'cancelled' | 'failed'): number {
+    this.cancelGeneration(generationId);
+    this.researchCancellations.delete(generationId);
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const now = new Date().toISOString();
@@ -1321,6 +1553,9 @@ export class AgentProviderLoopService {
       'document.update_draft',
       'document.archive',
       'document.restore',
+      'novel.chapter.submit_draft',
+      'novel.reference.submit_draft',
+      'novel.adaptation.submit_proposal',
     ]);
     if (targetRequired.has(operation) && !intent.documentId) {
       throw new Error(`${operation} requires an explicit document target.`);
@@ -1348,6 +1583,15 @@ export class AgentProviderLoopService {
         }
       | undefined;
     if (!document) throw new Error('Authorized document was not found in the current project.');
+    if (
+      operation === 'novel.chapter.submit_draft' ||
+      operation === 'novel.adaptation.submit_proposal'
+    ) {
+      const chapter = database
+        .prepare('SELECT id FROM novel_chapters WHERE document_id = ? AND project_id = ?')
+        .get(document.id, projectId);
+      if (!chapter) throw new Error('Novel chapter target is required for this operation.');
+    }
     if (operation === 'document.restore' && document.lifecycle_status !== 'archived') {
       throw new Error('Only an archived document can be restored.');
     }
@@ -1523,7 +1767,11 @@ function parseToolArguments(
     throw new Error('Tool arguments must be an object.');
   const record = parsed as Record<string, unknown>;
   const needsContent =
-    operation === 'document.create_draft' || operation === 'document.update_draft';
+    operation === 'document.create_draft' ||
+    operation === 'document.update_draft' ||
+    operation === 'novel.chapter.submit_draft' ||
+    operation === 'novel.reference.submit_draft' ||
+    operation === 'novel.adaptation.submit_proposal';
   if (
     needsContent &&
     Object.keys(record).some((key) => !['title', 'contentMarkdown'].includes(key))
@@ -1657,6 +1905,7 @@ function persistResearchSources(
   database: Database.Database,
   context: {
     projectId: string;
+    projectRoot: string;
     taskId: string;
     generationId: string;
     attemptId: string;
@@ -1665,8 +1914,12 @@ function persistResearchSources(
     createdAt: string;
   },
   result: ResearchSearchResult | ResearchFetchResult,
-): void {
+): Map<string, string> {
   const sources = result.status === 'searched' ? result.sources : [result];
+  const existing = database
+    .prepare('SELECT COUNT(*) AS count FROM agent_research_sources WHERE task_id = ?')
+    .get(context.taskId) as { count: number };
+  const citationLabels = new Map<string, string>();
   const insert = database.prepare(
     `INSERT INTO agent_research_sources
      (id, project_id, task_id, generation_id, attempt_id, provider_step_id, tool_call_id,
@@ -1676,6 +1929,18 @@ function persistResearchSources(
   );
   for (const [index, source] of sources.entries()) {
     const fetched = result.status === 'fetched';
+    const citationLabel = `R${existing.count + index + 1}`;
+    if (fetched) {
+      registerResearchCache({
+        database,
+        projectId: context.projectId,
+        projectRoot: context.projectRoot,
+        contentHash: result.contentHash,
+        cacheRelativePath: result.cacheRelativePath,
+        byteCount: Buffer.byteLength(result.content, 'utf8'),
+        now: context.createdAt,
+      });
+    }
     insert.run(
       randomUUID(),
       context.projectId,
@@ -1696,10 +1961,104 @@ function persistResearchSources(
       fetched && result.truncated ? 1 : 0,
       fetched ? result.cacheRelativePath : null,
       fetched ? 'fetched' : 'searched',
-      `R${index + 1}`,
+      citationLabel,
       context.createdAt,
     );
+    citationLabels.set(source.canonicalUrl, citationLabel);
   }
+  return citationLabels;
+}
+
+function addCitationLabels(
+  result: ResearchSearchResult | ResearchFetchResult,
+  labels: Map<string, string>,
+): ResearchSearchResult | ResearchFetchResult {
+  if (result.status === 'searched') {
+    return {
+      ...result,
+      sources: result.sources.map((source) => ({
+        ...source,
+        citationLabel: labels.get(source.canonicalUrl),
+      })),
+    };
+  }
+  return { ...result, citationLabel: labels.get(result.canonicalUrl) };
+}
+
+function linkResearchCitations(
+  database: Database.Database,
+  projectId: string,
+  taskId: string,
+  documentVersionId: string | undefined,
+  contentMarkdown: string,
+  now: string,
+): void {
+  if (!documentVersionId) throw new Error('Agent draft did not produce a document version.');
+  const labels = [...contentMarkdown.matchAll(/\[R([1-9][0-9]*)\]/g)].map(
+    (match) => `R${match[1]}`,
+  );
+  const distinctLabels = [...new Set(labels)];
+  const sources = database
+    .prepare(
+      `SELECT id, citation_label AS citationLabel
+       FROM agent_research_sources
+       WHERE project_id = ? AND task_id = ? AND status = 'fetched'`,
+    )
+    .all(projectId, taskId) as Array<{ id: string; citationLabel: string | null }>;
+  const byLabel = new Map(
+    sources
+      .filter((source): source is { id: string; citationLabel: string } => !!source.citationLabel)
+      .map((source) => [source.citationLabel, source.id]),
+  );
+  for (const label of distinctLabels) {
+    if (!byLabel.has(label)) {
+      throw new Error(`RESEARCH_CITATION_INVALID: unknown citation label ${label}.`);
+    }
+  }
+  const version = database
+    .prepare(
+      `SELECT versions.document_id AS documentId
+       FROM document_versions versions
+       INNER JOIN documents documents ON documents.id = versions.document_id
+       WHERE versions.id = ? AND documents.project_id = ?`,
+    )
+    .get(documentVersionId, projectId) as { documentId: string } | undefined;
+  if (!version) throw new Error('RESEARCH_CITATION_INVALID: document version is out of scope.');
+  const insert = database.prepare(
+    `INSERT INTO document_version_research_sources
+     (id, project_id, document_id, document_version_id, source_id, citation_label,
+      citation_reason, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(document_version_id, source_id) DO NOTHING`,
+  );
+  for (const label of distinctLabels) {
+    const sourceId = byLabel.get(label)!;
+    insert.run(
+      randomUUID(),
+      projectId,
+      version.documentId,
+      documentVersionId,
+      sourceId,
+      label,
+      'explicit Markdown citation in Agent draft',
+      now,
+    );
+    database
+      .prepare(
+        `UPDATE agent_research_sources
+         SET adoption_status = 'adopted', adoption_reason = ?
+         WHERE id = ? AND project_id = ? AND task_id = ?`,
+      )
+      .run(`Cited by document version ${documentVersionId}.`, sourceId, projectId, taskId);
+  }
+  database
+    .prepare(
+      `UPDATE agent_research_sources
+       SET adoption_status = 'excluded', adoption_reason = ?
+       WHERE project_id = ? AND task_id = ? AND status = 'fetched'
+         AND adoption_status = 'unreviewed'`,
+    )
+    .run(`Not cited by Agent draft version ${documentVersionId}.`, projectId, taskId);
 }
 
 function authorizationSpecsForTask(
@@ -1844,6 +2203,9 @@ function taskTypeFor(operation: AgentDocumentOperation): string {
     case 'document.create_draft':
       return 'document-create';
     case 'document.update_draft':
+    case 'novel.chapter.submit_draft':
+    case 'novel.reference.submit_draft':
+    case 'novel.adaptation.submit_proposal':
       return 'document-update';
     case 'document.list':
     case 'document.read':

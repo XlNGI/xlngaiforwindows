@@ -88,6 +88,10 @@ export function DetachedPanelApp({ config }: { config: DetachedPanelConfig }) {
       setSnapshot((current) =>
         current?.panelId === 'conversation' ? { ...current, composer: action.value } : current,
       );
+    } else if (action.type === 'conversation-research-mode') {
+      setSnapshot((current) =>
+        current?.panelId === 'conversation' ? { ...current, researchMode: action.mode } : current,
+      );
     }
     void emitTo('main', DETACHED_PANEL_ACTION_EVENT, {
       label: config.label,
@@ -323,6 +327,9 @@ function DetachedConversationPanel({
       }
       onLlmModelChange={(modelId) =>
         onAction({ panelId: 'conversation', type: 'conversation-model', modelId })
+      }
+      onResearchModeChange={(mode) =>
+        onAction({ panelId: 'conversation', type: 'conversation-research-mode', mode })
       }
       onOpenProviderSettings={() =>
         onAction({ panelId: 'conversation', type: 'conversation-open-settings' })

@@ -24,7 +24,7 @@ describe('theme provider', () => {
     document.documentElement.removeAttribute('data-theme');
   });
 
-  it('defaults to dark and applies the selected theme to the document', async () => {
+  it('defaults to dark and applies the selected theme to the document', () => {
     render(
       <ThemeProvider>
         <ThemeProbe />
@@ -34,7 +34,7 @@ describe('theme provider', () => {
     expect(screen.getByTestId('theme')).toHaveTextContent('dark');
     expect(document.documentElement.dataset.theme).toBe('dark');
 
-    await act(async () => {
+    act(() => {
       screen.getByRole('button', { name: '午夜' }).click();
     });
 

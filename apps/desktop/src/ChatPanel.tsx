@@ -1,5 +1,6 @@
 import {
   Archive,
+  BookOpenText,
   Bot,
   ChevronDown,
   ChevronRight,
@@ -13,6 +14,7 @@ import {
   Square,
 } from 'lucide-react';
 import type {
+  AgentResearchMode,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -25,6 +27,7 @@ import type {
 } from '@ai-video/contracts';
 
 type PromotionTarget = 'document' | 'memory' | 'constraint';
+export type ComposerMode = 'chat' | 'document' | 'novel-writing';
 
 interface ChatPanelProps {
   scopeType: ConversationScopeType;
@@ -41,6 +44,8 @@ interface ChatPanelProps {
   llmModels: ProviderModelInfo[];
   selectedLlmProfileId: string;
   selectedLlmModelId: string;
+  researchMode?: AgentResearchMode;
+  composerMode?: ComposerMode;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
   onClose?: () => void;
@@ -60,11 +65,14 @@ interface ChatPanelProps {
   onRetryGeneration: (assistantMessageId: string) => void;
   onLlmProfileChange: (profileId: string) => void;
   onLlmModelChange: (modelId: string) => void;
+  onResearchModeChange?: (mode: AgentResearchMode) => void;
+  onComposerModeChange?: (mode: ComposerMode) => void;
   onOpenProviderSettings: () => void;
   onComposerChange: (value: string) => void;
   onCancelGeneration: () => void;
   onSendMessage: () => void;
   onCreateDocumentDraft?: () => void;
+  onCreateNovelChapter?: () => void;
 }
 
 function scopeLabel(scope: ConversationScopeType): string {
@@ -86,6 +94,8 @@ export function ChatPanel({
   llmModels,
   selectedLlmProfileId,
   selectedLlmModelId,
+  researchMode = 'auto',
+  composerMode = 'chat',
   contextPreview,
   generation,
   onClose,
@@ -104,11 +114,14 @@ export function ChatPanel({
   onRetryGeneration,
   onLlmProfileChange,
   onLlmModelChange,
+  onResearchModeChange,
+  onComposerModeChange,
   onOpenProviderSettings,
   onComposerChange,
   onCancelGeneration,
   onSendMessage,
   onCreateDocumentDraft,
+  onCreateNovelChapter,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
   return (
@@ -263,6 +276,46 @@ export function ChatPanel({
                   </option>
                 ))}
             </select>
+            {onResearchModeChange && (
+              <select
+                aria-label="Agent 研究模式"
+                value={researchMode}
+                disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+                onChange={(event) => onResearchModeChange(event.target.value as AgentResearchMode)}
+              >
+                <option value="auto">研究：自动</option>
+                <option value="project_only">研究：仅项目资料</option>
+                <option value="network_disabled">研究：禁止联网</option>
+              </select>
+            )}
+          </div>
+        )}
+        {onComposerModeChange && (
+          <div className="scope-tabs" aria-label="会话模式">
+            <button
+              type="button"
+              className={composerMode === 'chat' ? 'active' : ''}
+              onClick={() => onComposerModeChange('chat')}
+              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+            >
+              会话
+            </button>
+            <button
+              type="button"
+              className={composerMode === 'document' ? 'active' : ''}
+              onClick={() => onComposerModeChange('document')}
+              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+            >
+              文档
+            </button>
+            <button
+              type="button"
+              className={composerMode === 'novel-writing' ? 'active' : ''}
+              onClick={() => onComposerModeChange('novel-writing')}
+              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+            >
+              小说创作
+            </button>
           </div>
         )}
         {contextPreview && (
@@ -353,7 +406,13 @@ export function ChatPanel({
       <div className="composer">
         <textarea
           aria-label="会话消息"
-          placeholder={conversation ? '输入消息…' : '请先新建会话'}
+          placeholder={
+            conversation
+              ? composerMode === 'novel-writing'
+                ? '输入明确的章节创作指令…'
+                : '输入消息…'
+              : '请先新建会话'
+          }
           rows={3}
           value={composer}
           onChange={(event) => onComposerChange(event.target.value)}
@@ -379,6 +438,17 @@ export function ChatPanel({
                 disabled={!composer.trim() || !conversation || !writable}
               >
                 <FilePlus2 size={16} />
+              </button>
+            )}
+            {onCreateNovelChapter && composerMode === 'novel-writing' && (
+              <button
+                className="icon-button subtle"
+                type="button"
+                title="创建小说章节草稿"
+                onClick={onCreateNovelChapter}
+                disabled={!conversation || !writable}
+              >
+                <BookOpenText size={16} />
               </button>
             )}
             <button

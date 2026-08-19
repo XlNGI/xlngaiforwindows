@@ -14,11 +14,15 @@ const MAX_REDIRECTS = 4;
 const PUBLIC_DNS_ENDPOINT = 'https://1.1.1.1/dns-query';
 const PUBLIC_DNS_TIMEOUT_MS = 5_000;
 const PUBLIC_DNS_RESPONSE_LIMIT = 32 * 1024;
+const NATIVE_BRIDGE_REQUEST_LIMIT = 32 * 1024;
 
 export const DEFAULT_RESEARCH_ADAPTER_ID = 'bing-html-public-v1';
 
 export type ResearchErrorCode =
-  'RESEARCH_SEARCH_FAILED' | 'RESEARCH_FETCH_BLOCKED' | 'RESEARCH_SOURCE_TOO_LARGE';
+  | 'RESEARCH_SEARCH_FAILED'
+  | 'RESEARCH_FETCH_BLOCKED'
+  | 'RESEARCH_SOURCE_TOO_LARGE'
+  | 'RESEARCH_CANCELLED';
 
 export class ResearchError extends Error {
   constructor(
@@ -38,6 +42,7 @@ export interface ResearchSourceSummary {
   canonicalUrl: string;
   snippet: string;
   retrievedAt: string;
+  citationLabel?: string;
 }
 
 export interface ResearchSearchResult {
@@ -90,9 +95,11 @@ export class ResearchService {
   private readonly sourceHandles = new Map<string, SourceHandleRecord>();
 
   constructor(options: ResearchServiceOptions = {}) {
-    this.fetcher = options.fetch ?? fetch;
+    const nativeBridgeFetcher = options.fetch ? undefined : createNativeBridgeFetcher();
+    this.fetcher = options.fetch ?? nativeBridgeFetcher ?? unavailableResearchFetcher;
     this.lookup = options.lookup ?? dnsLookup;
-    this.publicLookup = options.publicLookup ?? publicDnsLookup;
+    this.publicLookup =
+      options.publicLookup ?? (nativeBridgeFetcher ? unavailableLookup : publicDnsLookup);
     this.searchEndpoint = options.searchEndpoint ?? DEFAULT_SEARCH_ENDPOINT;
     this.requestTimeoutMs = positiveInteger(options.requestTimeoutMs, DEFAULT_TIMEOUT_MS);
     this.maxResponseBytes = positiveInteger(options.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES);
@@ -106,6 +113,7 @@ export class ResearchService {
     language?: string;
     recencyDays?: number;
     limit?: number;
+    signal?: AbortSignal;
   }): Promise<ResearchSearchResult> {
     const query = normalizeQuery(params.query);
     const limit = boundedInteger(params.limit, 5, 1, 10);
@@ -129,7 +137,7 @@ export class ResearchService {
 
     let candidates: Array<{ url: string; title: string; snippet: string }>;
     try {
-      const response = await this.request(endpoint, 'search');
+      const response = await this.request(endpoint, 'search', params.signal);
       candidates =
         response.contentType === 'application/json'
           ? flattenSearchResults(JSON.parse(response.body) as DuckDuckGoResponse)
@@ -183,6 +191,7 @@ export class ResearchService {
     attemptId: string;
     sourceHandle: string;
     maxChars?: number;
+    signal?: AbortSignal;
   }): Promise<ResearchFetchResult> {
     const source = this.sourceHandles.get(params.sourceHandle);
     if (
@@ -198,7 +207,10 @@ export class ResearchService {
       );
     }
     const maxChars = boundedInteger(params.maxChars, 50_000, 1, MAX_EXTRACTED_CHARACTERS);
-    const response = await this.request(new URL(source.canonicalUrl), 'text');
+    const response = await this.request(new URL(source.canonicalUrl), 'text', params.signal);
+    if (params.signal?.aborted) {
+      throw new ResearchError('RESEARCH_CANCELLED', 'External research was cancelled.', false);
+    }
     const extracted = extractText(response.body, response.contentType);
     const truncated = extracted.length > maxChars;
     const content = extracted.slice(0, maxChars);
@@ -214,6 +226,9 @@ export class ResearchService {
     const cachePath = resolve(params.projectRoot, ...cacheRelativePath.split('/'));
     assertPathInside(params.projectRoot, cachePath);
     await mkdir(resolve(params.projectRoot, 'cache', 'research'), { recursive: true });
+    if (params.signal?.aborted) {
+      throw new ResearchError('RESEARCH_CANCELLED', 'External research was cancelled.', false);
+    }
     await writeFile(cachePath, content, 'utf8');
     return {
       ...publicSource(source),
@@ -230,11 +245,17 @@ export class ResearchService {
   private async request(
     initialUrl: URL,
     expected: 'search' | 'text',
+    signal?: AbortSignal,
   ): Promise<{ body: string; contentType: string }> {
     let current = new URL(initialUrl);
     for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
       await this.assertPublicUrl(current);
       const controller = new AbortController();
+      if (signal?.aborted) {
+        throw new ResearchError('RESEARCH_CANCELLED', 'External research was cancelled.', false);
+      }
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
       let response: Response;
       try {
@@ -253,6 +274,10 @@ export class ResearchService {
         });
       } catch (error) {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        if (signal?.aborted) {
+          throw new ResearchError('RESEARCH_CANCELLED', 'External research was cancelled.', false);
+        }
         throw new ResearchError(
           expected === 'search' ? 'RESEARCH_SEARCH_FAILED' : 'RESEARCH_FETCH_BLOCKED',
           error instanceof Error && error.name === 'AbortError'
@@ -265,6 +290,7 @@ export class ResearchService {
         const location = response.headers.get('location');
         if (!location || redirect === MAX_REDIRECTS) {
           clearTimeout(timer);
+          signal?.removeEventListener('abort', abort);
           throw new ResearchError(
             'RESEARCH_FETCH_BLOCKED',
             'External source redirect was invalid or exceeded the limit.',
@@ -272,11 +298,13 @@ export class ResearchService {
           );
         }
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         current = new URL(location, current);
         continue;
       }
       if (!response.ok) {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         throw new ResearchError(
           expected === 'search' ? 'RESEARCH_SEARCH_FAILED' : 'RESEARCH_FETCH_BLOCKED',
           `External research request returned HTTP ${response.status}.`,
@@ -289,6 +317,7 @@ export class ResearchService {
         .toLowerCase();
       if (!isAllowedContentType(contentType, expected)) {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         throw new ResearchError(
           'RESEARCH_FETCH_BLOCKED',
           'External source returned an unsupported content type.',
@@ -298,6 +327,9 @@ export class ResearchService {
       try {
         return { body: await readBoundedBody(response, this.maxResponseBytes), contentType };
       } catch (error) {
+        if (signal?.aborted) {
+          throw new ResearchError('RESEARCH_CANCELLED', 'External research was cancelled.', false);
+        }
         if (controller.signal.aborted && !(error instanceof ResearchError)) {
           throw new ResearchError(
             expected === 'search' ? 'RESEARCH_SEARCH_FAILED' : 'RESEARCH_FETCH_BLOCKED',
@@ -308,6 +340,7 @@ export class ResearchService {
         throw error;
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
       }
     }
     throw new ResearchError(
@@ -380,6 +413,106 @@ export class ResearchService {
     }
   }
 }
+
+function createNativeBridgeFetcher(): typeof fetch | undefined {
+  const bridgeUrl = process.env.AI_VIDEO_RESEARCH_BRIDGE_URL;
+  const token = process.env.AI_VIDEO_RESEARCH_BRIDGE_TOKEN;
+  if (!bridgeUrl || !token) return undefined;
+  let endpoint: URL;
+  try {
+    endpoint = new URL(bridgeUrl);
+  } catch {
+    return undefined;
+  }
+  if (
+    endpoint.protocol !== 'http:' ||
+    endpoint.hostname !== '127.0.0.1' ||
+    endpoint.pathname !== '/research' ||
+    endpoint.username ||
+    endpoint.password
+  ) {
+    return undefined;
+  }
+  const cancelEndpoint = new URL(endpoint);
+  cancelEndpoint.pathname = '/research/cancel';
+  return async (input, init) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (init?.method && init.method !== 'GET') {
+      throw new Error('Native research bridge only supports GET requests.');
+    }
+    const accept = new Headers(init?.headers).get('accept');
+    if (
+      !accept ||
+      Buffer.byteLength(target, 'utf8') + Buffer.byteLength(accept, 'utf8') >
+        NATIVE_BRIDGE_REQUEST_LIMIT
+    ) {
+      throw new Error('Native research bridge request is invalid.');
+    }
+    const requestId = randomBytes(18).toString('base64url');
+    const requestBody = JSON.stringify({ url: target, accept, requestId });
+    if (Buffer.byteLength(requestBody, 'utf8') > NATIVE_BRIDGE_REQUEST_LIMIT) {
+      throw new Error('Native research bridge request is invalid.');
+    }
+    const cancel = () => {
+      void fetch(cancelEndpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-ai-video-research-token': token,
+        },
+        body: JSON.stringify({ requestId }),
+      }).catch(() => undefined);
+    };
+    init?.signal?.addEventListener('abort', cancel, { once: true });
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-ai-video-research-token': token,
+        },
+        body: requestBody,
+        signal: init?.signal,
+      });
+    } finally {
+      init?.signal?.removeEventListener('abort', cancel);
+    }
+    const body = (await response.json()) as {
+      status?: unknown;
+      contentType?: unknown;
+      location?: unknown;
+      bodyBase64?: unknown;
+      error?: unknown;
+    };
+    const status =
+      typeof body.status === 'number' && Number.isInteger(body.status) ? body.status : undefined;
+    if (
+      !response.ok ||
+      status === undefined ||
+      typeof body.bodyBase64 !== 'string' ||
+      (body.contentType !== undefined && typeof body.contentType !== 'string') ||
+      (body.location !== undefined && typeof body.location !== 'string')
+    ) {
+      throw new Error(
+        typeof body.error === 'string' ? body.error : 'Native research bridge failed.',
+      );
+    }
+    const headers = new Headers();
+    if (body.contentType) headers.set('content-type', body.contentType);
+    if (body.location) headers.set('location', body.location);
+    return new Response(Buffer.from(body.bodyBase64, 'base64url'), {
+      status,
+      headers,
+    });
+  };
+}
+
+const unavailableResearchFetcher: typeof fetch = () =>
+  Promise.reject(new Error('Native research network bridge is unavailable.'));
+
+const unavailableLookup: Lookup = () => Promise.resolve([]);
 
 interface DuckDuckGoTopic {
   FirstURL?: string;

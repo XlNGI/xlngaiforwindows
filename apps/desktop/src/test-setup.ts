@@ -13,6 +13,31 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   value: TestResizeObserver,
 });
 
+// Node 22 can disable jsdom's storage backend unless a localstorage file is supplied.
+// Keep the browser-facing tests deterministic without requiring that process flag.
+let hasLocalStorage = false;
+try {
+  hasLocalStorage = typeof window.localStorage !== 'undefined';
+} catch {
+  hasLocalStorage = false;
+}
+if (!hasLocalStorage) {
+  const values = new Map<string, string>();
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+      get length() {
+        return values.size;
+      },
+      clear: () => values.clear(),
+      getItem: (key: string) => values.get(key) ?? null,
+      key: (index: number) => [...values.keys()][index] ?? null,
+      removeItem: (key: string) => values.delete(key),
+      setItem: (key: string, value: string) => values.set(key, value),
+    } satisfies Storage,
+  });
+}
+
 if (typeof window.PointerEvent === 'undefined') {
   class TestPointerEvent extends MouseEvent {
     readonly pointerId: number;

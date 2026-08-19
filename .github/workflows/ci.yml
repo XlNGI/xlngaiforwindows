@@ -51,8 +51,25 @@ jobs:
         run: |
           .\scripts\validate-nsis-install.ps1 `
             -InstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe"
-      - name: Validate NSIS overwrite and external project preservation
+      - name: Validate same-package overwrite and external project preservation
         shell: powershell
         run: |
           .\scripts\validate-nsis-upgrade.ps1 `
+            -UpgradeInstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe" `
+            -AllowSameInstallerBaseline
+      - name: Validate previous-version NSIS upgrade
+        if: ${{ vars.PREVIOUS_INSTALLER_PATH != '' }}
+        shell: powershell
+        env:
+          PREVIOUS_INSTALLER_PATH: ${{ vars.PREVIOUS_INSTALLER_PATH }}
+        run: |
+          .\scripts\validate-nsis-upgrade.ps1 `
+            -PreviousInstallerPath "$env:PREVIOUS_INSTALLER_PATH" `
             -UpgradeInstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe"
+      - name: Record previous-version upgrade hold
+        if: ${{ vars.PREVIOUS_INSTALLER_PATH == '' }}
+        shell: powershell
+        run: |
+          $message = 'Cross-version NSIS upgrade: HOLD (repository variable PREVIOUS_INSTALLER_PATH is not configured). Same-package overwrite does not substitute for a previous formal release.'
+          Write-Host $message
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $message

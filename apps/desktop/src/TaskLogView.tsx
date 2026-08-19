@@ -4,6 +4,7 @@ import {
   Clock3,
   ExternalLink,
   FileText,
+  Globe2,
   Image as ImageIcon,
   ListChecks,
   RefreshCw,
@@ -13,6 +14,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AgentTaskDetail,
+  AgentPartialArtifactInfo,
   ImageGenerationJobInfo,
   TaskLogItem,
   VideoGenerationJobInfo,
@@ -89,7 +91,65 @@ function AgentTaskDetailPanel({
   onOpenDocument?: (documentId: string) => void;
   onOpenConversation?: (conversationId: string) => void;
 }) {
-  const { task, events, documents } = detail;
+  const { task, events, documents, providerSteps, researchSources } = detail;
+  const [partials, setPartials] = useState<AgentPartialArtifactInfo[]>([]);
+  const [partialBusy, setPartialBusy] = useState<string>();
+
+  useEffect(() => {
+    let active = true;
+    void callWorker('agent.partial.list', { includeTerminal: true })
+      .then((rows) => {
+        if (active) setPartials(rows.filter((row) => row.taskId === task.id));
+      })
+      .catch(() => {
+        if (active) setPartials([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [task.id]);
+
+  const discardPartial = async (partial: AgentPartialArtifactInfo) => {
+    setPartialBusy(partial.id);
+    try {
+      await callWorker('agent.partial.discard', {
+        artifactId: partial.id,
+        expectedRowVersion: partial.rowVersion,
+      });
+      setPartials((current) =>
+        current.map((item) =>
+          item.id === partial.id
+            ? { ...item, status: 'discarded', rowVersion: item.rowVersion + 1 }
+            : item,
+        ),
+      );
+    } finally {
+      setPartialBusy(undefined);
+    }
+  };
+
+  const recoverPartial = async (partial: AgentPartialArtifactInfo) => {
+    if (!partial.documentId) return;
+    setPartialBusy(partial.id);
+    try {
+      const document = await callWorker('document.get', { documentId: partial.documentId });
+      const recovered = await callWorker('agent.partial.recover', {
+        artifactId: partial.id,
+        expectedRowVersion: partial.rowVersion,
+        expectedDocumentRowVersion: document.rowVersion,
+      });
+      setPartials((current) =>
+        current.map((item) =>
+          item.id === partial.id
+            ? { ...item, status: 'recovered', rowVersion: item.rowVersion + 1 }
+            : item,
+        ),
+      );
+      onOpenDocument?.(recovered.id);
+    } finally {
+      setPartialBusy(undefined);
+    }
+  };
   return (
     <div className="task-log-detail-body">
       <TaskLogStatus status={task.status} outcome={task.outcome} />
@@ -221,6 +281,140 @@ function AgentTaskDetailPanel({
           </>
         ) : (
           <p className="task-log-detail-empty">暂无文档产物。</p>
+        )}
+      </section>
+
+      <section
+        className="task-log-detail-section"
+        aria-labelledby="task-log-provider-steps-heading"
+      >
+        <h3 id="task-log-provider-steps-heading">
+          <ListChecks size={15} />
+          Provider steps
+        </h3>
+        {providerSteps.length > 0 ? (
+          <ol className="task-log-artifacts">
+            {providerSteps.map((step) => (
+              <li key={step.id}>
+                <div>
+                  <strong>
+                    Step {step.ordinal + 1}: {statusText(step.status)}
+                  </strong>
+                  <span>
+                    {step.protocol} · {step.toolCallCount} tool call
+                    {step.toolCallCount === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <small>
+                  {step.finishReason ? `finish: ${step.finishReason} · ` : ''}
+                  input {step.inputTokens ?? 0} · output {step.outputTokens ?? 0}
+                  {step.reasoningTokens !== undefined ? ` · reasoning ${step.reasoningTokens}` : ''}
+                  {step.providerReportedCost
+                    ? ` · ${step.providerReportedCost}${step.currency ? ` ${step.currency}` : ''}`
+                    : ''}
+                  {' · '}
+                  {formatDate(step.startedAt)}
+                </small>
+                {(step.errorCode || step.errorMessage) && (
+                  <small className="task-log-provider-step-error">
+                    {[step.errorCode, step.errorMessage].filter(Boolean).join(': ')}
+                  </small>
+                )}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="task-log-detail-empty">No Provider steps were recorded for this task.</p>
+        )}
+      </section>
+
+      <section className="task-log-detail-section" aria-labelledby="task-log-research-heading">
+        <h3 id="task-log-research-heading">
+          <Globe2 size={15} />
+          研究来源
+        </h3>
+        {researchSources.length > 0 ? (
+          <ul className="task-log-research-sources">
+            {researchSources.map((source) => (
+              <li key={source.id}>
+                <div className="task-log-research-heading">
+                  <strong>{source.citationLabel ?? '来源'}</strong>
+                  <span
+                    className={`task-research-status task-research-status-${source.adoptionStatus}`}
+                  >
+                    {source.adoptionStatus === 'adopted'
+                      ? '已采用'
+                      : source.adoptionStatus === 'excluded'
+                        ? '已排除'
+                        : '待判断'}
+                  </span>
+                </div>
+                <a
+                  href={source.canonicalUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={source.canonicalUrl}
+                >
+                  {source.title}
+                  <ExternalLink size={11} aria-hidden="true" />
+                </a>
+                <div className="task-log-research-meta">
+                  <span>{source.site}</span>
+                  <time dateTime={source.retrievedAt}>{formatDate(source.retrievedAt)}</time>
+                  {source.status === 'failed' && <span>抓取失败</span>}
+                  {source.truncated && <span>内容已截断</span>}
+                  {source.cacheStatus && source.cacheStatus !== 'present' && (
+                    <span>缓存{source.cacheStatus === 'missing' ? '缺失' : '已过期'}</span>
+                  )}
+                </div>
+                {source.adoptionReason && <small>{source.adoptionReason}</small>}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="task-log-detail-empty">暂无研究来源。</p>
+        )}
+      </section>
+
+      <section className="task-log-detail-section" aria-labelledby="task-log-partials-heading">
+        <h3 id="task-log-partials-heading">
+          <FileText size={15} /> 未完成产物
+        </h3>
+        {partials.length > 0 ? (
+          <ul className="task-log-artifacts">
+            {partials.map((partial) => (
+              <li key={partial.id}>
+                <div>
+                  <strong>{partial.targetKind}</strong>
+                  <span>
+                    {partial.contentLength} bytes · {partial.status}
+                  </span>
+                </div>
+                {partial.status === 'recoverable' && (
+                  <div className="task-log-artifact-actions">
+                    <button
+                      className="button secondary"
+                      type="button"
+                      disabled={partialBusy === partial.id}
+                      onClick={() => void recoverPartial(partial)}
+                    >
+                      恢复草稿
+                    </button>
+                    <button
+                      className="button secondary"
+                      type="button"
+                      disabled={partialBusy === partial.id}
+                      onClick={() => void discardPartial(partial)}
+                    >
+                      丢弃
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="task-log-detail-empty">暂无未完成产物。</p>
         )}
       </section>
     </div>

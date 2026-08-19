@@ -5,6 +5,7 @@ import type {
   AdapterCatalogResult,
   AdapterDescriptor,
   AdapterParameterSchema,
+  AdapterParameterProperty,
   AdapterParameters,
   AdapterResolveParams,
   AdapterValidationError,
@@ -25,7 +26,7 @@ const capabilityOrder: GenerationCapability[] = [
   'START_END_TO_VIDEO',
 ];
 
-const adapters: AdapterDescriptor[] = [
+const baseAdapters: AdapterDescriptor[] = [
   {
     key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
     capability: 'TEXT_TO_IMAGE',
@@ -534,6 +535,143 @@ const adapters: AdapterDescriptor[] = [
     },
   },
 ];
+
+type ReferenceVideoOffPeakPolicy = { mode: 'unsupported' } | { mode: 'whenAudio'; audio: boolean };
+
+interface ReferenceVideoModelSpec {
+  model: string;
+  modelLabel: string;
+  duration: { min: number; max: number; default: number };
+  resolution: readonly string[];
+  aspectRatio: readonly string[];
+  offPeak: ReferenceVideoOffPeakPolicy;
+}
+
+function referenceVideoAdapter(spec: ReferenceVideoModelSpec): AdapterDescriptor {
+  const supportsOffPeak = spec.offPeak.mode === 'whenAudio';
+  const properties: Record<string, AdapterParameterProperty> = {
+    images: {
+      type: 'array',
+      title: '参考图片',
+      minItems: 1,
+      maxItems: 7,
+      items: { type: 'string', format: 'uri' },
+    },
+    prompt: { type: 'string', title: '视频提示词', minLength: 1, maxLength: 5000 },
+    duration: {
+      type: 'integer',
+      title: '时长（秒）',
+      minimum: spec.duration.min,
+      maximum: spec.duration.max,
+      default: spec.duration.default,
+    },
+    aspect_ratio: {
+      type: 'string',
+      title: '画幅比例',
+      enum: [...spec.aspectRatio],
+      default: spec.aspectRatio[0],
+    },
+    resolution: {
+      type: 'string',
+      title: '分辨率',
+      enum: [...spec.resolution],
+      default: spec.resolution[0],
+    },
+    audio: { type: 'boolean', title: '同步生成声音', default: true },
+    seed: { type: 'integer', title: '随机种子', minimum: 0 },
+  };
+  const fields: AdapterDescriptor['uiSchema']['fields'] = [
+    {
+      key: 'images',
+      control: 'url-list',
+      group: 'basic',
+      order: 10,
+      placeholder: '输入公开 URL，或选择本地图片（最多 7 张）',
+    },
+    { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
+    { key: 'duration', control: 'number', group: 'basic', order: 30 },
+    { key: 'aspect_ratio', control: 'select', group: 'basic', order: 40 },
+    { key: 'resolution', control: 'select', group: 'basic', order: 50 },
+    { key: 'audio', control: 'toggle', group: 'basic', order: 60 },
+    { key: 'seed', control: 'number', group: 'advanced', order: 70 },
+  ];
+  const allOf = supportsOffPeak
+    ? [
+        {
+          if: { properties: { off_peak: { const: true } }, required: ['off_peak'] },
+          then: {
+            properties: {
+              audio: { const: spec.offPeak.mode === 'whenAudio' && spec.offPeak.audio },
+            },
+          },
+        },
+      ]
+    : undefined;
+  if (supportsOffPeak) {
+    properties.off_peak = { type: 'boolean', title: '错峰模式', default: false };
+    fields.push({ key: 'off_peak', control: 'toggle', group: 'advanced', order: 80 });
+  }
+  return {
+    key: `REFERENCE_TO_VIDEO:vidu:${spec.model}:v2`,
+    capability: 'REFERENCE_TO_VIDEO',
+    capabilityLabel: '参考生视频',
+    provider: 'vidu',
+    providerLabel: 'Vidu',
+    model: spec.model,
+    modelLabel: spec.modelLabel,
+    apiVersion: 'v2',
+    schemaVersion: 1,
+    endpoint: 'https://api.vidu.com/ent/v2/reference2video',
+    documentationUrl: 'https://platform.vidu.com/docs/reference-to-video',
+    credentialProvider: 'vidu',
+    parameterSchema: {
+      $schema: schemaUri,
+      type: 'object',
+      additionalProperties: false,
+      required: ['images', 'prompt', 'duration', 'aspect_ratio', 'resolution', 'audio'],
+      properties,
+      ...(allOf ? { allOf } : {}),
+    },
+    uiSchema: { fields },
+  };
+}
+
+const generatedReferenceVideoAdapters = [
+  referenceVideoAdapter({
+    model: 'viduq3-ad',
+    modelLabel: 'Vidu Q3-Ad',
+    duration: { min: 3, max: 15, default: 5 },
+    resolution: ['720p', '1080p'],
+    aspectRatio: imageAspectRatios,
+    offPeak: { mode: 'whenAudio', audio: true },
+  }),
+  referenceVideoAdapter({
+    model: 'viduq3-mix',
+    modelLabel: 'Vidu Q3-Mix',
+    duration: { min: 3, max: 16, default: 5 },
+    resolution: ['720p', '1080p'],
+    aspectRatio: imageAspectRatios,
+    offPeak: { mode: 'unsupported' },
+  }),
+  referenceVideoAdapter({
+    model: 'viduq3-turbo',
+    modelLabel: 'Vidu Q3-Turbo',
+    duration: { min: 3, max: 16, default: 5 },
+    resolution: ['540p', '720p', '1080p'],
+    aspectRatio: imageAspectRatios,
+    offPeak: { mode: 'whenAudio', audio: true },
+  }),
+  referenceVideoAdapter({
+    model: 'viduq2-pro',
+    modelLabel: 'Vidu Q2 Pro',
+    duration: { min: 1, max: 10, default: 5 },
+    resolution: ['540p', '720p', '1080p'],
+    aspectRatio: imageAspectRatios,
+    offPeak: { mode: 'whenAudio', audio: false },
+  }),
+];
+
+const adapters: AdapterDescriptor[] = [...baseAdapters, ...generatedReferenceVideoAdapters];
 
 const UNICOMPAPI_MEDIA_MODELS: readonly {
   model: string;

@@ -28,6 +28,8 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'conversation.list',
   'chat.message.list',
   'context.preview',
+  'novel.context.consistencyReport',
+  'agent.generation.cancel',
   'llm.status',
   'llm.generation.runtime',
   'llm.generation.get',

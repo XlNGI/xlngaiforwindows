@@ -216,6 +216,27 @@ describe('worker handler', () => {
     });
   });
 
+  it('rejects unknown change-set fields and malformed nested items at the IPC boundary', async () => {
+    const unknown = await handleRequest({
+      id: 'change-set-unknown-param',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.changeSet.create',
+      params: { title: 'Proposal', items: [], forged: true },
+    } as unknown as WorkerRequest);
+    const malformed = await handleRequest({
+      id: 'change-set-malformed-item',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.changeSet.create',
+      params: {
+        title: 'Proposal',
+        items: [{ entityType: 'scene', action: 'create', title: 'Scene', forged: true }],
+      },
+    } as unknown as WorkerRequest);
+
+    expect(unknown).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    expect(malformed).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+  });
+
   it('rejects oversized prompts and invalid message role/status combinations', async () => {
     const oversized = await handleRequest({
       id: 'oversized-prompt',

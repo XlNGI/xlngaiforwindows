@@ -83,6 +83,39 @@ const agentDetail: AgentTaskDetail = {
       createdAt: '2026-08-16T01:00:01.000Z',
     },
   ],
+  providerSteps: [
+    {
+      id: 'step-1',
+      generationId: 'generation-1',
+      attemptId: 'attempt-1',
+      ordinal: 0,
+      protocol: 'openai-responses',
+      status: 'complete',
+      toolCallCount: 1,
+      finishReason: 'tool_calls',
+      inputTokens: 100,
+      outputTokens: 20,
+      startedAt: '2026-08-16T01:00:00.000Z',
+      completedAt: '2026-08-16T01:00:01.000Z',
+    },
+  ],
+  researchSources: [
+    {
+      id: 'research-source-1',
+      title: '公开研究来源',
+      site: 'example.com',
+      canonicalUrl: 'https://example.com/source',
+      retrievedAt: '2026-08-16T01:00:30.000Z',
+      contentHash: 'a'.repeat(64),
+      characterCount: 420,
+      truncated: true,
+      status: 'fetched',
+      citationLabel: 'R1',
+      adoptionStatus: 'adopted',
+      adoptionReason: '用于核对背景事实',
+      cacheStatus: 'present',
+    },
+  ],
 };
 
 const imageJob: ImageGenerationJobInfo = {
@@ -178,10 +211,21 @@ describe('TaskLogView', () => {
     expect(screen.getAllByText('等待审核 (waiting_review)')).toHaveLength(2);
     expect(screen.getByText('document.draft.created')).toBeInTheDocument();
     expect(screen.getByText('已创建可审阅草稿。')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '研究来源' })).toBeInTheDocument();
+    expect(screen.getByText('R1')).toBeInTheDocument();
+    expect(screen.getByText('公开研究来源')).toBeInTheDocument();
+    expect(screen.getByText('内容已截断')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /公开研究来源/ })).toHaveAttribute(
+      'href',
+      'https://example.com/source',
+    );
     expect(screen.getByText(/版本/)).toHaveTextContent('version-1');
     expect(screen.getByText('OpenAI · gpt-test')).toBeInTheDocument();
     expect(screen.getByText('输入 100 · 输出 20')).toBeInTheDocument();
     expect(screen.getByText('0.0001')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Provider steps' })).toBeInTheDocument();
+    expect(screen.getByText(/Step 1: .*complete/)).toBeInTheDocument();
+    expect(screen.getByText(/openai-responses.*1 tool call/)).toBeInTheDocument();
   });
 
   it('loads full image job details without requesting Agent task details', async () => {

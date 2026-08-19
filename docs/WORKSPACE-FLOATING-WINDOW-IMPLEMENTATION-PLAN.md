@@ -368,3 +368,8 @@ apps/desktop/src/conversations/
 - 新增相邻分隔线、生产页动态加入/移除、文档浮动/分离后邻页填充、紧凑宽度会话自动收起和窄屏单活动页面测试。
 - 浏览器验收覆盖 `1440x900`、紧凑工作区、`800x760` 和 `390x844`：三页高度一致；拖动文档/生产分隔线时会话宽度保持不变；项目栏宽度在重载后恢复；各断点无页面级横向滚动、顶栏重叠或重复边框。
 - 本轮门禁通过：Desktop 16 个测试文件、80 项测试，Worker 17 个测试文件、124 项测试；全仓 `pnpm test`、`pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、Rust fmt 和 41 项 Rust 测试均通过。
+2026-08-19 原生验收准备补强：
+
+- 新增 `scripts/validate-workspace-native-preflight.ps1`，可重复启动指定 Release Desktop/Worker 二进制，验证主窗口句柄、Worker 子进程、优雅关闭和 Worker 退出，并可输出 JSON 证据；脚本同时识别 Debug 下的 Node Worker 子进程，但独立 Debug EXE 因开发资源和 Worker 懒启动不作为验收证据。
+- 新增 `docs/WORKSPACE-NATIVE-ACCEPTANCE-CHECKLIST.md`，明确移动、缩放、最小化、最大化、关闭/附加、generation 保持、CAS 冲突、项目切换和窄屏人工验收步骤。
+- preflight 成功不等于原生窗口功能验收完成；Windows Graphics Capture 对当前 WebView2 的限制和真实人工动作仍保持未验证。

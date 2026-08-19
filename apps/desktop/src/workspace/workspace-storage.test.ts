@@ -8,9 +8,11 @@ import {
 
 describe('workspace storage', () => {
   let values: Map<string, string>;
+  let originalLocalStorage: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     values = new Map<string, string>();
+    originalLocalStorage = Object.getOwnPropertyDescriptor(window, 'localStorage');
     Object.defineProperty(window, 'localStorage', {
       configurable: true,
       value: {
@@ -22,7 +24,14 @@ describe('workspace storage', () => {
     });
   });
 
-  afterEach(() => values.clear());
+  afterEach(() => {
+    values.clear();
+    if (originalLocalStorage) {
+      Object.defineProperty(window, 'localStorage', originalLocalStorage);
+    } else {
+      Reflect.deleteProperty(window, 'localStorage');
+    }
+  });
 
   it('isolates persisted layout by project id', () => {
     const layout = createDefaultWorkspaceLayout('project-a', { width: 1440, height: 900 });

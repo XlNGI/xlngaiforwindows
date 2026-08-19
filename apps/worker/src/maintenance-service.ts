@@ -27,6 +27,11 @@ import type {
 } from '@ai-video/contracts';
 import { checkIntegrity, createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
+import {
+  cleanupResearchCache as cleanupResearchCacheIndex,
+  clearResearchCacheIndex,
+  type ResearchCacheCleanupResult,
+} from './research-cache.js';
 
 const MAX_DIAGNOSTIC_EVENTS = 50;
 const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 1_024;
@@ -392,12 +397,32 @@ export class MaintenanceService {
   }
 
   clearCache(): CacheClearResult {
-    return this.projects.access(true, (_database, project) => {
+    return this.projects.access(true, (database, project) => {
       const cachePath = resolveProjectRelativePath(project.rootPath, 'cache');
       const result = clearTree(cachePath);
       mkdirSync(cachePath, { recursive: true });
+      database
+        .prepare(
+          `UPDATE agent_research_sources
+           SET status = 'failed', error_code = 'RESEARCH_CACHE_MISSING'
+           WHERE project_id = ? AND cache_relative_path IS NOT NULL AND status = 'fetched'`,
+        )
+        .run(project.id);
+      clearResearchCacheIndex(database, project.id);
       return result;
     });
+  }
+
+  cleanupResearchCache(maxBytes?: number): ResearchCacheCleanupResult {
+    return this.projects.access(true, (database, project) =>
+      cleanupResearchCacheIndex({
+        database,
+        projectId: project.id,
+        projectRoot: project.rootPath,
+        now: this.now().toISOString(),
+        maxBytes,
+      }),
+    );
   }
 
   cleanupContextSnapshots(params: ContextSnapshotCleanupParams = {}): ContextSnapshotCleanupResult {

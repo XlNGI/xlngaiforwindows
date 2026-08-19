@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -52,6 +52,11 @@ try {
     '--outfile=dist-sidecar/index.cjs',
     '--external:better-sqlite3',
   ]);
+  const nativeBinding = join(sidecarSqliteDirectory, 'build', 'Release', 'better_sqlite3.node');
+  if (!existsSync(nativeBinding) || statSync(nativeBinding).size === 0) {
+    throw new Error(`Node 22 better-sqlite3 prebuild is missing before pkg: ${nativeBinding}`);
+  }
+  console.log(`Using sidecar native binding: ${nativeBinding}`);
   run(pkg, ['dist-sidecar/index.cjs', '--target', 'node22-win-x64', '--output', output]);
 } finally {
   rmSync(sidecarSqliteDirectory, { recursive: true, force: true });

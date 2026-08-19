@@ -44,6 +44,8 @@ pnpm tauri:build
   -UpgradeInstallerPath "apps\desktop\src-tauri\target\release\bundle\nsis\unicomp_0.1.0_x64-setup.exe"
 ```
 
+`validate-nsis-upgrade.ps1` rejects identical installer content by default. `-AllowSameInstallerBaseline` is reserved for the separate same-package overwrite smoke test and does not satisfy the previous-version upgrade gate.
+
 - [ ] 干净安装、桌面启动、Worker 启动、优雅退出和卸载清理通过。
 - [ ] CI 同包覆盖基线通过，外部项目身份、文档摘要和完整性保持不变。
 - [ ] 使用上一正式版本安装包执行真实跨版本升级脚本并通过。

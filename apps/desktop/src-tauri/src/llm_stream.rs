@@ -2,13 +2,13 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::ipc::Channel;
+use tauri::{ipc::Channel, Manager};
 use windows_sys::Win32::{
     Foundation::GetLastError,
     Networking::WinHttp::{
@@ -30,6 +30,7 @@ const ERROR_BODY_LIMIT: usize = 64 * 1024;
 const STREAM_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 const CHAT_TOOL_NAME_DOT_MARKER: &str = "__dot__";
+const AGENT_RUNTIME_EVENT_LIMIT: usize = 512;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +134,16 @@ pub(crate) struct NormalizedUsage {
     provider_reported_cost: Option<ProviderReportedCost>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentToolConfirmationRequest {
+    confirmation_token: String,
+    action: String,
+    document_id: String,
+    document_title: String,
+    expires_at: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(
     tag = "type",
@@ -143,6 +154,9 @@ pub(crate) enum LlmStreamEvent {
     Started,
     Delta {
         delta: String,
+    },
+    Confirmation {
+        confirmation: AgentToolConfirmationRequest,
     },
     ToolCalls {
         calls: Vec<LlmToolCall>,
@@ -171,6 +185,16 @@ pub(crate) enum LlmStreamEvent {
 #[derive(Default)]
 pub(crate) struct LlmStreamState {
     active: Mutex<HashMap<String, Arc<LlmCancellation>>>,
+    agent_generations: Mutex<HashMap<String, String>>,
+    agent_events: Mutex<HashMap<String, Vec<LlmStreamEvent>>>,
+    agent_subscribers: Mutex<HashMap<String, Vec<Channel<LlmStreamEvent>>>>,
+    confirmations: Mutex<HashMap<String, Arc<ConfirmationWaiter>>>,
+}
+
+struct ConfirmationWaiter {
+    confirmation_token: String,
+    decision: Mutex<Option<bool>>,
+    ready: Condvar,
 }
 
 impl LlmStreamState {
@@ -196,6 +220,101 @@ impl LlmStreamState {
                 active.remove(attempt_id);
             }
         }
+        if let Ok(mut agent_generations) = self.agent_generations.lock() {
+            agent_generations.remove(attempt_id);
+        }
+        if let Ok(mut agent_events) = self.agent_events.lock() {
+            agent_events.remove(attempt_id);
+        }
+        if let Ok(mut agent_subscribers) = self.agent_subscribers.lock() {
+            agent_subscribers.remove(attempt_id);
+        }
+        if let Ok(mut confirmations) = self.confirmations.lock() {
+            if let Some(waiter) = confirmations.remove(attempt_id) {
+                waiter.ready.notify_all();
+            }
+        }
+    }
+
+    fn register_agent(
+        &self,
+        request: &LlmStreamStart,
+        channel: Channel<LlmStreamEvent>,
+    ) -> Result<Arc<LlmCancellation>, String> {
+        let cancellation = self.register(&request.attempt_id)?;
+        let mut agent_generations = self
+            .agent_generations
+            .lock()
+            .map_err(|_| "LLM Agent runtime registry lock is poisoned".to_string())?;
+        agent_generations.insert(request.attempt_id.clone(), request.generation_id.clone());
+        self.agent_events
+            .lock()
+            .map_err(|_| "LLM Agent runtime event registry lock is poisoned".to_string())?
+            .insert(request.attempt_id.clone(), Vec::new());
+        self.agent_subscribers
+            .lock()
+            .map_err(|_| "LLM Agent runtime subscriber registry lock is poisoned".to_string())?
+            .insert(request.attempt_id.clone(), vec![channel]);
+        Ok(cancellation)
+    }
+
+    fn emit_agent_event(&self, attempt_id: &str, event: LlmStreamEvent) {
+        let Ok(mut events) = self.agent_events.lock() else {
+            return;
+        };
+        let Some(history) = events.get_mut(attempt_id) else {
+            return;
+        };
+        history.push(event.clone());
+        if history.len() > AGENT_RUNTIME_EVENT_LIMIT {
+            history.drain(..history.len() - AGENT_RUNTIME_EVENT_LIMIT);
+        }
+        let Ok(mut subscribers) = self.agent_subscribers.lock() else {
+            return;
+        };
+        let Some(channels) = subscribers.get_mut(attempt_id) else {
+            return;
+        };
+        channels.retain(|channel| channel.send(event.clone()).is_ok());
+    }
+
+    fn subscribe_agent_runtime(&self, attempt_id: &str, channel: Channel<LlmStreamEvent>) -> bool {
+        let Ok(events) = self.agent_events.lock() else {
+            return false;
+        };
+        let Some(history) = events.get(attempt_id) else {
+            return false;
+        };
+        let Ok(mut subscribers) = self.agent_subscribers.lock() else {
+            return false;
+        };
+        for event in history {
+            if channel.send(event.clone()).is_err() {
+                return false;
+            }
+        }
+        subscribers
+            .entry(attempt_id.to_string())
+            .or_default()
+            .push(channel);
+        true
+    }
+
+    pub(crate) fn interrupt_agent_runtimes(&self) -> Vec<String> {
+        let generation_ids = self
+            .agent_generations
+            .lock()
+            .map(|agent_generations| agent_generations.values().cloned().collect())
+            .unwrap_or_default();
+        for attempt_id in self
+            .agent_generations
+            .lock()
+            .map(|agent_generations| agent_generations.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            self.cancel(&attempt_id);
+        }
+        generation_ids
     }
 
     fn cancel(&self, attempt_id: &str) -> bool {
@@ -206,9 +325,119 @@ impl LlmStreamState {
             .and_then(|active| active.get(attempt_id).cloned());
         if let Some(cancellation) = cancellation {
             cancellation.cancel();
+            if let Some(waiter) = self
+                .confirmations
+                .lock()
+                .ok()
+                .and_then(|confirmations| confirmations.get(attempt_id).cloned())
+            {
+                waiter.ready.notify_all();
+            }
             true
         } else {
             false
+        }
+    }
+
+    fn register_confirmation(
+        &self,
+        attempt_id: &str,
+        confirmation_token: &str,
+    ) -> Result<Arc<ConfirmationWaiter>, StreamFailure> {
+        if !self
+            .active
+            .lock()
+            .map_err(|_| StreamFailure::new("LLM stream registry lock is poisoned", true))?
+            .contains_key(attempt_id)
+        {
+            return Err(StreamFailure::new(
+                "The LLM attempt is no longer active.",
+                false,
+            ));
+        }
+        let mut confirmations = self
+            .confirmations
+            .lock()
+            .map_err(|_| StreamFailure::new("LLM confirmation registry lock is poisoned", true))?;
+        if confirmations.contains_key(attempt_id) {
+            return Err(StreamFailure::new(
+                "An Agent confirmation is already pending.",
+                false,
+            ));
+        }
+        let waiter = Arc::new(ConfirmationWaiter {
+            confirmation_token: confirmation_token.to_string(),
+            decision: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        confirmations.insert(attempt_id.to_string(), Arc::clone(&waiter));
+        Ok(waiter)
+    }
+
+    fn confirm(&self, attempt_id: &str, confirmation_token: &str, approved: bool) -> bool {
+        let active = self
+            .active
+            .lock()
+            .ok()
+            .and_then(|active| active.get(attempt_id).cloned());
+        if active.is_none_or(|cancellation| cancellation.is_cancelled()) {
+            return false;
+        }
+        let waiter = self
+            .confirmations
+            .lock()
+            .ok()
+            .and_then(|confirmations| confirmations.get(attempt_id).cloned());
+        let Some(waiter) = waiter else {
+            return false;
+        };
+        if waiter.confirmation_token != confirmation_token {
+            return false;
+        }
+        let Ok(mut decision) = waiter.decision.lock() else {
+            return false;
+        };
+        if decision.is_some() {
+            return false;
+        }
+        *decision = Some(approved);
+        waiter.ready.notify_all();
+        true
+    }
+
+    fn clear_confirmation(&self, attempt_id: &str, waiter: &Arc<ConfirmationWaiter>) {
+        if let Ok(mut confirmations) = self.confirmations.lock() {
+            if confirmations
+                .get(attempt_id)
+                .is_some_and(|current| Arc::ptr_eq(current, waiter))
+            {
+                confirmations.remove(attempt_id);
+            }
+        }
+    }
+}
+
+impl ConfirmationWaiter {
+    fn wait(&self, cancellation: &LlmCancellation) -> Result<bool, StreamFailure> {
+        let started = Instant::now();
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(StreamFailure::cancelled());
+            }
+            let decision = self
+                .decision
+                .lock()
+                .map_err(|_| StreamFailure::new("LLM confirmation lock is poisoned", true))?;
+            if let Some(approved) = *decision {
+                return Ok(approved);
+            }
+            if started.elapsed() >= Duration::from_secs(5 * 60) {
+                return Err(StreamFailure::new("Agent confirmation expired.", false));
+            }
+            let _ = self
+                .ready
+                .wait_timeout(decision, Duration::from_millis(250))
+                .map_err(|_| StreamFailure::new("LLM confirmation lock is poisoned", true))?;
         }
     }
 }
@@ -390,6 +619,308 @@ pub(crate) fn llm_stream_cancel(
     streams.cancel(&attempt_id)
 }
 
+#[tauri::command]
+pub(crate) fn agent_runtime_start(
+    request: LlmStreamStart,
+    on_event: Channel<LlmStreamEvent>,
+    app: tauri::AppHandle,
+    streams: tauri::State<'_, LlmStreamState>,
+) -> Result<(), String> {
+    let cancellation = streams.register_agent(&request, on_event)?;
+    let attempt_id = request.attempt_id.clone();
+    std::thread::spawn(move || {
+        let worker = app.state::<WorkerState>();
+        let streams = app.state::<LlmStreamState>();
+        run_agent_runtime(request, &worker, Arc::clone(&cancellation), &streams);
+        streams.unregister(&attempt_id, &cancellation);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn agent_runtime_subscribe(
+    attempt_id: String,
+    on_event: Channel<LlmStreamEvent>,
+    streams: tauri::State<'_, LlmStreamState>,
+) -> bool {
+    streams.subscribe_agent_runtime(&attempt_id, on_event)
+}
+
+#[tauri::command]
+pub(crate) fn agent_runtime_cancel(
+    attempt_id: String,
+    streams: tauri::State<'_, LlmStreamState>,
+) -> bool {
+    streams.cancel(&attempt_id)
+}
+
+#[tauri::command]
+pub(crate) fn agent_runtime_confirm(
+    attempt_id: String,
+    confirmation_token: String,
+    approved: bool,
+    streams: tauri::State<'_, LlmStreamState>,
+) -> bool {
+    streams.confirm(&attempt_id, &confirmation_token, approved)
+}
+
+fn worker_call(
+    worker: &WorkerState,
+    request_id: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, StreamFailure> {
+    let response = worker
+        .request(&serde_json::json!({
+            "id": request_id,
+            "protocolVersion": 1,
+            "method": method,
+            "params": params,
+        }))
+        .map_err(|error| StreamFailure::new(error, true))?;
+    worker_result(response).map_err(|error| StreamFailure::new(error, false))
+}
+
+fn runtime_identity(request: &LlmStreamStart) -> serde_json::Value {
+    serde_json::json!({
+        "generationId": request.generation_id,
+        "attemptId": request.attempt_id,
+        "projectId": request.project_id,
+        "projectSessionId": request.project_session_id,
+        "conversationId": request.conversation_id,
+    })
+}
+
+fn run_agent_runtime(
+    request: LlmStreamStart,
+    worker: &WorkerState,
+    cancellation: Arc<LlmCancellation>,
+    streams: &LlmStreamState,
+) {
+    let mut aggregate = String::new();
+    let result = (|| -> Result<(), StreamFailure> {
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(StreamFailure::cancelled());
+            }
+            let runtime = resolve_runtime(&request, worker)
+                .map_err(|error| StreamFailure::new(error, false))?;
+            ensure_credential_subject(&runtime.provider_profile_id, worker)
+                .map_err(|error| StreamFailure::new(error, false))?;
+            let secret = credential_read(&runtime.provider_profile_id)
+                .map_err(|_| StreamFailure::new("Provider credential is not configured.", false))?;
+            let mut pending_tool_calls: Option<(
+                Vec<LlmToolCall>,
+                String,
+                Option<NormalizedUsage>,
+            )> = None;
+            stream_provider_with_emitter(
+                runtime,
+                secret,
+                Arc::clone(&cancellation),
+                |event| match event {
+                    LlmStreamEvent::Started => {
+                        worker_call(
+                            worker,
+                            &format!("native-agent-step-start-{}", request.attempt_id),
+                            "agent.providerStep.start",
+                            runtime_identity(&request),
+                        )?;
+                        streams.emit_agent_event(&request.attempt_id, LlmStreamEvent::Started);
+                        Ok(())
+                    }
+                    LlmStreamEvent::Delta { delta } => {
+                        aggregate.push_str(&delta);
+                        let mut params = runtime_identity(&request);
+                        params["content"] = serde_json::Value::String(aggregate.clone());
+                        worker_call(
+                            worker,
+                            &format!("native-agent-observe-{}", request.attempt_id),
+                            "llm.generation.observe",
+                            params,
+                        )?;
+                        streams
+                            .emit_agent_event(&request.attempt_id, LlmStreamEvent::Delta { delta });
+                        Ok(())
+                    }
+                    LlmStreamEvent::Confirmation { .. } => Err(StreamFailure::new(
+                        "Provider emitted an unexpected Agent confirmation event.",
+                        false,
+                    )),
+                    LlmStreamEvent::ToolCalls {
+                        calls,
+                        provider_response_id,
+                        usage,
+                    } => {
+                        let provider_response_id = provider_response_id.ok_or_else(|| {
+                            StreamFailure::new(
+                                "Provider tool calls did not include a continuation identity.",
+                                false,
+                            )
+                        })?;
+                        pending_tool_calls = Some((calls, provider_response_id, usage));
+                        Ok(())
+                    }
+                    LlmStreamEvent::Complete {
+                        provider_response_id,
+                        finish_reason,
+                        usage,
+                    } => {
+                        let mut step_params = runtime_identity(&request);
+                        step_params["providerResponseId"] = provider_response_id
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                        step_params["finishReason"] = finish_reason
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                        step_params["usage"] =
+                            serde_json::to_value(&usage).unwrap_or(serde_json::Value::Null);
+                        worker_call(
+                            worker,
+                            &format!("native-agent-step-complete-{}", request.attempt_id),
+                            "agent.providerStep.complete",
+                            step_params,
+                        )?;
+                        let mut complete_params = runtime_identity(&request);
+                        complete_params["content"] = serde_json::Value::String(aggregate.clone());
+                        complete_params["providerResponseId"] = provider_response_id
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                        complete_params["finishReason"] = finish_reason
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                        complete_params["usage"] =
+                            serde_json::to_value(&usage).unwrap_or(serde_json::Value::Null);
+                        worker_call(
+                            worker,
+                            &format!("native-agent-complete-{}", request.attempt_id),
+                            "llm.generation.complete",
+                            complete_params,
+                        )?;
+                        streams.emit_agent_event(
+                            &request.attempt_id,
+                            LlmStreamEvent::Complete {
+                                provider_response_id,
+                                finish_reason,
+                                usage,
+                            },
+                        );
+                        Ok(())
+                    }
+                    LlmStreamEvent::Failed {
+                        error,
+                        retryable,
+                        usage,
+                    } => Err(StreamFailure {
+                        message: error,
+                        retryable,
+                        cancelled: false,
+                        usage,
+                    }),
+                    LlmStreamEvent::Cancelled => Err(StreamFailure::cancelled()),
+                },
+                false,
+            )?;
+            let Some((calls, provider_response_id, usage)) = pending_tool_calls else {
+                return Ok(());
+            };
+            let mut params = runtime_identity(&request);
+            params["providerResponseId"] = serde_json::Value::String(provider_response_id);
+            params["calls"] = serde_json::to_value(calls).map_err(|_| {
+                StreamFailure::new("Provider tool calls could not be serialized.", false)
+            })?;
+            params["usage"] = serde_json::to_value(usage).unwrap_or(serde_json::Value::Null);
+            let execution = worker_call(
+                worker,
+                &format!("native-agent-tools-{}", request.attempt_id),
+                "agent.generation.executeTools",
+                params,
+            )?;
+            if execution.get("continuation").is_some() {
+                continue;
+            }
+            let confirmation = execution
+                .get("confirmation")
+                .cloned()
+                .ok_or_else(|| {
+                    StreamFailure::new("Agent tool execution did not return a continuation.", false)
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<AgentToolConfirmationRequest>(value).map_err(|_| {
+                        StreamFailure::new("Worker returned an invalid Agent confirmation.", false)
+                    })
+                })?;
+            let waiter = streams
+                .register_confirmation(&request.attempt_id, &confirmation.confirmation_token)?;
+            streams.emit_agent_event(
+                &request.attempt_id,
+                LlmStreamEvent::Confirmation {
+                    confirmation: confirmation.clone(),
+                },
+            );
+            let approved = waiter.wait(&cancellation)?;
+            streams.clear_confirmation(&request.attempt_id, &waiter);
+            if cancellation.is_cancelled() {
+                return Err(StreamFailure::cancelled());
+            }
+            let mut confirmation_params = runtime_identity(&request);
+            confirmation_params["confirmationToken"] =
+                serde_json::Value::String(confirmation.confirmation_token);
+            confirmation_params["approved"] = serde_json::Value::Bool(approved);
+            let confirmed = worker_call(
+                worker,
+                &format!("native-agent-confirm-{}", request.attempt_id),
+                "agent.generation.confirmTool",
+                confirmation_params,
+            )?;
+            if confirmed.get("continuation").is_none() {
+                return Err(StreamFailure::new(
+                    "Agent confirmation did not return a continuation.",
+                    false,
+                ));
+            }
+        }
+    })();
+    match result {
+        Ok(()) => {}
+        Err(failure) if failure.cancelled || cancellation.is_cancelled() => {
+            let _ = worker_call(
+                worker,
+                &format!("native-agent-cancel-{}", request.attempt_id),
+                "llm.generation.cancel",
+                serde_json::json!({ "generationId": request.generation_id }),
+            );
+            streams.emit_agent_event(&request.attempt_id, LlmStreamEvent::Cancelled);
+        }
+        Err(failure) => {
+            let mut params = runtime_identity(&request);
+            params["content"] = serde_json::Value::String(aggregate);
+            params["error"] = serde_json::Value::String(failure.message.clone());
+            params["retryable"] = serde_json::Value::Bool(failure.retryable);
+            params["usage"] =
+                serde_json::to_value(&failure.usage).unwrap_or(serde_json::Value::Null);
+            let _ = worker_call(
+                worker,
+                &format!("native-agent-fail-{}", request.attempt_id),
+                "llm.generation.fail",
+                params,
+            );
+            streams.emit_agent_event(
+                &request.attempt_id,
+                LlmStreamEvent::Failed {
+                    error: failure.message,
+                    retryable: failure.retryable,
+                    usage: failure.usage,
+                },
+            );
+        }
+    }
+}
+
 fn resolve_runtime(
     request: &LlmStreamStart,
     worker: &WorkerState,
@@ -421,6 +952,25 @@ fn stream_provider(
     channel: Channel<LlmStreamEvent>,
     allow_http_for_test: bool,
 ) -> Result<(), StreamFailure> {
+    stream_provider_with_emitter(
+        runtime,
+        secret,
+        cancellation,
+        |event| channel.send(event).map_err(|_| StreamFailure::cancelled()),
+        allow_http_for_test,
+    )
+}
+
+fn stream_provider_with_emitter<F>(
+    runtime: LlmRuntimeRequest,
+    secret: CredentialSecret,
+    cancellation: Arc<LlmCancellation>,
+    mut emit: F,
+    allow_http_for_test: bool,
+) -> Result<(), StreamFailure>
+where
+    F: FnMut(LlmStreamEvent) -> Result<(), StreamFailure>,
+{
     if cancellation.is_cancelled() {
         return Err(StreamFailure::cancelled());
     }
@@ -551,9 +1101,7 @@ fn stream_provider(
         return Err(classify_http_error(status, &error_body));
     }
 
-    channel
-        .send(LlmStreamEvent::Started)
-        .map_err(|_| StreamFailure::cancelled())?;
+    emit(LlmStreamEvent::Started)?;
     let started_at = Instant::now();
     let mut parser = SseParser::new(&runtime.protocol);
     loop {
@@ -585,20 +1133,15 @@ fn stream_provider(
         if read == 0 {
             break;
         }
-        parser.feed(&chunk[..read as usize], |event| {
-            channel.send(event).map_err(|_| StreamFailure::cancelled())
-        })?;
+        parser.feed(&chunk[..read as usize], |event| emit(event))?;
     }
-    let completed =
-        parser.finish(|event| channel.send(event).map_err(|_| StreamFailure::cancelled()))?;
+    let completed = parser.finish(|event| emit(event))?;
     if completed.tool_calls.is_empty() {
-        channel
-            .send(LlmStreamEvent::Complete {
-                provider_response_id: completed.provider_response_id,
-                finish_reason: completed.finish_reason,
-                usage: completed.usage,
-            })
-            .map_err(|_| StreamFailure::cancelled())?;
+        emit(LlmStreamEvent::Complete {
+            provider_response_id: completed.provider_response_id,
+            finish_reason: completed.finish_reason,
+            usage: completed.usage,
+        })?;
     } else {
         let mut calls = completed.tool_calls;
         let provider_response_id = completed.provider_response_id.or_else(|| {
@@ -613,13 +1156,11 @@ fn stream_provider(
                 .find(|tool| tool.name == call.name)
                 .and_then(|tool| tool.authorization_handle.clone());
         }
-        channel
-            .send(LlmStreamEvent::ToolCalls {
-                calls,
-                provider_response_id,
-                usage: completed.usage,
-            })
-            .map_err(|_| StreamFailure::cancelled())?;
+        emit(LlmStreamEvent::ToolCalls {
+            calls,
+            provider_response_id,
+            usage: completed.usage,
+        })?;
     }
     Ok(())
 }
@@ -1561,10 +2102,106 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::Arc,
+        sync::{Arc, Mutex},
         thread,
     };
     use tauri::ipc::Channel;
+
+    #[test]
+    fn confirmation_waiter_accepts_only_the_pending_token() {
+        let streams = Arc::new(LlmStreamState::default());
+        let cancellation = streams
+            .register("attempt")
+            .expect("attempt should register");
+        let waiter = streams
+            .register_confirmation("attempt", "pending-token")
+            .expect("confirmation should register");
+        let waiting_cancellation = Arc::clone(&cancellation);
+        let waiting = thread::spawn(move || waiter.wait(&waiting_cancellation));
+
+        assert!(!streams.confirm("attempt", "wrong-token", true));
+        assert!(streams.confirm("attempt", "pending-token", true));
+        assert_eq!(waiting.join().expect("waiter should join"), Ok(true));
+        streams.unregister("attempt", &cancellation);
+    }
+
+    #[test]
+    fn cancellation_unblocks_a_pending_confirmation() {
+        let streams = Arc::new(LlmStreamState::default());
+        let cancellation = streams
+            .register("attempt")
+            .expect("attempt should register");
+        let waiter = streams
+            .register_confirmation("attempt", "pending-token")
+            .expect("confirmation should register");
+        let waiting_cancellation = Arc::clone(&cancellation);
+        let waiting = thread::spawn(move || waiter.wait(&waiting_cancellation));
+
+        assert!(streams.cancel("attempt"));
+        assert!(waiting.join().expect("waiter should join").is_err());
+        streams.unregister("attempt", &cancellation);
+    }
+
+    #[test]
+    fn interrupting_agent_runtimes_cancels_only_registered_agent_attempts() {
+        let streams = LlmStreamState::default();
+        let channel = Channel::<LlmStreamEvent>::new(|_| Ok(()));
+        let chat = streams
+            .register("chat-attempt")
+            .expect("chat should register");
+        let agent_request = super::LlmStreamStart {
+            generation_id: "agent-generation".to_string(),
+            attempt_id: "agent-attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+        };
+        let agent = streams
+            .register_agent(&agent_request, channel)
+            .expect("Agent should register");
+
+        assert_eq!(streams.interrupt_agent_runtimes(), vec!["agent-generation"]);
+        assert!(!chat.is_cancelled());
+        assert!(agent.is_cancelled());
+        streams.unregister("chat-attempt", &chat);
+        streams.unregister("agent-attempt", &agent);
+    }
+
+    #[test]
+    fn agent_runtime_event_history_is_bounded_and_replayed_to_new_subscribers() {
+        let streams = LlmStreamState::default();
+        let first = Channel::<LlmStreamEvent>::new(|_| Ok(()));
+        let request = super::LlmStreamStart {
+            generation_id: "generation".to_string(),
+            attempt_id: "attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+        };
+        let cancellation = streams
+            .register_agent(&request, first)
+            .expect("Agent should register");
+        for index in 0..(super::AGENT_RUNTIME_EVENT_LIMIT + 1) {
+            streams.emit_agent_event(
+                "attempt",
+                LlmStreamEvent::Delta {
+                    delta: index.to_string(),
+                },
+            );
+        }
+        let replayed = Arc::new(Mutex::new(Vec::new()));
+        let target = Arc::clone(&replayed);
+        let second = Channel::<LlmStreamEvent>::new(move |event| {
+            target.lock().expect("events lock").push(event);
+            Ok(())
+        });
+
+        assert!(streams.subscribe_agent_runtime("attempt", second));
+        let replayed = replayed.lock().expect("events lock");
+        assert_eq!(replayed.len(), super::AGENT_RUNTIME_EVENT_LIMIT);
+        drop(replayed);
+        streams.unregister("attempt", &cancellation);
+    }
 
     #[test]
     fn parses_responses_deltas_usage_and_requires_completion() {

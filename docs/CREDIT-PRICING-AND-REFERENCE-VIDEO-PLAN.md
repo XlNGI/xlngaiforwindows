@@ -271,15 +271,15 @@ function referenceVideoAdapter(spec: ReferenceVideoModelSpec): AdapterDescriptor
 
 | 序号 | 项 | 状态 |
 |---|---|---|
-| 1 | `resolveCreditPricing` 双形态解析 + 双路径测试 | 待做 |
-| 2 | `extractVideoCost` 下沉 + 行为等价回归 | 待做 |
-| 3 | sidecar `pkg.assets` 指向副本预编译 | 待做 |
-| 4 | `pnpm worker:sidecar` + SQLite/health 硬门禁 | 待做 |
-| 5 | 参考生配置表工厂 + ad/mix/turbo/q2-pro（重构 q3/drama） | 待做 |
-| 6 | Rust 白名单按模型区分（mix 无 off_peak；ad 注入 viduq3-ad） | 待做 |
-| 7 | 内置模型与已有 profile 幂等补种（含 ad） | 待做 |
-| 8 | 适配器 / 注册表 / Rust / 必要 UI 测试 | 待做 |
-| 9 | 更新 M4 文档与质量门禁追踪 | 待做 |
+| 1 | `resolveCreditPricing` 双形态解析 + 双路径测试 | 已完成 |
+| 2 | `extractVideoCost` 下沉 + 行为等价回归 | 已完成 |
+| 3 | sidecar `pkg.assets` 指向副本预编译 | 已完成 |
+| 4 | `pnpm worker:sidecar` + SQLite/health 硬门禁 | 已完成 |
+| 5 | 参考生配置表工厂 + ad/mix/turbo/q2-pro（重构 q3/drama） | 已完成 |
+| 6 | Rust 白名单按模型区分（mix 无 off_peak；ad 注入 viduq3-ad） | 已完成 |
+| 7 | 内置模型与已有 profile 幂等补种（含 ad） | 已完成 |
+| 8 | 适配器 / 注册表 / Rust / 必要 UI 测试 | 已完成 |
+| 9 | 更新 M4 文档与质量门禁追踪 | 已完成 |
 
 ## 9. 不改动的范围
 
@@ -298,3 +298,10 @@ function referenceVideoAdapter(spec: ReferenceVideoModelSpec): AdapterDescriptor
 | 1.0 | 2026-08-03 | 初稿 |
 | 1.1 | 2026-08-03 | 审查修订：A1 改为双形态解析；A2 降为重构；A3 升为硬门禁；暂缓无出处的 viduq3-ad；修正 mix 时长与 off_peak/audio 条件；补齐不变量、故障矩阵与追踪表 |
 | 1.2 | 2026-08-04 | 按产品要求重新纳入 `viduq3-ad`；参数边界标为暂定，实施前用官方样本复核 |
+| 1.3 | 2026-08-19 | A1/A2、A3 hard gate 和 B 扩模型全部落地：sidecar 打包绑定 `dist-sidecar` Node 22 binding 并经 SQLite lifecycle 验证；参考生视频工厂覆盖 ad/mix/turbo/q2-pro，Worker 内置模型补种与 Rust 精确模型注入/白名单同步完成。自动化验证通过；真实 Vidu/UniCompAPI 额度成功请求仍为 HOLD。 |
+
+## 11. 实施与验证记录
+
+| 日期 | 阶段 | 结果 | 验证证据 | 未验证边界 |
+|---|---|---|---|---|
+| 2026-08-19 | A1/A2、A3 与 B 参考生视频扩展 | 定价双形态解析和用量提取已保持行为回归；sidecar 使用 `dist-sidecar/node_modules/better-sqlite3/build/Release/better_sqlite3.node`，构建前校验 binding 存在且非空；新增 `viduq3-ad`、`viduq3-mix`、`viduq3-turbo`、`viduq2-pro` 由配置工厂生成，Worker built-in catalog 与 Rust native task/字段白名单一致，mix 在 TS 和 Rust 边界均拒绝 `off_peak`。 | `pnpm.cmd --filter @ai-video/generation-adapters test`（17 项）、`pnpm.cmd --filter @ai-video/worker test`（21 文件/172 项）、`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`（49 项）、`pnpm.cmd worker:sidecar`、`pnpm.cmd --filter @ai-video/worker validate:m7-sidecar` 通过。 | 未使用真实 Vidu 或 UniCompAPI 凭据发起额度消耗型成功请求；该项保持 HOLD，不能由 mock、路由测试或 sidecar 测试替代。 |

@@ -1,6 +1,7 @@
 import { emitTo } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type {
+  AgentResearchMode,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -66,6 +67,7 @@ export interface DetachedConversationSnapshot {
   llmModels: ProviderModelInfo[];
   selectedLlmProfileId: string;
   selectedLlmModelId: string;
+  researchMode?: AgentResearchMode;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
 }
@@ -96,6 +98,7 @@ export type DetachedPanelAction =
   | { panelId: 'conversation'; type: 'conversation-retry'; messageId: string }
   | { panelId: 'conversation'; type: 'conversation-profile'; profileId: string }
   | { panelId: 'conversation'; type: 'conversation-model'; modelId: string }
+  | { panelId: 'conversation'; type: 'conversation-research-mode'; mode: AgentResearchMode }
   | { panelId: 'conversation'; type: 'conversation-open-settings' }
   | { panelId: 'conversation'; type: 'conversation-composer'; value: string }
   | { panelId: 'conversation'; type: 'conversation-cancel' }

@@ -116,6 +116,9 @@ export class ContentService {
       if (params.sceneId && (!existing || existing.projectId !== project.id)) {
         throw new Error('Scene was not found.');
       }
+      if (existing && params.expectedRowVersion !== existing.rowVersion) {
+        throw new Error('SCENE_ROW_VERSION_CONFLICT');
+      }
       const now = new Date().toISOString();
       const record: SceneInfo = {
         id: existing?.id ?? randomUUID(),
@@ -124,13 +127,14 @@ export class ContentService {
         position:
           existing?.position ??
           (repositories.scenes.listByProject(project.id).at(-1)?.position ?? -1) + 1,
+        rowVersion: existing?.rowVersion ?? 0,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };
       repositories.scenes.save(record);
       repositories.projects.touch(now);
       project.updatedAt = now;
-      return record;
+      return repositories.scenes.get(record.id)!;
     });
   }
 
@@ -153,6 +157,9 @@ export class ContentService {
       if (params.shotId && (!existing || existing.sceneId !== scene.id)) {
         throw new Error('Shot was not found.');
       }
+      if (existing && params.expectedRowVersion !== existing.rowVersion) {
+        throw new Error('SHOT_ROW_VERSION_CONFLICT');
+      }
       const now = new Date().toISOString();
       const record: ShotInfo = {
         id: existing?.id ?? randomUUID(),
@@ -162,13 +169,14 @@ export class ContentService {
           existing?.position ??
           (repositories.shots.listByScene(scene.id).at(-1)?.position ?? -1) + 1,
         status: params.status ?? existing?.status ?? 'draft',
+        rowVersion: existing?.rowVersion ?? 0,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };
       repositories.shots.save(record);
       repositories.projects.touch(now);
       project.updatedAt = now;
-      return record;
+      return repositories.shots.get(record.id)!;
     });
   }
 

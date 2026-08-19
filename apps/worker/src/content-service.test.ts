@@ -77,6 +77,43 @@ describe('ContentService', () => {
     });
   });
 
+  it('uses row-version CAS for scene and shot updates', async () => {
+    const { content } = await setup();
+    const scene = content.saveScene({ title: '场次 01' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '镜头 01' });
+    expect(scene.rowVersion).toBe(0);
+    expect(shot.rowVersion).toBe(0);
+
+    const updatedScene = content.saveScene({
+      sceneId: scene.id,
+      title: '场次 01 更新',
+      expectedRowVersion: scene.rowVersion,
+    });
+    const updatedShot = content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: '镜头 01 更新',
+      expectedRowVersion: shot.rowVersion,
+    });
+    expect(updatedScene.rowVersion).toBe(1);
+    expect(updatedShot.rowVersion).toBe(1);
+    expect(() =>
+      content.saveScene({
+        sceneId: scene.id,
+        title: '过期场次更新',
+        expectedRowVersion: scene.rowVersion,
+      }),
+    ).toThrow('SCENE_ROW_VERSION_CONFLICT');
+    expect(() =>
+      content.saveShot({
+        shotId: shot.id,
+        sceneId: scene.id,
+        title: '过期镜头更新',
+        expectedRowVersion: shot.rowVersion,
+      }),
+    ).toThrow('SHOT_ROW_VERSION_CONFLICT');
+  });
+
   it('renames, archives, restores, and filters conversations', async () => {
     const { content } = await setup();
     const conversation = content.createConversation({

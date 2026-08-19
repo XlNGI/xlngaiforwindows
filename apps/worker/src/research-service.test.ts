@@ -11,6 +11,22 @@ afterEach(async () => {
 });
 
 describe('ResearchService', () => {
+  it('fails closed instead of using Worker network access when the Native bridge is unavailable', async () => {
+    vi.stubEnv('AI_VIDEO_RESEARCH_BRIDGE_URL', '');
+    vi.stubEnv('AI_VIDEO_RESEARCH_BRIDGE_TOKEN', '');
+    const service = new ResearchService({
+      searchEndpoint: 'https://search.test/',
+      lookup: () => Promise.resolve([{ address: '93.184.216.34', family: 4 }]),
+    });
+
+    await expect(
+      service.search({ taskId: 'task-bridge', attemptId: 'attempt-bridge', query: 'source' }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<ResearchError>>({ code: 'RESEARCH_SEARCH_FAILED' }),
+    );
+    vi.unstubAllEnvs();
+  });
+
   it('searches, binds source handles, extracts text, and writes a local cache entry', async () => {
     const root = await mkdtemp(join(tmpdir(), 'research-service-'));
     directories.push(root);
@@ -160,6 +176,32 @@ describe('ResearchService', () => {
     ).rejects.toEqual(
       expect.objectContaining<Partial<ResearchError>>({ code: 'RESEARCH_FETCH_BLOCKED' }),
     );
+  });
+
+  it('propagates caller cancellation through the bounded fetch request', async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn<typeof fetch>(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        }),
+    );
+    const service = new ResearchService({
+      fetch: fetcher,
+      searchEndpoint: 'https://search.test/',
+      lookup: () => Promise.resolve([{ address: '93.184.216.34', family: 4 }]),
+    });
+    const pending = service.search({
+      taskId: 'task-cancel',
+      attemptId: 'attempt-cancel',
+      query: 'cancel me',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'RESEARCH_CANCELLED' });
   });
 });
 
