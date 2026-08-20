@@ -21,6 +21,28 @@ $gracefulClose = $false
 $workerExitedAfterClose = $false
 $leaveOpen = $false
 
+function Write-EvidenceFile {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Json
+  )
+
+  $candidatePath = if ([IO.Path]::IsPathRooted($Path)) {
+    $Path
+  } else {
+    Join-Path (Get-Location) $Path
+  }
+  $resolvedPath = [IO.Path]::GetFullPath($candidatePath)
+  $evidenceDirectory = Split-Path -Parent $resolvedPath
+  if ($evidenceDirectory) {
+    New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
+  }
+  [IO.File]::WriteAllText($resolvedPath, $Json, [Text.Encoding]::UTF8)
+}
+
 try {
   if (-not $isDebugBuild -and -not (Test-Path -LiteralPath $workerExecutable -PathType Leaf)) {
     throw "Native workspace preflight requires the bundled Worker beside the desktop executable: $workerExecutable"
@@ -84,10 +106,11 @@ try {
 
   if ($KeepOpen) {
     $leaveOpen = $true
-    $result | ConvertTo-Json -Depth 5
+    $json = $result | ConvertTo-Json -Depth 5
     if ($EvidencePath) {
-      [IO.File]::WriteAllText((Join-Path (Get-Location) $EvidencePath), ($result | ConvertTo-Json -Depth 5), [Text.Encoding]::UTF8)
+      Write-EvidenceFile -Path $EvidencePath -Json $json
     }
+    $json
     return
   }
 
@@ -115,10 +138,7 @@ try {
   $result.WorkerExitedAfterClose = $true
   $json = $result | ConvertTo-Json -Depth 5
   if ($EvidencePath) {
-    $resolvedEvidence = [IO.Path]::GetFullPath((Join-Path (Get-Location) $EvidencePath))
-    $evidenceDirectory = Split-Path -Parent $resolvedEvidence
-    New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
-    [IO.File]::WriteAllText($resolvedEvidence, $json, [Text.Encoding]::UTF8)
+    Write-EvidenceFile -Path $EvidencePath -Json $json
   }
   $json
 }

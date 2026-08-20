@@ -373,3 +373,11 @@ apps/desktop/src/conversations/
 - 新增 `scripts/validate-workspace-native-preflight.ps1`，可重复启动指定 Release Desktop/Worker 二进制，验证主窗口句柄、Worker 子进程、优雅关闭和 Worker 退出，并可输出 JSON 证据；脚本同时识别 Debug 下的 Node Worker 子进程，但独立 Debug EXE 因开发资源和 Worker 懒启动不作为验收证据。
 - 新增 `docs/WORKSPACE-NATIVE-ACCEPTANCE-CHECKLIST.md`，明确移动、缩放、最小化、最大化、关闭/附加、generation 保持、CAS 冲突、项目切换和窄屏人工验收步骤。
 - preflight 成功不等于原生窗口功能验收完成；Windows Graphics Capture 对当前 WebView2 的限制和真实人工动作仍保持未验证。
+
+2026-08-20 Release 原生验收与模态层修复：
+
+- Release 实机完成主窗口、文档独立窗口和会话独立窗口的移动、缩放、最小化、最大化、恢复、单实例聚焦、关闭与静态状态重新附加；`1280x720` 和 `390x844` 布局检查通过。
+- 发现脏文档浮窗的关闭确认已经触发，但全局遮罩层级 `100` 低于聚焦浮窗 `102`，导致对话框被遮挡、表现为关闭按钮无响应；现统一运行时层级，模态确认使用 `1000`，并增加层级回归测试。
+- Release 实机复验确认“取消 / 放弃更改 / 保存并关闭”显示于浮窗之上；取消保留未保存内容，测试内容随后放弃且未写入项目。
+- 原生预检补强为绝对和相对证据路径均可写入并自动创建父目录；Release 预检和 NSIS 干净安装生命周期均通过。
+- in-flight Worker 崩溃注入确认 Desktop 保持响应，重启后 generation 收敛为 `failed / worker-restarted` 并可重试；当前不支持透明续跑。活动 generation 窗口切换、多窗口 CAS、陈旧项目动作和真实 Provider 成功链路仍保持未完成。

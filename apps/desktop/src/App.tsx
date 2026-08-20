@@ -82,6 +82,7 @@ import {
   type DetachedPanelSnapshot,
 } from './workspace/detached-window';
 import type { WorkspacePanelId } from './workspace/workspace-types';
+import { MODAL_Z_INDEX } from './workspace/ui-layers';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
@@ -2072,7 +2073,7 @@ export function App() {
       )}
 
       {documentCloseConfirmation && (
-        <div className="dialog-backdrop" role="presentation">
+        <div className="dialog-backdrop" role="presentation" style={{ zIndex: MODAL_Z_INDEX }}>
           <section
             className="document-close-dialog"
             role="dialog"

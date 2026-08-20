@@ -1,6 +1,7 @@
 import { ExternalLink, Maximize2, Minimize2, PanelRightOpen, X } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { clampBounds, CONVERSATION_MIN_SIZE, DOCUMENT_MIN_SIZE } from './workspace-geometry';
+import { workspaceFloatingZIndex } from './ui-layers';
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { FloatingBounds, WorkspacePanelId, WorkspaceViewport } from './workspace-types';
 
@@ -119,7 +120,7 @@ export function FloatingWindow({
         top: bounds.y,
         width: bounds.width,
         height: bounds.height,
-        zIndex: 100 + zOrder,
+        zIndex: workspaceFloatingZIndex(zOrder),
       }}
       onPointerDown={onFocus}
     >
