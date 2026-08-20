@@ -3027,6 +3027,17 @@ button {
   border-right: 1px solid var(--border-subtle);
 }
 
+.production-panel-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.production-panel-heading-actions .icon-button {
+  width: 28px;
+  height: 28px;
+}
+
 .production-panel-body {
   display: flex;
   flex: 1;

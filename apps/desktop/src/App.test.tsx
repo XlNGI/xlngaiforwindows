@@ -257,7 +257,7 @@ describe('App', () => {
     );
     expect(container.querySelector('.production-panel')).toHaveClass('expanded');
 
-    fireEvent.click(screen.getByRole('button', { name: /项目文档/ }));
+    fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
     expect(container.querySelector('.app-shell')).toHaveAttribute(
       'data-navigation-mode',
       'project',

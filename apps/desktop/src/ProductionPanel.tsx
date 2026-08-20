@@ -17,6 +17,7 @@ import {
   WandSparkles,
   Square,
   Video,
+  X,
 } from 'lucide-react';
 import type {
   AdapterCatalogResult,
@@ -66,6 +67,7 @@ interface ProductionPanelProps {
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
   onOpenAssetLibrary?: (assetId?: string) => void;
   onOpenProviderSettings?: () => void;
+  onClose?: () => void;
   providerSettingsRevision?: number;
 }
 
@@ -218,6 +220,7 @@ export function ProductionPanel({
   onAssetsChanged,
   onOpenAssetLibrary,
   onOpenProviderSettings,
+  onClose,
   providerSettingsRevision = 0,
 }: ProductionPanelProps) {
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
@@ -950,7 +953,20 @@ export function ProductionPanel({
     <aside className={`production-panel panel-border${expanded ? ' expanded' : ''}`}>
       <div className="panel-heading">
         <span>生产参数</span>
-        {adapter && <small>Schema {adapter.schemaVersion}</small>}
+        <div className="production-panel-heading-actions">
+          {adapter && <small>Schema {adapter.schemaVersion}</small>}
+          {onClose && (
+            <button
+              className="icon-button subtle"
+              type="button"
+              title="关闭生产参数"
+              aria-label="关闭生产参数"
+              onClick={onClose}
+            >
+              <X size={15} />
+            </button>
+          )}
+        </div>
       </div>
       {!catalog ? (
         <div className="parameter-placeholder">正在读取适配器目录</div>

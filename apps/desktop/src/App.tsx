@@ -1775,6 +1775,7 @@ export function App() {
         setView('assets');
       }}
       onOpenProviderSettings={() => openSettings('providers')}
+      onClose={() => setNavigationMode('project')}
       providerSettingsRevision={providerSettingsRevision}
     />
   );
