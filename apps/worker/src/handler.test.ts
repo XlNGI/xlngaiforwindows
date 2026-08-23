@@ -105,6 +105,41 @@ describe('worker handler', () => {
     });
   });
 
+  it('validates novel import payloads at the IPC boundary', async () => {
+    const response = await handleRequest({
+      id: 'novel-import-invalid',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'novel.import',
+      params: {
+        chapters: [{ title: '第一章', contentMarkdown: '正文', forged: true }],
+      },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'novel-import-invalid',
+        retryable: false,
+        operation: 'novel.import',
+      },
+    });
+  });
+
+  it('recognizes novel import as a registered Worker method', async () => {
+    const response = await handleRequest({
+      id: 'novel-import-registered',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'novel.import',
+      params: { chapters: [{ title: '第一章', contentMarkdown: '正文' }] },
+    } as unknown as WorkerRequest);
+
+    expect(response).not.toMatchObject({
+      ok: false,
+      error: { code: 'METHOD_NOT_FOUND' },
+    });
+  });
+
   it('rejects untrusted fields on Agent prepare requests at the IPC boundary', async () => {
     const response = await handleRequest({
       id: 'agent-prepare-unknown-param',

@@ -1717,6 +1717,7 @@ export function App() {
       contextPreview={contextPreview}
       generation={generation}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
+      showCloseAction={false}
       onScopeChange={(scope) => {
         void (async () => {
           await cancelNativeLlmRun();
@@ -2133,7 +2134,7 @@ export function App() {
                 }}
               >
                 <BookOpen size={16} />
-                <span>Novel chapters</span>
+                <span>小说章节</span>
               </button>
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'documents' ? 'active' : ''}`}

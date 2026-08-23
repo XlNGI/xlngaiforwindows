@@ -1,4 +1,11 @@
-import { ExternalLink, LayoutPanelTop, PanelTopOpen, Rows3, SlidersHorizontal } from 'lucide-react';
+import {
+  ExternalLink,
+  LayoutPanelTop,
+  PanelTopOpen,
+  Rows3,
+  SlidersHorizontal,
+  X,
+} from 'lucide-react';
 import {
   useEffect,
   useMemo,
@@ -319,6 +326,26 @@ export function WorkspaceSurface({
               disabled={!layout.projectId}
             >
               <ExternalLink size={15} />
+            </button>
+          )}
+          {paneId === 'editor' && (
+            <button
+              type="button"
+              title="关闭文档面板"
+              aria-label="关闭文档面板"
+              onClick={onCloseDocument}
+            >
+              <X size={15} />
+            </button>
+          )}
+          {paneId === 'conversation' && (
+            <button
+              type="button"
+              title="关闭会话面板"
+              aria-label="关闭会话面板"
+              onClick={() => dispatch({ type: 'close', panelId: 'conversation' })}
+            >
+              <X size={15} />
             </button>
           )}
           {index === 0 && (

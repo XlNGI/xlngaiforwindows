@@ -49,6 +49,7 @@ interface ChatPanelProps {
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
   onClose?: () => void;
+  showCloseAction?: boolean;
   /** @deprecated Use onClose. Kept temporarily for component consumers outside the workspace host. */
   onCollapse?: () => void;
   onScopeChange: (scope: ConversationScopeType) => void;
@@ -99,6 +100,7 @@ export function ChatPanel({
   contextPreview,
   generation,
   onClose,
+  showCloseAction = true,
   onCollapse,
   onScopeChange,
   onSelectConversation,
@@ -128,9 +130,11 @@ export function ChatPanel({
     <section className="chat-panel panel-border" aria-label="项目会话">
       <div className="panel-heading">
         <span>{scopeLabel(scopeType)}会话</span>
-        <button className="icon-button subtle" type="button" title="关闭会话" onClick={close}>
-          <PanelRightClose size={16} />
-        </button>
+        {showCloseAction && close && (
+          <button className="icon-button subtle" type="button" title="关闭会话" onClick={close}>
+            <PanelRightClose size={16} />
+          </button>
+        )}
       </div>
       <div className="scope-tabs">
         {(['project', 'scene', 'shot'] as const).map((scope) => (

@@ -572,6 +572,23 @@ export interface NovelChapterRestoreParams {
   expectedRowVersion: number;
 }
 
+export interface NovelImportChapterInput {
+  title: string;
+  displayLabel?: string;
+  contentMarkdown: string;
+}
+
+export interface NovelImportParams {
+  volumeTitle?: string;
+  chapters: NovelImportChapterInput[];
+}
+
+export interface NovelImportResult {
+  volume?: NovelVolumeInfo;
+  chapters: NovelChapterInfo[];
+  importedCount: number;
+}
+
 export interface NovelBindingInfo {
   id: string;
   projectId: string;
@@ -2044,6 +2061,7 @@ export interface WorkerMethodMap {
   'novel.chapter.save': { params: NovelChapterSaveParams; result: NovelChapterInfo };
   'novel.chapter.archive': { params: NovelChapterArchiveParams; result: NovelChapterInfo };
   'novel.chapter.restore': { params: NovelChapterRestoreParams; result: NovelChapterInfo };
+  'novel.import': { params: NovelImportParams; result: NovelImportResult };
   'novel.binding.list': { params: NovelBindingListParams; result: NovelBindingInfo[] };
   'novel.context.consistencyReport': {
     params: Record<string, never>;

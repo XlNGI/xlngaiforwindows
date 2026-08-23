@@ -3,8 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentDetail, NovelChapterInfo, WorkerMethod } from '@ai-video/contracts';
 import { NovelWorkspace } from './NovelWorkspace';
 import { callWorker } from './worker-client';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { readMarkdownDocument } from './markdown-import-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
+vi.mock('./markdown-import-client', () => ({ readMarkdownDocument: vi.fn() }));
 
 const chapter: NovelChapterInfo = {
   id: 'chapter-1',
@@ -50,9 +54,9 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function mockWorker(handler: (method: WorkerMethod) => unknown): void {
+function mockWorker(handler: (method: WorkerMethod, params?: unknown) => unknown): void {
   vi.mocked(callWorker).mockImplementation(
-    (method) => Promise.resolve(handler(method)) as ReturnType<typeof callWorker>,
+    (method, params) => Promise.resolve(handler(method, params)) as ReturnType<typeof callWorker>,
   );
 }
 
@@ -69,10 +73,10 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     expect(await screen.findByText(/Chapter 1 Opening/)).toBeInTheDocument();
-    fireEvent.change(await screen.findByLabelText('Chapter content'), {
+    fireEvent.change(await screen.findByLabelText('章节内容'), {
       target: { value: 'Updated' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /Save draft/i }));
+    fireEvent.click(screen.getByRole('button', { name: /保存草稿/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'document.draft.save',
@@ -97,13 +101,95 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByRole('button', { name: /Export Markdown/i }));
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('novel.export.prepare', {
         exportType: 'work',
         exportFormat: 'files',
       }),
     );
+  });
+
+  it('previews selected Markdown chapters and imports them through Worker', async () => {
+    const importedChapter = { ...chapter, id: 'chapter-imported', documentId: 'document-imported' };
+    vi.mocked(openDialog).mockResolvedValue(['D:\\Novels\\part-1.md', 'D:\\Novels\\part-2.md']);
+    vi.mocked(readMarkdownDocument).mockImplementation((path) =>
+      Promise.resolve({
+        title: path.endsWith('part-1.md') ? '第一卷' : '第二卷',
+        contentMarkdown: path.endsWith('part-1.md')
+          ? '# 第一章\n\n雨落在雾港。'
+          : '# 第二章\n\n灯塔亮起。',
+      }),
+    );
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [importedChapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      if (method === 'novel.import') {
+        return { volume: undefined, chapters: [importedChapter], importedCount: 2 };
+      }
+      return {};
+    });
+
+    render(<NovelWorkspace projectId="project-1" writable />);
+    fireEvent.click(screen.getByRole('button', { name: /导入小说/i }));
+    expect(await screen.findByText(/导入预览（2 章）/)).toBeInTheDocument();
+    expect(screen.getByText('第一章')).toBeInTheDocument();
+    expect(screen.getByText('第二章')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('导入卷名'), { target: { value: '第一卷' } });
+    fireEvent.click(screen.getByRole('button', { name: '仅导入草稿' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('novel.import', {
+        volumeTitle: '第一卷',
+        chapters: [
+          { title: '第一章', displayLabel: '第 1 章', contentMarkdown: '雨落在雾港。' },
+          { title: '第二章', displayLabel: '第 2 章', contentMarkdown: '灯塔亮起。' },
+        ],
+      }),
+    );
+    expect(await screen.findByText('已导入 2 个章节，当前为草稿。')).toBeInTheDocument();
+    expect(readMarkdownDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('publishes every active draft with the batch publish action', async () => {
+    const secondChapter = {
+      ...chapter,
+      id: 'chapter-2',
+      documentId: 'document-2',
+      title: 'Second',
+      displayLabel: 'Chapter 2',
+      position: 1,
+    };
+    const details = new Map([
+      ['document-1', documentDetail()],
+      ['document-2', { ...documentDetail(), id: 'document-2', title: 'Second' }],
+    ]);
+    mockWorker((method, params) => {
+      if (method === 'novel.chapter.list') return [chapter, secondChapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get')
+        return details.get((params as { documentId: string }).documentId);
+      if (method === 'document.selfPublish') {
+        const input = params as { documentId: string };
+        const next = details.get(input.documentId)!;
+        next.currentVersion!.state = 'published';
+        next.publishedVersionId = next.currentVersion!.id;
+        next.rowVersion = 1;
+        return { document: next, publication: { id: `publication-${input.documentId}` } };
+      }
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByText(/Chapter 1 Opening/);
+    fireEvent.click(screen.getByRole('button', { name: '全部发布' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'document.selfPublish',
+        expect.objectContaining({ documentId: 'document-2' }),
+      ),
+    );
+    expect(await screen.findByText('已批量发布 2 个章节。')).toBeInTheDocument();
   });
 
   it('opens a chapter in the shared document workspace for detached-window reuse', async () => {
@@ -116,7 +202,7 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable onOpenDocument={onOpenDocument} />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByRole('button', { name: /Open in document workspace/i }));
+    fireEvent.click(screen.getByRole('button', { name: /在文档工作区打开/ }));
     expect(onOpenDocument).toHaveBeenCalledWith('document-1');
   });
 
@@ -136,7 +222,7 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByRole('button', { name: /^Publish$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^发布$/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('document.selfPublish', {
         documentId: 'document-1',
@@ -173,8 +259,8 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByRole('button', { name: /Check novel continuity/i }));
-    expect(await screen.findByText('Chapter 1 has no published version.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /检查小说连续性/ }));
+    expect(await screen.findByText('当前章节没有已发布版本。')).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('novel.context.consistencyReport', {});
   });
 
@@ -188,11 +274,11 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.change(await screen.findByLabelText('Chapter content'), {
+    fireEvent.change(await screen.findByLabelText('章节内容'), {
       target: { value: 'Local edits' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /Save draft/i }));
-    await waitFor(() => expect(screen.getByText(/Server version loaded/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /保存草稿/ }));
+    await waitFor(() => expect(screen.getByText(/已载入服务器版本/)).toBeInTheDocument());
     expect(screen.getByDisplayValue('Local edits')).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: 'document-1' });
   });
@@ -212,20 +298,20 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.change(await screen.findByLabelText('Chapter content'), {
+    fireEvent.change(await screen.findByLabelText('章节内容'), {
       target: { value: 'Local edits' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /Save draft/i }));
+    fireEvent.click(screen.getByRole('button', { name: /保存草稿/ }));
     expect(await screen.findByRole('alert')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Use server version/i }));
+    fireEvent.click(screen.getByRole('button', { name: /使用服务器版本/ }));
     expect(screen.getByDisplayValue('Server version')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('Chapter content'), {
+    fireEvent.change(screen.getByLabelText('章节内容'), {
       target: { value: 'Local edits again' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /Save draft/i }));
+    fireEvent.click(screen.getByRole('button', { name: /保存草稿/ }));
     await screen.findByRole('alert');
-    fireEvent.click(screen.getByRole('button', { name: /Keep local edits/i }));
+    fireEvent.click(screen.getByRole('button', { name: /保留本地修改/ }));
     expect(screen.getByDisplayValue('Local edits again')).toBeInTheDocument();
   });
 });

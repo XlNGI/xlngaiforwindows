@@ -60,6 +60,17 @@ describe('WorkspaceSurface', () => {
     expect(onDetachDocument).toHaveBeenCalledOnce();
   });
 
+  it('closes document and conversation panels from their pane headers', () => {
+    const { container } = render(<WorkspaceFixture />);
+
+    fireEvent.click(within(container).getByLabelText('关闭文档面板'));
+    expect(container.querySelector('.workspace-editor-page')).not.toBeInTheDocument();
+
+    fireEvent.click(within(container).getByLabelText('关闭会话面板'));
+    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(within(container).getByLabelText('打开项目会话')).toBeInTheDocument();
+  });
+
   it('renders shared separators between adjacent docked pages', () => {
     const { container } = render(<WorkspaceFixture />);
 

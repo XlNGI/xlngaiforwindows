@@ -86,6 +86,18 @@ try {
     throw 'Worker process remained after the desktop application exited'
   }
 
+  # Do not start NSIS cleanup while another installed binary still owns a file.
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $installedProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+      $_.ExecutablePath -and $_.ExecutablePath.StartsWith($installDirectory, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($installedProcesses.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if ($installedProcesses.Count -gt 0) {
+    throw "Installed process remained before uninstall: $($installedProcesses.ExecutablePath -join ', ')"
+  }
+
   $uninstall = Start-Process `
     -FilePath $uninstaller `
     -ArgumentList '/S' `
@@ -97,22 +109,14 @@ try {
   }
   $uninstalled = $true
 
-  for ($attempt = 0; $attempt -lt 20; $attempt++) {
-    if (
-      -not (Test-Path -LiteralPath $desktopExecutable) -and
-      -not (Test-Path -LiteralPath $workerExecutable) -and
-      -not (Test-Path -LiteralPath $uninstaller)
-    ) {
-      break
-    }
+  # NSIS schedules self-deletion of uninstall.exe after its child process exits;
+  # wait for the whole isolated directory instead of racing that cleanup.
+  for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    if (-not (Test-Path -LiteralPath $installDirectory)) { break }
     Start-Sleep -Milliseconds 500
   }
-  if (
-    (Test-Path -LiteralPath $desktopExecutable) -or
-    (Test-Path -LiteralPath $workerExecutable) -or
-    (Test-Path -LiteralPath $uninstaller)
-  ) {
-    throw "Installed binaries remained after uninstall: $installDirectory"
+  if (Test-Path -LiteralPath $installDirectory) {
+    throw "Installed files remained after uninstall: $installDirectory"
   }
 
   [pscustomobject]@{

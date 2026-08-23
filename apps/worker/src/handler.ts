@@ -60,6 +60,7 @@ import {
   type NovelChapterArchiveParams,
   type NovelChapterRestoreParams,
   type NovelChapterSaveParams,
+  type NovelImportParams,
   type NovelProfileUpdateParams,
   type NovelVolumeSaveParams,
   type NovelMarkdownExportPrepareParams,
@@ -153,6 +154,7 @@ const methods = new Set<WorkerMethod>([
   'novel.chapter.save',
   'novel.chapter.archive',
   'novel.chapter.restore',
+  'novel.import',
   'novel.binding.list',
   'novel.binding.save',
   'novel.context.consistencyReport',
@@ -534,6 +536,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           break;
         case 'novel.chapter.restore':
           result = novelService.restoreChapter(params as unknown as NovelChapterRestoreParams);
+          break;
+        case 'novel.import':
+          result = novelService.importNovel(params as unknown as NovelImportParams);
           break;
         case 'novel.binding.list':
           result = novelService.listBindings(params);

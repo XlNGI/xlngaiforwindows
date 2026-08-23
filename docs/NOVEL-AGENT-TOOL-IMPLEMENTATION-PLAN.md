@@ -2,7 +2,7 @@
 
 版本：0.7  
 日期：2026-08-16  
-状态：P0 决策与业务合同完成，P1 已实现，P2 已实现核心工具边界，P3 已实现意图/目标/章节锁与最小 Desktop 创作模式，P5 partial 采集/恢复基础已实现，P6 小说章节工作区基础已实现，P8 Markdown export v23/job 基础已实现；P3 Native runtime 恢复闭环及 P4-P9 其余工作待实施  
+状态：P0 决策与业务合同完成，P1 已实现，P2 已实现核心工具边界，P3 已实现意图/目标/章节锁与最小 Desktop 创作模式，P5 partial 采集/恢复基础已实现，P6 小说章节工作区与 Markdown 导入基础已实现，P8 Markdown export v23/job 基础已实现；P3 Native runtime 恢复闭环及 P4-P9 其余工作待实施  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档定义“用户通过会话或小说工作区发出创作指令，Agent 自动生成可审阅章节草稿”的企业级业务逻辑与实施顺序。本文档只规划尚未完成的小说领域和真实 Provider 工具调用能力，不重复实现现有文档草稿、审核、发布、CAS、幂等、任务事件和不可变审计能力。
@@ -2121,6 +2121,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-19 | P6 小说工作区基础 | 部分完成 | 新增 Desktop `NovelWorkspace` 章节树和 Markdown 编辑器入口；章节选择自动打开关联文档，用户草稿保存复用 `document.draft.save` 的 document row-version CAS，提交审核复用现有 review 链路；新增组件测试，Desktop 102 项测试及 typecheck 通过 | 卷分组、章节归档/恢复入口、多窗口同章冲突提示、完整原生人工验收仍待完成 | Codex |
 | 2026-08-19 | P6/P8 工作区与导出基础 | 部分完成 | 小说章节树增加可选卷分组、归档显示、章节归档/恢复和 Markdown 导出入口。Schema v23 新增 `markdown_export_jobs/items` 及项目/章节/版本/发布快照触发器；Worker 导出器冻结 source state/hash/title/position/display label/publication/version，使用 staging package、manifest、files/merged 输出和原子 rename；Persistence 23 项、Worker 185 项、Desktop 103 项测试及三端 typecheck 通过 | P3 Native runtime 补播/退出恢复、P5 tool-linked partial/清理审计、P6 多窗口冲突提示、P8 Windows 路径句柄硬化/启动对账/短剧 adaptation、P9 仍待完成 | Codex |
 | 2026-08-19 | P7 小说上下文、摘要与一致性基础 | 部分完成 | Schema v25 新增 `novel_chapter_summaries`，已发布章节按内容 hash/version 生成确定性摘要并由 publication trigger 标记旧摘要 stale；小说 Agent generation 使用专用 system instruction。上下文默认预算按来源规模和选中章节数动态计算，章节选择聚焦最新章节、前四章和会话命中的相关章节；新增只读 `novel.context.consistencyReport` Worker 查询。`pnpm.cmd test`（全仓通过，Worker 197 项）、`pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`cargo fmt --check`、`git diff --check` 均通过 | 章节相关性仍为确定性标题命中，尚未完成任务意图驱动选择、长篇性能基准、完整一致性规则和 Desktop context.preview 展示增强 | Codex |
+| 2026-08-23 | P6 工作区关闭与 Markdown 小说导入基础 | 部分完成 | 停靠文档/会话面板提供明确关闭按钮，文档未保存关闭保留确认流程；小说工作区支持多选 Markdown、按 H1/H2 预览拆章、可选卷名、事务化导入 profile/volume/chapter/document/draft version，并校验 1 MiB 单章、32 MiB 总量和内容 hash。新增解析、持久化、回滚、UI 交互和 IPC 边界测试；全仓 JS/TS 测试 395 项、Rust 测试 55 项及类型/Lint/格式/构建门禁通过；sidecar、M4/M7 校验、Tauri Release/NSIS 构建、干净安装启动/优雅退出/卸载和同包覆盖烟测通过 | 原生多窗口人工验收、Native runtime 崩溃恢复、真实 Provider、正式签名/SmartScreen、真实旧版本升级和干净 Windows 虚拟机仍待完成；同包覆盖烟测不替代上一正式版本升级；P3-P9 不标记全部完成 | Codex |
 | 待填写 | P2 | 未开始 |  |  |  |
 | 待填写 | P3 | 未开始 |  |  |  |
 | 待填写 | P4 | 未开始 |  |  |  |

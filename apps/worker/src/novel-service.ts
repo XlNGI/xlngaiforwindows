@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
   DocumentBindingDomain,
@@ -11,6 +11,8 @@ import type {
   NovelChapterListParams,
   NovelChapterRestoreParams,
   NovelChapterSaveParams,
+  NovelImportParams,
+  NovelImportResult,
   NovelProfileGetParams,
   NovelProfileInfo,
   NovelProfileUpdateParams,
@@ -42,6 +44,8 @@ const bindingRoles = new Set<DocumentBindingRole>([
   'note',
 ]);
 const bindingDomains = new Set<DocumentBindingDomain>(['shared', 'novel', 'short-drama']);
+const MAX_IMPORT_CHAPTER_BYTES = 1_048_576;
+const MAX_IMPORT_TOTAL_BYTES = 32 * 1024 * 1024;
 
 function required(value: string, label: string, limit = 200): string {
   const result = value.trim();
@@ -306,6 +310,135 @@ export class NovelService {
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.chapterInfo(repositories.novelChapters.get(record.id)!, database);
+    });
+  }
+
+  importNovel(params: NovelImportParams): NovelImportResult {
+    return this.projects.access(true, (database, project) => {
+      const chapters = params.chapters ?? [];
+      if (chapters.length < 1 || chapters.length > 200) {
+        throw new NovelServiceError(
+          'INVALID_PARAMETERS',
+          'Import must contain between one and 200 chapters.',
+        );
+      }
+      const totalBytes = chapters.reduce(
+        (sum, chapter) => sum + Buffer.byteLength(chapter.contentMarkdown, 'utf8'),
+        0,
+      );
+      if (totalBytes > MAX_IMPORT_TOTAL_BYTES) {
+        throw new NovelServiceError(
+          'INVALID_PARAMETERS',
+          'Imported novel exceeds the 32 MiB limit.',
+        );
+      }
+      for (const chapter of chapters) {
+        if (Buffer.byteLength(chapter.contentMarkdown, 'utf8') > MAX_IMPORT_CHAPTER_BYTES) {
+          throw new NovelServiceError(
+            'INVALID_PARAMETERS',
+            'Imported chapter exceeds the 1 MiB limit.',
+          );
+        }
+      }
+      const repositories = createRepositories(database);
+      const now = new Date().toISOString();
+      const volumeTitle = params.volumeTitle?.trim();
+      const validatedVolumeTitle = volumeTitle ? required(volumeTitle, 'Volume title') : undefined;
+      const volumeId = volumeTitle ? randomUUID() : undefined;
+      const imported: NovelChapterRecord[] = [];
+      database.transaction(() => {
+        if (!repositories.novelProfiles.get(project.id)) {
+          database
+            .prepare(
+              `INSERT INTO novel_profiles (project_id, language, status, row_version, created_at, updated_at)
+             VALUES (?, 'zh-CN', 'active', 0, ?, ?)`,
+            )
+            .run(project.id, now, now);
+        }
+        if (volumeId) {
+          database
+            .prepare(
+              `INSERT INTO novel_volumes (id, project_id, title, position, status, row_version, created_at, updated_at)
+             VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM novel_volumes WHERE project_id = ?), 'active', 0, ?, ?)`,
+            )
+            .run(volumeId, project.id, validatedVolumeTitle, project.id, now, now);
+        }
+        const positionRow = database
+          .prepare(
+            'SELECT COALESCE(MAX(position), -1) AS value FROM novel_chapters WHERE project_id = ? AND volume_id IS ?',
+          )
+          .get(project.id, volumeId ?? null) as { value: number };
+        let position = positionRow.value + 1;
+        for (const input of chapters) {
+          const title = required(input.title, 'Chapter title');
+          const content = input.contentMarkdown.trim();
+          if (!content)
+            throw new NovelServiceError(
+              'INVALID_PARAMETERS',
+              `Chapter ${title} has empty content.`,
+            );
+          const documentId = randomUUID();
+          const chapterId = randomUUID();
+          const versionId = randomUUID();
+          const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+          const displayLabel = input.displayLabel?.trim() || `第 ${position + 1} 章`;
+          database
+            .prepare(
+              `INSERT INTO documents (id, project_id, kind, title, scope_type, scope_id, lifecycle_status, row_version, created_at, updated_at)
+             VALUES (?, ?, 'note', ?, 'project', NULL, 'active', 0, ?, ?)`,
+            )
+            .run(documentId, project.id, title, now, now);
+          database
+            .prepare(
+              `INSERT INTO document_versions
+             (id, document_id, version, content_markdown, state, title_snapshot, scope_type_snapshot,
+              author_type, content_hash, state_updated_at, created_at)
+             VALUES (?, ?, 1, ?, 'draft', ?, 'project', 'import', ?, ?, ?)`,
+            )
+            .run(versionId, documentId, content, title, hash, now, now);
+          database
+            .prepare(`UPDATE documents SET current_version_id = ?, updated_at = ? WHERE id = ?`)
+            .run(versionId, now, documentId);
+          database
+            .prepare(
+              `INSERT INTO novel_chapters
+             (id, project_id, volume_id, document_id, position, display_label, lifecycle_status,
+              archive_reason, row_version, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, 0, ?, ?)`,
+            )
+            .run(
+              chapterId,
+              project.id,
+              volumeId ?? null,
+              documentId,
+              position,
+              displayLabel,
+              now,
+              now,
+            );
+          imported.push({
+            id: chapterId,
+            projectId: project.id,
+            volumeId,
+            documentId,
+            position,
+            displayLabel,
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: now,
+            updatedAt: now,
+          });
+          position += 1;
+        }
+        database.prepare('UPDATE projects SET updated_at = ?').run(now);
+      })();
+      const result: NovelImportResult = {
+        volume: volumeId ? repositories.novelVolumes.get(volumeId) : undefined,
+        chapters: imported.map((chapter) => this.chapterInfo(chapter, database)),
+        importedCount: imported.length,
+      };
+      project.updatedAt = now;
+      return result;
     });
   }
 

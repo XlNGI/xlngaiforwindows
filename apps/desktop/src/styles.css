@@ -4949,6 +4949,66 @@ button {
   font-size: 12px;
 }
 
+.novel-import-preview {
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--control-bg);
+}
+
+.novel-import-preview-heading,
+.novel-import-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.novel-import-preview-heading {
+  justify-content: space-between;
+}
+
+.novel-import-actions input {
+  width: 150px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--panel-bg);
+}
+
+.novel-import-actions button {
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--panel-bg);
+}
+
+.novel-import-actions button:first-of-type {
+  color: var(--panel-bg);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.novel-import-preview ol {
+  max-height: 180px;
+  margin: 9px 0 0;
+  padding-left: 25px;
+  overflow: auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.novel-import-preview li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
 .document-close-dialog {
   width: min(420px, calc(100vw - 40px));
   padding: 18px;

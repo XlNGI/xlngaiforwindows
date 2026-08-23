@@ -48,6 +48,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'novel.chapter.save',
   'novel.chapter.archive',
   'novel.chapter.restore',
+  'novel.import',
   'novel.binding.list',
   'novel.binding.save',
   'novel.intent.list',
@@ -176,6 +177,28 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['chapterId', 'expectedRowVersion']);
       requireId(params, 'chapterId');
       requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'novel.import':
+      rejectUnknown(params, ['volumeTitle', 'chapters']);
+      optionalString(params, 'volumeTitle', MAX_TITLE_LENGTH);
+      if (
+        !Array.isArray(params.chapters) ||
+        params.chapters.length < 1 ||
+        params.chapters.length > 200
+      ) {
+        throw new RequestValidationError('chapters must contain between one and 200 items.');
+      }
+      for (const item of params.chapters) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          throw new RequestValidationError('Each imported chapter must be an object.');
+        }
+        const chapter = item as Record<string, unknown>;
+        rejectUnknown(chapter, ['title', 'displayLabel', 'contentMarkdown']);
+        requireString(chapter, 'title', MAX_TITLE_LENGTH);
+        optionalString(chapter, 'displayLabel', 80);
+        const content = requireString(chapter, 'contentMarkdown', 1_048_576);
+        if (!content.trim()) throw new RequestValidationError('Chapter content cannot be empty.');
+      }
       break;
     case 'novel.binding.list':
       rejectUnknown(params, ['includeNeedsReview']);
