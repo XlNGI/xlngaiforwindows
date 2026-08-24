@@ -6,6 +6,119 @@ import { ChatPanel } from './ChatPanel';
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
+  it('submits with Enter and keeps Shift+Enter for a newline', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onSendMessage = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer="继续写下去"
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={onSendMessage}
+      />,
+    );
+
+    const composer = screen.getByLabelText('会话消息');
+    fireEvent.keyDown(composer, { key: 'Enter' });
+    expect(onSendMessage).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true });
+    expect(onSendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('does not submit with Enter while generation is active', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onSendMessage = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer="继续写下去"
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        generation={{
+          generationId: 'generation',
+          conversationId: conversation.id,
+          snapshotId: 'snapshot',
+          status: 'streaming',
+          userMessage: {
+            id: 'user',
+            conversationId: conversation.id,
+            role: 'user',
+            content: '之前的消息',
+            status: 'complete',
+            createdAt: '2026-08-03T00:00:00.000Z',
+          },
+          assistantMessage: {
+            id: 'assistant',
+            conversationId: conversation.id,
+            role: 'assistant',
+            content: '生成中',
+            status: 'streaming',
+            createdAt: '2026-08-03T00:00:00.000Z',
+          },
+          sources: [],
+        }}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={onSendMessage}
+      />,
+    );
+
+    fireEvent.keyDown(screen.getByLabelText('会话消息'), { key: 'Enter' });
+    expect(onSendMessage).not.toHaveBeenCalled();
+  });
+
   it('exposes an explicit document draft action only for a writable message', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',

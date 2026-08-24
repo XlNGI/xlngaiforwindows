@@ -420,6 +420,19 @@ export function ChatPanel({
           rows={3}
           value={composer}
           onChange={(event) => onComposerChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            if (
+              generation?.status !== 'prepared' &&
+              generation?.status !== 'streaming' &&
+              composer.trim() &&
+              conversation &&
+              writable
+            ) {
+              onSendMessage();
+            }
+          }}
           disabled={!conversation || !writable}
         />
         {generation?.status === 'prepared' || generation?.status === 'streaming' ? (

@@ -642,11 +642,11 @@ export function App() {
       stopAgentTaskEventPolling();
       return;
     }
+    // Invalidate callbacks before asking the native transport to stop so late events
+    // cannot put a cancelled generation back into the streaming state.
+    nativeLlmRun.current = undefined;
     await run.cancel().catch(() => undefined);
     stopAgentTaskEventPolling();
-    if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
-      nativeLlmRun.current = undefined;
-    }
   };
 
   const cancelGenerationForConversation = async (conversationId: string) => {
@@ -1172,13 +1172,24 @@ export function App() {
   };
 
   const cancelGeneration = async () => {
-    if (!generation) return;
-    if (generation.executionMode === 'native') {
+    const current = generation;
+    if (!current || !isGenerationActive(current)) return;
+    generationPollVersion.current += 1;
+    if (current.executionMode === 'native') {
       await cancelNativeLlmRun();
     }
-    setGeneration(
-      await callWorker('llm.generation.cancel', { generationId: generation.generationId }),
-    );
+    try {
+      const cancelled = await callWorker('llm.generation.cancel', {
+        generationId: current.generationId,
+      });
+      setGeneration(cancelled);
+      setMessages((messages) =>
+        mergeGenerationMessage(messages, current.conversationId, cancelled),
+      );
+      setChatMessage('生成已停止');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '停止生成失败');
+    }
   };
 
   const retryGeneration = async (assistantMessageId: string) => {
