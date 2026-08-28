@@ -27,7 +27,7 @@ import type {
 } from '@ai-video/contracts';
 
 type PromotionTarget = 'document' | 'memory' | 'constraint';
-export type ComposerMode = 'chat' | 'document' | 'novel-writing';
+export type ComposerMode = 'chat' | 'document' | 'novel-writing' | 'short-drama';
 
 interface ChatPanelProps {
   scopeType: ConversationScopeType;
@@ -46,6 +46,8 @@ interface ChatPanelProps {
   selectedLlmModelId: string;
   researchMode?: AgentResearchMode;
   composerMode?: ComposerMode;
+  /** Number of chapters selected as the current short-drama episode scope. */
+  episodeChapterCount?: number;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
   onClose?: () => void;
@@ -97,6 +99,7 @@ export function ChatPanel({
   selectedLlmModelId,
   researchMode = 'auto',
   composerMode = 'chat',
+  episodeChapterCount = 0,
   contextPreview,
   generation,
   onClose,
@@ -320,6 +323,21 @@ export function ChatPanel({
             >
               小说创作
             </button>
+            <button
+              type="button"
+              className={composerMode === 'short-drama' ? 'active' : ''}
+              onClick={() => onComposerModeChange('short-drama')}
+              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+            >
+              短剧创作
+            </button>
+          </div>
+        )}
+        {composerMode === 'short-drama' && (
+          <div className="short-drama-hint" role="status">
+            {episodeChapterCount && episodeChapterCount > 0
+              ? `短剧创作 · 已选 ${episodeChapterCount} 个章节作为本集范围`
+              : '短剧创作 · 请先在小说章节页选择章节'}
           </div>
         )}
         {contextPreview && (
@@ -414,7 +432,9 @@ export function ChatPanel({
             conversation
               ? composerMode === 'novel-writing'
                 ? '输入明确的章节创作指令…'
-                : '输入消息…'
+                : composerMode === 'short-drama'
+                  ? '输入短剧创作指令（如：生成本集整体把控 / 生成场次和镜头提示词 / 把前三章的人物和场景做成提示词）…'
+                  : '输入消息…'
               : '请先新建会话'
           }
           rows={3}
@@ -446,7 +466,7 @@ export function ChatPanel({
           </button>
         ) : (
           <>
-            {onCreateDocumentDraft && (
+            {onCreateDocumentDraft && composerMode !== 'short-drama' && (
               <button
                 className="icon-button subtle"
                 type="button"

@@ -167,6 +167,46 @@ describe('worker handler', () => {
     });
   });
 
+  it('requires a supported target platform only for short-drama Agent requests', async () => {
+    const base = {
+      conversationId: 'conversation',
+      prompt: 'Generate an AI short drama',
+      providerProfileId: 'profile',
+      modelId: 'model',
+      agentMode: 'short-drama' as const,
+      documentIntent: { operation: 'novel.episode.submit_draft' as const },
+      selectedChapterIds: ['chapter-1'],
+    };
+    for (const [id, params] of [
+      ['missing', base],
+      ['invalid', { ...base, targetPlatform: 'untrusted-platform' }],
+      [
+        'document-mode',
+        {
+          ...base,
+          agentMode: 'document',
+          targetPlatform: 'seedance',
+          selectedChapterIds: undefined,
+        },
+      ],
+    ] as const) {
+      const response = await handleRequest({
+        id: `agent-platform-${id}`,
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'agent.generation.prepare',
+        params,
+      } as unknown as WorkerRequest);
+      expect(response).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_REQUEST',
+          requestId: `agent-platform-${id}`,
+          operation: 'agent.generation.prepare',
+        },
+      });
+    }
+  });
+
   it('reports a missing Agent provider profile as invalid parameters', async () => {
     const response = await handleRequest({
       id: 'agent-prepare-missing-profile',

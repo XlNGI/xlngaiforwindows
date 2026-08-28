@@ -2021,7 +2021,7 @@ button {
 
 .document-fields {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(130px, auto) auto;
   gap: 10px;
   align-items: end;
 }
@@ -2234,6 +2234,69 @@ button {
   border-right: 1px solid var(--border-default);
 }
 
+.novel-chapter-tools {
+  position: sticky;
+  z-index: 1;
+  top: -10px;
+  padding: 0 0 8px;
+  background: var(--surface-bg);
+}
+
+.novel-chapter-tools label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--control-bg);
+}
+
+.novel-chapter-tools input {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0;
+  color: var(--text-primary);
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.novel-chapter-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.novel-chapter-row input[type='checkbox'] {
+  flex: 0 0 auto;
+  accent-color: var(--accent-deep);
+}
+
+.novel-chapter-row .tree-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.novel-chapter-row .tree-item small {
+  margin-left: auto;
+  padding-left: 6px;
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+
+.rag-ready {
+  color: var(--success);
+}
+
+.rag-pending {
+  color: var(--text-muted);
+}
+
 .novel-editor {
   display: flex;
   min-width: 0;
@@ -2256,6 +2319,11 @@ button {
 .novel-markdown-editor {
   min-height: 0;
   flex: 1;
+}
+
+.novel-editor-actions button.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-default));
 }
 
 .novel-empty {
@@ -2997,6 +3065,28 @@ button {
 .change-set-item > svg {
   margin-left: auto;
   color: var(--warning);
+}
+
+.change-set-item-prompt {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shot-prompt-editor {
+  min-height: 90px;
+  margin-bottom: 8px;
+}
+
+.short-drama-hint {
+  padding: 5px 9px;
+  color: var(--accent-deep, #4f9cf9);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--control-bg);
+  font-size: 11px;
 }
 
 .change-set-item.applied {

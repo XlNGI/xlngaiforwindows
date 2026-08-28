@@ -28,9 +28,12 @@ import {
 } from 'lucide-react';
 import type {
   AgentDocumentIntent,
+  AgentDocumentOperation,
   AgentResearchMode,
   ChatMessageInfo,
+  ConstraintInfo,
   ConversationScopeType,
+  DocumentDetail,
   DocumentKind,
   DocumentSummary,
   DocumentVersionInfo,
@@ -170,6 +173,17 @@ export function inferDocumentIntent(
   return { needsTarget: false };
 }
 
+/** Legacy Native Agent routing only. The Pi Task Plan path uses structured
+ * deliverables and never reads this keyword-based inference result. */
+export function inferShortDramaIntent(prompt: string): AgentDocumentOperation {
+  const value = prompt.trim().toLocaleLowerCase();
+  const wantsCharacters = /人物|角色|场景提示词|场景设定|人物提示词|角色提示词/u.test(value);
+  const wantsStructure = /场次|镜头|分镜|分集结构/u.test(value);
+  if (wantsCharacters) return 'document.create_draft';
+  if (wantsStructure) return 'novel.episode.submit_structure';
+  return 'novel.episode.submit_draft';
+}
+
 function initialLlmSelection(): { providerProfileId?: string; modelId?: string } {
   try {
     const stored = window.localStorage.getItem(LLM_SELECTION_STORAGE_KEY);
@@ -276,6 +290,13 @@ export function App() {
   const [scene, setScene] = useState<SceneInfo>();
   const [shots, setShots] = useState<ShotInfo[]>([]);
   const [shot, setShot] = useState<ShotInfo>();
+  const [shotPrompt, setShotPrompt] = useState('');
+  const [constraints, setConstraints] = useState<ConstraintInfo[]>([]);
+  const [shotStoryboard, setShotStoryboard] = useState<DocumentDetail>();
+  const [shotStoryboardTitle, setShotStoryboardTitle] = useState('');
+  const [shotStoryboardContent, setShotStoryboardContent] = useState('');
+  const [shotStoryboardBusy, setShotStoryboardBusy] = useState(false);
+  const shotStoryboardRequest = useRef(0);
 
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
@@ -294,6 +315,7 @@ export function App() {
   );
   const [researchMode, setResearchMode] = useState<AgentResearchMode>(initialResearchMode);
   const [composerMode, setComposerMode] = useState<ComposerMode>(initialComposerMode);
+  const [episodeChapterIds, setEpisodeChapterIds] = useState<string[]>([]);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
@@ -364,6 +386,7 @@ export function App() {
     documentEditorWritable,
     documentDirty,
     setDocuments,
+    setDocumentKind,
     setDocumentTitle,
     setDocumentContent,
     setContentMessage,
@@ -714,15 +737,17 @@ export function App() {
   const loadProjectContent = async () => {
     const requestId = ++projectContentRequest.current;
     try {
-      const [documentList, sceneList] = await Promise.all([
+      const [documentList, sceneList, constraintList] = await Promise.all([
         callWorker('document.list', {}),
         callWorker('scene.list', {}),
+        callWorker('constraint.list', {}),
       ]);
       const assetList = await callWorker('asset.list', {});
       const firstScene = sceneList[0];
       const shotList = firstScene ? await callWorker('shot.list', { sceneId: firstScene.id }) : [];
       if (requestId !== projectContentRequest.current) return;
       setDocuments(documentList);
+      setConstraints(constraintList);
       setScenes(sceneList);
       setScene(firstScene);
       setShots(shotList);
@@ -1008,6 +1033,62 @@ export function App() {
     }
   };
 
+  useEffect(() => {
+    setShotPrompt(shot?.prompt ?? '');
+  }, [shot?.id]);
+
+  useEffect(() => {
+    const requestId = ++shotStoryboardRequest.current;
+    setShotStoryboardBusy(true);
+    if (!shot?.documentId) {
+      setShotStoryboard(undefined);
+      setShotStoryboardTitle('');
+      setShotStoryboardContent('');
+      setShotStoryboardBusy(false);
+      return;
+    }
+    callWorker('document.get', { documentId: shot.documentId })
+      .then((detail: DocumentDetail) => {
+        if (requestId !== shotStoryboardRequest.current) return;
+        setShotStoryboard(detail);
+        setShotStoryboardTitle(detail.title);
+        setShotStoryboardContent(detail.currentVersion?.contentMarkdown ?? '');
+      })
+      .catch((reason: unknown) => {
+        if (requestId === shotStoryboardRequest.current) {
+          setChatMessage(reason instanceof Error ? reason.message : '分镜文档加载失败');
+        }
+      })
+      .finally(() => {
+        if (requestId === shotStoryboardRequest.current) setShotStoryboardBusy(false);
+      });
+  }, [shot]);
+
+  const saveShotStoryboard = async () => {
+    if (!shot) return;
+    setShotStoryboardBusy(true);
+    try {
+      const updated = await callWorker('shot.storyboard.save', {
+        shotId: shot.id,
+        title: shotStoryboardTitle.trim() || shot.title,
+        contentMarkdown: shotStoryboardContent,
+      });
+      setShotStoryboard(updated);
+      setShotStoryboardTitle(updated.title);
+      setShotStoryboardContent(updated.currentVersion?.contentMarkdown ?? '');
+      if (!shot.documentId) {
+        const attached: ShotInfo = { ...shot, documentId: updated.id };
+        setShot(attached);
+        setShots((rows) => rows.map((row) => (row.id === shot.id ? attached : row)));
+      }
+      setChatMessage('分镜文档已保存。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '分镜文档保存失败');
+    } finally {
+      setShotStoryboardBusy(false);
+    }
+  };
+
   const addShot = async () => {
     if (!scene) return;
     const created = await callWorker('shot.save', {
@@ -1018,12 +1099,71 @@ export function App() {
     setShot(created);
   };
 
+  const saveShotPrompt = async () => {
+    if (!shot) return;
+    try {
+      const updated = await callWorker('shot.save', {
+        shotId: shot.id,
+        sceneId: shot.sceneId,
+        title: shot.title,
+        prompt: shotPrompt,
+        expectedRowVersion: shot.rowVersion,
+      });
+      setShots((rows) => rows.map((row) => (row.id === shot.id ? updated : row)));
+      setShot(updated);
+      setChatMessage('镜头提示词已保存。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '镜头提示词保存失败');
+    }
+  };
+
+  const runShortDramaGeneration = async (prompt: string) => {
+    if (!conversation) return;
+    if (!selectedLlmProfile || !selectedLlmModel) {
+      setComposer(prompt);
+      setChatMessage('短剧创作需要已配置支持工具调用的 LLM 模型。');
+      return;
+    }
+    if (episodeChapterIds.length === 0) {
+      setComposer(prompt);
+      setChatMessage('请先在小说章节页选择章节，再生成短剧内容。');
+      return;
+    }
+    try {
+      const prepared = await callWorker('agent.generation.prepare', {
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: selectedLlmProfile.id,
+        modelId: selectedLlmModel.id,
+        agentMode: 'short-drama',
+        targetPlatform: 'seedance',
+        researchMode,
+        documentIntent: { operation: inferShortDramaIntent(prompt) },
+        selectedChapterIds: episodeChapterIds,
+      });
+      if ('pendingIntent' in prepared) {
+        setComposer(prompt);
+        setChatMessage('短剧创作目标需要澄清；请补充指令后再提交。');
+        return;
+      }
+      launchPreparedGeneration(prepared);
+    } catch (reason) {
+      setComposer(prompt);
+      setChatMessage(reason instanceof Error ? reason.message : '短剧生成任务启动失败');
+      void loadLlmCatalog();
+    }
+  };
+
   const sendMessage = async (composerValue = composer) => {
     if (!composerValue.trim() || !conversation) return;
     const prompt = composerValue;
     setComposer('');
     if (composerMode === 'novel-writing') {
       await createNovelDraft(prompt);
+      return;
+    }
+    if (composerMode === 'short-drama') {
+      await runShortDramaGeneration(prompt);
       return;
     }
     if (selectedLlmProfile && selectedLlmModel) {
@@ -1093,11 +1233,16 @@ export function App() {
 
   const createDocumentDraft = async () => {
     if (!composer.trim() || !conversation) return;
+    const prompt = composer;
+    if (composerMode === 'short-drama') {
+      setComposer('');
+      await runShortDramaGeneration(prompt);
+      return;
+    }
     if (!selectedLlmProfile || !selectedLlmModel) {
       setChatMessage('创建文档草稿需要已配置支持工具调用的 LLM 模型。');
       return;
     }
-    const prompt = composer;
     setComposer('');
     try {
       const prepared = await callWorker('agent.generation.prepare', {
@@ -1725,6 +1870,7 @@ export function App() {
       selectedLlmModelId={selectedLlmModelId}
       researchMode={researchMode}
       composerMode={composerMode}
+      episodeChapterCount={episodeChapterIds.length}
       contextPreview={contextPreview}
       generation={generation}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
@@ -1793,6 +1939,9 @@ export function App() {
     />
   );
 
+  const projectDocuments = documents.filter(
+    (item) => item.kind === 'outline' || item.kind === 'plan',
+  );
   const characterSceneDocuments = documents.filter(
     (item) => item.kind === 'character' || item.kind === 'scene',
   );
@@ -1890,6 +2039,23 @@ export function App() {
             placeholder="输入文档标题"
             readOnly={!documentEditorWritable}
           />
+        </label>
+        <label className="kind-field">
+          类型
+          <select
+            value={documentKind}
+            onChange={(event) => setDocumentKind(event.target.value as DocumentKind)}
+            disabled={!documentEditorWritable}
+            aria-label="文档类型"
+          >
+            {(
+              ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'] as DocumentKind[]
+            ).map((kind) => (
+              <option key={kind} value={kind}>
+                {kind}
+              </option>
+            ))}
+          </select>
         </label>
         <span
           className={`document-state document-state-${document?.currentVersion?.state ?? 'new'}`}
@@ -2405,6 +2571,14 @@ export function App() {
                 projectId={project?.id}
                 writable={writable}
                 onOpenDocument={(documentId) => void openNovelDocument(documentId)}
+                onGenerateEpisode={(chapterIds) => {
+                  setEpisodeChapterIds(chapterIds);
+                  setComposerMode('short-drama');
+                  workspaceDispatch({ type: 'open', panelId: 'conversation' });
+                  setChatMessage(
+                    `已选择 ${chapterIds.length} 个章节作为本集范围。请在会话中输入生成指令。`,
+                  );
+                }}
               />
             ) : view === 'documents' ? (
               <>
@@ -2423,13 +2597,16 @@ export function App() {
                           className="icon-button subtle"
                           type="button"
                           title="新建文档"
-                          onClick={newDocument}
+                          onClick={() => {
+                            newDocument();
+                            setDocumentKind('outline');
+                          }}
                           disabled={!writable}
                         >
                           <FilePlus2 size={14} />
                         </button>
                       </div>
-                      {documents.map((item) => (
+                      {projectDocuments.map((item) => (
                         <button
                           className={`tree-item ${document?.id === item.id ? 'selected' : ''}`}
                           type="button"
@@ -2440,7 +2617,29 @@ export function App() {
                           <span>{item.title}</span>
                         </button>
                       ))}
-                      {documents.length === 0 && <small className="tree-empty">暂无正式文档</small>}
+                      {projectDocuments.length === 0 && (
+                        <small className="tree-empty">暂无正式资料</small>
+                      )}
+                      <div className="tree-heading nested">
+                        <span>约束条件</span>
+                      </div>
+                      {constraints.map((item) => (
+                        <div
+                          className="tree-item constraint-item"
+                          key={item.id}
+                          title={item.content}
+                        >
+                          <ListChecks size={13} />
+                          <span>
+                            {item.content.length > 40
+                              ? item.content.slice(0, 40) + '…'
+                              : item.content}
+                          </span>
+                        </div>
+                      ))}
+                      {constraints.length === 0 && (
+                        <small className="tree-empty">暂无约束，可在会话中提升为约束</small>
+                      )}
                     </aside>
                     <div className="directory-pane">{renderDocumentEditor()}</div>
                   </div>
@@ -2573,10 +2772,65 @@ export function App() {
                             </div>
                           </div>
                           <div className="shot-section">
+                            <h2>镜头提示词</h2>
+                            <p>
+                              用于生成本镜头图片/视频的提示词；可引用已发布角色/场景，如 [角色:林澈]
+                              [场景:旧码头]。
+                            </p>
+                            <textarea
+                              className="markdown-editor shot-prompt-editor"
+                              aria-label="镜头提示词"
+                              value={shotPrompt}
+                              onChange={(event) => setShotPrompt(event.target.value)}
+                              placeholder="输入镜头提示词…"
+                              readOnly={!writable}
+                            />
+                            <button
+                              className="button secondary"
+                              type="button"
+                              disabled={!writable}
+                              onClick={() => void saveShotPrompt()}
+                            >
+                              <Save size={13} /> 保存提示词
+                            </button>
+                          </div>
+                          <div className="shot-section">
                             <h2>镜头内容</h2>
                             <p>
                               在项目会话中完善镜头描述，再通过明确操作保存为分镜文档。普通会话不会修改正式资料。
                             </p>
+                          </div>
+                          <div className="shot-section">
+                            <h2>分镜文档</h2>
+                            <label className="title-field">
+                              分镜标题
+                              <input
+                                value={shotStoryboardTitle}
+                                onChange={(event) => setShotStoryboardTitle(event.target.value)}
+                                placeholder="输入分镜标题"
+                                readOnly={!writable || shotStoryboardBusy}
+                              />
+                            </label>
+                            <textarea
+                              className="markdown-editor"
+                              aria-label="分镜内容"
+                              value={shotStoryboardContent}
+                              onChange={(event) => setShotStoryboardContent(event.target.value)}
+                              placeholder="# 分镜&#10;&#10;1. 镜头描述…"
+                              readOnly={!writable || shotStoryboardBusy}
+                            />
+                            <div className="toolbar-actions">
+                              <button
+                                className="button primary"
+                                type="button"
+                                disabled={!writable || shotStoryboardBusy}
+                                onClick={() => void saveShotStoryboard()}
+                              >
+                                <Save size={13} />
+                                {shotStoryboard ? '保存分镜' : '新建分镜'}
+                              </button>
+                              {shotStoryboardBusy && <span className="inline-status">保存中…</span>}
+                            </div>
                           </div>
                         </div>
                       ) : (

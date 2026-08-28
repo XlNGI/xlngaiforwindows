@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentChangeSetInfo } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -69,6 +69,31 @@ describe('ChangeSetReviewPanel', () => {
       }),
     );
     expect(await screen.findByText('Selected proposal changes applied.')).toBeInTheDocument();
+  });
+
+  it('shows the shot prompt on scene and shot proposal items', async () => {
+    const withPrompt = {
+      ...proposal,
+      items: [
+        proposal.items[0]!,
+        {
+          ...proposal.items[1]!,
+          prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+        },
+      ],
+    };
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'agent.changeSet.list') return Promise.resolve([withPrompt]);
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const { container } = render(<ChangeSetReviewPanel projectId="project-1" writable />);
+    fireEvent.click(await within(container).findByRole('button', { name: /Opening proposal/i }));
+    const promptText = await within(container).findByText(
+      (content, element) =>
+        element?.className === 'change-set-item-prompt' && content.includes('[场景:旧码头]'),
+    );
+    expect(promptText.textContent).toContain('提示词：');
+    expect(promptText.textContent).toContain('[角色:林澈]');
   });
 
   it('does not render without a project or pending proposal', async () => {

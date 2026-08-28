@@ -49,7 +49,7 @@ describe('NovelContextService', () => {
     expect(calculateNovelContextBudget(2_000_000, 200, 12_000)).toBe(12_000);
   });
 
-  it('includes only published chapter summaries and reuses the derived cache', async () => {
+  it('retrieves saved draft chunks and keeps published summaries as derived context', async () => {
     const { projects, workflow, novel, context, conversation } = await setup();
     const chapter = novel.saveChapter({ title: '第一章' });
     const draft = workflow.saveDraft({
@@ -71,7 +71,8 @@ describe('NovelContextService', () => {
     const second = context.compile(conversation.id);
     expect(first.systemInstruction).toContain('长篇小说');
     expect(first.rendered).toContain('已发布章节内容');
-    expect(first.rendered).not.toContain('不应进入小说上下文');
+    expect(first.rendered).toContain('不应进入小说上下文');
+    expect(first.sources.some((source) => source.id.startsWith('novel-rag-chunk:'))).toBe(true);
     expect(
       first.sources.find((source) => source.id.startsWith('chapter-summary:'))?.summaryCacheKey,
     ).toBe(
@@ -85,6 +86,77 @@ describe('NovelContextService', () => {
         .all(project.id),
     );
     expect(summaries).toEqual([{ status: 'current', count: 1 }]);
+  });
+
+  it('compiles short-drama context with selected chapters and published references', async () => {
+    const { workflow, novel, context, conversation } = await setup();
+    const character = workflow.saveDraft({
+      kind: 'character',
+      title: '角色提示词',
+      contentMarkdown: '# 林澈\n灯塔守望员。',
+    });
+    publish(workflow, character.id);
+    novel.saveBinding({
+      documentId: character.id,
+      role: 'character-bible',
+      domainScope: 'short-drama',
+    });
+    const chapter = novel.saveChapter({ title: '第一章' });
+    workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: '前三章内容。'.repeat(30),
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    const unpublished = novel.saveChapter({ title: '未选章节' });
+    workflow.saveDraft({
+      documentId: unpublished.documentId,
+      title: unpublished.title,
+      contentMarkdown: '不应进入短剧上下文。',
+      expectedDocumentRowVersion: unpublished.documentRowVersion,
+    });
+
+    const compiled = context.compileShortDrama(conversation.id, undefined, [chapter.id]);
+    expect(compiled.systemInstruction).toContain('短剧分集创作助手');
+    expect(compiled.systemInstruction).toContain('[角色:名称]');
+    expect(compiled.rendered).toContain('前三章内容');
+    expect(compiled.rendered).toContain('短剧资料：角色提示词');
+    expect(compiled.rendered).not.toContain('不应进入短剧上下文');
+
+    const novelMode = context.compile(conversation.id, undefined, chapter.id);
+    expect(novelMode.systemInstruction).toContain('长篇小说');
+    expect(novelMode.rendered).not.toContain('短剧资料：角色提示词');
+  });
+
+  it('restricts short-drama RAG context to only the selected saved drafts in a long novel', async () => {
+    const { workflow, novel, context, conversation } = await setup();
+    const published: Array<{ id: string }> = [];
+    for (let index = 1; index <= 14; index += 1) {
+      const chapter = novel.saveChapter({ title: `第${index}章` });
+      workflow.saveDraft({
+        documentId: chapter.documentId,
+        title: chapter.title,
+        contentMarkdown: `第${index}章正文内容。`,
+        expectedDocumentRowVersion: chapter.documentRowVersion,
+      });
+      published.push({ id: chapter.id });
+    }
+    const selected = [published[1]!, published[2]!, published[3]!].map((row) => row.id);
+    const compiled = context.compileShortDrama(conversation.id, undefined, selected);
+    expect(compiled.rendered).toContain('第2章正文内容。');
+    expect(compiled.rendered).toContain('第3章正文内容。');
+    expect(compiled.rendered).toContain('第4章正文内容。');
+    expect(compiled.rendered).not.toContain('第1章正文内容。');
+    expect(compiled.rendered).not.toContain('第14章正文内容。');
+    expect(compiled.sources.some((source) => source.label.startsWith('本集章节：'))).toBe(true);
+  });
+
+  it('fails short-drama generation when selected chapters have not been saved', async () => {
+    const { novel, context, conversation } = await setup();
+    const chapter = novel.saveChapter({ title: '未发布章节' });
+    expect(() => context.compileShortDrama(conversation.id, undefined, [chapter.id])).toThrow(
+      /尚未保存/,
+    );
   });
 
   it('marks chapter summaries stale when a newer publication is created', async () => {
@@ -143,8 +215,9 @@ describe('NovelContextService', () => {
 
     const compiled = context.compile(conversation.id, undefined, chapters[8]!.id);
     const selectedIds = compiled.sources
-      .filter((source) => source.id.startsWith('chapter-summary:'))
-      .map((source) => source.id.replace('chapter-summary:', ''));
+      .filter((source) => source.id.startsWith('novel-rag-chunk:'))
+      .map((source) => source.id.split(':')[1]!)
+      .filter((id, index, rows) => rows.indexOf(id) === index);
     expect(selectedIds).toEqual([
       chapters[8]!.id,
       ...chapters.slice(0, 8).map((chapter) => chapter.id),

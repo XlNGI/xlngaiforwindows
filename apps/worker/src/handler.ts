@@ -66,6 +66,7 @@ import {
   type NovelMarkdownExportPrepareParams,
   type SceneSaveParams,
   type ShotSaveParams,
+  ShotStoryboardSaveParams,
   type AgentChangeSetCreateParams,
   type AgentChangeSetApplyParams,
   type AgentChangeSetRejectParams,
@@ -193,6 +194,8 @@ const methods = new Set<WorkerMethod>([
   'scene.save',
   'shot.list',
   'shot.save',
+  'shot.storyboard.save',
+  'constraint.list',
   'conversation.list',
   'conversation.create',
   'conversation.update',
@@ -309,6 +312,8 @@ const generationService = new GenerationService(
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
   documentWorkflowService,
+  undefined,
+  changeSetService,
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
@@ -704,6 +709,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             agentParams.title,
             agentParams.documentIntent,
             agentParams.researchMode,
+            undefined,
+            agentParams.agentMode === 'short-drama' ? agentParams.selectedChapterIds : undefined,
+            agentParams.agentMode === 'short-drama' ? agentParams.targetPlatform : undefined,
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
           result = { ...prepared, agentTaskId: agent.taskId, runtimeOwner: 'native-agent' };
@@ -776,6 +784,12 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           break;
         case 'shot.save':
           result = contentService.saveShot(params as unknown as ShotSaveParams);
+          break;
+        case 'shot.storyboard.save':
+          result = contentService.saveShotStoryboard(params as unknown as ShotStoryboardSaveParams);
+          break;
+        case 'constraint.list':
+          result = contentService.listConstraints();
           break;
         case 'conversation.list':
           result = contentService.listConversations(params);

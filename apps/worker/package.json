@@ -12,15 +12,18 @@
     "dev": "tsx watch src/index.ts --http 43120 --dev-http",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "validate:pi-runtime-spike": "node scripts/validate-pi-runtime-spike.mjs"
   },
   "dependencies": {
-    "@ai-video/contracts": "workspace:*",
     "@ai-video/context": "workspace:*",
+    "@ai-video/contracts": "workspace:*",
     "@ai-video/domain": "workspace:*",
     "@ai-video/generation-adapters": "workspace:*",
     "@ai-video/llm": "workspace:*",
     "@ai-video/persistence": "workspace:*",
+    "@earendil-works/pi-agent-core": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.3",
     "better-sqlite3": "^12.2.0"
   },
   "devDependencies": {

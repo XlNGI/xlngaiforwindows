@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ProjectService, resolveProjectRelativePath } from './project-service.js';
+import { isProcessAlive, ProjectService, resolveProjectRelativePath } from './project-service.js';
 import Database from 'better-sqlite3';
 
 const temporaryDirectories: string[] = [];
@@ -50,7 +50,7 @@ describe('ProjectService', () => {
     const recent = join(base, 'recent.json');
     const first = service(recent);
     const created = first.create(root, 'First Project');
-    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 27 });
+    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 31 });
     for (const path of [
       'project.sqlite',
       'assets/images',
@@ -125,6 +125,33 @@ describe('ProjectService', () => {
     expect(results.every(({ error }) => error === undefined)).toBe(true);
   }, 20_000);
 
+  it('treats a reused PID with a mismatched process start as stale', () => {
+    const now = new Date();
+    const sameStart = () => now.toISOString();
+    const oldStart = () => new Date(now.getTime() - 3_600_000).toISOString();
+    expect(isProcessAlive(process.pid, now.toISOString(), sameStart)).toBe(true);
+    expect(isProcessAlive(process.pid, now.toISOString(), oldStart)).toBe(false);
+    expect(isProcessAlive(2147483647, now.toISOString(), sameStart)).toBe(false);
+    expect(isProcessAlive(process.pid, undefined, oldStart)).toBe(true);
+  });
+
+  it('writes process start metadata into the project lock', async () => {
+    const base = await temporaryRoot('lock-metadata');
+    const root = join(base, 'project');
+    const recent = join(base, 'recent.json');
+    const writer = service(recent);
+    writer.create(root, 'Metadata Project');
+    const lock = JSON.parse(await readFile(join(root, '.ai-video.lock'), 'utf8')) as {
+      pid: number;
+      token: string;
+      createdAt: string;
+      processStart?: string;
+    };
+    expect(lock.pid).toBe(process.pid);
+    expect(lock.processStart).toBeTruthy();
+    expect(Number.isNaN(Date.parse(lock.processStart!))).toBe(false);
+  });
+
   it('recovers an abandoned lock', async () => {
     const base = await temporaryRoot('stale-lock');
     const root = join(base, 'project');
@@ -167,7 +194,7 @@ describe('ProjectService', () => {
     writer.close();
     expect(service(recent).open(exported)).toMatchObject({
       name: 'Portable Project',
-      schemaVersion: 27,
+      schemaVersion: 31,
     });
   });
 

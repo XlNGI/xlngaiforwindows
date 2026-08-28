@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
+  AgentChangeSetItemDraft,
   AgentGenerationExecuteToolsParams,
   AgentGenerationExecuteToolsResult,
   AgentGenerationConfirmToolParams,
@@ -8,6 +9,8 @@ import type {
   AgentDocumentIntent,
   AgentDocumentOperation,
   AgentResearchMode,
+  ConversationTargetPlatform,
+  DocumentDetail,
   AgentProviderStepCompleteParams,
   LlmGenerationIdentity,
   LlmToolCall,
@@ -15,6 +18,7 @@ import type {
   LlmToolDefinition,
   LlmToolOutput,
 } from '@ai-video/contracts';
+import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 import {
@@ -41,7 +45,8 @@ type AgentToolOperation = AgentDocumentOperation | ResearchOperation;
 export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.create_draft',
-    description: 'Create one reviewable Markdown document draft for the current project.',
+    description:
+      'Create one reviewable Markdown document draft for the current project. documentKind is optional and controls which workspace shows the document (character/scene appears in the characters and scenes workspace).',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -49,6 +54,10 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        documentKind: {
+          type: 'string',
+          enum: ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'],
+        },
       },
     },
   },
@@ -115,6 +124,60 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
   {
+    name: 'novel.episode.submit_draft',
+    description:
+      'Submit one reviewable short-drama episode overview document (project document / overall control for this episode) from the authorized chapter selection. This never creates scenes or shots.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['title', 'contentMarkdown'],
+      properties: {
+        title: { type: 'string', minLength: 1, maxLength: 200 },
+        contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+      },
+    },
+  },
+  {
+    name: 'novel.episode.submit_structure',
+    description:
+      'Submit a short-drama episode scene/shot structure with a prompt for every shot. Creates one reviewable change set; never writes scenes or shots directly. Reference published characters and scenes with [角色:名称] / [场景:名称] placeholders.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['episodeTitle', 'scenes'],
+      properties: {
+        episodeTitle: { type: 'string', minLength: 1, maxLength: 200 },
+        scenes: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['title', 'shots'],
+            properties: {
+              title: { type: 'string', minLength: 1, maxLength: 200 },
+              shots: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 30,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['title', 'prompt'],
+                  properties: {
+                    title: { type: 'string', minLength: 1, maxLength: 200 },
+                    prompt: { type: 'string', minLength: 1, maxLength: 2000 },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
     name: 'novel.adaptation.submit_proposal',
     description:
       'Create one short-drama adaptation proposal draft from the authorized published novel chapter. This never creates scenes or shots.',
@@ -164,6 +227,17 @@ export const RESEARCH_AGENT_TOOLS: LlmToolDefinition[] = [
 ];
 
 const AGENT_TOOLS = [...DOCUMENT_AGENT_TOOLS, ...RESEARCH_AGENT_TOOLS];
+
+export function conversationTaskToolDefinition(
+  name: Extract<
+    AgentDocumentOperation,
+    'novel.episode.submit_draft' | 'document.create_draft' | 'novel.episode.submit_structure'
+  >,
+): LlmToolDefinition {
+  const tool = DOCUMENT_AGENT_TOOLS.find((candidate) => candidate.name === name);
+  if (!tool) throw new Error(`Conversation task tool is not registered: ${name}.`);
+  return { ...tool, parameters: structuredClone(tool.parameters) };
+}
 
 type AuthorizationSpec = {
   operation: AgentToolOperation;
@@ -257,6 +331,7 @@ export class AgentProviderLoopService {
     private readonly projects: ProjectService,
     private readonly documents: DocumentWorkflowService,
     private readonly research: ResearchService = new ResearchService(),
+    private readonly changeSets: ChangeSetService = new ChangeSetService(projects),
   ) {}
 
   cancelGeneration(generationId: string): boolean {
@@ -277,6 +352,8 @@ export class AgentProviderLoopService {
     intent: AgentDocumentIntent = { operation: 'document.create_draft' },
     researchMode: AgentResearchMode = 'auto',
     existingTaskId?: string,
+    selectedChapterIds?: string[],
+    targetPlatform?: ConversationTargetPlatform,
   ): PreparedAgentLoop {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -414,9 +491,10 @@ export class AgentProviderLoopService {
             normalizeTitle(title ?? 'Agent document draft'),
             JSON.stringify({
               promptHash: requestHash,
-              agentMode: 'document',
+              agentMode: selectedChapterIds ? 'short-drama' : 'document',
               documentOperation: authorization.operation,
               researchMode,
+              ...(selectedChapterIds ? { selectedChapterIds, targetPlatform } : {}),
             }),
             requestHash,
             generation.context_snapshot_id,
@@ -499,7 +577,12 @@ export class AgentProviderLoopService {
         ) {
           throw new Error('Provider tool call is not authorized for this step.');
         }
-        const args = parseToolArguments(call.name, call.argumentsJson);
+        let args: ReturnType<typeof parseToolArguments>;
+        try {
+          args = parseToolArguments(call.name, call.argumentsJson);
+        } catch (error) {
+          return toolErrorContinuation(activeGeneration.protocol, params, call, error);
+        }
         const lifecycleAction: 'document.archive' | 'document.restore' | undefined =
           call.name === 'document.archive'
             ? 'document.archive'
@@ -643,6 +726,7 @@ export class AgentProviderLoopService {
             taskId: task.id,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
+            kind: (args.documentKind ?? 'note') as DocumentDetail['kind'],
             scopeType: task.scope_type,
             scopeId: task.scope_id ?? undefined,
             sourceMessageId: task.user_message_id ?? undefined,
@@ -660,6 +744,88 @@ export class AgentProviderLoopService {
             status: 'draft_created',
             documentId: document.id,
             documentVersionId: document.currentVersion?.id,
+            reviewRequired: true,
+          });
+          resultSummary = result;
+        } else if (call.name === 'novel.episode.submit_draft') {
+          document = this.documents.writeTrustedAgentDraftInTransaction(database, project, {
+            taskId: task.id,
+            title: args.title as string,
+            contentMarkdown: args.contentMarkdown as string,
+            kind: 'plan',
+            scopeType: task.scope_type,
+            scopeId: task.scope_id ?? undefined,
+            sourceMessageId: task.user_message_id ?? undefined,
+            contextSnapshotId: task.context_snapshot_id ?? undefined,
+          });
+          if (!document.currentVersion?.id) {
+            throw new Error('Episode overview draft version is missing.');
+          }
+          database
+            .prepare(
+              `INSERT INTO document_bindings
+               (id, project_id, document_id, role, domain_scope, status, row_version, created_at, updated_at)
+               VALUES (?, ?, ?, 'screenplay', 'short-drama', 'active', 0, ?, ?)`,
+            )
+            .run(randomUUID(), project.id, document.id, now, now);
+          linkResearchCitations(
+            database,
+            project.id,
+            task.id,
+            document.currentVersion.id,
+            args.contentMarkdown as string,
+            now,
+          );
+          result = JSON.stringify({
+            status: 'episode_draft_submitted',
+            documentId: document.id,
+            documentVersionId: document.currentVersion.id,
+            reviewRequired: true,
+          });
+          resultSummary = result;
+        } else if (call.name === 'novel.episode.submit_structure') {
+          let structure: EpisodeStructure;
+          try {
+            structure = parseEpisodeStructureArguments(call.argumentsJson);
+            validateEpisodeReferences(database, project.id, structure);
+          } catch (error) {
+            database
+              .prepare(
+                `UPDATE agent_tool_calls
+                 SET status = 'failed', error_message = ?, completed_at = ?
+                 WHERE id = ? AND status = 'executing'`,
+              )
+              .run(
+                error instanceof Error ? error.message.slice(0, 500) : 'Invalid episode structure.',
+                now,
+                toolCallId,
+              );
+            return toolErrorContinuation(activeGeneration.protocol, params, call, error);
+          }
+          const items: AgentChangeSetItemDraft[] = [];
+          let sceneOrdinal = 0;
+          for (const scene of structure.scenes) {
+            items.push({ entityType: 'scene', action: 'create', title: scene.title });
+            for (const shot of scene.shots) {
+              items.push({
+                entityType: 'shot',
+                action: 'create',
+                parentItemOrdinal: sceneOrdinal,
+                title: shot.title,
+                prompt: shot.prompt,
+              });
+            }
+            sceneOrdinal += 1;
+          }
+          const changeSet = this.changeSets.create({
+            taskId: task.id,
+            title: structure.episodeTitle,
+            items,
+          });
+          result = JSON.stringify({
+            status: 'episode_structure_change_set_created',
+            changeSetId: changeSet.id,
+            itemCount: changeSet.items.length,
             reviewRequired: true,
           });
           resultSummary = result;
@@ -1732,6 +1898,51 @@ export class AgentProviderLoopService {
   }
 }
 
+function excerptArguments(value: string, maximum = 120): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum)}…（已截断）`;
+}
+
+/**
+ * Converts a model-correctable tool argument failure into a tool output that is
+ * fed back to the provider, so the model can fix its JSON and retry within the
+ * same task instead of failing the whole generation.
+ */
+function toolErrorContinuation(
+  protocol: 'openai-responses' | 'openai-chat-completions',
+  params: AgentGenerationExecuteToolsParams,
+  call: LlmToolCall,
+  error: unknown,
+): AgentGenerationExecuteToolsResult {
+  const message =
+    error instanceof Error && error.message.trim()
+      ? error.message
+      : 'Tool arguments could not be parsed.';
+  return {
+    continuation: createToolContinuation(protocol, params.providerResponseId, params.calls, [
+      {
+        callId: call.id,
+        output: `工具参数解析失败：${message}。请修正后重新提交该工具调用。`,
+      },
+    ]),
+  };
+}
+
+/**
+ * Chat Completions continuations must carry valid JSON arguments because the
+ * provider rebuilds the assistant tool message from them. When a model emitted
+ * malformed arguments we still feed the parse error back for self-correction,
+ * but the echoed call must not re-enter the provider with the broken payload.
+ */
+function safeArgumentsJson(value: string): string {
+  try {
+    JSON.parse(value);
+    return value;
+  } catch {
+    return '{}';
+  }
+}
+
 function createToolContinuation(
   protocol: 'openai-responses' | 'openai-chat-completions',
   providerResponseId: string,
@@ -1742,7 +1953,11 @@ function createToolContinuation(
     return {
       protocol,
       providerResponseId,
-      calls: calls.map(({ id, name, argumentsJson }) => ({ id, name, argumentsJson })),
+      calls: calls.map(({ id, name, argumentsJson }) => ({
+        id,
+        name,
+        argumentsJson: safeArgumentsJson(argumentsJson),
+      })),
       outputs: outputs.map((output) => ({ ...output })),
     };
   }
@@ -1756,26 +1971,33 @@ function createToolContinuation(
 function parseToolArguments(
   operation: string,
   value: string,
-): { title?: string; contentMarkdown?: string } {
+): { title?: string; contentMarkdown?: string; documentKind?: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error('Tool arguments are not valid JSON.');
+    throw new Error(
+      `Tool arguments are not valid JSON for ${operation}: ${excerptArguments(value)}`,
+    );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
     throw new Error('Tool arguments must be an object.');
   const record = parsed as Record<string, unknown>;
+  if (operation === 'novel.episode.submit_structure') {
+    return {};
+  }
   const needsContent =
     operation === 'document.create_draft' ||
     operation === 'document.update_draft' ||
     operation === 'novel.chapter.submit_draft' ||
     operation === 'novel.reference.submit_draft' ||
-    operation === 'novel.adaptation.submit_proposal';
-  if (
-    needsContent &&
-    Object.keys(record).some((key) => !['title', 'contentMarkdown'].includes(key))
-  ) {
+    operation === 'novel.adaptation.submit_proposal' ||
+    operation === 'novel.episode.submit_draft';
+  const allowedKeys =
+    operation === 'document.create_draft'
+      ? ['title', 'contentMarkdown', 'documentKind']
+      : ['title', 'contentMarkdown'];
+  if (needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
     throw new Error('Tool arguments contain unsupported fields.');
   }
   if (!needsContent && Object.keys(record).length > 0) {
@@ -1794,7 +2016,14 @@ function parseToolArguments(
   if (!rawContent.trim() || rawContent.length > 1_000_000) {
     throw new Error('Tool document content is invalid.');
   }
-  return { title, contentMarkdown: rawContent };
+  const documentKind =
+    operation === 'document.create_draft' && typeof record.documentKind === 'string'
+      ? record.documentKind
+      : undefined;
+  if (documentKind !== undefined && !DOCUMENT_KIND_SET.has(documentKind)) {
+    throw new Error('Tool documentKind is invalid.');
+  }
+  return { title, contentMarkdown: rawContent, documentKind };
 }
 
 function parseResearchToolArguments(
@@ -2201,6 +2430,8 @@ function optionalPatternString(
 function taskTypeFor(operation: AgentDocumentOperation): string {
   switch (operation) {
     case 'document.create_draft':
+    case 'novel.episode.submit_draft':
+    case 'novel.episode.submit_structure':
       return 'document-create';
     case 'document.update_draft':
     case 'novel.chapter.submit_draft':
@@ -2216,6 +2447,109 @@ function taskTypeFor(operation: AgentDocumentOperation): string {
       return 'document-restore';
   }
   throw new Error('Unsupported document operation.');
+}
+
+const DOCUMENT_KIND_SET = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
+
+interface EpisodeStructure {
+  episodeTitle: string;
+  scenes: Array<{
+    title: string;
+    shots: Array<{ title: string; prompt: string }>;
+  }>;
+}
+
+function parseEpisodeStructureArguments(value: string): EpisodeStructure {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`Episode structure arguments are not valid JSON: ${excerptArguments(value)}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Episode structure arguments must be an object.');
+  }
+  const record = parsed as Record<string, unknown>;
+  const unknown = Object.keys(record).find((key) => !['episodeTitle', 'scenes'].includes(key));
+  if (unknown) throw new Error(`Episode structure has unsupported field: ${unknown}.`);
+  const episodeTitle = normalizeTitle(
+    typeof record.episodeTitle === 'string' ? record.episodeTitle : '',
+  );
+  if (!Array.isArray(record.scenes) || record.scenes.length < 1 || record.scenes.length > 20) {
+    throw new Error('Episode structure scenes must contain between one and 20 items.');
+  }
+  const scenes: EpisodeStructure['scenes'] = [];
+  for (const [sceneIndex, rawScene] of record.scenes.entries()) {
+    if (!rawScene || typeof rawScene !== 'object' || Array.isArray(rawScene)) {
+      throw new Error(`Episode scene ${sceneIndex} must be an object.`);
+    }
+    const scene = rawScene as Record<string, unknown>;
+    const sceneUnknown = Object.keys(scene).find((key) => !['title', 'shots'].includes(key));
+    if (sceneUnknown)
+      throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
+    const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
+    if (!Array.isArray(scene.shots) || scene.shots.length < 1 || scene.shots.length > 30) {
+      throw new Error(`Episode scene ${sceneIndex} shots must contain between one and 30 items.`);
+    }
+    const shots: EpisodeStructure['scenes'][number]['shots'] = [];
+    for (const [shotIndex, rawShot] of scene.shots.entries()) {
+      if (!rawShot || typeof rawShot !== 'object' || Array.isArray(rawShot)) {
+        throw new Error(`Episode shot ${sceneIndex}:${shotIndex} must be an object.`);
+      }
+      const shot = rawShot as Record<string, unknown>;
+      const shotUnknown = Object.keys(shot).find((key) => !['title', 'prompt'].includes(key));
+      if (shotUnknown)
+        throw new Error(
+          `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
+        );
+      const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
+      if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 2000) {
+        throw new Error(
+          `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 2000 characters.`,
+        );
+      }
+      shots.push({ title: shotTitle, prompt: shot.prompt.trim() });
+    }
+    scenes.push({ title: sceneTitle, shots });
+  }
+  return { episodeTitle, scenes };
+}
+
+function validateEpisodeReferences(
+  database: Database.Database,
+  projectId: string,
+  structure: EpisodeStructure,
+): void {
+  const rows = database
+    .prepare(
+      `SELECT documents.kind AS kind, versions.content_markdown AS content_markdown
+       FROM documents
+       INNER JOIN document_versions versions ON versions.id = documents.published_version_id
+       WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+         AND documents.kind IN ('character', 'scene')`,
+    )
+    .all(projectId) as Array<{ kind: string; content_markdown: string }>;
+  const names = new Set<string>();
+  for (const row of rows) {
+    for (const line of row.content_markdown.split(/\r?\n/)) {
+      const match = /^#\s+(.+)$/.exec(line.trim());
+      if (match?.[1]?.trim()) names.add(match[1].trim());
+    }
+  }
+  const referencePattern = /\[(角色|场景):([^\]]+)\]/g;
+  for (const scene of structure.scenes) {
+    for (const shot of scene.shots) {
+      for (const match of shot.prompt.matchAll(referencePattern)) {
+        const label = match[1] === '角色' ? 'character' : 'scene';
+        const name = (match[2] ?? '').trim();
+        if (!name || !names.has(name)) {
+          throw new Error(
+            `Episode structure references unknown ${label} "${name}". Publish the character/scene prompt first or fix the placeholder.`,
+          );
+        }
+      }
+    }
+  }
 }
 
 function normalizeTitle(value: string): string {

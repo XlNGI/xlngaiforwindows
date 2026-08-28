@@ -6,6 +6,10 @@ import type {
   AgentTaskEventRepository,
   AgentTaskGenerationRecord,
   AgentTaskGenerationRepository,
+  AgentTaskPlanRecord,
+  AgentTaskPlanRepository,
+  AgentTaskDeliverableRecord,
+  AgentTaskDeliverableRepository,
   AgentTaskRecord,
   AgentTaskRepository,
   AgentToolCallRecord,
@@ -1109,10 +1113,11 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
   save(record: ShotRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO shots (id, scene_id, title, position, status, created_at, updated_at, row_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO shots (id, scene_id, title, position, status, document_id, prompt, created_at, updated_at, row_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-           title = excluded.title, status = excluded.status, updated_at = excluded.updated_at,
+           title = excluded.title, status = excluded.status, document_id = excluded.document_id,
+           prompt = excluded.prompt, updated_at = excluded.updated_at,
            row_version = shots.row_version + 1
          WHERE shots.row_version = excluded.row_version`,
       )
@@ -1122,6 +1127,8 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
         record.title,
         record.position,
         record.status,
+        record.documentId ?? null,
+        record.prompt ?? null,
         record.createdAt,
         record.updatedAt,
         record.rowVersion,
@@ -1132,6 +1139,13 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
   get(id: string): ShotRecord | undefined {
     const row = this.database.prepare('SELECT * FROM shots WHERE id = ?').get(id) as
       ShotRow | undefined;
+    return row ? mapShot(row) : undefined;
+  }
+
+  findByDocumentId(documentId: string): ShotRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM shots WHERE document_id = ?')
+      .get(documentId) as ShotRow | undefined;
     return row ? mapShot(row) : undefined;
   }
 
@@ -1150,6 +1164,8 @@ interface ShotRow {
   title: string;
   position: number;
   status: string;
+  document_id: string | null;
+  prompt: string | null;
   created_at: string;
   updated_at: string;
   row_version: number;
@@ -1162,6 +1178,8 @@ function mapShot(row: ShotRow): ShotRecord {
     title: row.title,
     position: row.position,
     status: row.status,
+    documentId: row.document_id ?? undefined,
+    prompt: row.prompt ?? undefined,
     rowVersion: row.row_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1796,6 +1814,210 @@ function mapAgentTask(row: AgentTaskRow): AgentTaskRecord {
     toolCallCount: row.tool_call_count,
     lifecycleStatus: row.lifecycle_status,
     archivedAt: row.archived_at ?? undefined,
+  };
+}
+
+class SqliteAgentTaskPlanRepository
+  extends ProjectScopedRepository
+  implements AgentTaskPlanRepository
+{
+  save(record: AgentTaskPlanRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO agent_task_plans
+         (id, task_id, project_id, version, mode, action, target_platform, plan_json,
+          trusted_scope_json, plan_hash, status, idempotency_key, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.taskId,
+        record.projectId,
+        record.version,
+        record.mode,
+        record.action,
+        record.targetPlatform ?? null,
+        record.planJson,
+        record.trustedScopeJson,
+        record.planHash,
+        record.status,
+        record.idempotencyKey ?? null,
+        record.rowVersion,
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  get(id: string): AgentTaskPlanRecord | undefined {
+    const row = this.database.prepare('SELECT * FROM agent_task_plans WHERE id = ?').get(id) as
+      AgentTaskPlanRow | undefined;
+    return row ? mapAgentTaskPlan(row) : undefined;
+  }
+
+  getByTask(taskId: string): AgentTaskPlanRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM agent_task_plans WHERE task_id = ?')
+      .get(taskId) as AgentTaskPlanRow | undefined;
+    return row ? mapAgentTaskPlan(row) : undefined;
+  }
+
+  updateStatus(
+    id: string,
+    status: AgentTaskPlanRecord['status'],
+    updatedAt: string,
+    expectedRowVersion: number,
+  ): boolean {
+    return (
+      this.database
+        .prepare(
+          `UPDATE agent_task_plans SET status = ?, updated_at = ?, row_version = row_version + 1
+           WHERE id = ? AND row_version = ?`,
+        )
+        .run(status, updatedAt, id, expectedRowVersion).changes === 1
+    );
+  }
+}
+
+interface AgentTaskPlanRow {
+  id: string;
+  task_id: string;
+  project_id: string;
+  version: 1;
+  mode: AgentTaskPlanRecord['mode'];
+  action: AgentTaskPlanRecord['action'];
+  target_platform: AgentTaskPlanRecord['targetPlatform'] | null;
+  plan_json: string;
+  trusted_scope_json: string;
+  plan_hash: string;
+  status: AgentTaskPlanRecord['status'];
+  idempotency_key: string | null;
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapAgentTaskPlan(row: AgentTaskPlanRow): AgentTaskPlanRecord {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    projectId: row.project_id,
+    version: row.version,
+    mode: row.mode,
+    action: row.action,
+    targetPlatform: row.target_platform ?? undefined,
+    planJson: row.plan_json,
+    trustedScopeJson: row.trusted_scope_json,
+    planHash: row.plan_hash,
+    status: row.status,
+    idempotencyKey: row.idempotency_key ?? undefined,
+    rowVersion: row.row_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+class SqliteAgentTaskDeliverableRepository
+  extends ProjectScopedRepository
+  implements AgentTaskDeliverableRepository
+{
+  save(record: AgentTaskDeliverableRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO agent_task_deliverables
+         (id, plan_id, task_id, project_id, ordinal, kind, required, depends_on_json, status,
+          entity_type, entity_id, error_code, error_message, row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.planId,
+        record.taskId,
+        record.projectId,
+        record.ordinal,
+        record.kind,
+        record.required ? 1 : 0,
+        record.dependsOnJson,
+        record.status,
+        record.entityType ?? null,
+        record.entityId ?? null,
+        record.errorCode ?? null,
+        record.errorMessage ?? null,
+        record.rowVersion,
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  get(id: string): AgentTaskDeliverableRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM agent_task_deliverables WHERE id = ?')
+      .get(id) as AgentTaskDeliverableRow | undefined;
+    return row ? mapAgentTaskDeliverable(row) : undefined;
+  }
+
+  listByPlan(planId: string): AgentTaskDeliverableRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM agent_task_deliverables WHERE plan_id = ? ORDER BY ordinal, id')
+        .all(planId) as AgentTaskDeliverableRow[]
+    ).map(mapAgentTaskDeliverable);
+  }
+
+  updateStatus(
+    id: string,
+    status: AgentTaskDeliverableRecord['status'],
+    updatedAt: string,
+    expectedRowVersion: number,
+  ): boolean {
+    return (
+      this.database
+        .prepare(
+          `UPDATE agent_task_deliverables
+           SET status = ?, updated_at = ?, row_version = row_version + 1
+           WHERE id = ? AND row_version = ?`,
+        )
+        .run(status, updatedAt, id, expectedRowVersion).changes === 1
+    );
+  }
+}
+
+interface AgentTaskDeliverableRow {
+  id: string;
+  plan_id: string;
+  task_id: string;
+  project_id: string;
+  ordinal: number;
+  kind: AgentTaskDeliverableRecord['kind'];
+  required: number;
+  depends_on_json: string;
+  status: AgentTaskDeliverableRecord['status'];
+  entity_type: AgentTaskDeliverableRecord['entityType'] | null;
+  entity_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapAgentTaskDeliverable(row: AgentTaskDeliverableRow): AgentTaskDeliverableRecord {
+  return {
+    id: row.id,
+    planId: row.plan_id,
+    taskId: row.task_id,
+    projectId: row.project_id,
+    ordinal: row.ordinal,
+    kind: row.kind,
+    required: row.required === 1,
+    dependsOnJson: row.depends_on_json,
+    status: row.status,
+    entityType: row.entity_type ?? undefined,
+    entityId: row.entity_id ?? undefined,
+    errorCode: row.error_code ?? undefined,
+    errorMessage: row.error_message ?? undefined,
+    rowVersion: row.row_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -3110,6 +3332,8 @@ export function createRepositories(database: Database.Database): {
   agentTasks: AgentTaskRepository;
   agentTaskEvents: AgentTaskEventRepository;
   agentTaskGenerations: AgentTaskGenerationRepository;
+  agentTaskPlans: AgentTaskPlanRepository;
+  agentTaskDeliverables: AgentTaskDeliverableRepository;
   agentToolCalls: AgentToolCallRepository;
   agentToolAuthorizations: AgentToolAuthorizationRepository;
   agentTaskDocumentVersions: AgentTaskDocumentVersionRepository;
@@ -3141,6 +3365,8 @@ export function createRepositories(database: Database.Database): {
     agentTasks: new SqliteAgentTaskRepository(database),
     agentTaskEvents: new SqliteAgentTaskEventRepository(database),
     agentTaskGenerations: new SqliteAgentTaskGenerationRepository(database),
+    agentTaskPlans: new SqliteAgentTaskPlanRepository(database),
+    agentTaskDeliverables: new SqliteAgentTaskDeliverableRepository(database),
     agentToolCalls: new SqliteAgentToolCallRepository(database),
     agentToolAuthorizations: new SqliteAgentToolAuthorizationRepository(database),
     agentTaskDocumentVersions: new SqliteAgentTaskDocumentVersionRepository(database),

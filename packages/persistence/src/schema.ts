@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 27;
+export const CURRENT_SCHEMA_VERSION = 31;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -1959,5 +1959,173 @@ OR (NEW.expected_current_version_id IS NOT NULL AND NOT EXISTS (
 ))
 BEGIN
   SELECT RAISE(ABORT, 'change set item target does not belong to project or proposal');
+END;
+`;
+
+export const MIGRATION_V28 = `
+ALTER TABLE shots ADD COLUMN document_id TEXT;
+CREATE UNIQUE INDEX idx_shots_document_id ON shots(document_id) WHERE document_id IS NOT NULL;
+`;
+
+/** S1: short-drama episode prompts. */
+export const MIGRATION_V29 = `
+ALTER TABLE shots ADD COLUMN prompt TEXT
+  CHECK (prompt IS NULL OR length(trim(prompt)) <= 2000);
+ALTER TABLE agent_change_set_items ADD COLUMN shot_prompt TEXT
+  CHECK (shot_prompt IS NULL OR length(trim(shot_prompt)) <= 2000);
+
+CREATE TRIGGER agent_change_set_item_shot_prompt_match
+BEFORE INSERT ON agent_change_set_items
+WHEN NEW.shot_prompt IS NOT NULL AND NEW.entity_type != 'shot'
+BEGIN
+  SELECT RAISE(ABORT, 'shot prompt is only allowed on shot items');
+END;
+`;
+
+/** Locally persisted RAG chunks for the current saved novel chapter drafts. */
+export const MIGRATION_V30 = `
+CREATE TABLE novel_rag_chunks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  chapter_id TEXT NOT NULL REFERENCES novel_chapters(id) ON DELETE CASCADE,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  source_document_version_id TEXT NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+  end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
+  content_text TEXT NOT NULL CHECK (length(content_text) > 0),
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+  character_count INTEGER NOT NULL CHECK (character_count = length(content_text)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(chapter_id, ordinal)
+);
+
+CREATE INDEX idx_novel_rag_chunks_project_chapter
+  ON novel_rag_chunks(project_id, chapter_id, ordinal);
+CREATE INDEX idx_novel_rag_chunks_current_version
+  ON novel_rag_chunks(project_id, source_document_version_id, chapter_id);
+
+CREATE TRIGGER novel_rag_chunk_scope_match
+BEFORE INSERT ON novel_rag_chunks
+WHEN NOT EXISTS (
+  SELECT 1 FROM novel_chapters chapters
+  INNER JOIN documents ON documents.id = chapters.document_id
+  INNER JOIN document_versions versions ON versions.document_id = documents.id
+  WHERE chapters.id = NEW.chapter_id
+    AND chapters.project_id = NEW.project_id
+    AND documents.id = NEW.document_id
+    AND documents.project_id = NEW.project_id
+    AND versions.id = NEW.source_document_version_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'novel RAG chunk does not match project chapter version');
+END;
+`;
+
+/** P2: Pi-independent conversation task plans and multi-deliverable state. */
+export const MIGRATION_V31 = `
+CREATE TABLE agent_task_plans (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL UNIQUE REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL CHECK (version = 1),
+  mode TEXT NOT NULL CHECK (mode IN ('document', 'novel-writing', 'short-drama')),
+  action TEXT NOT NULL CHECK (action IN ('generate', 'revise', 'analyze')),
+  target_platform TEXT CHECK (
+    target_platform IS NULL OR target_platform IN ('seedance', 'generic-video', 'generic-image')
+  ),
+  plan_json TEXT NOT NULL CHECK (json_valid(plan_json) AND json_type(plan_json) = 'object'),
+  trusted_scope_json TEXT NOT NULL
+    CHECK (json_valid(trusted_scope_json) AND json_type(trusted_scope_json) = 'object'),
+  plan_hash TEXT NOT NULL CHECK (length(plan_hash) = 64),
+  status TEXT NOT NULL DEFAULT 'frozen'
+    CHECK (status IN ('frozen', 'active', 'succeeded', 'failed', 'cancelled')),
+  idempotency_key TEXT,
+  row_version INTEGER NOT NULL DEFAULT 0 CHECK (row_version >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (target_platform IS NULL OR mode = 'short-drama')
+);
+
+CREATE UNIQUE INDEX idx_agent_task_plans_project_idempotency
+  ON agent_task_plans(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_agent_task_plans_project_status
+  ON agent_task_plans(project_id, status, updated_at, id);
+
+CREATE TABLE agent_task_deliverables (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES agent_task_plans(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'episode-outline', 'character-prompts', 'scene-prompts',
+    'scene-shot-structure', 'shot-prompts', 'production-notes'
+  )),
+  required INTEGER NOT NULL CHECK (required IN (0, 1)),
+  depends_on_json TEXT NOT NULL
+    CHECK (json_valid(depends_on_json) AND json_type(depends_on_json) = 'array'),
+  status TEXT NOT NULL CHECK (
+    status IN ('pending', 'ready', 'in_progress', 'succeeded', 'failed', 'blocked', 'cancelled')
+  ),
+  entity_type TEXT CHECK (entity_type IS NULL OR entity_type IN ('document', 'change-set', 'task')),
+  entity_id TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  row_version INTEGER NOT NULL DEFAULT 0 CHECK (row_version >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(plan_id, ordinal),
+  UNIQUE(plan_id, kind),
+  CHECK ((entity_type IS NULL AND entity_id IS NULL) OR (entity_type IS NOT NULL AND entity_id IS NOT NULL))
+);
+
+CREATE INDEX idx_agent_task_deliverables_plan_status
+  ON agent_task_deliverables(plan_id, status, ordinal);
+CREATE INDEX idx_agent_task_deliverables_task
+  ON agent_task_deliverables(task_id, ordinal);
+
+CREATE TRIGGER agent_task_plan_project_match
+BEFORE INSERT ON agent_task_plans
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_tasks
+  WHERE agent_tasks.id = NEW.task_id AND agent_tasks.project_id = NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'agent task plan does not match task project');
+END;
+
+CREATE TRIGGER agent_task_deliverable_scope_match
+BEFORE INSERT ON agent_task_deliverables
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_task_plans
+  WHERE agent_task_plans.id = NEW.plan_id
+    AND agent_task_plans.task_id = NEW.task_id
+    AND agent_task_plans.project_id = NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'agent task deliverable does not match plan scope');
+END;
+
+CREATE TRIGGER agent_task_plan_status_transition
+BEFORE UPDATE OF status ON agent_task_plans
+WHEN (OLD.status = 'frozen' AND NEW.status NOT IN ('frozen', 'active', 'failed', 'cancelled'))
+  OR (OLD.status = 'active' AND NEW.status NOT IN ('active', 'succeeded', 'failed', 'cancelled'))
+  OR (OLD.status = 'failed' AND NEW.status NOT IN ('failed', 'active', 'cancelled'))
+  OR (OLD.status IN ('succeeded', 'cancelled') AND NEW.status <> OLD.status)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent task plan status transition');
+END;
+
+CREATE TRIGGER agent_task_deliverable_status_transition
+BEFORE UPDATE OF status ON agent_task_deliverables
+WHEN (OLD.status = 'pending' AND NEW.status NOT IN ('pending', 'ready', 'blocked', 'cancelled'))
+  OR (OLD.status = 'ready' AND NEW.status NOT IN ('ready', 'in_progress', 'blocked', 'cancelled'))
+  OR (OLD.status = 'in_progress' AND NEW.status NOT IN ('in_progress', 'succeeded', 'failed', 'blocked', 'cancelled'))
+  OR (OLD.status IN ('failed', 'blocked') AND NEW.status NOT IN (OLD.status, 'ready', 'cancelled'))
+  OR (OLD.status IN ('succeeded', 'cancelled') AND NEW.status <> OLD.status)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent task deliverable status transition');
 END;
 `;

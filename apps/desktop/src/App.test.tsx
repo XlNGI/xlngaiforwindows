@@ -384,7 +384,12 @@ describe('App', () => {
           schemaVersion: 4,
         });
       }
-      if (method === 'project.recent' || method === 'document.list' || method === 'asset.list')
+      if (
+        method === 'project.recent' ||
+        method === 'document.list' ||
+        method === 'asset.list' ||
+        method === 'constraint.list'
+      )
         return Promise.resolve([]);
       if (method === 'scene.list') {
         return Promise.resolve([
@@ -822,5 +827,284 @@ describe('App', () => {
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.list'),
     ).toHaveLength(2);
+  });
+
+  it('shows only outline/plan documents plus constraints on the project documents page', async () => {
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Filter Project',
+          rootPath: 'D:\\Filter',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 4,
+        });
+      if (method === 'project.recent') return Promise.resolve([]);
+      if (method === 'document.list')
+        return Promise.resolve([
+          {
+            id: 'd-outline',
+            projectId: 'project',
+            kind: 'outline',
+            title: '项目大纲',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'd-plan',
+            projectId: 'project',
+            kind: 'plan',
+            title: '项目计划',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'd-note',
+            projectId: 'project',
+            kind: 'note',
+            title: '小说章节一',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'd-character',
+            projectId: 'project',
+            kind: 'character',
+            title: '角色设定',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'd-scene',
+            projectId: 'project',
+            kind: 'scene',
+            title: '场景设定',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'd-storyboard',
+            projectId: 'project',
+            kind: 'storyboard',
+            title: '第一集分镜',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'scene.list') return Promise.resolve([]);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'constraint.list')
+        return Promise.resolve([
+          {
+            id: 'c-1',
+            projectId: 'project',
+            scopeType: 'project',
+            kind: 'production',
+            content: '所有镜头保持冷色调',
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'provider.profile.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method);
+    });
+    render(<App />);
+    expect(await screen.findByText('项目大纲')).toBeInTheDocument();
+    expect(screen.getByText('项目计划')).toBeInTheDocument();
+    expect(screen.queryByText('小说章节一')).not.toBeInTheDocument();
+    expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
+    expect(screen.queryByText('场景设定')).not.toBeInTheDocument();
+    expect(screen.queryByText('第一集分镜')).not.toBeInTheDocument();
+    expect(screen.getByText('所有镜头保持冷色调')).toBeInTheDocument();
+  });
+
+  it('shows and saves the shot storyboard document in the shot workspace', async () => {
+    vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Storyboard Project',
+          rootPath: 'D:\\Storyboard',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 4,
+        });
+      if (
+        method === 'project.recent' ||
+        method === 'document.list' ||
+        method === 'asset.list' ||
+        method === 'constraint.list'
+      )
+        return Promise.resolve([]);
+      if (method === 'scene.list')
+        return Promise.resolve([
+          {
+            id: 'scene',
+            projectId: 'project',
+            title: '场次一',
+            position: 0,
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'shot.list')
+        return Promise.resolve([
+          {
+            id: 'shot',
+            sceneId: 'scene',
+            title: '镜头一',
+            position: 0,
+            status: 'draft',
+            documentId: 'sb-1',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'document.get')
+        return Promise.resolve({
+          id: 'sb-1',
+          projectId: 'project',
+          kind: 'storyboard',
+          title: '镜头一分镜',
+          scopeType: 'shot',
+          scopeId: 'shot',
+          lifecycleStatus: 'active',
+          rowVersion: 0,
+          currentVersionId: 'v1',
+          currentVersion: {
+            id: 'v1',
+            documentId: 'sb-1',
+            version: 1,
+            contentMarkdown: '# 分镜\n\n1. 远景。',
+            state: 'draft',
+            authorType: 'user',
+            createdAt: 'now',
+          },
+          createdAt: 'now',
+          updatedAt: 'now',
+        });
+      if (method === 'shot.storyboard.save') {
+        const title = (params as { title: string }).title;
+        const contentMarkdown = (params as { contentMarkdown: string }).contentMarkdown;
+        return Promise.resolve({
+          id: 'sb-1',
+          projectId: 'project',
+          kind: 'storyboard',
+          title,
+          scopeType: 'shot',
+          scopeId: 'shot',
+          lifecycleStatus: 'active',
+          rowVersion: 1,
+          currentVersionId: 'v2',
+          currentVersion: {
+            id: 'v2',
+            documentId: 'sb-1',
+            version: 2,
+            contentMarkdown,
+            state: 'draft',
+            authorType: 'user',
+            createdAt: 'now',
+          },
+          createdAt: 'now',
+          updatedAt: 'now',
+        });
+      }
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'provider.profile.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /场次与镜头/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
+    expect(await screen.findByLabelText('分镜标题')).toHaveValue('镜头一分镜');
+    expect(screen.getByLabelText('分镜内容')).toHaveValue('# 分镜\n\n1. 远景。');
+
+    fireEvent.change(screen.getByLabelText('分镜内容'), {
+      target: { value: '# 分镜\n\n2. 中景。' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /保存分镜/ }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('shot.storyboard.save', {
+        shotId: 'shot',
+        title: '镜头一分镜',
+        contentMarkdown: '# 分镜\n\n2. 中景。',
+      }),
+    );
   });
 });

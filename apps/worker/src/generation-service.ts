@@ -50,6 +50,7 @@ interface GenerationState extends LlmGenerationInfo {
 interface GenerationCreationOptions {
   idempotencyKey?: string;
   retryOfGenerationId?: string;
+  selectedChapterIds?: string[];
 }
 
 export interface LlmSelectionResolver {
@@ -152,6 +153,9 @@ export class GenerationService {
       { idempotencyKey: params.idempotencyKey },
       'agentMode' in params && params.agentMode === 'novel-writing',
       'agentMode' in params ? params.novelIntent?.chapterId : undefined,
+      'agentMode' in params && params.agentMode === 'short-drama'
+        ? params.selectedChapterIds
+        : undefined,
     );
   }
 
@@ -508,6 +512,7 @@ export class GenerationService {
     options: GenerationCreationOptions = {},
     novelMode = false,
     novelFocusChapterId?: string,
+    selectedChapterIds?: string[],
   ): LlmGenerationPrepareResult {
     const existing = this.findIdempotent(options.idempotencyKey);
     if (existing) return prepareResultOf(existing);
@@ -521,6 +526,7 @@ export class GenerationService {
       options,
       novelMode,
       novelFocusChapterId,
+      selectedChapterIds,
     );
     const { state, systemInstruction, context } = prepared;
     state.runtimeRequest = {
@@ -579,6 +585,7 @@ export class GenerationService {
     options: GenerationCreationOptions = {},
     novelMode = false,
     novelFocusChapterId?: string,
+    selectedChapterIds?: string[],
   ): { state: GenerationState; systemInstruction: string; context: string } {
     if (!prompt) throw new Error('Prompt is required.');
     const projectId = this.projects.current()?.id;
@@ -587,7 +594,9 @@ export class GenerationService {
     const compiled =
       novelMode && this.novelContexts
         ? this.novelContexts.compile(conversationId, budgetTokens, novelFocusChapterId)
-        : this.contexts.compile(conversationId, budgetTokens);
+        : selectedChapterIds && this.novelContexts
+          ? this.novelContexts.compileShortDrama(conversationId, budgetTokens, selectedChapterIds)
+          : this.contexts.compile(conversationId, budgetTokens);
     const snapshotId = randomUUID();
     const generationId = randomUUID();
     const attemptId = randomUUID();

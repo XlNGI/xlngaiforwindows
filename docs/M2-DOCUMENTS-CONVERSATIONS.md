@@ -16,9 +16,11 @@ M3 Schema v2 已为正式文档增加项目、场次和镜头作用域；Schema 
 - 会话“保存为文档”只创建可审阅草稿；只有用户显式发布后，内容才进入正式资料。
 - 文档工具栏支持一次选择并导入 UTF-8 编码的 `.md` 或 `.markdown` 文件。导入标题取文件名，正文保持 Markdown，并创建可审阅的导入草稿；只有用户显式发布后才成为正式资料并进入后续 LLM 上下文。单文件上限为 5 MiB，不支持的扩展名、目录、非 UTF-8 内容和超限文件由 Tauri 原生边界拒绝。
 
+页面展示按领域隔离：项目文档页只展示大纲（`outline`）、计划（`plan`）等整体把控资料并列出约束；小说章节在小说工作区、角色与场景文档在角色与场景页、分镜文档挂在具体镜头下，均不进入项目文档页。
+
 ## 场次与镜头
 
-场次属于项目，镜头属于场次。位置按创建顺序递增，场次和镜头的归属在 Worker 中校验。当前 M2 提供创建、列表和状态存储；后续生产阶段在镜头边界上增加参数草稿、生成任务和资产关联。
+场次属于项目，镜头属于场次。位置按创建顺序递增，场次和镜头的归属在 Worker 中校验。每个镜头可关联一份分镜文档（`shots.document_id`，由 `shot.storyboard.save` 在事务中创建/更新 `storyboard` 文档并建立关联）；镜头工作区提供分镜标题与 Markdown 内容编辑。后续生产阶段在镜头边界上增加参数草稿、生成任务和资产关联。
 
 ## 三级会话
 
@@ -53,6 +55,8 @@ scene.list
 scene.save
 shot.list
 shot.save
+shot.storyboard.save
+constraint.list
 conversation.list
 conversation.create
 chat.message.list

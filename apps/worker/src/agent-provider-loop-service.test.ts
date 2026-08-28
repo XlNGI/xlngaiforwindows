@@ -4,12 +4,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LlmProvider } from '@ai-video/llm';
 import { AgentProviderLoopService } from './agent-provider-loop-service.js';
+import { ChangeSetService } from './change-set-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { GenerationService, type LlmSelectionResolver } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ResearchService } from './research-service.js';
+import { NovelContextService } from './novel-context-service.js';
 import { NovelService } from './novel-service.js';
 
 const directories: string[] = [];
@@ -59,6 +61,37 @@ async function setup(
 }
 
 describe('AgentProviderLoopService', () => {
+  it('freezes the trusted target platform with a short-drama task snapshot', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成 AI 漫剧提示词',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '生成 AI 漫剧提示词',
+      'Seedance 漫剧',
+      { operation: 'novel.episode.submit_draft' },
+      'project_only',
+      undefined,
+      ['chapter-1'],
+      'seedance',
+    );
+    const snapshot = project.access(false, (database) => {
+      const row = database
+        .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
+        .get(agent.taskId) as { request_snapshot_json: string };
+      return JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
+    });
+    expect(snapshot).toMatchObject({
+      agentMode: 'short-drama',
+      selectedChapterIds: ['chapter-1'],
+      targetPlatform: 'seedance',
+    });
+  });
+
   it('authorizes the novel chapter draft tool only for an exact chapter document target', async () => {
     const { conversation, generations, loop, project, workflow } = await setup();
     const novel = new NovelService(project);
@@ -755,24 +788,23 @@ describe('AgentProviderLoopService', () => {
     });
     const agent = loop.prepare(prepared.stream, 'Create a draft.');
 
-    await expect(
-      loop.executeTools({
-        ...prepared.stream,
-        providerResponseId: 'resp_tool',
-        calls: [
-          {
-            id: 'call_1',
-            name: 'document.create_draft',
-            authorizationHandle: agent.tools[0]?.authorizationHandle,
-            argumentsJson: JSON.stringify({
-              title: 'Draft',
-              contentMarkdown: '# Draft',
-              projectId: 'forged-project',
-            }),
-          },
-        ],
-      }),
-    ).rejects.toThrow('unsupported fields');
+    const corrected = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_tool',
+      calls: [
+        {
+          id: 'call_1',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]?.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: 'Draft',
+            contentMarkdown: '# Draft',
+            projectId: 'forged-project',
+          }),
+        },
+      ],
+    });
+    expect(corrected.continuation?.outputs[0]?.output).toContain('unsupported fields');
 
     await expect(
       loop.executeTools({
@@ -1025,6 +1057,451 @@ describe('AgentProviderLoopService', () => {
         status: 'interrupted',
       });
     });
+  });
+
+  it('creates an episode overview draft with a short-drama screenplay binding', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '把前三章做成一集，生成本集整体把控',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '把前三章做成一集，生成本集整体把控',
+      '第1集整体把控',
+      { operation: 'novel.episode.submit_draft' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.episode.submit_draft']);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_episode_draft',
+      calls: [
+        {
+          id: 'call_episode_draft',
+          name: 'novel.episode.submit_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: '第1集 · 第一卷 第1–3章 整体把控',
+            contentMarkdown: '# 第1集整体把控\n\n- 集范围：第一卷 第1–3章',
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain('episode_draft_submitted');
+    const parsed = JSON.parse(result.continuation!.outputs[0]!.output) as { documentId: string };
+    const document = workflow.getDocument(parsed.documentId);
+    expect(document.kind).toBe('plan');
+    expect(document.title).toContain('第1集');
+    const novel = new NovelService(project);
+    expect(novel.listBindings()).toMatchObject([
+      { documentId: parsed.documentId, role: 'screenplay', domainScope: 'short-drama' },
+    ]);
+  });
+
+  it('turns an episode structure into a reviewable change set with shot prompts', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const character = workflow.saveDraft({
+      kind: 'character',
+      title: '角色提示词',
+      contentMarkdown: '# 林澈\n24 岁，灯塔守望员。',
+    });
+    workflow.submitReview({
+      documentId: character.id,
+      documentVersionId: character.currentVersion!.id,
+      expectedDocumentRowVersion: character.rowVersion,
+    });
+    workflow.publish({
+      documentId: character.id,
+      documentVersionId: character.currentVersion!.id,
+      expectedDocumentRowVersion: character.rowVersion + 1,
+    });
+    const sceneDoc = workflow.saveDraft({
+      kind: 'scene',
+      title: '场景提示词',
+      contentMarkdown: '# 旧码头\n海雾低垂的旧码头。',
+    });
+    workflow.submitReview({
+      documentId: sceneDoc.id,
+      documentVersionId: sceneDoc.currentVersion!.id,
+      expectedDocumentRowVersion: sceneDoc.rowVersion,
+    });
+    workflow.publish({
+      documentId: sceneDoc.id,
+      documentVersionId: sceneDoc.currentVersion!.id,
+      expectedDocumentRowVersion: sceneDoc.rowVersion + 1,
+    });
+
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成本集的场次和镜头提示词',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '生成本集的场次和镜头提示词',
+      '第1集场次与镜头',
+      { operation: 'novel.episode.submit_structure' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.episode.submit_structure']);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_structure',
+      calls: [
+        {
+          id: 'call_structure',
+          name: 'novel.episode.submit_structure',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            episodeTitle: '第1集 · 来信',
+            scenes: [
+              {
+                title: '旧码头 · 台风前夜',
+                shots: [
+                  {
+                    title: '海雾中的码头',
+                    prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+                  },
+                ],
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain(
+      'episode_structure_change_set_created',
+    );
+    const changeSets = new ChangeSetService(project);
+    const proposed = changeSets.list({ includeTerminal: false });
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0]!.items).toMatchObject([
+      { entityType: 'scene', title: '旧码头 · 台风前夜' },
+      {
+        entityType: 'shot',
+        title: '海雾中的码头',
+        prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+      },
+    ]);
+    const applied = changeSets.apply({
+      changeSetId: proposed[0]!.id,
+      expectedRowVersion: proposed[0]!.rowVersion,
+    });
+    expect(applied.status).toBe('applied');
+    const content = new ContentService(project);
+    const scene = content.listScenes()[0]!;
+    expect(content.listShots(scene.id)).toMatchObject([
+      { title: '海雾中的码头', prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。' },
+    ]);
+  });
+
+  it('feeds an unpublished character reference back to the model for correction', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成场次镜头',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '生成场次镜头',
+      '第1集',
+      { operation: 'novel.episode.submit_structure' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_structure_bad',
+      calls: [
+        {
+          id: 'call_structure_bad',
+          name: 'novel.episode.submit_structure',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            episodeTitle: '第1集',
+            scenes: [
+              {
+                title: '场次 01',
+                shots: [{ title: '镜头 01', prompt: '[角色:不存在的人物] 出现在画面中。' }],
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain(
+      'references unknown character "不存在的人物"',
+    );
+    expect(new ChangeSetService(project).list({ includeTerminal: false })).toHaveLength(0);
+  });
+
+  it('feeds malformed tool arguments back to the model for correction', async () => {
+    const { conversation, generations, loop } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Create a draft.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      'Create a draft.',
+      'Draft',
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_bad_json',
+      calls: [
+        {
+          id: 'call_bad_json',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: '{"title": "Draft", "contentMarkdown": "未闭合',
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain(
+      'Tool arguments are not valid JSON for document.create_draft',
+    );
+    expect(result.continuation?.outputs[0]?.output).toContain('请修正后重新提交');
+  });
+
+  it('keeps malformed arguments out of the chat-completions continuation for self-correction', async () => {
+    const { conversation, generations, loop } = await setup('openai-chat-completions');
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Create a draft.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      'Create a draft.',
+      'Draft',
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_bad_json_chat',
+      calls: [
+        {
+          id: 'call_bad_json_chat',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: '{"title": "Draft", "contentMarkdown": "未闭合',
+        },
+      ],
+    });
+    expect(result.continuation?.protocol).toBe('openai-chat-completions');
+    const continuation = result.continuation as Extract<
+      typeof result.continuation,
+      { protocol: 'openai-chat-completions' }
+    >;
+    expect(continuation.calls[0]).toMatchObject({
+      id: 'call_bad_json_chat',
+      name: 'document.create_draft',
+      argumentsJson: '{}',
+    });
+    expect(continuation.outputs[0]?.output).toContain('Tool arguments are not valid JSON');
+  });
+
+  it('feeds malformed episode structure arguments back without creating a change set', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成场次镜头',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '生成场次镜头',
+      '第1集',
+      { operation: 'novel.episode.submit_structure' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_structure_bad_json',
+      calls: [
+        {
+          id: 'call_structure_bad_json',
+          name: 'novel.episode.submit_structure',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: '{"episodeTitle": "第1集", "scenes": [',
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain(
+      'Tool arguments are not valid JSON for novel.episode.submit_structure',
+    );
+    expect(new ChangeSetService(project).list({ includeTerminal: false })).toHaveLength(0);
+  });
+
+  it('lands the full episode flow: publish chapters and scene prompts, then generate and approve scenes/shots', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const content = new ContentService(project);
+    const novel = new NovelService(project);
+    const context = new NovelContextService(project);
+
+    const publishDocument = (documentId: string) => {
+      const current = workflow.getDocument(documentId);
+      workflow.submitReview({
+        documentId,
+        expectedDocumentRowVersion: current.rowVersion,
+      });
+      const reviewed = workflow.getDocument(documentId);
+      workflow.publish({
+        documentId,
+        expectedDocumentRowVersion: reviewed.rowVersion,
+        expectedPublishedVersionId: reviewed.publishedVersionId,
+      });
+    };
+
+    // 1. Upload and publish chapters.
+    const chapters: string[] = [];
+    for (const title of ['第一章', '第二章', '第三章']) {
+      const chapter = novel.saveChapter({ title });
+      const draft = workflow.saveDraft({
+        documentId: chapter.documentId,
+        title: chapter.title,
+        contentMarkdown: `${title}正文，白家三房的日常。`,
+        expectedDocumentRowVersion: chapter.documentRowVersion,
+      });
+      publishDocument(draft.id);
+      chapters.push(chapter.id);
+    }
+
+    // 2. Publish a scene prompt document WITHOUT a document_bindings row.
+    const scenePrompt = workflow.saveDraft({
+      kind: 'scene',
+      title: '本集场景提示词',
+      contentMarkdown: '# 白家三房\n堂屋与两侧小房，年代农家。\n\n# 白家正屋\n待客与吃饭的主屋。',
+    });
+    publishDocument(scenePrompt.id);
+
+    // 3. Short-drama context must expose the published scene prompt to the model.
+    const compiled = context.compileShortDrama(conversation.id, undefined, chapters);
+    expect(compiled.rendered).toContain('场景提示词：本集场景提示词');
+    expect(compiled.rendered).toContain('# 白家三房');
+    expect(compiled.rendered).toContain('# 白家正屋');
+
+    // 4. Generate an episode structure that references the published scene names.
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成本集的场次和镜头提示词',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '生成本集的场次和镜头提示词',
+      '第1集',
+      { operation: 'novel.episode.submit_structure' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_episode_flow',
+      calls: [
+        {
+          id: 'call_episode_flow',
+          name: 'novel.episode.submit_structure',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            episodeTitle: '第1集',
+            scenes: [
+              {
+                title: '白家三房 · 午后',
+                shots: [
+                  {
+                    title: '屋檐下全景',
+                    prompt: '[场景:白家三房] 屋檐下全景，白小弟在学医。',
+                  },
+                ],
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain(
+      'episode_structure_change_set_created',
+    );
+
+    // 5. Approve the change set; prompts must land on shots.
+    const changeSets = new ChangeSetService(project);
+    const proposed = changeSets.list({ includeTerminal: false });
+    expect(proposed).toHaveLength(1);
+    const applied = changeSets.apply({
+      changeSetId: proposed[0]!.id,
+      expectedRowVersion: proposed[0]!.rowVersion,
+    });
+    expect(applied.status).toBe('applied');
+    const scene = content.listScenes()[0]!;
+    expect(content.listShots(scene.id)).toMatchObject([
+      { title: '屋檐下全景', prompt: '[场景:白家三房] 屋檐下全景，白小弟在学医。' },
+    ]);
+  });
+
+  it('creates character and scene documents through document.create_draft documentKind', async () => {
+    const { conversation, generations, loop, workflow } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '把前三章的人物做成提示词',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '把前三章的人物做成提示词',
+      '角色提示词',
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_char_draft',
+      calls: [
+        {
+          id: 'call_char_draft',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: '前三章人物提示词',
+            contentMarkdown: '# 林澈\n灯塔守望员。',
+            documentKind: 'character',
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain('draft_created');
+    const parsed = JSON.parse(result.continuation!.outputs[0]!.output) as { documentId: string };
+    expect(workflow.getDocument(parsed.documentId).kind).toBe('character');
   });
 
   it('cleans up interrupted Agent runtime records after Worker recovery', async () => {

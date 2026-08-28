@@ -2,7 +2,11 @@
 import { createReadStream, statSync } from 'node:fs';
 import { createServer, type ServerResponse } from 'node:http';
 import { createInterface } from 'node:readline';
-import { IPC_PROTOCOL_VERSION, type AssetMediaSourceInfo } from '@ai-video/contracts';
+import {
+  IPC_PROTOCOL_VERSION,
+  SIDECAR_ENVELOPE_MAX_BYTES,
+  type AssetMediaSourceInfo,
+} from '@ai-video/contracts';
 import {
   authorizeDevHttpMediaRequest,
   authorizeDevHttpRequest,
@@ -12,15 +16,12 @@ import {
   removeDevHttpToken,
 } from './dev-http-security.js';
 import { handleRequest, parseRequest, recordQueueWait, recordWorkerError } from './handler.js';
+import { JsonLineWriter, NativeProviderBridge } from './native-provider-bridge.js';
 import { RequestScheduler } from './request-scheduler.js';
 
 const requestScheduler = new RequestScheduler({
   onQueueWait: (method, waitMs) => recordQueueWait(method, waitMs),
 });
-
-function writeResponse(response: unknown): void {
-  process.stdout.write(`${JSON.stringify(response)}\n`);
-}
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -62,15 +63,36 @@ function streamMedia(
 }
 
 function startStdio(): void {
+  const writer = new JsonLineWriter(process.stdout);
+  const bridge = new NativeProviderBridge({ send: (envelope) => writer.write(envelope) });
+  const writeResponse = (response: unknown): void => {
+    void writer.write(response).catch((error) => recordWorkerError('ipc.write', error));
+  };
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', (line) => {
     void (async () => {
+      if (Buffer.byteLength(line, 'utf8') > SIDECAR_ENVELOPE_MAX_BYTES) {
+        recordWorkerError('ipc.size', new Error('Sidecar line exceeds the 2 MiB limit.'));
+        bridge.interruptAll({
+          code: 'MESSAGE_TOO_LARGE',
+          message: 'Native host message exceeds the 2 MiB limit.',
+          retryable: false,
+        });
+        writeResponse(parseRequest(null));
+        return;
+      }
       let value: unknown;
       try {
         value = JSON.parse(line) as unknown;
       } catch (error) {
         recordWorkerError('ipc.parse', error);
         writeResponse(parseRequest(null));
+        return;
+      }
+      try {
+        if (bridge.handleEnvelope(value)) return;
+      } catch (error) {
+        recordWorkerError('ipc.host-envelope', error);
         return;
       }
       const parsed = parseRequest(value);

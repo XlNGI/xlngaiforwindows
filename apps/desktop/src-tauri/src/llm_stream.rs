@@ -14,9 +14,9 @@ use windows_sys::Win32::{
     Networking::WinHttp::{
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
         WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-        WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_REDIRECTS,
-        WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_STATUS_CODE,
+        WinHttpSetTimeouts, ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
     },
 };
 
@@ -29,6 +29,11 @@ const REQUEST_BODY_LIMIT: usize = 4 * 1024 * 1024;
 const ERROR_BODY_LIMIT: usize = 64 * 1024;
 const STREAM_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// WinHTTP receive timeout in milliseconds. Covers waiting for response headers
+/// (first byte) and each body read. 2026-08-25: raised to 240s after observed
+/// first-token latency of ~100s at 50k tokens on UniCompAPI gpt-5.6-sol; a
+/// stalled stream is still bounded by TOTAL_TIMEOUT after the first byte.
+const LLM_RECEIVE_TIMEOUT_MS: i32 = 240_000;
 const CHAT_TOOL_NAME_DOT_MARKER: &str = "__dot__";
 const AGENT_RUNTIME_EVENT_LIMIT: usize = 512;
 
@@ -43,7 +48,7 @@ pub(crate) struct LlmStreamStart {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LlmRuntimeRequest {
     generation_id: String,
     attempt_id: String,
@@ -65,7 +70,7 @@ struct LlmRuntimeRequest {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LlmToolDefinition {
     name: String,
     description: String,
@@ -75,7 +80,7 @@ struct LlmToolDefinition {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LlmToolOutput {
     call_id: String,
     output: String,
@@ -153,6 +158,9 @@ pub(crate) struct AgentToolConfirmationRequest {
 pub(crate) enum LlmStreamEvent {
     Started,
     Delta {
+        delta: String,
+    },
+    ThinkingDelta {
         delta: String,
     },
     Confirmation {
@@ -443,7 +451,7 @@ impl ConfirmationWaiter {
 }
 
 #[derive(Default)]
-struct LlmCancellation {
+pub(crate) struct LlmCancellation {
     cancelled: AtomicBool,
     request_handle: AtomicUsize,
 }
@@ -466,7 +474,7 @@ impl LlmCancellation {
         }
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         self.close_request();
     }
@@ -494,11 +502,11 @@ impl Drop for RequestGuard {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct StreamFailure {
-    message: String,
-    retryable: bool,
-    cancelled: bool,
-    usage: Option<NormalizedUsage>,
+pub(crate) struct StreamFailure {
+    pub(crate) message: String,
+    pub(crate) retryable: bool,
+    pub(crate) cancelled: bool,
+    pub(crate) usage: Option<NormalizedUsage>,
 }
 
 impl StreamFailure {
@@ -743,6 +751,7 @@ fn run_agent_runtime(
                             .emit_agent_event(&request.attempt_id, LlmStreamEvent::Delta { delta });
                         Ok(())
                     }
+                    LlmStreamEvent::ThinkingDelta { .. } => Ok(()),
                     LlmStreamEvent::Confirmation { .. } => Err(StreamFailure::new(
                         "Provider emitted an unexpected Agent confirmation event.",
                         false,
@@ -961,6 +970,21 @@ fn stream_provider(
     )
 }
 
+pub(crate) fn native_provider_stream<F>(
+    runtime_value: serde_json::Value,
+    cancellation: Arc<LlmCancellation>,
+    emit: F,
+) -> Result<(), StreamFailure>
+where
+    F: FnMut(LlmStreamEvent) -> Result<(), StreamFailure>,
+{
+    let runtime: LlmRuntimeRequest = serde_json::from_value(runtime_value)
+        .map_err(|_| StreamFailure::new("Native Provider runtime request is invalid.", false))?;
+    let secret = credential_read(&runtime.provider_profile_id)
+        .map_err(|_| StreamFailure::new("Provider credential is not configured.", false))?;
+    stream_provider_with_emitter(runtime, secret, cancellation, emit, false)
+}
+
 fn stream_provider_with_emitter<F>(
     runtime: LlmRuntimeRequest,
     secret: CredentialSecret,
@@ -1016,7 +1040,8 @@ where
         },
         "Unable to initialize LLM transport",
     )?;
-    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) } == 0 {
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, LLM_RECEIVE_TIMEOUT_MS) } == 0
+    {
         return Err(StreamFailure::new(
             winhttp_error("Unable to configure LLM timeouts"),
             true,
@@ -1723,6 +1748,15 @@ impl SseParser {
                     }
                 }
             }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                    if !delta.is_empty() {
+                        emit(LlmStreamEvent::ThinkingDelta {
+                            delta: delta.to_string(),
+                        })?;
+                    }
+                }
+            }
             "response.output_item.added" => {
                 let item = value.get("item").unwrap_or(value);
                 if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call") {
@@ -1820,6 +1854,17 @@ impl SseParser {
         }
         if let Some(choices) = value.get("choices").and_then(serde_json::Value::as_array) {
             for choice in choices {
+                if let Some(delta) = choice
+                    .pointer("/delta/reasoning_content")
+                    .or_else(|| choice.pointer("/delta/reasoning"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if !delta.is_empty() {
+                        emit(LlmStreamEvent::ThinkingDelta {
+                            delta: delta.to_string(),
+                        })?;
+                    }
+                }
                 if let Some(delta) = choice
                     .pointer("/delta/content")
                     .and_then(serde_json::Value::as_str)
@@ -2089,7 +2134,13 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 fn winhttp_error(operation: &str) -> String {
-    format!("{operation} (Windows error {})", unsafe { GetLastError() })
+    let code = unsafe { GetLastError() };
+    if code == ERROR_WINHTTP_TIMEOUT {
+        return format!(
+            "{operation}（超时：服务端在限定时间内未返回响应，请检查网络/代理、模型端点或减少上下文后重试）"
+        );
+    }
+    format!("{operation} (Windows error {code})")
 }
 
 #[cfg(test)]
@@ -2239,6 +2290,37 @@ mod tests {
                 ..NormalizedUsage::default()
             })
         );
+    }
+
+    #[test]
+    fn fixed_sse_fixtures_forward_reasoning_for_both_supported_protocols() {
+        let fixtures = [
+            (
+                "openai-responses",
+                b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n".as_slice(),
+            ),
+            (
+                "openai-chat-completions",
+                b"data: {\"id\":\"chat\",\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n".as_slice(),
+            ),
+        ];
+        for (protocol, fixture) in fixtures {
+            let mut parser = SseParser::new(protocol);
+            let mut events = Vec::new();
+            parser
+                .feed(fixture, |event| {
+                    events.push(event);
+                    Ok(())
+                })
+                .expect("fixed reasoning fixture should parse");
+            parser.finish(|_| Ok(())).expect("fixture should complete");
+            assert_eq!(
+                events,
+                vec![LlmStreamEvent::ThinkingDelta {
+                    delta: "plan".to_string(),
+                }]
+            );
+        }
     }
 
     #[test]

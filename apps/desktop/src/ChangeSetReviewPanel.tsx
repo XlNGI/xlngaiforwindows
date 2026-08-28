@@ -143,6 +143,11 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
                               ? ` · base v${item.expectedRowVersion}`
                               : ''}
                           </small>
+                          {item.prompt ? (
+                            <small className="change-set-item-prompt">
+                              {`提示词：${item.prompt}`}
+                            </small>
+                          ) : null}
                         </span>
                         {item.status === 'conflicted' && <CircleAlert size={14} />}
                       </li>

@@ -1,6 +1,9 @@
 import type {
   ChatMessageRole,
   ChatMessageStatus,
+  ConversationDeliverableKind,
+  ConversationTaskPlanErrorCode,
+  ConversationTaskPlanV1,
   ConversationScopeType,
   NormalizedLlmUsage,
   TaskLogKind,
@@ -104,10 +107,237 @@ const agentDocumentOperations = new Set([
   'novel.chapter.submit_draft',
   'novel.reference.submit_draft',
   'novel.adaptation.submit_proposal',
+  'novel.episode.submit_draft',
+  'novel.episode.submit_structure',
 ]);
 const agentResearchModes = new Set(['auto', 'project_only', 'network_disabled']);
 
 export class RequestValidationError extends Error {}
+
+export class ConversationTaskPlanValidationError extends RequestValidationError {
+  constructor(
+    readonly code: ConversationTaskPlanErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const conversationTaskModes = new Set(['document', 'novel-writing', 'short-drama']);
+const conversationTaskActions = new Set(['generate', 'revise', 'analyze']);
+const conversationTargetPlatforms = new Set(['seedance', 'generic-video', 'generic-image']);
+const conversationDeliverableKinds = new Set<ConversationDeliverableKind>([
+  'episode-outline',
+  'character-prompts',
+  'scene-prompts',
+  'scene-shot-structure',
+  'shot-prompts',
+  'production-notes',
+]);
+const taskPlanAuthorityFields = new Set([
+  'projectId',
+  'projectSessionId',
+  'conversationId',
+  'taskId',
+  'chapterIds',
+  'selectedChapterIds',
+  'documentId',
+  'path',
+  'localPath',
+  'filePath',
+  'providerProfileId',
+  'providerCredential',
+  'credential',
+  'secret',
+]);
+
+/** Strict validator for model-proposed plans. It never accepts Worker authority fields. */
+export function validateConversationTaskPlanV1(input: unknown): ConversationTaskPlanV1 {
+  const plan = taskPlanObject(input, 'plan');
+  rejectTaskPlanFields(plan, [
+    'version',
+    'mode',
+    'action',
+    'targetPlatform',
+    'deliverables',
+    'constraints',
+  ]);
+  if (plan.version !== 1) {
+    throw taskPlanError('TASK_PLAN_INVALID_VERSION', 'Task plan version must be 1.');
+  }
+  if (typeof plan.mode !== 'string' || !conversationTaskModes.has(plan.mode)) {
+    throw taskPlanError('TASK_PLAN_INVALID_MODE', 'Task plan mode is invalid.');
+  }
+  if (typeof plan.action !== 'string' || !conversationTaskActions.has(plan.action)) {
+    throw taskPlanError('TASK_PLAN_INVALID_ACTION', 'Task plan action is invalid.');
+  }
+  if (
+    plan.targetPlatform !== undefined &&
+    (typeof plan.targetPlatform !== 'string' ||
+      !conversationTargetPlatforms.has(plan.targetPlatform))
+  ) {
+    throw taskPlanError('TASK_PLAN_INVALID_PLATFORM', 'Task plan target platform is invalid.');
+  }
+  if (plan.targetPlatform !== undefined && plan.mode !== 'short-drama') {
+    throw taskPlanError(
+      'TASK_PLAN_INVALID_PLATFORM',
+      'A target platform is only supported for short-drama plans.',
+    );
+  }
+  if (
+    !Array.isArray(plan.deliverables) ||
+    plan.deliverables.length < 1 ||
+    plan.deliverables.length > 8
+  ) {
+    throw taskPlanError(
+      'TASK_PLAN_INVALID_DELIVERABLE',
+      'Task plan deliverables must contain between one and eight items.',
+    );
+  }
+
+  const kinds = new Set<ConversationDeliverableKind>();
+  const deliverables = plan.deliverables.map((inputDeliverable, index) => {
+    const deliverable = taskPlanObject(inputDeliverable, `deliverables[${index}]`);
+    rejectTaskPlanFields(deliverable, ['kind', 'required', 'dependsOn']);
+    if (
+      typeof deliverable.kind !== 'string' ||
+      !conversationDeliverableKinds.has(deliverable.kind as ConversationDeliverableKind)
+    ) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_DELIVERABLE',
+        `Deliverable ${index} has an invalid kind.`,
+      );
+    }
+    const kind = deliverable.kind as ConversationDeliverableKind;
+    if (kinds.has(kind)) {
+      throw taskPlanError(
+        'TASK_PLAN_DUPLICATE_DELIVERABLE',
+        `Deliverable kind ${kind} is duplicated.`,
+      );
+    }
+    kinds.add(kind);
+    if (typeof deliverable.required !== 'boolean') {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_DELIVERABLE',
+        `Deliverable ${kind} must declare required as a boolean.`,
+      );
+    }
+    if (!Array.isArray(deliverable.dependsOn) || deliverable.dependsOn.length > 7) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_DEPENDENCY',
+        `Deliverable ${kind} has invalid dependencies.`,
+      );
+    }
+    const dependencyKinds = new Set<ConversationDeliverableKind>();
+    const dependsOn = deliverable.dependsOn.map((dependency) => {
+      if (
+        typeof dependency !== 'string' ||
+        !conversationDeliverableKinds.has(dependency as ConversationDeliverableKind)
+      ) {
+        throw taskPlanError(
+          'TASK_PLAN_INVALID_DEPENDENCY',
+          `Deliverable ${kind} has an invalid dependency.`,
+        );
+      }
+      const dependencyKind = dependency as ConversationDeliverableKind;
+      if (dependencyKind === kind || dependencyKinds.has(dependencyKind)) {
+        throw taskPlanError(
+          'TASK_PLAN_INVALID_DEPENDENCY',
+          `Deliverable ${kind} has a self or duplicate dependency.`,
+        );
+      }
+      dependencyKinds.add(dependencyKind);
+      return dependencyKind;
+    });
+    return { kind, required: deliverable.required, dependsOn };
+  });
+
+  for (const deliverable of deliverables) {
+    if (deliverable.dependsOn.some((dependency) => !kinds.has(dependency))) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_DEPENDENCY',
+        `Deliverable ${deliverable.kind} depends on a deliverable not present in the plan.`,
+      );
+    }
+  }
+  assertAcyclicDeliverables(deliverables);
+
+  if (!Array.isArray(plan.constraints) || plan.constraints.length > 50) {
+    throw taskPlanError(
+      'TASK_PLAN_INVALID_TYPE',
+      'Task plan constraints must be an array with at most 50 items.',
+    );
+  }
+  const constraints = plan.constraints.map((constraint, index) => {
+    if (typeof constraint !== 'string' || !constraint.trim() || constraint.length > 1_000) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_TYPE',
+        `Constraint ${index} must contain between one and 1000 characters.`,
+      );
+    }
+    return constraint.normalize('NFC').trim();
+  });
+
+  return {
+    version: 1,
+    mode: plan.mode as ConversationTaskPlanV1['mode'],
+    action: plan.action as ConversationTaskPlanV1['action'],
+    ...(plan.targetPlatform
+      ? { targetPlatform: plan.targetPlatform as ConversationTaskPlanV1['targetPlatform'] }
+      : {}),
+    deliverables,
+    constraints,
+  };
+}
+
+function taskPlanObject(input: unknown, label: string): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw taskPlanError('TASK_PLAN_INVALID_TYPE', `${label} must be an object.`);
+  }
+  return input as Record<string, unknown>;
+}
+
+function rejectTaskPlanFields(value: Record<string, unknown>, allowed: string[]): void {
+  const forbidden = Object.keys(value).find((key) => taskPlanAuthorityFields.has(key));
+  if (forbidden) {
+    throw taskPlanError(
+      'TASK_PLAN_AUTHORITY_FIELD_FORBIDDEN',
+      `Task plan authority field is forbidden: ${forbidden}.`,
+    );
+  }
+  const allowedFields = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allowedFields.has(key));
+  if (unknown) {
+    throw taskPlanError('TASK_PLAN_UNKNOWN_FIELD', `Unknown task plan field: ${unknown}.`);
+  }
+}
+
+function assertAcyclicDeliverables(deliverables: ConversationTaskPlanV1['deliverables']): void {
+  const graph = new Map(deliverables.map((item) => [item.kind, item.dependsOn]));
+  const visiting = new Set<ConversationDeliverableKind>();
+  const visited = new Set<ConversationDeliverableKind>();
+  const visit = (kind: ConversationDeliverableKind): void => {
+    if (visiting.has(kind)) {
+      throw taskPlanError(
+        'TASK_PLAN_CYCLIC_DEPENDENCY',
+        `Task plan contains a dependency cycle at ${kind}.`,
+      );
+    }
+    if (visited.has(kind)) return;
+    visiting.add(kind);
+    for (const dependency of graph.get(kind) ?? []) visit(dependency);
+    visiting.delete(kind);
+    visited.add(kind);
+  };
+  for (const kind of graph.keys()) visit(kind);
+}
+
+function taskPlanError(
+  code: ConversationTaskPlanErrorCode,
+  message: string,
+): ConversationTaskPlanValidationError {
+  return new ConversationTaskPlanValidationError(code, message);
+}
 
 export function validateSessionRequestParams(
   method: WorkerMethod,
@@ -471,6 +701,15 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['messageId']);
       requireId(params, 'messageId');
       break;
+    case 'shot.storyboard.save':
+      rejectUnknown(params, ['shotId', 'title', 'contentMarkdown']);
+      requireId(params, 'shotId');
+      requireString(params, 'title', MAX_TITLE_LENGTH);
+      requireString(params, 'contentMarkdown', MAX_DOCUMENT_LENGTH, true);
+      break;
+    case 'constraint.list':
+      rejectUnknown(params, []);
+      break;
     case 'chat.message.toConstraint':
       rejectUnknown(params, ['messageId', 'kind']);
       requireId(params, 'messageId');
@@ -566,6 +805,8 @@ export function validateSessionRequestParams(
         'title',
         'documentIntent',
         'novelIntent',
+        'selectedChapterIds',
+        'targetPlatform',
       ]);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
@@ -573,19 +814,31 @@ export function validateSessionRequestParams(
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
-      requireEnum(params, 'agentMode', new Set(['document', 'novel-writing']));
+      requireEnum(params, 'agentMode', new Set(['document', 'novel-writing', 'short-drama']));
       optionalEnum(params, 'researchMode', agentResearchModes);
       optionalString(params, 'title', MAX_TITLE_LENGTH);
-      if (params.agentMode === 'document') {
+      validateSelectedChapterIds(params);
+      if (params.agentMode === 'document' || params.agentMode === 'short-drama') {
         validateAgentDocumentIntent(params.documentIntent);
         if (params.novelIntent !== undefined) {
           throw new RequestValidationError('novelIntent is only allowed in novel-writing mode.');
+        }
+        if (params.agentMode === 'short-drama' && params.selectedChapterIds === undefined) {
+          throw new RequestValidationError('selectedChapterIds is required in short-drama mode.');
+        }
+        if (params.agentMode === 'short-drama') {
+          requireEnum(params, 'targetPlatform', conversationTargetPlatforms);
+        } else if (params.targetPlatform !== undefined) {
+          throw new RequestValidationError('targetPlatform is only allowed in short-drama mode.');
         }
       } else {
         if (params.documentIntent !== undefined) {
           throw new RequestValidationError('documentIntent is not allowed in novel-writing mode.');
         }
         validateNovelWritingIntent(params.novelIntent);
+        if (params.targetPlatform !== undefined) {
+          throw new RequestValidationError('targetPlatform is only allowed in short-drama mode.');
+        }
       }
       break;
     case 'agent.generation.cancel':
@@ -892,6 +1145,7 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'parentItemOrdinal',
       'title',
       'shotStatus',
+      'prompt',
       'documentKind',
       'contentMarkdown',
       'scopeType',
@@ -899,13 +1153,17 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'expectedRowVersion',
       'expectedCurrentVersionId',
     ]);
-    requireEnum(item, 'entityType', new Set(['scene', 'shot']));
+    requireEnum(item, 'entityType', new Set(['scene', 'shot', 'document']));
     requireEnum(item, 'action', new Set(['create', 'update']));
     optionalId(item, 'targetId');
     optionalId(item, 'parentSceneId');
     optionalInteger(item, 'parentItemOrdinal', 0, items.length - 1);
     requireString(item, 'title', MAX_TITLE_LENGTH);
     optionalString(item, 'shotStatus', 80);
+    optionalString(item, 'prompt', 2000);
+    if (item.prompt !== undefined && item.entityType !== 'shot') {
+      throw new RequestValidationError('prompt is only allowed on shot items.');
+    }
     optionalEnum(item, 'documentKind', documentKinds);
     if (item.contentMarkdown !== undefined) {
       requireString(item, 'contentMarkdown', MAX_DOCUMENT_LENGTH, true);
@@ -921,6 +1179,22 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
     optionalInteger(item, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
     optionalId(item, 'expectedCurrentVersionId');
   });
+}
+
+function validateSelectedChapterIds(params: Record<string, unknown>): void {
+  if (params.selectedChapterIds === undefined) return;
+  if (
+    !Array.isArray(params.selectedChapterIds) ||
+    params.selectedChapterIds.length < 1 ||
+    params.selectedChapterIds.length > 50
+  ) {
+    throw new RequestValidationError('selectedChapterIds must contain between one and 50 IDs.');
+  }
+  for (const chapterId of params.selectedChapterIds) {
+    if (typeof chapterId !== 'string' || !chapterId.trim() || chapterId.length > MAX_ID_LENGTH) {
+      throw new RequestValidationError('selectedChapterIds must contain valid IDs.');
+    }
+  }
 }
 
 function validateAgentChangeSetMutation(params: Record<string, unknown>): void {

@@ -201,6 +201,53 @@ export interface AgentTaskRecord {
   archivedAt?: string;
 }
 
+export type AgentTaskPlanStatus = 'frozen' | 'active' | 'succeeded' | 'failed' | 'cancelled';
+export type AgentTaskDeliverableStatus =
+  'pending' | 'ready' | 'in_progress' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+
+export interface AgentTaskPlanRecord {
+  id: string;
+  taskId: string;
+  projectId: string;
+  version: 1;
+  mode: 'document' | 'novel-writing' | 'short-drama';
+  action: 'generate' | 'revise' | 'analyze';
+  targetPlatform?: 'seedance' | 'generic-video' | 'generic-image';
+  planJson: string;
+  trustedScopeJson: string;
+  planHash: string;
+  status: AgentTaskPlanStatus;
+  idempotencyKey?: string;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentTaskDeliverableRecord {
+  id: string;
+  planId: string;
+  taskId: string;
+  projectId: string;
+  ordinal: number;
+  kind:
+    | 'episode-outline'
+    | 'character-prompts'
+    | 'scene-prompts'
+    | 'scene-shot-structure'
+    | 'shot-prompts'
+    | 'production-notes';
+  required: boolean;
+  dependsOnJson: string;
+  status: AgentTaskDeliverableStatus;
+  entityType?: 'document' | 'change-set' | 'task';
+  entityId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type AgentTaskEventLevel = 'info' | 'warning' | 'error';
 
 export interface AgentTaskEventRecord {
@@ -445,6 +492,9 @@ export interface ShotRecord {
   title: string;
   position: number;
   status: string;
+  documentId?: string;
+  /** Short-drama episode shot prompt (image/video generation text). */
+  prompt?: string;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -766,6 +816,30 @@ export interface AgentTaskGenerationRepository {
   listByTask(taskId: string): AgentTaskGenerationRecord[];
 }
 
+export interface AgentTaskPlanRepository {
+  save(record: AgentTaskPlanRecord): void;
+  get(id: string): AgentTaskPlanRecord | undefined;
+  getByTask(taskId: string): AgentTaskPlanRecord | undefined;
+  updateStatus(
+    id: string,
+    status: AgentTaskPlanStatus,
+    updatedAt: string,
+    expectedRowVersion: number,
+  ): boolean;
+}
+
+export interface AgentTaskDeliverableRepository {
+  save(record: AgentTaskDeliverableRecord): void;
+  get(id: string): AgentTaskDeliverableRecord | undefined;
+  listByPlan(planId: string): AgentTaskDeliverableRecord[];
+  updateStatus(
+    id: string,
+    status: AgentTaskDeliverableStatus,
+    updatedAt: string,
+    expectedRowVersion: number,
+  ): boolean;
+}
+
 export interface AgentToolCallRepository {
   save(record: AgentToolCallRecord): void;
   get(id: string): AgentToolCallRecord | undefined;
@@ -846,6 +920,7 @@ export interface SceneRepository {
 export interface ShotRepository {
   save(record: ShotRecord): void;
   get(id: string): ShotRecord | undefined;
+  findByDocumentId(documentId: string): ShotRecord | undefined;
   listByScene(sceneId: string): ShotRecord[];
 }
 

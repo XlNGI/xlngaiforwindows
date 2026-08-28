@@ -13,6 +13,7 @@ import type {
   AgentTaskListParams,
   DocumentDetail,
   DocumentDraftSaveParams,
+  DocumentKind,
   DocumentPublicationInfo,
   DocumentPublishParams,
   DocumentRestoreParams,
@@ -31,7 +32,7 @@ import type {
   DocumentWorkflowAuditActorType,
   OpenProject,
 } from '@ai-video/domain';
-import { createRepositories } from '@ai-video/persistence';
+import { createRepositories, rebuildNovelRagChunks } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 const LOCAL_USER = 'local-user';
@@ -226,6 +227,7 @@ export interface TrustedAgentDraftParams {
   taskId: string;
   title: string;
   contentMarkdown: string;
+  kind?: DocumentKind;
   scopeType: DocumentSummary['scopeType'];
   scopeId?: string;
   sourceMessageId?: string;
@@ -1010,7 +1012,7 @@ export class DocumentWorkflowService {
     }
     const now = new Date().toISOString();
     const document = this.writeDraft(database, project, {
-      kind: 'note',
+      kind: params.kind ?? 'note',
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
       contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
       scopeType: params.scopeType,
@@ -1948,6 +1950,13 @@ export class DocumentWorkflowService {
         now,
       );
     }
+    rebuildNovelRagChunks(database, {
+      projectId: project.id,
+      documentId,
+      documentVersionId: versionId,
+      contentMarkdown: params.contentMarkdown,
+      now,
+    });
     return this.getDocumentInProject(database, project, documentId);
   }
 

@@ -197,6 +197,86 @@ describe('ChatPanel attempt metadata', () => {
     expect(screen.getByTitle('创建文档草稿')).toBeDisabled();
   });
 
+  it('hides the document draft action and shows the selected-chapter hint in short-drama mode', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Test conversation',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onCreateDocumentDraft = vi.fn();
+    const { rerender } = render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer="生成本集的场次和镜头提示词"
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        composerMode="short-drama"
+        episodeChapterCount={3}
+        onCollapse={vi.fn()}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+        onCreateDocumentDraft={onCreateDocumentDraft}
+      />,
+    );
+    expect(screen.queryByTitle('创建文档草稿')).not.toBeInTheDocument();
+    expect(screen.getByText('短剧创作 · 已选 3 个章节作为本集范围')).toBeInTheDocument();
+
+    rerender(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer="生成本集的场次和镜头提示词"
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        composerMode="short-drama"
+        episodeChapterCount={0}
+        onCollapse={vi.fn()}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+        onCreateDocumentDraft={onCreateDocumentDraft}
+      />,
+    );
+    expect(screen.getByText('短剧创作 · 请先在小说章节页选择章节')).toBeInTheDocument();
+  });
+
   it('shows provider usage, snapshot cost, latency details, and missing usage', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',

@@ -21,15 +21,24 @@ type NovelChapterContextRow = {
   display_label: string;
   volume_title: string | null;
   chapter_title: string;
+  published_version_id: string | null;
   version_id: string;
   version: number;
   content_markdown: string;
   updated_at: string;
 };
 
+type NovelRagChunkRow = {
+  id: string;
+  chapter_id: string;
+  ordinal: number;
+  content_text: string;
+};
+
 export interface NovelConsistencyIssue {
   code:
-    | 'missing-published-version'
+    | 'missing-rag-index'
+    | 'stale-rag-index'
     | 'duplicate-position'
     | 'duplicate-display-label'
     | 'stale-summary';
@@ -42,6 +51,7 @@ export interface NovelConsistencyReport {
   projectId: string;
   generatedAt: string;
   chapterCount: number;
+  indexedChunkCount: number;
   currentSummaryCount: number;
   staleSummaryCount: number;
   issues: NovelConsistencyIssue[];
@@ -68,6 +78,8 @@ export class NovelContextService {
     conversationId: string,
     budgetTokens?: number,
     focusChapterId?: string,
+    selectedChapterIds?: string[],
+    mode: 'novel' | 'short-drama' = 'novel',
   ): ProductionContext {
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -96,6 +108,8 @@ export class NovelContextService {
         });
       }
 
+      const domainScope =
+        mode === 'short-drama' ? "('shared', 'short-drama')" : "('shared', 'novel')";
       const bindingRows = database
         .prepare(
           `SELECT bindings.document_id, bindings.role, bindings.domain_scope,
@@ -106,9 +120,9 @@ export class NovelContextService {
            INNER JOIN documents ON documents.id = bindings.document_id
            INNER JOIN document_versions versions ON versions.id = documents.published_version_id
            WHERE bindings.project_id = ? AND bindings.status = 'active'
-             AND bindings.domain_scope IN ('shared', 'novel')
+             AND bindings.domain_scope IN ${domainScope}
              AND documents.lifecycle_status = 'active'
-           ORDER BY CASE bindings.domain_scope WHEN 'novel' THEN 0 ELSE 1 END,
+           ORDER BY CASE bindings.domain_scope WHEN 'novel' THEN 0 WHEN 'short-drama' THEN 1 ELSE 2 END,
                     bindings.role, bindings.document_id`,
         )
         .all(project.id) as Array<{
@@ -126,13 +140,57 @@ export class NovelContextService {
           id: row.document_id,
           type: 'document',
           scopeType: 'project',
-          label: `小说资料：${row.title}`,
+          label: mode === 'short-drama' ? `短剧资料：${row.title}` : `小说资料：${row.title}`,
           content: row.content_markdown,
           version: row.version,
           versionId: row.version_id,
           updatedAt: row.updated_at,
           priority: row.domain_scope === 'novel' ? 0 : 8,
         });
+      }
+
+      if (mode === 'short-drama') {
+        // Published character/scene prompt documents are the reference chain for
+        // episode generation even when they have no document_bindings row (the
+        // UI has no binding editor). This mirrors validateEpisodeReferences, so
+        // the model sees the same names the Worker will accept.
+        const boundIds = new Set(bindingRows.map((row) => row.document_id));
+        const promptRows = database
+          .prepare(
+            `SELECT documents.id AS document_id, documents.kind AS kind,
+                    documents.title AS title, documents.updated_at AS updated_at,
+                    versions.version AS version, versions.id AS version_id,
+                    versions.content_markdown AS content_markdown
+             FROM documents
+             INNER JOIN document_versions versions ON versions.id = documents.published_version_id
+             WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+               AND documents.kind IN ('character', 'scene')
+             ORDER BY documents.created_at, documents.id`,
+          )
+          .all(project.id) as Array<{
+          document_id: string;
+          kind: string;
+          title: string;
+          updated_at: string;
+          version: number;
+          version_id: string;
+          content_markdown: string;
+        }>;
+        for (const row of promptRows) {
+          if (boundIds.has(row.document_id)) continue;
+          sources.push({
+            id: `prompt:${row.document_id}`,
+            type: 'document',
+            scopeType: 'project',
+            label:
+              row.kind === 'character' ? `角色提示词：${row.title}` : `场景提示词：${row.title}`,
+            content: row.content_markdown,
+            version: row.version,
+            versionId: row.version_id,
+            updatedAt: row.updated_at,
+            priority: 6,
+          });
+        }
       }
 
       const messages = repositories.chatMessages.listPage(conversation.id, 12).reverse();
@@ -145,29 +203,64 @@ export class NovelContextService {
                   versions.version, versions.content_markdown, documents.updated_at
            FROM novel_chapters chapters
            INNER JOIN documents ON documents.id = chapters.document_id
-           INNER JOIN document_versions versions ON versions.id = documents.published_version_id
+           INNER JOIN document_versions versions ON versions.id = documents.current_version_id
            LEFT JOIN novel_volumes volumes ON volumes.id = chapters.volume_id
            WHERE chapters.project_id = ? AND chapters.lifecycle_status = 'active'
            ORDER BY chapters.position, chapters.id`,
         )
         .all(project.id) as NovelChapterContextRow[];
-      const selectedChapters = selectChapters(chapterRows, recentConversation, focusChapterId);
-      for (const row of selectedChapters) {
-        const summary = ensureSummary(database, project.id, row);
-        sources.push({
-          id: `chapter-summary:${row.chapter_id}`,
-          type: 'document',
-          scopeType: 'project',
-          label: `章节摘要：${row.display_label} ${row.chapter_title}`,
-          content: summary,
-          version: row.version,
-          versionId: row.version_id,
-          updatedAt: row.updated_at,
-          priority:
-            row.position === selectedChapters[selectedChapters.length - 1]?.position
-              ? 10
-              : 20 + row.position / 10_000,
-        });
+      const selectedChapters =
+        mode === 'short-drama'
+          ? selectShortDramaChapters(chapterRows, selectedChapterIds)
+          : selectChapters(chapterRows, recentConversation, focusChapterId);
+      let selectedNovelChunkCount = 0;
+      for (const [index, row] of selectedChapters.entries()) {
+        const chunkRows = database
+          .prepare(
+            `SELECT id, chapter_id, ordinal, content_text
+             FROM novel_rag_chunks
+             WHERE project_id = ? AND chapter_id = ? AND source_document_version_id = ?
+             ORDER BY ordinal`,
+          )
+          .all(project.id, row.chapter_id, row.version_id) as NovelRagChunkRow[];
+        const selectedChunks = selectRelevantChunks(chunkRows, recentConversation, mode);
+        selectedNovelChunkCount += selectedChunks.length;
+        for (const chunk of selectedChunks) {
+          sources.push({
+            id: `novel-rag-chunk:${row.chapter_id}:${chunk.id}`,
+            type: 'document',
+            scopeType: 'project',
+            label:
+              mode === 'short-drama'
+                ? `本集章节：${row.display_label} ${row.chapter_title} · 切片 ${chunk.ordinal + 1}`
+                : `小说草稿：${row.display_label} ${row.chapter_title} · 切片 ${chunk.ordinal + 1}`,
+            content: chunk.content_text,
+            version: row.version,
+            versionId: row.version_id,
+            updatedAt: row.updated_at,
+            priority:
+              mode === 'short-drama'
+                ? index + chunk.ordinal / 10_000
+                : novelChunkPriority(chunk, recentConversation, row.chapter_id === focusChapterId),
+          });
+        }
+        if (row.published_version_id === row.version_id) {
+          const summary = ensureSummary(database, project.id, row);
+          sources.push({
+            id: `chapter-summary:${row.chapter_id}`,
+            type: 'document',
+            scopeType: 'project',
+            label: `已发布摘要：${row.display_label} ${row.chapter_title}`,
+            content: summary,
+            version: row.version,
+            versionId: row.version_id,
+            updatedAt: row.updated_at,
+            priority: 40 + row.position / 10_000,
+          });
+        }
+      }
+      if (mode === 'short-drama' && selectedNovelChunkCount === 0) {
+        throw new Error('所选章节没有可用切片，请先保存草稿后再生成。');
       }
 
       for (const memory of repositories.memories.listByProject(project.id)) {
@@ -214,9 +307,19 @@ export class NovelContextService {
         ),
         summaries,
         systemInstruction:
-          '你是长篇小说创作助手。只使用本次上下文中的小说资料、已发布章节摘要、生产约束和相关会话。章节摘要是派生资料，不是权威正文；不得把草稿或未发布内容当作事实。保持人物、时间线和称谓连续，发现冲突时明确报告。',
+          mode === 'short-drama'
+            ? '你是短剧分集创作助手。用户已保存的小说草稿切片是本次改编的权威源材料；只使用本次上下文中的所选小说切片、短剧资料（角色/场景提示词、本集整体把控、风格指南）、生产约束和相关会话。已发布摘要只是派生资料。人物名、称谓、时间线、地点必须与源材料和角色/场景提示词一致；引用已发布角色/场景时使用 [角色:名称] / [场景:名称] 占位符；发现冲突必须明确报告，不得静默改写。'
+            : '你是长篇小说创作助手。用户已保存的小说草稿切片是可检索的权威创作源材料；只使用本次上下文中的小说草稿切片、小说资料、生产约束和相关会话。已发布摘要只是派生资料。保持人物、时间线和称谓连续，发现冲突时明确报告。',
       });
     });
+  }
+
+  compileShortDrama(
+    conversationId: string,
+    budgetTokens?: number,
+    selectedChapterIds?: string[],
+  ): ProductionContext {
+    return this.compile(conversationId, budgetTokens, undefined, selectedChapterIds, 'short-drama');
   }
 
   consistencyReport(): NovelConsistencyReport {
@@ -225,24 +328,58 @@ export class NovelContextService {
       const chapterRows = database
         .prepare(
           `SELECT chapters.id, chapters.position, chapters.display_label,
-                  chapters.lifecycle_status, documents.published_version_id
+                  chapters.lifecycle_status, documents.current_version_id,
+                  versions.content_markdown,
+                  COUNT(chunks.id) AS chunk_count
            FROM novel_chapters chapters
            INNER JOIN documents ON documents.id = chapters.document_id
-           WHERE chapters.project_id = ? AND chapters.lifecycle_status = 'active'`,
+           LEFT JOIN document_versions versions ON versions.id = documents.current_version_id
+           LEFT JOIN novel_rag_chunks chunks
+             ON chunks.chapter_id = chapters.id
+            AND chunks.source_document_version_id = documents.current_version_id
+           WHERE chapters.project_id = ? AND chapters.lifecycle_status = 'active'
+           GROUP BY chapters.id, chapters.position, chapters.display_label,
+                    chapters.lifecycle_status, documents.current_version_id,
+                    versions.content_markdown`,
         )
         .all(project.id) as Array<{
         id: string;
         position: number;
         display_label: string;
         lifecycle_status: string;
-        published_version_id: string | null;
+        current_version_id: string | null;
+        content_markdown: string | null;
+        chunk_count: number;
       }>;
-      for (const row of chapterRows.filter((chapter) => !chapter.published_version_id)) {
+      for (const row of chapterRows.filter(
+        (chapter) =>
+          !chapter.current_version_id ||
+          (!!chapter.content_markdown?.trim() && chapter.chunk_count === 0),
+      )) {
         issues.push({
-          code: 'missing-published-version',
+          code: 'missing-rag-index',
           severity: 'warning',
           chapterId: row.id,
-          message: `Active chapter ${row.display_label} has no published version.`,
+          message: `Active chapter ${row.display_label} has no current RAG index.`,
+        });
+      }
+      const indexedChunkCount = chapterRows.reduce((total, row) => total + row.chunk_count, 0);
+      const staleChunkRows = database
+        .prepare(
+          `SELECT DISTINCT chunks.chapter_id
+           FROM novel_rag_chunks chunks
+           INNER JOIN novel_chapters chapters ON chapters.id = chunks.chapter_id
+           INNER JOIN documents ON documents.id = chapters.document_id
+           WHERE chunks.project_id = ? AND chapters.lifecycle_status = 'active'
+             AND chunks.source_document_version_id != documents.current_version_id`,
+        )
+        .all(project.id) as Array<{ chapter_id: string }>;
+      for (const row of staleChunkRows) {
+        issues.push({
+          code: 'stale-rag-index',
+          severity: 'warning',
+          chapterId: row.chapter_id,
+          message: 'A RAG chunk set does not match the current saved draft.',
         });
       }
       for (const row of duplicateRows(database, project.id, 'position')) {
@@ -295,6 +432,7 @@ export class NovelContextService {
         projectId: project.id,
         generatedAt: new Date().toISOString(),
         chapterCount: chapterRows.length,
+        indexedChunkCount,
         currentSummaryCount,
         staleSummaryCount,
         issues,
@@ -303,16 +441,90 @@ export class NovelContextService {
   }
 }
 
+/**
+ * Short-drama episode scope: only the user-selected, saved chapter drafts enter
+ * the context (in selection order). Unrelated chapters are never included.
+ */
+function selectShortDramaChapters(
+  rows: NovelChapterContextRow[],
+  selectedChapterIds?: string[],
+): NovelChapterContextRow[] {
+  if (!selectedChapterIds || selectedChapterIds.length === 0) {
+    throw new Error('Short-drama generation requires selected chapters.');
+  }
+  const byId = new Map(rows.map((row) => [row.chapter_id, row]));
+  const selected = selectedChapterIds
+    .map((chapterId) => byId.get(chapterId))
+    .filter((row): row is NovelChapterContextRow => row !== undefined);
+  if (selected.length === 0) {
+    throw new Error('所选章节尚未保存，请先保存草稿并完成切片后再生成。');
+  }
+  return selected;
+}
+
+function selectRelevantChunks(
+  rows: NovelRagChunkRow[],
+  query: string,
+  mode: 'novel' | 'short-drama',
+): NovelRagChunkRow[] {
+  const limit = mode === 'short-drama' ? 24 : 10;
+  if (rows.length <= limit) return rows;
+  const anchored =
+    mode === 'short-drama' ? [...rows.slice(0, 3), ...rows.slice(-2)] : [rows[0]!, rows.at(-1)!];
+  const selected = new Map(anchored.map((row) => [row.id, row]));
+  const ranked = rows
+    .filter((row) => !selected.has(row.id))
+    .map((row) => ({ row, score: novelChunkScore(row.content_text, query) }))
+    .sort((left, right) => right.score - left.score || left.row.ordinal - right.row.ordinal);
+  for (const candidate of ranked) {
+    if (selected.size >= limit) break;
+    selected.set(candidate.row.id, candidate.row);
+  }
+  return [...selected.values()].sort((left, right) => left.ordinal - right.ordinal);
+}
+
+function novelChunkPriority(chunk: NovelRagChunkRow, query: string, focused: boolean): number {
+  const relevance = Math.min(novelChunkScore(chunk.content_text, query), 9);
+  return (focused ? 0 : 10) - relevance + chunk.ordinal / 10_000;
+}
+
+function novelChunkScore(content: string, query: string): number {
+  if (!query.trim()) return 0;
+  const haystack = content.toLocaleLowerCase('zh-CN');
+  return ragQueryTerms(query).reduce(
+    (score, term) => score + (haystack.includes(term) ? Math.min(term.length, 6) : 0),
+    0,
+  );
+}
+
+function ragQueryTerms(query: string): string[] {
+  const terms = new Set<string>();
+  const segments = query.toLocaleLowerCase('zh-CN').match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  for (const segment of segments) {
+    if (/^[\u3400-\u9fff]+$/u.test(segment)) {
+      for (let index = 0; index < segment.length - 1 && terms.size < 64; index += 1) {
+        terms.add(segment.slice(index, index + 2));
+      }
+    } else if (segment.length >= 2) {
+      terms.add(segment);
+    }
+    if (terms.size >= 64) break;
+  }
+  return [...terms];
+}
+
 function selectChapters(
   rows: NovelChapterContextRow[],
   recentConversation: string,
   focusChapterId?: string,
+  selectedChapterIds?: string[],
 ): NovelChapterContextRow[] {
+  const explicit = rows.filter((row) => selectedChapterIds?.includes(row.chapter_id) ?? false);
   if (rows.length <= 12) return rows;
   const focal = rows.find((row) => row.chapter_id === focusChapterId) ?? rows[rows.length - 1]!;
   const opening = rows.slice(0, 4);
   const prior = rows.filter((row) => row.position < focal.position).slice(-4);
-  const fixed = new Set([...opening, ...prior, focal].map((row) => row.chapter_id));
+  const fixed = new Set([...opening, ...prior, focal, ...explicit].map((row) => row.chapter_id));
   const related = rows
     .filter((row) => !fixed.has(row.chapter_id))
     .filter(

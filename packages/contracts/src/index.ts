@@ -540,6 +540,9 @@ export interface NovelChapterInfo {
   lifecycleStatus: NovelChapterLifecycleStatus;
   archiveReason?: NovelChapterArchiveReason;
   documentRowVersion: number;
+  /** Number of locally persisted RAG chunks for the current saved draft version. */
+  ragChunkCount: number;
+  ragIndexedAt?: string;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -612,7 +615,8 @@ export interface NovelBindingListParams {
 
 export interface NovelConsistencyIssueInfo {
   code:
-    | 'missing-published-version'
+    | 'missing-rag-index'
+    | 'stale-rag-index'
     | 'duplicate-position'
     | 'duplicate-display-label'
     | 'stale-summary';
@@ -625,6 +629,7 @@ export interface NovelConsistencyReport {
   projectId: string;
   generatedAt: string;
   chapterCount: number;
+  indexedChunkCount: number;
   currentSummaryCount: number;
   staleSummaryCount: number;
   issues: NovelConsistencyIssueInfo[];
@@ -927,6 +932,9 @@ export interface ShotInfo {
   title: string;
   position: number;
   status: string;
+  documentId?: string;
+  /** Short-drama episode shot prompt (image/video generation text). */
+  prompt?: string;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -941,7 +949,26 @@ export interface ShotSaveParams {
   sceneId: string;
   title: string;
   status?: string;
+  documentId?: string;
+  prompt?: string;
   expectedRowVersion?: number;
+}
+
+export interface ShotStoryboardSaveParams {
+  shotId: string;
+  title: string;
+  contentMarkdown: string;
+}
+
+export interface ConstraintInfo {
+  id: string;
+  projectId: string;
+  scopeType: ConversationScopeType;
+  scopeId?: string;
+  kind: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type AgentChangeSetStatus =
@@ -956,6 +983,8 @@ export interface AgentChangeSetItemDraft {
   parentItemOrdinal?: number;
   title: string;
   shotStatus?: string;
+  /** Shot prompt for `shot` items; applied to `shots.prompt` when approved. */
+  prompt?: string;
   documentKind?: DocumentKind;
   contentMarkdown?: string;
   scopeType?: ConversationScopeType;
@@ -1247,8 +1276,110 @@ export interface LlmChatCompletionsToolContinuation {
 
 export type LlmToolContinuation = LlmResponsesToolContinuation | LlmChatCompletionsToolContinuation;
 
+/** Maximum UTF-8 size of one JSONL message on the Worker <-> Native host channel. */
+export const SIDECAR_ENVELOPE_MAX_BYTES = 2 * 1024 * 1024;
+
+export type HostMethod =
+  | 'provider.stream.start'
+  | 'provider.stream.cancel'
+  | 'provider.confirmation.wait'
+  | 'provider.confirmation.resolve';
+
+/** Provider request data that is safe to cross the sidecar boundary. Credentials and headers are absent. */
+export interface NativeProviderStreamStartParams extends LlmGenerationIdentity {
+  providerProfileId: string;
+  modelId: string;
+  remoteModelId: string;
+  protocol: 'openai-responses' | 'openai-chat-completions';
+  baseUrl: string;
+  systemInstruction: string;
+  context: string;
+  prompt: string;
+  tools?: Array<Pick<LlmToolDefinition, 'name' | 'description' | 'parameters'>>;
+  continuation?:
+    | LlmResponsesToolContinuation
+    | (Omit<LlmChatCompletionsToolContinuation, 'calls'> & {
+        calls: Array<Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>>;
+      });
+}
+
+export interface NativeProviderStreamCancelParams {
+  streamRequestId: string;
+  projectSessionId: string;
+}
+
+export interface NativeProviderConfirmationWaitParams {
+  confirmationToken: string;
+  projectSessionId: string;
+}
+
+export interface NativeProviderConfirmationResolveParams extends NativeProviderConfirmationWaitParams {
+  approved: boolean;
+}
+
+export type HostMethodParams = {
+  'provider.stream.start': NativeProviderStreamStartParams;
+  'provider.stream.cancel': NativeProviderStreamCancelParams;
+  'provider.confirmation.wait': NativeProviderConfirmationWaitParams;
+  'provider.confirmation.resolve': NativeProviderConfirmationResolveParams;
+};
+
+export interface HostError {
+  code:
+    | 'INVALID_ENVELOPE'
+    | 'MESSAGE_TOO_LARGE'
+    | 'METHOD_NOT_FOUND'
+    | 'INVALID_PARAMETERS'
+    | 'PROVIDER_UNAVAILABLE'
+    | 'PROVIDER_FAILED'
+    | 'INTERRUPTED'
+    | 'CANCELLED'
+    | 'STALE_SESSION'
+    | 'TIMEOUT'
+    | 'INTERNAL_ERROR';
+  message: string;
+  retryable: boolean;
+}
+
+export type NativeProviderHostEvent =
+  | { type: 'started'; projectSessionId: string }
+  | { type: 'text_delta'; projectSessionId: string; delta: string }
+  | { type: 'thinking_delta'; projectSessionId: string; delta: string }
+  | { type: 'tool_call_start'; projectSessionId: string; callId: string; name: string }
+  | { type: 'tool_call_delta'; projectSessionId: string; callId: string; delta: string }
+  | {
+      type: 'tool_call_end';
+      projectSessionId: string;
+      call: Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>;
+    }
+  | { type: 'usage'; projectSessionId: string; usage: NormalizedLlmUsage }
+  | {
+      type: 'complete';
+      projectSessionId: string;
+      providerResponseId?: string;
+      finishReason?: string;
+    }
+  | { type: 'failed'; projectSessionId: string; error: HostError }
+  | { type: 'cancelled'; projectSessionId: string };
+
+export type SidecarEnvelope =
+  | { kind: 'worker.response'; requestId: string; payload: WorkerResponse }
+  | { kind: 'host.request'; requestId: string; method: HostMethod; params: unknown }
+  | {
+      kind: 'host.event';
+      requestId: string;
+      sequence: number;
+      event: NativeProviderHostEvent;
+    }
+  | { kind: 'host.response'; requestId: string; ok: true; result: unknown }
+  | { kind: 'host.response'; requestId: string; ok: false; error: HostError };
+
 export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
-  agentMode: 'document' | 'novel-writing';
+  agentMode: 'document' | 'novel-writing' | 'short-drama';
+  /** Frozen chapter scope for short-drama episode generation (max 50). */
+  selectedChapterIds?: string[];
+  /** Trusted Desktop selection. Required for short-drama and frozen into its task snapshot. */
+  targetPlatform?: ConversationTargetPlatform;
   /**
    * External research is opt-out for explicit Agent document tasks. The Worker
    * still enforces the selected mode when deciding which tools to authorize.
@@ -1262,6 +1393,114 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
   documentIntent?: AgentDocumentIntent;
   /** Trusted Desktop intent. Provider tool arguments never carry these targets. */
   novelIntent?: NovelWritingIntent;
+}
+
+/** Versioned, model-proposed business plan. Authority fields are injected by the Worker. */
+export type ConversationTaskMode = 'document' | 'novel-writing' | 'short-drama';
+export type ConversationTaskAction = 'generate' | 'revise' | 'analyze';
+export type ConversationTargetPlatform = 'seedance' | 'generic-video' | 'generic-image';
+export type ConversationDeliverableKind =
+  | 'episode-outline'
+  | 'character-prompts'
+  | 'scene-prompts'
+  | 'scene-shot-structure'
+  | 'shot-prompts'
+  | 'production-notes';
+
+export interface ConversationTaskDeliverableV1 {
+  kind: ConversationDeliverableKind;
+  required: boolean;
+  dependsOn: ConversationDeliverableKind[];
+}
+
+export interface ConversationTaskPlanV1 {
+  version: 1;
+  mode: ConversationTaskMode;
+  action: ConversationTaskAction;
+  targetPlatform?: ConversationTargetPlatform;
+  deliverables: ConversationTaskDeliverableV1[];
+  constraints: string[];
+}
+
+export type ConversationTaskPlanStatus = 'frozen' | 'active' | 'succeeded' | 'failed' | 'cancelled';
+export type ConversationDeliverableStatus =
+  'pending' | 'ready' | 'in_progress' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+
+export type ConversationTaskPlanErrorCode =
+  | 'TASK_PLAN_INVALID_TYPE'
+  | 'TASK_PLAN_UNKNOWN_FIELD'
+  | 'TASK_PLAN_AUTHORITY_FIELD_FORBIDDEN'
+  | 'TASK_PLAN_INVALID_VERSION'
+  | 'TASK_PLAN_INVALID_MODE'
+  | 'TASK_PLAN_INVALID_ACTION'
+  | 'TASK_PLAN_INVALID_PLATFORM'
+  | 'TASK_PLAN_INVALID_DELIVERABLE'
+  | 'TASK_PLAN_DUPLICATE_DELIVERABLE'
+  | 'TASK_PLAN_INVALID_DEPENDENCY'
+  | 'TASK_PLAN_CYCLIC_DEPENDENCY'
+  | 'TASK_PLAN_TASK_NOT_FOUND'
+  | 'TASK_PLAN_TASK_MODE_MISMATCH'
+  | 'TASK_PLAN_SCOPE_INVALID'
+  | 'TASK_PLAN_PLATFORM_MISMATCH'
+  | 'TASK_PLAN_IDEMPOTENCY_CONFLICT'
+  | 'TASK_PLAN_INVALID_STATE'
+  | 'TASK_PLAN_DELIVERABLE_NOT_READY'
+  | 'TASK_PLAN_DUPLICATE_COMPLETION'
+  | 'TASK_PACKAGE_ENTITY_INVALID'
+  | 'TASK_PACKAGE_INCOMPLETE'
+  | 'TASK_PACKAGE_FOLLOW_UP_LIMIT';
+
+export type ConversationTaskToolName =
+  | 'task.plan.submit'
+  | 'novel.episode.submit_draft'
+  | 'document.create_draft'
+  | 'novel.episode.submit_structure'
+  | 'task.package.complete';
+
+export interface ConversationTaskToolGrant {
+  deliverableId?: string;
+  deliverableKind?: ConversationDeliverableKind;
+  tool: LlmToolDefinition & { name: ConversationTaskToolName };
+}
+
+export interface DomainToolResultV1 {
+  version: 1;
+  status: 'succeeded' | 'rejected' | 'needs_confirmation' | 'conflicted';
+  deliverable?: ConversationDeliverableKind;
+  entityType?: 'document' | 'change-set' | 'task';
+  entityId?: string;
+  summary: string;
+  remainingRequiredDeliverables: ConversationDeliverableKind[];
+  retryable: boolean;
+}
+
+export interface ConversationPackageCompleteResult {
+  complete: boolean;
+  taskStatus?: 'waiting_review' | 'completed' | 'failed';
+  errorCode?: Extract<ConversationTaskPlanErrorCode, 'TASK_PACKAGE_FOLLOW_UP_LIMIT'>;
+  followUp?: {
+    ordinal: 1 | 2;
+    prompt: string;
+    missingDeliverables: ConversationDeliverableKind[];
+  };
+}
+
+export interface ConversationTaskPlanInfo {
+  id: string;
+  taskId: string;
+  projectId: string;
+  plan: ConversationTaskPlanV1;
+  /** Worker-owned scope copied from the frozen task snapshot, never from model output. */
+  trustedScope: { selectedChapterIds: string[] };
+  status: ConversationTaskPlanStatus;
+  deliverables: Array<
+    ConversationTaskDeliverableV1 & {
+      id: string;
+      status: ConversationDeliverableStatus;
+    }
+  >;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type AgentResearchMode = 'auto' | 'project_only' | 'network_disabled';
@@ -1354,7 +1593,9 @@ export type AgentDocumentOperation =
   | 'document.restore'
   | 'novel.chapter.submit_draft'
   | 'novel.reference.submit_draft'
-  | 'novel.adaptation.submit_proposal';
+  | 'novel.adaptation.submit_proposal'
+  | 'novel.episode.submit_draft'
+  | 'novel.episode.submit_structure';
 
 export interface AgentDocumentIntent {
   operation: AgentDocumentOperation;
@@ -2135,6 +2376,8 @@ export interface WorkerMethodMap {
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
   'shot.save': { params: ShotSaveParams; result: ShotInfo };
+  'shot.storyboard.save': { params: ShotStoryboardSaveParams; result: DocumentDetail };
+  'constraint.list': { params: Record<string, never>; result: ConstraintInfo[] };
   'agent.changeSet.create': {
     params: AgentChangeSetCreateParams;
     result: AgentChangeSetInfo;

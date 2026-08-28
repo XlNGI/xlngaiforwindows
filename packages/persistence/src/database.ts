@@ -29,10 +29,15 @@ import {
   MIGRATION_V25,
   MIGRATION_V26,
   MIGRATION_V27,
+  MIGRATION_V28,
+  MIGRATION_V29,
+  MIGRATION_V30,
+  MIGRATION_V31,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
+import { backfillCurrentNovelRagChunks } from './novel-rag-chunks.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -296,6 +301,39 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(27, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 27) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V28);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(28, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 28) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V29);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(29, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 29) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V30);
+      backfillCurrentNovelRagChunks(database, now);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(30, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 30) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V31);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(31, now);
     })();
   }
   return getSchemaVersion(database);

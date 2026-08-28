@@ -18,6 +18,7 @@ use tauri::Manager;
 
 mod credential_store;
 mod llm_stream;
+mod novel_import;
 mod provider_connector;
 mod provider_http;
 mod research_bridge;
@@ -34,11 +35,13 @@ use llm_stream::{
     agent_runtime_cancel, agent_runtime_confirm, agent_runtime_start, agent_runtime_subscribe,
     llm_stream, llm_stream_cancel, LlmStreamState,
 };
+use novel_import::novel_import;
 use provider_connector::provider_test_connection;
 use provider_http::{request_bytes, request_json, JsonHttpRequest};
 use research_bridge::NativeResearchBridge;
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const SIDECAR_ENVELOPE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_REQUEST_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const PROVIDER_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -1276,9 +1279,15 @@ fn request_unicompapi_bytes(
 
 struct WorkerProcess {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Arc<Mutex<ChildStdin>>,
     responses: Receiver<Result<String, String>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
+    host_streams: Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+}
+
+struct ActiveHostStream {
+    project_session_id: String,
+    cancellation: Arc<llm_stream::LlmCancellation>,
 }
 
 impl WorkerProcess {
@@ -1305,7 +1314,9 @@ impl WorkerProcess {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Failed to start worker: {error}"))?;
-        let stdin = child.stdin.take().ok_or("Worker stdin is unavailable")?;
+        let stdin = Arc::new(Mutex::new(
+            child.stdin.take().ok_or("Worker stdin is unavailable")?,
+        ));
         let stdout = child.stdout.take().ok_or("Worker stdout is unavailable")?;
         let stderr = child.stderr.take().ok_or("Worker stderr is unavailable")?;
         let (response_tx, responses) = mpsc::channel();
@@ -1320,6 +1331,13 @@ impl WorkerProcess {
                         break;
                     }
                     Ok(_) => {
+                        if line.len() > SIDECAR_ENVELOPE_MAX_BYTES {
+                            let _ =
+                                response_tx
+                                    .send(Err("Worker message exceeds the 2 MiB sidecar limit"
+                                        .to_string()));
+                            break;
+                        }
                         if response_tx.send(Ok(line)).is_err() {
                             break;
                         }
@@ -1359,6 +1377,7 @@ impl WorkerProcess {
             stdin,
             responses,
             stderr_tail,
+            host_streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -1371,27 +1390,44 @@ impl WorkerProcess {
         request: &serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
-        let payload = serde_json::to_string(request)
-            .map_err(|error| format!("Failed to serialize worker request: {error}"))?;
-        writeln!(self.stdin, "{payload}")
-            .and_then(|_| self.stdin.flush())
-            .map_err(|error| format!("Failed to write worker request: {error}"))?;
-
-        let line = match self.responses.recv_timeout(timeout) {
-            Ok(Ok(line)) => line,
-            Ok(Err(error)) => return Err(self.with_diagnostics(error)),
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(format!(
-                    "Worker request timed out after {} ms; the Worker will be restarted",
-                    timeout.as_millis()
-                ));
+        write_sidecar_value(&self.stdin, request)?;
+        let request_id = request
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Worker request is missing its correlation ID")?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(error)) => return Err(self.with_diagnostics(error)),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "Worker request timed out after {} ms; the Worker will be restarted",
+                        timeout.as_millis()
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self.with_diagnostics("Worker response channel closed".to_string()));
+                }
+            };
+            let value: serde_json::Value = serde_json::from_str(&line)
+                .map_err(|error| format!("Worker returned invalid JSON: {error}"))?;
+            if value.get("kind").and_then(serde_json::Value::as_str) == Some("host.request") {
+                dispatch_host_request(
+                    value,
+                    Arc::clone(&self.stdin),
+                    Arc::clone(&self.host_streams),
+                );
+                continue;
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(self.with_diagnostics("Worker response channel closed".to_string()));
+            if value.get("id").and_then(serde_json::Value::as_str) != Some(request_id) {
+                return Err(
+                    "Worker returned a response with a mismatched correlation ID".to_string(),
+                );
             }
-        };
-        serde_json::from_str(&line)
-            .map_err(|error| format!("Worker returned invalid JSON: {error}"))
+            return Ok(value);
+        }
     }
 
     fn with_diagnostics(&self, message: String) -> String {
@@ -1406,6 +1442,463 @@ impl WorkerProcess {
             format!("{message}: {diagnostics}")
         }
     }
+}
+
+fn write_sidecar_value(
+    writer: &Arc<Mutex<ChildStdin>>,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let mut payload = serde_json::to_vec(value)
+        .map_err(|error| format!("Failed to serialize sidecar message: {error}"))?;
+    payload.push(b'\n');
+    if payload.len() > SIDECAR_ENVELOPE_MAX_BYTES {
+        return Err("Sidecar message exceeds the 2 MiB limit".to_string());
+    }
+    let mut stdin = writer
+        .lock()
+        .map_err(|_| "Worker writer lock is poisoned".to_string())?;
+    stdin
+        .write_all(&payload)
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Failed to write Worker message: {error}"))
+}
+
+fn dispatch_host_request(
+    value: serde_json::Value,
+    writer: Arc<Mutex<ChildStdin>>,
+    streams: Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+) {
+    let request_id = value
+        .get("requestId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("invalid-host-request")
+        .to_string();
+    if let Err(error) = validate_host_request_envelope(&value) {
+        let _ = send_host_response(
+            &writer,
+            &request_id,
+            Err(host_error("INVALID_ENVELOPE", error, false)),
+        );
+        return;
+    }
+    let method = value["method"].as_str().unwrap_or_default();
+    let params = value["params"].clone();
+    match method {
+        "provider.stream.start" => {
+            if let Err(error) = validate_provider_stream_params(&params) {
+                let _ = send_host_response(
+                    &writer,
+                    &request_id,
+                    Err(host_error("INVALID_PARAMETERS", error, false)),
+                );
+                return;
+            }
+            let project_session_id = params["projectSessionId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let cancellation = Arc::new(llm_stream::LlmCancellation::default());
+            let inserted = streams.lock().ok().is_some_and(|mut active| {
+                if active.contains_key(&request_id) {
+                    false
+                } else {
+                    active.insert(
+                        request_id.clone(),
+                        ActiveHostStream {
+                            project_session_id: project_session_id.clone(),
+                            cancellation: Arc::clone(&cancellation),
+                        },
+                    );
+                    true
+                }
+            });
+            if !inserted {
+                let _ = send_host_response(
+                    &writer,
+                    &request_id,
+                    Err(host_error(
+                        "INVALID_PARAMETERS",
+                        "Native Provider request ID is already active",
+                        false,
+                    )),
+                );
+                return;
+            }
+            thread::spawn(move || {
+                run_host_provider_stream(
+                    &request_id,
+                    &project_session_id,
+                    params,
+                    Arc::clone(&cancellation),
+                    &writer,
+                );
+                if let Ok(mut active) = streams.lock() {
+                    if active
+                        .get(&request_id)
+                        .is_some_and(|current| Arc::ptr_eq(&current.cancellation, &cancellation))
+                    {
+                        active.remove(&request_id);
+                    }
+                }
+            });
+        }
+        "provider.stream.cancel" => {
+            let outcome = cancel_host_provider_stream(&params, &streams);
+            let _ = send_host_response(&writer, &request_id, outcome.map(serde_json::Value::Bool));
+        }
+        "provider.confirmation.wait" | "provider.confirmation.resolve" => {
+            let _ = send_host_response(
+                &writer,
+                &request_id,
+                Err(host_error(
+                    "PROVIDER_UNAVAILABLE",
+                    "Native Provider confirmations are not active in P3",
+                    false,
+                )),
+            );
+        }
+        _ => {
+            let _ = send_host_response(
+                &writer,
+                &request_id,
+                Err(host_error("METHOD_NOT_FOUND", "Unknown host method", false)),
+            );
+        }
+    }
+}
+
+fn run_host_provider_stream(
+    request_id: &str,
+    project_session_id: &str,
+    params: serde_json::Value,
+    cancellation: Arc<llm_stream::LlmCancellation>,
+    writer: &Arc<Mutex<ChildStdin>>,
+) {
+    let mut sequence = 0_u64;
+    let mut emit = |mut event: serde_json::Value| -> Result<(), llm_stream::StreamFailure> {
+        event["projectSessionId"] = serde_json::Value::String(project_session_id.to_string());
+        let envelope = serde_json::json!({
+            "kind": "host.event",
+            "requestId": request_id,
+            "sequence": sequence,
+            "event": event,
+        });
+        write_sidecar_value(writer, &envelope).map_err(|message| llm_stream::StreamFailure {
+            message,
+            retryable: true,
+            cancelled: false,
+            usage: None,
+        })?;
+        sequence += 1;
+        Ok(())
+    };
+    let result = llm_stream::native_provider_stream(params, Arc::clone(&cancellation), |event| {
+        emit_native_provider_event(event, &mut emit)
+    });
+    match result {
+        Ok(()) => {
+            let _ = send_host_response(
+                writer,
+                request_id,
+                Ok(serde_json::json!({ "projectSessionId": project_session_id })),
+            );
+        }
+        Err(failure) => {
+            if let Some(usage) = failure.usage.as_ref() {
+                let _ = emit(serde_json::json!({ "type": "usage", "usage": usage }));
+            }
+            let code = if failure.cancelled {
+                "CANCELLED"
+            } else if failure.message.to_ascii_lowercase().contains("timeout")
+                || failure.message.contains("超时")
+            {
+                "TIMEOUT"
+            } else {
+                "PROVIDER_FAILED"
+            };
+            let terminal = if failure.cancelled {
+                serde_json::json!({ "type": "cancelled" })
+            } else {
+                serde_json::json!({
+                    "type": "failed",
+                    "error": host_error(code, &failure.message, failure.retryable),
+                })
+            };
+            let _ = emit(terminal);
+            let _ = send_host_response(
+                writer,
+                request_id,
+                Err(host_error(code, failure.message, failure.retryable)),
+            );
+        }
+    }
+}
+
+fn emit_native_provider_event<F>(
+    event: llm_stream::LlmStreamEvent,
+    emit: &mut F,
+) -> Result<(), llm_stream::StreamFailure>
+where
+    F: FnMut(serde_json::Value) -> Result<(), llm_stream::StreamFailure>,
+{
+    match event {
+        llm_stream::LlmStreamEvent::Started => emit(serde_json::json!({ "type": "started" })),
+        llm_stream::LlmStreamEvent::Delta { delta } => {
+            emit(serde_json::json!({ "type": "text_delta", "delta": delta }))
+        }
+        llm_stream::LlmStreamEvent::ThinkingDelta { delta } => {
+            emit(serde_json::json!({ "type": "thinking_delta", "delta": delta }))
+        }
+        llm_stream::LlmStreamEvent::ToolCalls {
+            calls,
+            provider_response_id,
+            usage,
+        } => {
+            for call in calls {
+                let value = serde_json::to_value(&call).map_err(|_| llm_stream::StreamFailure {
+                    message: "Provider tool call could not be serialized".to_string(),
+                    retryable: false,
+                    cancelled: false,
+                    usage: None,
+                })?;
+                let call_id = value["id"].as_str().unwrap_or_default();
+                let name = value["name"].as_str().unwrap_or_default();
+                let arguments = value["argumentsJson"].as_str().unwrap_or_default();
+                emit(serde_json::json!({
+                    "type": "tool_call_start",
+                    "callId": call_id,
+                    "name": name,
+                }))?;
+                if !arguments.is_empty() {
+                    emit(serde_json::json!({
+                        "type": "tool_call_delta",
+                        "callId": call_id,
+                        "delta": arguments,
+                    }))?;
+                }
+                emit(serde_json::json!({
+                    "type": "tool_call_end",
+                    "call": {
+                        "id": call_id,
+                        "name": name,
+                        "argumentsJson": arguments,
+                    },
+                }))?;
+            }
+            if let Some(usage) = usage {
+                emit(serde_json::json!({ "type": "usage", "usage": usage }))?;
+            }
+            emit(serde_json::json!({
+                "type": "complete",
+                "providerResponseId": provider_response_id,
+                "finishReason": "tool_calls",
+            }))
+        }
+        llm_stream::LlmStreamEvent::Complete {
+            provider_response_id,
+            finish_reason,
+            usage,
+        } => {
+            if let Some(usage) = usage {
+                emit(serde_json::json!({ "type": "usage", "usage": usage }))?;
+            }
+            emit(serde_json::json!({
+                "type": "complete",
+                "providerResponseId": provider_response_id,
+                "finishReason": finish_reason,
+            }))
+        }
+        llm_stream::LlmStreamEvent::Failed {
+            error,
+            retryable,
+            usage,
+        } => {
+            if let Some(usage) = usage {
+                emit(serde_json::json!({ "type": "usage", "usage": usage }))?;
+            }
+            emit(serde_json::json!({
+                "type": "failed",
+                "error": host_error("PROVIDER_FAILED", error, retryable),
+            }))
+        }
+        llm_stream::LlmStreamEvent::Cancelled => emit(serde_json::json!({ "type": "cancelled" })),
+        llm_stream::LlmStreamEvent::Confirmation { .. } => emit(serde_json::json!({
+            "type": "failed",
+            "error": host_error(
+                "PROVIDER_FAILED",
+                "Provider emitted an unexpected confirmation event",
+                false,
+            ),
+        })),
+    }
+}
+
+fn cancel_host_provider_stream(
+    params: &serde_json::Value,
+    streams: &Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+) -> Result<bool, serde_json::Value> {
+    let Some(object) = params.as_object() else {
+        return Err(host_error(
+            "INVALID_PARAMETERS",
+            "Cancellation params must be an object",
+            false,
+        ));
+    };
+    if !has_exact_keys(object, &["streamRequestId", "projectSessionId"]) {
+        return Err(host_error(
+            "INVALID_PARAMETERS",
+            "Cancellation params contain unknown fields",
+            false,
+        ));
+    }
+    let stream_request_id = params["streamRequestId"].as_str().unwrap_or_default();
+    let project_session_id = params["projectSessionId"].as_str().unwrap_or_default();
+    let active = streams.lock().map_err(|_| {
+        host_error(
+            "INTERNAL_ERROR",
+            "Native Provider registry lock is poisoned",
+            true,
+        )
+    })?;
+    let Some(stream) = active.get(stream_request_id) else {
+        return Ok(false);
+    };
+    if stream.project_session_id != project_session_id {
+        return Err(host_error(
+            "STALE_SESSION",
+            "Cancellation belongs to a stale project session",
+            false,
+        ));
+    }
+    stream.cancellation.cancel();
+    Ok(true)
+}
+
+fn validate_host_request_envelope(value: &serde_json::Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or("Host request envelope must be an object")?;
+    if !has_exact_keys(object, &["kind", "requestId", "method", "params"]) {
+        return Err("Host request envelope contains unknown or missing fields".to_string());
+    }
+    if value["kind"].as_str() != Some("host.request")
+        || value["requestId"].as_str().is_none_or(str::is_empty)
+        || value["method"].as_str().is_none_or(str::is_empty)
+        || !value["params"].is_object()
+    {
+        return Err("Host request envelope fields are invalid".to_string());
+    }
+    if serde_json::to_vec(value)
+        .map_err(|_| "Host request cannot be serialized".to_string())?
+        .len()
+        > SIDECAR_ENVELOPE_MAX_BYTES
+    {
+        return Err("Host request exceeds the 2 MiB limit".to_string());
+    }
+    Ok(())
+}
+
+fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or("Native Provider params must be an object")?;
+    let allowed = [
+        "generationId",
+        "attemptId",
+        "projectId",
+        "projectSessionId",
+        "conversationId",
+        "providerProfileId",
+        "modelId",
+        "remoteModelId",
+        "protocol",
+        "baseUrl",
+        "systemInstruction",
+        "context",
+        "prompt",
+        "tools",
+        "continuation",
+    ];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("Native Provider params contain an unknown field".to_string());
+    }
+    for key in [
+        "generationId",
+        "attemptId",
+        "projectId",
+        "projectSessionId",
+        "conversationId",
+        "providerProfileId",
+        "modelId",
+        "remoteModelId",
+        "protocol",
+        "baseUrl",
+    ] {
+        if value[key].as_str().is_none_or(str::is_empty) {
+            return Err(format!(
+                "Native Provider field {key} must be a non-empty string"
+            ));
+        }
+    }
+    if contains_sensitive_host_data(value) {
+        return Err("Sensitive data cannot cross the Native Provider boundary".to_string());
+    }
+    Ok(())
+}
+
+fn contains_sensitive_host_data(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            let lower = value.to_ascii_lowercase();
+            lower.starts_with("http")
+                && lower.contains('?')
+                && ["x-amz-signature=", "signature=", "sig=", "token="]
+                    .iter()
+                    .any(|needle| lower.contains(needle))
+        }
+        serde_json::Value::Array(values) => values.iter().any(contains_sensitive_host_data),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            let normalized = key
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "secret" | "authorization" | "headers" | "apikey" | "signedurl"
+            ) || normalized.starts_with("authorization")
+                || contains_sensitive_host_data(value)
+        }),
+        _ => false,
+    }
+}
+
+fn has_exact_keys(object: &serde_json::Map<String, serde_json::Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+}
+
+fn host_error(code: &str, message: impl AsRef<str>, retryable: bool) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "message": message.as_ref().chars().take(500).collect::<String>(),
+        "retryable": retryable,
+    })
+}
+
+fn send_host_response(
+    writer: &Arc<Mutex<ChildStdin>>,
+    request_id: &str,
+    result: Result<serde_json::Value, serde_json::Value>,
+) -> Result<(), String> {
+    let envelope = match result {
+        Ok(result) => serde_json::json!({
+            "kind": "host.response", "requestId": request_id, "ok": true, "result": result,
+        }),
+        Err(error) => serde_json::json!({
+            "kind": "host.response", "requestId": request_id, "ok": false, "error": error,
+        }),
+    };
+    write_sidecar_value(writer, &envelope)
 }
 
 impl Drop for WorkerProcess {
@@ -1477,12 +1970,12 @@ struct NativeRuntimeExitState {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MarkdownImportResult {
-    title: String,
-    content_markdown: String,
+pub(crate) struct MarkdownImportResult {
+    pub(crate) title: String,
+    pub(crate) content_markdown: String,
 }
 
-fn read_markdown_document(path: &Path) -> Result<MarkdownImportResult, String> {
+pub(crate) fn read_markdown_document(path: &Path) -> Result<MarkdownImportResult, String> {
     if !path.is_absolute() {
         return Err("Markdown import path must be absolute".to_string());
     }
@@ -1761,6 +2254,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             worker_request,
             markdown_import,
+            novel_import,
             credential_status,
             credential_set,
             credential_delete,
@@ -1800,9 +2294,10 @@ mod tests {
         provider_state, provider_submit_error, provider_target, provider_task_error,
         provider_task_id, provider_task_path, resolve_media_selection, unicompapi_adapter_model,
         unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
-        validate_credential_provider, WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME,
-        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, UNICOMPAPI_AUTHORIZATION_SCHEME,
-        UNICOMPAPI_HOST,
+        validate_credential_provider, validate_host_request_envelope,
+        validate_provider_stream_params, WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME,
+        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES,
+        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
     };
     use serde_json::json;
     use std::{
@@ -2635,7 +3130,7 @@ mod tests {
         let mut command = Command::new("node");
         command.args([
             "-e",
-            "process.stdin.once('data',()=>{process.stderr.write('x'.repeat(1024*1024),()=>process.stdout.write('{\"ok\":true}\\n'))})",
+            "process.stdin.once('data',()=>{process.stderr.write('x'.repeat(1024*1024),()=>process.stdout.write('{\"id\":\"stderr\",\"ok\":true}\\n'))})",
         ]);
         let mut worker = WorkerProcess::spawn_command(command).expect("fixture should start");
 
@@ -2658,5 +3153,84 @@ mod tests {
 
         assert!(error.contains("timed out after 50 ms"));
         assert!(error.contains("restarted"));
+    }
+
+    #[test]
+    fn worker_multiplexes_host_requests_while_correlating_the_legacy_response() {
+        let mut command = Command::new("node");
+        command.args([
+            "-e",
+            "const r=require('readline').createInterface({input:process.stdin});let legacy;r.on('line',l=>{const v=JSON.parse(l);if(!legacy){legacy=v;process.stdout.write(JSON.stringify({kind:'host.request',requestId:'host-from-worker',method:'unknown.method',params:{}})+'\\n')}else if(v.kind==='host.response'){process.stdout.write(JSON.stringify({id:legacy.id,ok:true,result:{multiplexed:true}})+'\\n')}})",
+        ]);
+        let mut worker = WorkerProcess::spawn_command(command).expect("fixture should start");
+
+        let result = worker
+            .request_with_timeout(&json!({"id": "legacy-request"}), Duration::from_secs(5))
+            .expect("host request must not steal the legacy response slot");
+
+        assert_eq!(result["id"], "legacy-request");
+        assert_eq!(result["result"]["multiplexed"], true);
+    }
+
+    #[test]
+    fn worker_rejects_a_mismatched_legacy_response_id() {
+        let mut command = Command::new("node");
+        command.args([
+            "-e",
+            "process.stdin.once('data',()=>process.stdout.write('{\"id\":\"other\",\"ok\":true}\\n'))",
+        ]);
+        let mut worker = WorkerProcess::spawn_command(command).expect("fixture should start");
+
+        let error = worker
+            .request_with_timeout(&json!({"id": "expected"}), Duration::from_secs(5))
+            .expect_err("correlation mismatch must terminate the request");
+
+        assert!(error.contains("mismatched correlation ID"));
+    }
+
+    #[test]
+    fn native_provider_host_contract_rejects_secrets_unknown_fields_and_oversize() {
+        let valid = json!({
+            "generationId": "generation",
+            "attemptId": "attempt",
+            "projectId": "project",
+            "projectSessionId": "session",
+            "conversationId": "conversation",
+            "providerProfileId": "123e4567-e89b-42d3-a456-426614174000",
+            "modelId": "model",
+            "remoteModelId": "remote",
+            "protocol": "openai-responses",
+            "baseUrl": "https://example.com/v1",
+            "systemInstruction": "system",
+            "context": "context",
+            "prompt": "prompt"
+        });
+        assert!(validate_provider_stream_params(&valid).is_ok());
+        let mut with_api_key = valid.clone();
+        with_api_key["apiKey"] = json!("secret");
+        let mut with_headers = valid.clone();
+        with_headers["headers"] = json!({ "Authorization": "secret" });
+        let mut with_signed_url = valid.clone();
+        with_signed_url["baseUrl"] = json!("https://example.com/v1?X-Amz-Signature=secret");
+        let mut with_unknown = valid.clone();
+        with_unknown["unknown"] = json!(true);
+        for invalid in [with_api_key, with_headers, with_signed_url, with_unknown] {
+            assert!(validate_provider_stream_params(&invalid).is_err());
+        }
+
+        let envelope = json!({
+            "kind": "host.request",
+            "requestId": "request",
+            "method": "provider.stream.start",
+            "params": valid,
+        });
+        assert!(validate_host_request_envelope(&envelope).is_ok());
+        let oversized = json!({
+            "kind": "host.request",
+            "requestId": "request",
+            "method": "provider.stream.start",
+            "params": { "value": "x".repeat(SIDECAR_ENVELOPE_MAX_BYTES) },
+        });
+        assert!(validate_host_request_envelope(&oversized).is_err());
     }
 }

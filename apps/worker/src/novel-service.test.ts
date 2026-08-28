@@ -166,6 +166,7 @@ describe('NovelService', () => {
       result.volume!.id,
       result.volume!.id,
     ]);
+    expect(result.chapters.map((chapter) => chapter.ragChunkCount)).toEqual([1, 1]);
 
     const rows = project.access(false, (database) => ({
       chapters: database.prepare('SELECT COUNT(*) AS count FROM novel_chapters').get() as {
@@ -175,6 +176,9 @@ describe('NovelService', () => {
         count: number;
       },
       versions: database.prepare('SELECT COUNT(*) AS count FROM document_versions').get() as {
+        count: number;
+      },
+      chunks: database.prepare('SELECT COUNT(*) AS count FROM novel_rag_chunks').get() as {
         count: number;
       },
       hashes: database
@@ -190,12 +194,72 @@ describe('NovelService', () => {
       chapters: { count: 2 },
       documents: { count: 2 },
       versions: { count: 2 },
+      chunks: { count: 2 },
     });
     expect(rows.hashes.map((row) => row.content_hash)).toEqual([
       createHash('sha256').update('雨落在雾港。').digest('hex'),
       createHash('sha256').update('灯塔亮起。').digest('hex'),
     ]);
     expect(novel.getProfile()).toMatchObject({ language: 'zh-CN' });
+  });
+
+  it('atomically replaces RAG chunks whenever a chapter draft is saved', async () => {
+    const { project, novel } = await setup();
+    const workflow = new DocumentWorkflowService(project);
+    const chapter = novel.saveChapter({ title: '长章节' });
+    const first = workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: `${'雾港的雨声覆盖石阶。'.repeat(180)}\n\n${'灯塔照亮归航的船。'.repeat(180)}`,
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    const firstChunks = project.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            `SELECT source_document_version_id, ordinal, content_text
+           FROM novel_rag_chunks WHERE chapter_id = ? ORDER BY ordinal`,
+          )
+          .all(chapter.id) as Array<{
+          source_document_version_id: string;
+          ordinal: number;
+          content_text: string;
+        }>,
+    );
+    expect(firstChunks.length).toBeGreaterThan(1);
+    expect(
+      firstChunks.every((chunk) => chunk.source_document_version_id === first.currentVersion!.id),
+    ).toBe(true);
+
+    const second = workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: '修改后的短草稿。',
+      expectedDocumentRowVersion: first.rowVersion,
+    });
+    const secondChunks = project.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            `SELECT source_document_version_id, ordinal, content_text
+           FROM novel_rag_chunks WHERE chapter_id = ? ORDER BY ordinal`,
+          )
+          .all(chapter.id) as Array<{
+          source_document_version_id: string;
+          ordinal: number;
+          content_text: string;
+        }>,
+    );
+    expect(secondChunks).toEqual([
+      {
+        source_document_version_id: second.currentVersion!.id,
+        ordinal: 0,
+        content_text: '修改后的短草稿。',
+      },
+    ]);
+    expect(novel.listChapters()[0]).toMatchObject({ ragChunkCount: 1 });
   });
 
   it('rejects oversized imports before creating any partial records', async () => {

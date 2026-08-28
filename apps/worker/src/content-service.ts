@@ -4,6 +4,7 @@ import type {
   ChatMessageListParams,
   ChatMessagePage,
   ChatMessageSaveParams,
+  ConstraintInfo,
   ConversationArchiveParams,
   ConversationCreateParams,
   ConversationInfo,
@@ -27,6 +28,7 @@ import type {
   SceneSaveParams,
   ShotInfo,
   ShotSaveParams,
+  ShotStoryboardSaveParams,
 } from '@ai-video/contracts';
 import type { ConversationRecord, LlmGenerationAttemptRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
@@ -149,6 +151,10 @@ export class ContentService {
 
   saveShot(params: ShotSaveParams): ShotInfo {
     const title = required(params.title, 'Shot title');
+    const prompt = params.prompt === undefined ? undefined : params.prompt.trim();
+    if (prompt !== undefined && prompt.length > 2000) {
+      throw new Error('Shot prompt must be at most 2000 characters.');
+    }
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const scene = repositories.scenes.get(params.sceneId);
@@ -160,6 +166,16 @@ export class ContentService {
       if (existing && params.expectedRowVersion !== existing.rowVersion) {
         throw new Error('SHOT_ROW_VERSION_CONFLICT');
       }
+      if (params.documentId) {
+        const document = repositories.documents.get(params.documentId);
+        if (!document || document.projectId !== project.id) {
+          throw new Error('Shot document was not found.');
+        }
+        const owner = repositories.shots.findByDocumentId(params.documentId);
+        if (owner && owner.id !== (params.shotId ?? existing?.id)) {
+          throw new Error('Shot document is already attached to another shot.');
+        }
+      }
       const now = new Date().toISOString();
       const record: ShotInfo = {
         id: existing?.id ?? randomUUID(),
@@ -169,6 +185,8 @@ export class ContentService {
           existing?.position ??
           (repositories.shots.listByScene(scene.id).at(-1)?.position ?? -1) + 1,
         status: params.status ?? existing?.status ?? 'draft',
+        documentId: params.documentId ?? existing?.documentId,
+        prompt: prompt ?? existing?.prompt,
         rowVersion: existing?.rowVersion ?? 0,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
@@ -178,6 +196,69 @@ export class ContentService {
       project.updatedAt = now;
       return repositories.shots.get(record.id)!;
     });
+  }
+
+  saveShotStoryboard(params: ShotStoryboardSaveParams): DocumentDetail {
+    const title = required(params.title, 'Storyboard title');
+    const resolved = this.projects.access(false, (database, project) => {
+      const repositories = createRepositories(database);
+      const shot = repositories.shots.get(params.shotId);
+      if (!shot) throw new Error('Shot was not found.');
+      const scene = repositories.scenes.get(shot.sceneId);
+      if (!scene || scene.projectId !== project.id) throw new Error('Shot was not found.');
+      const document = shot.documentId ? repositories.documents.get(shot.documentId) : undefined;
+      return {
+        shotId: shot.id,
+        documentId: shot.documentId,
+        documentRowVersion: document?.rowVersion,
+      };
+    });
+    const document = resolved.documentId
+      ? this.workflow.saveDraft({
+          documentId: resolved.documentId,
+          kind: 'storyboard',
+          title,
+          contentMarkdown: params.contentMarkdown,
+          scopeType: 'shot',
+          scopeId: resolved.shotId,
+          expectedDocumentRowVersion: resolved.documentRowVersion,
+          authorType: 'user',
+        })
+      : this.workflow.saveDraft({
+          kind: 'storyboard',
+          title,
+          contentMarkdown: params.contentMarkdown,
+          scopeType: 'shot',
+          scopeId: resolved.shotId,
+          authorType: 'user',
+        });
+    if (!resolved.documentId) {
+      this.projects.access(true, (database) => {
+        const repositories = createRepositories(database);
+        const shot = repositories.shots.get(resolved.shotId);
+        if (!shot || shot.documentId) return;
+        repositories.shots.save({ ...shot, documentId: document.id });
+        repositories.projects.touch(new Date().toISOString());
+      });
+    }
+    return document;
+  }
+
+  listConstraints(): ConstraintInfo[] {
+    return this.projects.access(false, (database, project) =>
+      createRepositories(database)
+        .constraints.listByProject(project.id)
+        .map((record) => ({
+          id: record.id,
+          projectId: record.projectId,
+          scopeType: record.scopeType as ConstraintInfo['scopeType'],
+          scopeId: record.scopeId,
+          kind: record.kind,
+          content: record.content,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
+        })),
+    );
   }
 
   listConversations(params: ConversationListParams): ConversationPage {

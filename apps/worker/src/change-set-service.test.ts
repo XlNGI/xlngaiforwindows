@@ -56,6 +56,65 @@ describe('ChangeSetService', () => {
     expect(applied.items[1]!.appliedEntityId).toBeTruthy();
   });
 
+  it('applies shot prompts into shots.prompt when approved', async () => {
+    const { changeSets, content } = await setup();
+    const proposed = changeSets.create({
+      title: 'Episode scenes with shot prompts',
+      items: [
+        { entityType: 'scene', action: 'create', title: '旧码头 · 台风前夜' },
+        {
+          entityType: 'shot',
+          action: 'create',
+          parentItemOrdinal: 0,
+          title: '海雾中的码头',
+          prompt: '[场景:旧码头] 全景，台风前夜，海雾低垂。',
+        },
+      ],
+    });
+    expect(proposed.items[1]).toMatchObject({ prompt: '[场景:旧码头] 全景，台风前夜，海雾低垂。' });
+    const applied = changeSets.apply({
+      changeSetId: proposed.id,
+      expectedRowVersion: proposed.rowVersion,
+    });
+    expect(applied.status).toBe('applied');
+    const scene = content.listScenes()[0]!;
+    const shots = content.listShots(scene.id);
+    expect(shots).toHaveLength(1);
+    expect(shots[0]).toMatchObject({
+      title: '海雾中的码头',
+      prompt: '[场景:旧码头] 全景，台风前夜，海雾低垂。',
+    });
+  });
+
+  it('rejects shot prompts on scene proposals', async () => {
+    const { changeSets } = await setup();
+    expect(() =>
+      changeSets.create({
+        title: 'Invalid',
+        items: [{ entityType: 'scene', action: 'create', title: 'Scene', prompt: 'not allowed' }],
+      }),
+    ).toThrow(/Scene proposals cannot include shot parent, status or prompt fields/);
+  });
+
+  it('rejects shot prompts on document proposals', async () => {
+    const { changeSets } = await setup();
+    expect(() =>
+      changeSets.create({
+        title: 'Invalid',
+        items: [
+          {
+            entityType: 'document',
+            action: 'create',
+            title: 'Notes',
+            documentKind: 'note',
+            contentMarkdown: '# Notes',
+            prompt: 'not allowed',
+          },
+        ],
+      }),
+    ).toThrow(/Document proposals cannot include a shot prompt/);
+  });
+
   it('supports selected partial apply and reject', async () => {
     const { changeSets } = await setup();
     const proposed = changeSets.create({

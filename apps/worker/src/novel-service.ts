@@ -26,7 +26,7 @@ import type {
   NovelProfileRecord,
   NovelVolumeRecord,
 } from '@ai-video/domain';
-import { createRepositories } from '@ai-video/persistence';
+import { createRepositories, rebuildNovelRagChunks } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 const bindingRoles = new Set<DocumentBindingRole>([
@@ -416,6 +416,13 @@ export class NovelService {
               now,
               now,
             );
+          rebuildNovelRagChunks(database, {
+            projectId: project.id,
+            documentId,
+            documentVersionId: versionId,
+            contentMarkdown: content,
+            now,
+          });
           imported.push({
             id: chapterId,
             projectId: project.id,
@@ -546,10 +553,22 @@ export class NovelService {
   private chapterInfo(chapter: NovelChapterRecord, database: Database.Database): NovelChapterInfo {
     const document = createRepositories(database).documents.get(chapter.documentId);
     if (!document) throw new NovelServiceError('INVALID_STATE', 'Chapter document is missing.');
+    const rag = database
+      .prepare(
+        `SELECT COUNT(*) AS chunk_count, MAX(updated_at) AS indexed_at
+         FROM novel_rag_chunks
+         WHERE chapter_id = ? AND source_document_version_id = ?`,
+      )
+      .get(chapter.id, document.currentVersionId ?? '') as {
+      chunk_count: number;
+      indexed_at: string | null;
+    };
     return {
       ...chapter,
       title: document.title,
       documentRowVersion: document.rowVersion ?? 0,
+      ragChunkCount: rag.chunk_count,
+      ragIndexedAt: rag.indexed_at ?? undefined,
     };
   }
 }

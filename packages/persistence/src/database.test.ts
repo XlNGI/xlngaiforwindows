@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkIntegrity,
@@ -38,8 +39,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(27);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 27 });
+    expect(migrateDatabase(database)).toBe(31);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 31 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -141,6 +142,85 @@ describe('project database', () => {
         .prepare("SELECT name FROM pragma_table_info('scenes') WHERE name = ?")
         .get('row_version'),
     ).toMatchObject({ name: 'row_version' });
+    expect(
+      database.prepare("SELECT name FROM pragma_table_info('shots') WHERE name = ?").get('prompt'),
+    ).toMatchObject({ name: 'prompt' });
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('agent_change_set_items') WHERE name = ?")
+        .get('shot_prompt'),
+    ).toMatchObject({ name: 'shot_prompt' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('novel_rag_chunks'),
+    ).toMatchObject({ name: 'novel_rag_chunks' });
+    database.close();
+  });
+
+  it('backfills current saved novel drafts when upgrading from v29', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database.exec(`
+      DROP TABLE agent_task_deliverables;
+      DROP TABLE agent_task_plans;
+      DROP TRIGGER novel_rag_chunk_scope_match;
+      DROP TABLE novel_rag_chunks;
+    `);
+    database.prepare('DELETE FROM schema_migrations WHERE version >= 30').run();
+    const content = `${'雾港的雨落在石阶上。'.repeat(180)}\n\n${'灯塔照亮归航的船。'.repeat(180)}`;
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Legacy Novel', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO documents
+         (id, project_id, kind, title, scope_type, lifecycle_status, row_version, created_at, updated_at)
+         VALUES (?, ?, 'note', ?, 'project', 'active', 0, ?, ?)`,
+      )
+      .run('document', 'project', '旧小说草稿', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO document_versions
+         (id, document_id, version, content_markdown, state, title_snapshot, scope_type_snapshot,
+          author_type, content_hash, state_updated_at, created_at)
+         VALUES (?, ?, 1, ?, 'draft', ?, 'project', 'import', ?, ?, ?)`,
+      )
+      .run(
+        'version',
+        'document',
+        content,
+        '旧小说草稿',
+        createHash('sha256').update(content).digest('hex'),
+        'now',
+        'now',
+      );
+    database
+      .prepare('UPDATE documents SET current_version_id = ? WHERE id = ?')
+      .run('version', 'document');
+    database
+      .prepare(
+        `INSERT INTO novel_chapters
+         (id, project_id, document_id, position, display_label, lifecycle_status,
+          row_version, created_at, updated_at)
+         VALUES (?, ?, ?, 0, ?, 'active', 0, ?, ?)`,
+      )
+      .run('chapter', 'project', 'document', '第一章', 'now', 'now');
+
+    expect(migrateDatabase(database)).toBe(31);
+    const chunks = database
+      .prepare(
+        `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
+         FROM novel_rag_chunks WHERE chapter_id = ? ORDER BY ordinal`,
+      )
+      .all('chapter') as Array<{
+      source_document_version_id: string;
+      ordinal: number;
+      content_length: number;
+    }>;
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.source_document_version_id === 'version')).toBe(true);
+    expect(chunks.every((chunk) => chunk.content_length <= 2_200)).toBe(true);
     database.close();
   });
 
@@ -367,7 +447,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(31);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -394,7 +474,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(31);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -456,7 +536,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(31);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -504,7 +584,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(31);
     expect(
       database
         .prepare(
@@ -577,8 +657,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(27);
-    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(31);
+    expect(migrateDatabase(database)).toBe(31);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -733,7 +813,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(27);
+    expect(migrateDatabase(database)).toBe(31);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -771,7 +851,33 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 27 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 31 });
+    database.close();
+  });
+
+  it('rolls back the whole v31 migration when one task-plan table conflicts', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database.exec('DROP TABLE agent_task_deliverables; DROP TABLE agent_task_plans;');
+    database.prepare('DELETE FROM schema_migrations WHERE version = 31').run();
+    database.exec('CREATE TABLE agent_task_deliverables (conflict TEXT);');
+
+    expect(() => migrateDatabase(database)).toThrow();
+    expect(getSchemaVersion(database)).toBe(30);
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_task_plans'",
+        )
+        .get(),
+    ).toBeUndefined();
+    expect(
+      database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_task_deliverables'",
+        )
+        .get(),
+    ).toMatchObject({ sql: 'CREATE TABLE agent_task_deliverables (conflict TEXT)' });
     database.close();
   });
 });

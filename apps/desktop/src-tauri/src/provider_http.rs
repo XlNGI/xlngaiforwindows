@@ -562,7 +562,14 @@ fn winhttp_error(operation: &str) -> JsonHttpError {
         }
         _ => JsonHttpErrorKind::Transport,
     };
-    JsonHttpError::new(kind, format!("{operation} (Windows error {code})"))
+    let message = if code == ERROR_WINHTTP_TIMEOUT {
+        format!(
+            "{operation}（超时：服务端在限定时间内未返回响应，请检查网络/代理、模型端点或凭据后重试）"
+        )
+    } else {
+        format!("{operation} (Windows error {code})")
+    };
+    JsonHttpError::new(kind, message)
 }
 
 #[cfg(test)]

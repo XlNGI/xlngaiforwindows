@@ -11,7 +11,7 @@ SQLite Schema v2 为正式文档增加 `scope_type` 和 `scope_id`。从 Schema 
 
 会话企业级加固阶段升级到 Schema v11：新增 `llm_generations` 作为 generation 聚合事实源，记录项目会话、上下文快照、输入/回复消息、执行模式、幂等键、终态错误和 CAS 版本。`llm_generation_attempts` 保留为 Provider 尝试明细。Worker 重启后可按 generation ID 从 SQLite 重建终态，重复 prepare/retry、完成和取消不会重复写入业务输入或把终态改回活动态。
 
-文档工作流阶段升级到 Schema v12：`documents.current_version_id` 表示当前工作版本，`documents.published_version_id` 是唯一默认权威版本。草稿、审核和发布记录保存在项目 SQLite；未发布草稿默认不进入其他会话的 LLM 上下文。
+文档工作流阶段升级到 Schema v12：`documents.current_version_id` 表示当前工作版本，`documents.published_version_id` 是唯一默认权威版本。草稿、审核和发布记录保存在项目 SQLite；未发布草稿默认不进入其他会话的 LLM 上下文。小说章节是明确例外：自 Schema v30 起，用户导入或保存的小说章节草稿会生成项目本地 RAG 切片，可作为小说创作与短剧改编的源材料，无需先发布；普通文档和派生资料的发布边界不变。
 
 审计加固阶段升级到 Schema v13：新增项目级不可变 `document_audit_events`，记录草稿保存/恢复、审核提交/退回/拒绝和发布动作。审计事件只保存有界元数据，不保存 Markdown 正文或完整审核评论，并与任务事件保持分离。
 
@@ -37,7 +37,7 @@ SQLite Schema v2 为正式文档增加 `scope_type` 和 `scope_id`。从 Schema 
 - 请求存储：`store = false`
 - 密钥来源：仅 `OPENAI_API_KEY`
 - 可选覆盖：`OPENAI_BASE_URL`、`OPENAI_MODEL`
-- 默认超时：总时限 120 秒、首字节 30 秒、流空闲 30 秒
+- 默认超时：总时限 120 秒（首字节后）、首字节 240 秒（2026-08-25 两次调大：30→120→240 秒，实测 UniCompAPI gpt-5.6-sol 在 5 万 token 上下文首字节可达约 100 秒且波动大；流停滞仍由总时限兜底）
 
 凭据不会写入项目数据库、上下文快照或日志。没有密钥时，界面仍可保存本地会话，但生成入口显示 Provider 未配置，IPC 返回 `LLM_NOT_CONFIGURED`。
 

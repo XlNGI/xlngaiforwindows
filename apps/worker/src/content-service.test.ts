@@ -114,6 +114,35 @@ describe('ContentService', () => {
     ).toThrow('SHOT_ROW_VERSION_CONFLICT');
   });
 
+  it('saves and updates shot prompts', async () => {
+    const { content } = await setup();
+    const scene = content.saveScene({ title: '场次 01' });
+    const shot = content.saveShot({
+      sceneId: scene.id,
+      title: '镜头 01',
+      prompt: '[场景:旧码头] 全景',
+    });
+    expect(shot).toMatchObject({ title: '镜头 01', prompt: '[场景:旧码头] 全景' });
+    const updated = content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: '镜头 01',
+      prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+      expectedRowVersion: shot.rowVersion,
+    });
+    expect(updated).toMatchObject({ prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。' });
+    expect(content.listShots(scene.id)[0]).toMatchObject({
+      prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+    });
+    expect(() =>
+      content.saveShot({
+        sceneId: scene.id,
+        title: '镜头 02',
+        prompt: 'x'.repeat(2001),
+      }),
+    ).toThrow('Shot prompt must be at most 2000 characters.');
+  });
+
   it('renames, archives, restores, and filters conversations', async () => {
     const { content } = await setup();
     const conversation = content.createConversation({
@@ -235,5 +264,63 @@ describe('ContentService', () => {
       expect.arrayContaining([first.id, streaming.id]),
     );
     expect([...older.items, ...latest.items]).toHaveLength(3);
+  });
+
+  it('saves a shot storyboard document and attaches it to the shot', async () => {
+    const { content } = await setup();
+    const scene = content.saveScene({ title: '场次 01' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '镜头 01' });
+
+    const storyboard = content.saveShotStoryboard({
+      shotId: shot.id,
+      title: '镜头 01 分镜',
+      contentMarkdown: '# 分镜\n\n1. 远景。',
+    });
+    expect(storyboard.kind).toBe('storyboard');
+    expect(storyboard.scopeType).toBe('shot');
+    expect(storyboard.scopeId).toBe(shot.id);
+    expect(storyboard.currentVersion?.contentMarkdown).toBe('# 分镜\n\n1. 远景。');
+    expect(content.listShots(scene.id).find((item) => item.id === shot.id)?.documentId).toBe(
+      storyboard.id,
+    );
+
+    const updated = content.saveShotStoryboard({
+      shotId: shot.id,
+      title: '镜头 01 分镜',
+      contentMarkdown: '# 分镜\n\n2. 中景。',
+    });
+    expect(updated.id).toBe(storyboard.id);
+    expect(updated.currentVersion?.version).toBe(2);
+    expect(updated.currentVersion?.contentMarkdown).toBe('# 分镜\n\n2. 中景。');
+  });
+
+  it('rejects a storyboard save for an unknown shot', async () => {
+    const { content } = await setup();
+    expect(() =>
+      content.saveShotStoryboard({
+        shotId: 'missing-shot',
+        title: '分镜',
+        contentMarkdown: '内容',
+      }),
+    ).toThrow('Shot was not found.');
+  });
+
+  it('lists project constraints promoted from chat messages', async () => {
+    const { content } = await setup();
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const message = content.saveMessage({
+      conversationId: conversation.id,
+      role: 'user',
+      content: '所有镜头必须保持冷色调。',
+    });
+    content.messageToConstraint({ messageId: message.id });
+
+    const constraints = content.listConstraints();
+    expect(constraints).toHaveLength(1);
+    expect(constraints[0]).toMatchObject({
+      scopeType: 'project',
+      kind: 'production',
+      content: '所有镜头必须保持冷色调。',
+    });
   });
 });

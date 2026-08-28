@@ -34,6 +34,7 @@ type ItemRow = {
   parent_item_ordinal: number | null;
   title: string;
   shot_status: string | null;
+  shot_prompt: string | null;
   document_kind: AgentChangeSetItemInfo['documentKind'] | null;
   content_markdown: string | null;
   scope_type: AgentChangeSetItemInfo['scopeType'] | null;
@@ -66,6 +67,7 @@ function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
     parentItemOrdinal: row.parent_item_ordinal ?? undefined,
     title: row.title,
     shotStatus: row.shot_status ?? undefined,
+    prompt: row.shot_prompt ?? undefined,
     documentKind: row.document_kind ?? undefined,
     contentMarkdown: row.content_markdown ?? undefined,
     scopeType: row.scope_type ?? undefined,
@@ -102,10 +104,10 @@ export class ChangeSetService {
           `INSERT INTO agent_change_set_items
            (id, change_set_id, project_id, ordinal, entity_type, action, target_id,
             parent_scene_id, parent_item_id, title, shot_status, document_kind,
-            content_markdown, scope_type, scope_id, expected_row_version,
+            content_markdown, shot_prompt, scope_type, scope_id, expected_row_version,
             expected_current_version_id,
             status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
         );
         params.items.forEach((candidate, ordinal) => {
           const item = this.validateDraft(candidate, ordinal, params.items);
@@ -123,6 +125,7 @@ export class ChangeSetService {
             item.shotStatus ?? null,
             item.documentKind ?? null,
             item.contentMarkdown ?? null,
+            item.prompt ?? null,
             item.scopeType ?? null,
             item.scopeId ?? null,
             item.expectedRowVersion ?? null,
@@ -267,6 +270,9 @@ export class ChangeSetService {
       if (item.parentSceneId || item.parentItemOrdinal !== undefined || item.shotStatus) {
         throw new Error('Document proposals cannot include scene or shot parent fields.');
       }
+      if (item.prompt !== undefined) {
+        throw new Error('Document proposals cannot include a shot prompt.');
+      }
       if (item.scopeType === 'project' && item.scopeId) {
         throw new Error('Project documents cannot include a scope ID.');
       }
@@ -288,8 +294,13 @@ export class ChangeSetService {
       throw new Error('Scene and shot proposals cannot include document fields.');
     }
     if (item.entityType === 'scene') {
-      if (item.parentSceneId || item.parentItemOrdinal !== undefined || item.shotStatus) {
-        throw new Error('Scene proposals cannot include shot parent or status fields.');
+      if (
+        item.parentSceneId ||
+        item.parentItemOrdinal !== undefined ||
+        item.shotStatus ||
+        item.prompt !== undefined
+      ) {
+        throw new Error('Scene proposals cannot include shot parent, status or prompt fields.');
       }
     } else if (item.action === 'create') {
       const parentCount =
@@ -310,6 +321,7 @@ export class ChangeSetService {
     }
     if (item.shotStatus !== undefined)
       item.shotStatus = requiredText(item.shotStatus, 'Shot status', 80);
+    if (item.prompt !== undefined) item.prompt = requiredText(item.prompt, 'Shot prompt', 2000);
     return item;
   }
 
@@ -364,21 +376,39 @@ export class ChangeSetService {
       database
         .prepare(
           `INSERT INTO shots
-           (id, scene_id, title, position, status, created_at, updated_at, row_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+           (id, scene_id, title, position, status, prompt, created_at, updated_at, row_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         )
-        .run(id, sceneId, item.title, position, item.shot_status ?? 'draft', now, now);
+        .run(
+          id,
+          sceneId,
+          item.title,
+          position,
+          item.shot_status ?? 'draft',
+          item.shot_prompt ?? null,
+          now,
+          now,
+        );
       return id;
     }
     const result = database
       .prepare(
-        `UPDATE shots SET title = ?, status = COALESCE(?, status), updated_at = ?,
+        `UPDATE shots SET title = ?, status = COALESCE(?, status),
+           prompt = COALESCE(?, prompt), updated_at = ?,
            row_version = row_version + 1
          WHERE id = ? AND row_version = ? AND scene_id IN (
            SELECT id FROM scenes WHERE project_id = ?
          )`,
       )
-      .run(item.title, item.shot_status, now, item.target_id, item.expected_row_version, projectId);
+      .run(
+        item.title,
+        item.shot_status,
+        item.shot_prompt,
+        now,
+        item.target_id,
+        item.expected_row_version,
+        projectId,
+      );
     if (result.changes !== 1) throw new ChangeSetConflict('SHOT_ROW_VERSION_CONFLICT');
     return item.target_id!;
   }

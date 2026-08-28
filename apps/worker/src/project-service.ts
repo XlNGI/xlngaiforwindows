@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -39,6 +40,8 @@ interface LockContents {
   pid: number;
   token: string;
   createdAt: string;
+  /** ISO start time of the lock-holding process, used to detect PID reuse. */
+  processStart?: string;
 }
 
 interface ProjectSession {
@@ -66,13 +69,54 @@ function isInside(parent: string, candidate: string): boolean {
   return child === '' || (!child.startsWith(`..${sep}`) && child !== '..' && !isAbsolute(child));
 }
 
-function isProcessAlive(pid: number): boolean {
+const PROCESS_START_ISO = new Date(Date.now() - process.uptime() * 1_000).toISOString();
+const PROCESS_START_TOLERANCE_MS = 30_000;
+
+/**
+ * Reads another process's start time on Windows via PowerShell. Returns
+ * undefined when the process is gone or the lookup cannot run; callers then
+ * fall back to a PID-only check.
+ */
+export function readProcessStartIso(pid: number): string | undefined {
+  try {
+    const result = spawnSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).StartTime.ToString('o')`,
+      ],
+      { encoding: 'utf8', timeout: 3_000, windowsHide: true },
+    );
+    if (result.status !== 0 || result.error) return undefined;
+    const lines = (result.stdout ?? '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.at(-1) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isProcessAlive(
+  pid: number,
+  expectedProcessStart?: string,
+  resolveStart: (candidatePid: number) => string | undefined = readProcessStartIso,
+): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  if (!expectedProcessStart) return true;
+  const actual = resolveStart(pid);
+  if (!actual) return true;
+  const expected = Date.parse(expectedProcessStart);
+  const found = Date.parse(actual);
+  if (Number.isNaN(expected) || Number.isNaN(found)) return true;
+  return Math.abs(found - expected) <= PROCESS_START_TOLERANCE_MS;
 }
 
 function readLock(lockPath: string): LockContents | undefined {
@@ -93,7 +137,12 @@ function tryAcquireLock(rootPath: string): { path: string; token: string } | und
   const temporaryPath = `${lockPath}.${process.pid}.${token}.tmp`;
   writeFileSync(
     temporaryPath,
-    JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }),
+    JSON.stringify({
+      pid: process.pid,
+      token,
+      createdAt: new Date().toISOString(),
+      processStart: PROCESS_START_ISO,
+    }),
     { encoding: 'utf8', flag: 'wx' },
   );
 
@@ -106,7 +155,7 @@ function tryAcquireLock(rootPath: string): { path: string; token: string } | und
       } catch (error) {
         if (!hasErrorCode(error, 'EEXIST')) throw error;
         const lock = readLock(lockPath);
-        if (lock && isProcessAlive(lock.pid)) return undefined;
+        if (lock && isProcessAlive(lock.pid, lock.processStart)) return undefined;
         try {
           rmSync(lockPath);
         } catch (removeError) {
