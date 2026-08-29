@@ -10,6 +10,8 @@ import type {
   AgentTaskEventsParams,
   AgentTaskEventsResult,
   AgentTaskInfo,
+  AgentTaskPendingConfirmationInfo,
+  ConversationTaskPlanInfo,
   AgentTaskListParams,
   DocumentDetail,
   DocumentDraftSaveParams,
@@ -1068,6 +1070,62 @@ export class DocumentWorkflowService {
     return document;
   }
 
+  /**
+   * Writes a Pi-managed reviewable draft without taking ownership of the
+   * parent task's terminal state. A single Pi task can produce several
+   * deliverables, so the legacy primary-artifact uniqueness rule cannot be
+   * reused here. The task-document-version link remains the durable ownership
+   * record used by the task plan completeness gate.
+   */
+  writePiAgentDraftInTransaction(
+    database: Database.Database,
+    project: OpenProject,
+    params: TrustedAgentDraftParams,
+  ): DocumentDetail {
+    const now = new Date().toISOString();
+    const document = this.writeDraft(database, project, {
+      kind: params.kind ?? 'note',
+      title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
+      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      scopeType: params.scopeType,
+      scopeId: params.scopeId,
+      sourceTaskId: params.taskId,
+      sourceMessageId: params.sourceMessageId,
+      contextSnapshotId: params.contextSnapshotId,
+      authorType: 'agent',
+    });
+    const version = document.currentVersion;
+    if (!version) throw new DocumentWorkflowError('EXPECTED_ARTIFACT_MISSING', 'CONFLICT');
+    this.appendAudit(database, project.id, {
+      action: 'draft_saved',
+      actorType: 'agent',
+      actorId: 'pi-agent-runtime',
+      documentId: document.id,
+      documentVersionId: version.id,
+      taskId: params.taskId,
+      metadata: { operation: 'create', providerTool: true, runtime: 'pi' },
+      createdAt: version.createdAt,
+    });
+    database
+      .prepare(
+        `INSERT INTO agent_task_document_versions
+         (task_id, document_id, document_version_id, operation, created_at)
+         VALUES (?, ?, ?, 'create', ?)`,
+      )
+      .run(params.taskId, document.id, version.id, now);
+    this.appendEvent(
+      database,
+      project.id,
+      params.taskId,
+      'document.draft.created',
+      'info',
+      'Pi created a reviewable document draft.',
+      { documentId: document.id, documentVersionId: version.id, runtime: 'pi' },
+      now,
+    );
+    return document;
+  }
+
   writeTrustedAgentUpdateInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1261,6 +1319,55 @@ export class DocumentWorkflowService {
   getTask(params: AgentTaskGetParams): AgentTaskDetail {
     return this.projects.access(false, (database, project) => {
       const task = this.requireTask(database, project, params.taskId);
+      const planRow = database
+        .prepare('SELECT * FROM agent_task_plans WHERE task_id = ? AND project_id = ?')
+        .get(task.id, project.id) as
+        | {
+            id: string;
+            task_id: string;
+            project_id: string;
+            plan_json: string;
+            trusted_scope_json: string;
+            status: ConversationTaskPlanInfo['status'];
+            created_at: string;
+            updated_at: string;
+          }
+        | undefined;
+      const plan = planRow
+        ? ({
+            id: planRow.id,
+            taskId: planRow.task_id,
+            projectId: planRow.project_id,
+            plan: JSON.parse(planRow.plan_json) as ConversationTaskPlanInfo['plan'],
+            trustedScope: JSON.parse(planRow.trusted_scope_json) as {
+              selectedChapterIds: string[];
+            },
+            status: planRow.status,
+            deliverables: (
+              database
+                .prepare(
+                  'SELECT id, kind, required, depends_on_json, status FROM agent_task_deliverables WHERE plan_id = ? ORDER BY ordinal',
+                )
+                .all(planRow.id) as Array<{
+                id: string;
+                kind: ConversationTaskPlanInfo['deliverables'][number]['kind'];
+                required: number;
+                depends_on_json: string;
+                status: ConversationTaskPlanInfo['deliverables'][number]['status'];
+              }>
+            ).map((item) => ({
+              id: item.id,
+              kind: item.kind,
+              required: Boolean(item.required),
+              dependsOn: JSON.parse(
+                item.depends_on_json,
+              ) as ConversationTaskPlanInfo['deliverables'][number]['dependsOn'],
+              status: item.status,
+            })),
+            createdAt: planRow.created_at,
+            updatedAt: planRow.updated_at,
+          } satisfies ConversationTaskPlanInfo)
+        : undefined;
       const events = (
         database
           .prepare('SELECT * FROM agent_task_events WHERE task_id = ? ORDER BY sequence, id')
@@ -1360,7 +1467,43 @@ export class DocumentWorkflowService {
           : {}),
         ...(source.cache_error_code ? { cacheErrorCode: source.cache_error_code } : {}),
       }));
-      return { task: toTask(task), events, documents, providerSteps, researchSources };
+      const confirmationRow = database
+        .prepare(
+          `SELECT confirmations.action, confirmations.target_document_id, confirmations.status,
+                  confirmations.expires_at, documents.title
+             FROM agent_task_confirmations confirmations
+             INNER JOIN documents ON documents.id = confirmations.target_document_id
+            WHERE confirmations.task_id = ? AND confirmations.project_id = ?
+              AND confirmations.status IN ('pending', 'expired')
+            ORDER BY confirmations.created_at DESC LIMIT 1`,
+        )
+        .get(task.id, project.id) as
+        | {
+            action: AgentTaskPendingConfirmationInfo['action'];
+            target_document_id: string;
+            expires_at: string;
+            title: string;
+            status: AgentTaskPendingConfirmationInfo['status'];
+          }
+        | undefined;
+      const pendingConfirmation = confirmationRow
+        ? ({
+            action: confirmationRow.action,
+            documentId: confirmationRow.target_document_id,
+            documentTitle: confirmationRow.title,
+            expiresAt: confirmationRow.expires_at,
+            status: confirmationRow.status,
+          } satisfies AgentTaskPendingConfirmationInfo)
+        : undefined;
+      return {
+        task: toTask(task),
+        ...(pendingConfirmation ? { pendingConfirmation } : {}),
+        ...(plan ? { plan } : {}),
+        events,
+        documents,
+        providerSteps,
+        researchSources,
+      };
     });
   }
 

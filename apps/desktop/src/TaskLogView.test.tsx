@@ -284,6 +284,64 @@ describe('TaskLogView', () => {
     expect(onOpenConversation).toHaveBeenCalledWith('conversation-1');
   });
 
+  it('offers explicit recovery and discard actions for failed partial artifacts', async () => {
+    const partial = {
+      id: 'partial-1',
+      taskId: 'task-1',
+      documentId: 'document-1',
+      targetKind: 'reference-update' as const,
+      contentLength: 128,
+      status: 'recoverable' as const,
+      rowVersion: 2,
+      expiresAt: '2026-08-17T01:00:00.000Z',
+      createdAt: '2026-08-16T01:00:00.000Z',
+      updatedAt: '2026-08-16T01:00:00.000Z',
+    };
+    const discardablePartial = { ...partial, id: 'partial-2', documentId: undefined };
+    const failedDetail: AgentTaskDetail = {
+      ...agentDetail,
+      task: { ...agentDetail.task, status: 'failed', phase: 'recovering' },
+    };
+    const respond = (value: unknown) => Promise.resolve(value as never);
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'task.log.list') return respond({ items: [agentItem], nextCursor: undefined });
+      if (method === 'agent.task.get') return respond(failedDetail);
+      if (method === 'agent.partial.list') return respond([partial, discardablePartial]);
+      if (method === 'document.get') return respond({ ...agentDetail.documents[0], rowVersion: 4 });
+      if (method === 'agent.partial.recover') return respond({ id: 'document-1' });
+      if (method === 'agent.partial.discard') return respond({ ...partial, status: 'discarded' });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const onOpenDocument = vi.fn();
+    render(<TaskLogView projectId="project-1" onOpenDocument={onOpenDocument} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /项目大纲草稿/ }));
+    expect(await screen.findByText(/任务失败，但仍有可恢复/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: '恢复草稿' })[0]!);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('agent.partial.recover', {
+        artifactId: 'partial-1',
+        expectedRowVersion: 2,
+        expectedDocumentRowVersion: 4,
+      }),
+    );
+    expect(onOpenDocument).toHaveBeenCalledWith('document-1');
+    expect(confirm).toHaveBeenCalledWith('将未完成内容恢复为新的用户草稿吗？原有版本不会被覆盖。');
+
+    fireEvent.click(screen.getAllByRole('button', { name: '丢弃' })[0]!);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('agent.partial.discard', {
+        artifactId: 'partial-2',
+        expectedRowVersion: 2,
+      }),
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      '确定丢弃这份未完成产物吗？丢弃后将清除其内容，且无法恢复。',
+    );
+    confirm.mockRestore();
+  });
+
   it('closes the selected detail panel without reloading the task list', async () => {
     render(<TaskLogView projectId="project-1" />);
     fireEvent.click(await screen.findByRole('button', { name: /项目大纲草稿/ }));

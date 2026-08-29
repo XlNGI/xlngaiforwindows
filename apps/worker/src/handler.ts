@@ -106,6 +106,12 @@ import {
 import { PartialArtifactService } from './partial-artifact-service.js';
 import { MarkdownExportService } from './markdown-export-service.js';
 import { ChangeSetService } from './change-set-service.js';
+import type { ConversationRuntimeStartParams } from '@ai-video/contracts';
+import { PiConversationRuntime } from './pi-conversation-runtime.js';
+import { DomainToolGateway } from './domain-tool-gateway.js';
+import { TaskPlanService } from './task-plan-service.js';
+import { NativeProviderBridge } from './native-provider-bridge.js';
+import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 
 const WORKER_VERSION = '0.1.0';
 const methods = new Set<WorkerMethod>([
@@ -180,6 +186,7 @@ const methods = new Set<WorkerMethod>([
   'agent.task.get',
   'agent.task.events',
   'agent.generation.prepare',
+  'conversation.runtime.start',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
@@ -278,6 +285,24 @@ const agentOrchestrationService = new AgentOrchestrationService(projectService);
 const partialArtifactService = new PartialArtifactService(projectService, documentWorkflowService);
 const markdownExportService = new MarkdownExportService(projectService);
 const changeSetService = new ChangeSetService(projectService);
+const taskPlanService = new TaskPlanService(projectService);
+let piConversationRuntime: PiConversationRuntime | undefined;
+
+export function configurePiConversationRuntime(bridge: NativeProviderBridge): void {
+  piConversationRuntime = new PiConversationRuntime({
+    generation: generationService,
+    plans: taskPlanService,
+    bridge,
+    createGateway: (identity) =>
+      new DomainToolGateway(
+        projectService,
+        taskPlanService,
+        documentWorkflowService,
+        changeSetService,
+        identity,
+      ),
+  });
+}
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
 const videoGenerationService = new VideoGenerationService(
@@ -714,7 +739,34 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             agentParams.agentMode === 'short-drama' ? agentParams.targetPlatform : undefined,
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
-          result = { ...prepared, agentTaskId: agent.taskId, runtimeOwner: 'native-agent' };
+          result = {
+            ...prepared,
+            agentTaskId: agent.taskId,
+            runtimeOwner:
+              agentParams.agentMode === 'short-drama' && resolvePiConversationRuntimeEnabled()
+                ? 'pi'
+                : 'native-agent',
+          };
+          break;
+        }
+        case 'conversation.runtime.start': {
+          if (!piConversationRuntime) throw new Error('Pi conversation runtime is not configured.');
+          const runtimeParams = params as unknown as ConversationRuntimeStartParams;
+          result = await piConversationRuntime.start({
+            taskId: runtimeParams.taskId,
+            projectId: runtimeParams.projectId,
+            projectSessionId: runtimeParams.projectSessionId,
+            conversationId: runtimeParams.conversationId,
+            mode: runtimeParams.mode,
+            identity: {
+              generationId: runtimeParams.generationId,
+              attemptId: runtimeParams.attemptId,
+              projectId: runtimeParams.projectId,
+              projectSessionId: runtimeParams.projectSessionId,
+              conversationId: runtimeParams.conversationId,
+            },
+            prompt: runtimeParams.prompt,
+          });
           break;
         }
         case 'agent.generation.executeTools': {
@@ -728,13 +780,18 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = execution;
           break;
         }
-        case 'agent.generation.cancel':
+        case 'agent.generation.cancel': {
+          const generationId = requireString(params, 'generationId');
+          const piCancelled = piConversationRuntime?.cancel(generationId) ?? false;
+          const providerCancelled = agentProviderLoopService.cancelGeneration(generationId);
+          if (piCancelled) {
+            agentProviderLoopService.terminateGeneration(generationId, 'cancelled');
+          }
           result = {
-            cancelled: agentProviderLoopService.cancelGeneration(
-              requireString(params, 'generationId'),
-            ),
+            cancelled: piCancelled || providerCancelled,
           };
           break;
+        }
         case 'agent.generation.confirmTool': {
           const confirmationParams = params as unknown as AgentGenerationConfirmToolParams;
           const confirmation = agentProviderLoopService.confirmTool(confirmationParams);

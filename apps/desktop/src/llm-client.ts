@@ -13,11 +13,14 @@ import { callWorker } from './worker-client';
 const FLUSH_INTERVAL_MS = 250;
 const FLUSH_CHARACTER_THRESHOLD = 512;
 const CHANNEL_DELIVERY_GRACE_MS = 1_000;
+const PI_POLL_INTERVAL_MS = 300;
+const PI_POLL_TIMEOUT_MS = 10 * 60 * 1_000;
+const MAX_PROVIDER_INVOCATIONS = 16;
 
 type InvocationBoundaryOutcome = 'continue' | 'terminal' | 'missing';
 type AgentCapablePrepared = LlmGenerationPrepareResult & {
   agentTaskId?: string;
-  runtimeOwner?: 'desktop' | 'native-agent';
+  runtimeOwner?: 'desktop' | 'native-agent' | 'pi';
 };
 
 export interface LlmStreamCallbacks {
@@ -40,11 +43,15 @@ export function streamPreparedLlmGeneration(
   const nativeAgentRuntime =
     Boolean((prepared as AgentCapablePrepared).agentTaskId) &&
     (prepared as AgentCapablePrepared).runtimeOwner === 'native-agent';
+  const piRuntime =
+    Boolean((prepared as AgentCapablePrepared).agentTaskId) &&
+    (prepared as AgentCapablePrepared).runtimeOwner === 'pi';
   let aggregate = prepared.generation.assistantMessage.content;
   let persisted = aggregate;
   let terminal = false;
   let closing = false;
   let cancelRequested = false;
+  let providerInvocationCount = 0;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let invocationBoundary:
     { receive(): void; complete(outcome: InvocationBoundaryOutcome): void } | undefined;
@@ -155,6 +162,13 @@ export function streamPreparedLlmGeneration(
     } finally {
       closing = false;
     }
+  };
+
+  const cancelOwnedRuntime = async () => {
+    if (!nativeAgentRuntime && !piRuntime) return;
+    await callWorker('agent.generation.cancel', {
+      generationId: identity.generationId,
+    }).catch(() => undefined);
   };
 
   const handleEvent = async (
@@ -332,6 +346,29 @@ export function streamPreparedLlmGeneration(
       return;
     }
     try {
+      if (piRuntime) {
+        await callWorker('conversation.runtime.start', {
+          ...identity,
+          taskId: (prepared as AgentCapablePrepared).agentTaskId!,
+          mode: 'short-drama',
+          prompt: prepared.generation.userMessage.content,
+        });
+        const deadline = Date.now() + PI_POLL_TIMEOUT_MS;
+        while (true) {
+          if (Date.now() >= deadline) {
+            await cancelOwnedRuntime();
+            throw new Error('Pi runtime did not reach a terminal state before the timeout.');
+          }
+          await new Promise((resolve) => setTimeout(resolve, PI_POLL_INTERVAL_MS));
+          const current = await callWorker('llm.generation.get', {
+            generationId: identity.generationId,
+          });
+          callbacks.onState(current);
+          if (!['prepared', 'streaming'].includes(current.status)) break;
+        }
+        terminal = true;
+        return;
+      }
       if (nativeAgentRuntime) {
         const channel = createInvocationChannel();
         try {
@@ -351,6 +388,15 @@ export function streamPreparedLlmGeneration(
         return;
       }
       while (true) {
+        providerInvocationCount += 1;
+        if (providerInvocationCount > MAX_PROVIDER_INVOCATIONS) {
+          await fail(
+            `Provider exceeded the ${MAX_PROVIDER_INVOCATIONS}-invocation safety limit.`,
+            true,
+          );
+          await cancelOwnedRuntime();
+          break;
+        }
         const boundary = prepareInvocationBoundary();
         await invoke<void>('llm_stream', {
           request: identity,
@@ -368,7 +414,10 @@ export function streamPreparedLlmGeneration(
     } catch (error) {
       await events;
       if (cancelRequested) await cancelWorker();
-      else await fail(error instanceof Error ? error.message : 'Native LLM stream failed.', true);
+      else {
+        await cancelOwnedRuntime();
+        await fail(error instanceof Error ? error.message : 'Native LLM stream failed.', true);
+      }
     }
   })();
 
@@ -379,18 +428,23 @@ export function streamPreparedLlmGeneration(
       if (terminal) return;
       cancelRequested = true;
       try {
-        if (nativeAgentRuntime) {
-          await callWorker('agent.generation.cancel', {
-            generationId: identity.generationId,
-          }).catch(() => undefined);
-        }
-        if (isTauri()) {
+        await cancelOwnedRuntime();
+        if (isTauri() && !piRuntime) {
           await invoke<boolean>(nativeAgentRuntime ? 'agent_runtime_cancel' : 'llm_stream_cancel', {
             attemptId: identity.attemptId,
           });
         }
       } finally {
-        if (!nativeAgentRuntime) await cancelWorker();
+        // Persist cancellation from the caller as well as asking the runtime to
+        // stop. Native Agent normally reports its own cancelled event, but that
+        // event can be lost while a view is closing or switching scope. The
+        // Worker operation is idempotent, so the runtime's eventual callback is
+        // harmless and SQLite still reaches a terminal state immediately.
+        try {
+          await cancelWorker();
+        } finally {
+          resolveNativeRuntimeTerminal?.();
+        }
       }
     },
   };

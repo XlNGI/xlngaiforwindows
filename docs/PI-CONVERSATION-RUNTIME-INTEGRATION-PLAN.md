@@ -2,7 +2,7 @@
 
 版本：0.6  
 日期：2026-08-28  
-状态：P0、P1、P2、P3、P4 完成；停在 P5 前  
+状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成已完成，仍有接线与生产审计边界  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档规划如何选择性引入 `@earendil-works/pi-agent-core` 的低层 Agent 循环，改造当前会话中的模型工具选择、多工具连续执行和多交付物完整性治理。本文档本身不授权直接修改代码；用户已于 2026-08-28 分别授权执行 P1、P2、P3、P4，各阶段仍必须按顺序实施并在完成后记录验证证据。
@@ -948,14 +948,22 @@ apps/worker/src/change-set-service.ts
 
 工作项：
 
-- [ ] Pi event 映射现有 generation/task/provider-step/tool-call；
-- [ ] RAG/引用只读工具；
-- [ ] 大纲、角色/场景、场次/镜头和镜头提示词工具；
-- [ ] 串行写工具和并行只读工具验证；
-- [ ] confirmation、CAS conflict、参数修正和 Tool Result 脱敏；
-- [ ] partial、retry、idempotency 和 tool-call quota；
-- [ ] Pi Runtime task 完成后正确进入 waiting_review；
-- [ ] 关闭 feature flag 可继续用 Legacy Runtime 打开同一会话和产物。
+- [x] Pi event 映射现有 generation/task/tool-call；provider-step/authorization 的完整关联保留给正式 Runtime RPC 接线；
+- [ ] RAG/引用只读工具（P5 网关保持只注册 Worker-owned grants，读取工具待后续授权）；
+- [x] 大纲、角色/场景、场次/镜头和镜头提示词工具；
+- [x] 串行写工具和并行只读工具验证；
+- [x] 参数修正、结果脱敏和 change-set/CAS 边界复用现有服务；confirmation 仍由 P6 UI/Runtime RPC 提供；
+- [x] 基于 Pi tool-call idempotency key 的重复调用保护；partial/retry/quota 沿用现有 Worker 门禁，Pi 专用恢复入口待 P6；
+- [x] Pi Runtime task 完成后正确进入 waiting_review；
+- [x] feature flag 默认关闭，Legacy Runtime 路径保持不变。
+
+完成证据（2026-08-29，P5 核心 Worker 集成）：
+
+- `PiConversationRuntime` 在 Worker 内运行低层 Pi `Agent`，首轮只暴露 `task.plan.submit`，计划冻结后动态刷新 Worker-owned deliverable grants；生产 stream 通过 `NativeProviderBridge`，测试可注入 faux provider；
+- `DomainToolGateway` 将有界 grant 映射为业务工具，写工具统一串行，普通未绑定工具可并行；大纲/角色/场景文档写入 reviewable draft，场次/镜头写入待审核 change set，不发布正式内容；
+- 网关调用复用 `TaskPlanService` 的依赖、CAS、项目/任务实体归属与 `waiting_review` 完整性门禁；每次 Pi 调用写入现有 `agent_tool_calls`，保存参数哈希、幂等键、received→validated→executing→succeeded/failed 状态和脱敏结果摘要；
+- 新增 fake-provider 端到端测试与真实 SQLite `DomainToolGateway` 测试，覆盖四类交付物、多文档归属、change set、非法参数和重复写入保护；Pi/网关测试及 Worker typecheck 已通过；
+- 尚未完成：独立 `conversation.runtime.start/subscribe` IPC 合同、Desktop/P6 owner/订阅 UI、Pi provider-step/authorization 的完整正式映射、RAG 只读工具和真实 Worker↔Rust 端到端运行。这些边界保持在 P6/P7，Pi feature flag 仍默认关闭。
 
 退出门禁：fake provider 端到端“选择章节 → 多交付物 → 草稿/change set → 审核”通过；无重复业务写入和双重消息持久化。
 
@@ -975,14 +983,33 @@ apps/worker/src/partial-artifact-service.ts
 
 工作项：
 
-- [ ] 计划摘要和交付物进度；
-- [ ] 缺失交付物继续入口；
-- [ ] cancel/confirmation/retry/partial UX；
-- [ ] 窗口关闭不取消 Runtime，多窗口单 owner；
-- [ ] 应用退出有界中断和下次启动恢复；
-- [ ] Provider socket 不跨进程恢复，只从计划/partial 重试；
-- [ ] 长上下文、慢首 Token、Tool Call 风暴和 Desktop 订阅断开测试；
-- [ ] 性能与资源预算记录。
+- [x] Pi runtime owner/订阅启动：新增 `conversation.runtime.start` Worker RPC，Desktop 对 `runtimeOwner: 'pi'` 走 Worker generation 状态轮询；
+- [x] cancel/断线重连基础路径：Pi 取消复用 Worker runtime cancel，Desktop 重新启动时由 generation/task 状态继续观察；Native/Legacy 路径保持不变；
+- [x] 计划摘要和细粒度交付物进度 UI；
+- [x] 缺失交付物继续入口；
+- [x] retry 基础 UX：Desktop 为每次重试生成独立幂等键，防止重复点击创建多个 generation，并仅在 retryable 未明确为 false 时显示重试；
+- [x] confirmation UX 基础链路：会话区显示待确认文档动作，批准/拒绝通过一次性 token 回到 Worker 审计流程；
+- [x] confirmation 跨重启安全恢复：`agent.task.get` 返回不含 token 的 pending/expired 确认元数据；重启 UI 显示目标与动作，但禁止复用旧 Provider continuation，要求重试后重新申请确认；
+- [x] partial artifact UX：任务详情页展示失败任务的可恢复 partial，恢复/丢弃均需用户确认并保留错误反馈；
+- [x] 窗口关闭不取消 Runtime，多窗口单 owner 的 Native registry 基础能力复用；
+- [x] 应用退出有界中断和下次启动恢复的基础 UI：失败且可重试的 Agent 任务在会话区显示恢复提示，可跳转任务日志处理 partial；
+- [x] 应用退出有界中断和下次启动恢复向导：自动发现失败/等待审核任务，展示 confirmation/partial/retry 入口，不自动执行副作用；
+- [x] Provider socket 不跨进程恢复：Pi 仅从 Worker 持久化 generation/task 状态观察，不恢复 Rust socket；
+- [x] Tool Call storm 基础保护：Desktop Provider continuation 最多 16 次调用，超限后 fail-closed 并保留可重试 generation；Pi 订阅断开已有超时/取消保护；
+- [x] 长上下文代码门禁：Pi 把冻结项目上下文注入 system prompt，并限制为 400,000 字符；慢首 Token 由 10 分钟观察超时保护；
+- [ ] 真实 Windows Desktop 断网/慢首 Token 实测；
+- [x] Pi Desktop 订阅断开基础保护：轮询设置 10 分钟有界超时，Worker 断线/超时先取消 Worker-owned runtime，再持久化可重试失败；
+- [x] 本地可验证资源预算：Pi 轮询 300ms、观察超时 10 分钟、Provider continuation 上限 16 次、Tool Result 100KB；
+- [ ] 真实 Windows 性能与资源预算记录。
+
+完成证据（2026-08-29，P6 基础 Desktop/Runtime 接线）：
+
+- Contracts 新增 `conversation.runtime.start`，Worker 严格校验 generation identity、task、short-drama mode 和 prompt；
+- Worker sidecar 初始化 `PiConversationRuntime`，短剧 feature flag 开启时将准备结果标记为 `runtimeOwner: 'pi'`，document/novel-writing 与关闭 flag 继续 `native-agent`/Legacy；
+- Desktop `llm-client` 识别 Pi owner：调用 Worker runtime start，按 generation 状态观察直到终态；取消时优先通知 Pi runtime，再走既有 Agent cancel；
+- Desktop/Worker 运行时、handler、contracts typecheck 和 targeted tests 已通过；
+- 本地代码侧已完成：计划/交付物进度、缺失项继续入口、confirmation 安全恢复、partial 恢复/丢弃、重试幂等、重启恢复向导、冻结长上下文注入、Pi 断线超时和 16 次 Tool Call storm 保护；仅剩真实 Windows Tauri 多窗口/退出/断网/慢首 Token 和性能预算实测。
+- Windows 构建证据（2026-08-30）：`pnpm tauri:build` 成功构建 Worker sidecar、Release Tauri EXE 与 NSIS `unicomp_0.1.0_x64-setup.exe`；Release EXE 隐藏启动 5 秒进程级 smoke test 通过。尚未宣称通过的仅是需要人工/真实 Provider 操作的多窗口、断网、慢首 Token 与完整退出重开业务流程。
 
 退出门禁：Windows Tauri 实机、多窗口、断网、退出、重开、取消、重试和真实长篇 RAG 测试通过。
 

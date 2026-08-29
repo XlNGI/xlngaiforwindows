@@ -15,7 +15,13 @@ import {
   publishDevHttpToken,
   removeDevHttpToken,
 } from './dev-http-security.js';
-import { handleRequest, parseRequest, recordQueueWait, recordWorkerError } from './handler.js';
+import {
+  configurePiConversationRuntime,
+  handleRequest,
+  parseRequest,
+  recordQueueWait,
+  recordWorkerError,
+} from './handler.js';
 import { JsonLineWriter, NativeProviderBridge } from './native-provider-bridge.js';
 import { RequestScheduler } from './request-scheduler.js';
 
@@ -65,6 +71,7 @@ function streamMedia(
 function startStdio(): void {
   const writer = new JsonLineWriter(process.stdout);
   const bridge = new NativeProviderBridge({ send: (envelope) => writer.write(envelope) });
+  configurePiConversationRuntime(bridge);
   const writeResponse = (response: unknown): void => {
     void writer.write(response).catch((error) => recordWorkerError('ipc.write', error));
   };

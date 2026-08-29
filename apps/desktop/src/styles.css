@@ -2622,6 +2622,57 @@ button {
   margin: 14px;
 }
 
+.task-log-detail-notice {
+  margin: 0;
+  padding: 8px 10px;
+  color: #e3c46b;
+  border: 1px solid #6c5a31;
+  background: #2a261c;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-confirmation {
+  display: grid;
+  gap: 6px;
+  margin: 0 14px 10px;
+  padding: 10px;
+  color: #e6e9ea;
+  border: 1px solid #7b6330;
+  background: #29251b;
+  font-size: 11px;
+}
+
+.agent-confirmation span,
+.agent-confirmation small {
+  color: #c9c1a8;
+  font-size: 10px;
+}
+
+.agent-confirmation > div {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.agent-recovery-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 14px 10px;
+  padding: 8px 10px;
+  color: #d8c58c;
+  border: 1px solid #6c5a31;
+  background: #262218;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.agent-recovery-notice span {
+  min-width: 0;
+}
+
 .task-log-detail-section {
   display: grid;
   gap: 9px;

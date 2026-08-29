@@ -317,6 +317,11 @@ export function App() {
   const [composerMode, setComposerMode] = useState<ComposerMode>(initialComposerMode);
   const [episodeChapterIds, setEpisodeChapterIds] = useState<string[]>([]);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
+  const [agentTask, setAgentTask] = useState<import('@ai-video/contracts').AgentTaskDetail>();
+  const [agentConfirmation, setAgentConfirmation] =
+    useState<import('@ai-video/contracts').AgentToolConfirmationRequest>();
+  const confirmationResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const retryRequestsRef = useRef(new Set<string>());
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
   const generationPollVersion = useRef(0);
@@ -543,6 +548,9 @@ export function App() {
         )
         .then((result) => {
           if (agentTaskEventPollRef.current !== poll) return;
+          void callWorker('agent.task.get', { taskId })
+            .then(setAgentTask)
+            .catch(() => undefined);
           poll.afterSequence = result.nextSequence;
           const latest = result.events.at(-1);
           if (latest?.level === 'error') setChatMessage(latest.summary);
@@ -567,6 +575,7 @@ export function App() {
         : undefined;
     const isAgentGeneration = agentTaskId !== undefined;
     if (agentTaskId) {
+      setAgentTask(undefined);
       startAgentTaskEventPolling(agentTaskId);
     } else {
       stopAgentTaskEventPolling();
@@ -640,8 +649,14 @@ export function App() {
         }
       },
       onConfirmation(request) {
-        const action = request.action === 'document.archive' ? '归档' : '恢复归档';
-        return Promise.resolve(window.confirm(`确认${action}文档“${request.documentTitle}”？`));
+        setAgentConfirmation(request);
+        return new Promise<boolean>((resolve) => {
+          confirmationResolverRef.current = (approved) => {
+            confirmationResolverRef.current = undefined;
+            setAgentConfirmation(undefined);
+            resolve(approved);
+          };
+        });
       },
     });
     nativeLlmRun.current = run;
@@ -669,6 +684,15 @@ export function App() {
     // cannot put a cancelled generation back into the streaming state.
     nativeLlmRun.current = undefined;
     await run.cancel().catch(() => undefined);
+    const terminal = await callWorker('llm.generation.get', {
+      generationId: run.identity.generationId,
+    }).catch(() => undefined);
+    if (terminal) {
+      setGeneration((current) =>
+        current?.generationId === terminal.generationId ? terminal : current,
+      );
+      setMessages((current) => mergeGenerationMessage(current, terminal.conversationId, terminal));
+    }
     stopAgentTaskEventPolling();
   };
 
@@ -818,6 +842,7 @@ export function App() {
   useEffect(
     () => () => {
       void nativeLlmRun.current?.cancel();
+      confirmationResolverRef.current?.(false);
     },
     [],
   );
@@ -889,6 +914,47 @@ export function App() {
       if (generationPollVersion.current === version) generationPollVersion.current += 1;
     };
   }, [project?.id, generation?.generationId, generation?.status, conversation?.id]);
+
+  // Re-discover persisted Agent tasks after app restart or conversation switches.
+  // SQLite remains authoritative; this only restores observation/presentation and
+  // never starts a second runtime or replays a side effect.
+  useEffect(() => {
+    const projectId = project?.id;
+    const conversationId = conversation?.id;
+    if (!projectId || !conversationId) {
+      stopAgentTaskEventPolling();
+      setAgentTask(undefined);
+      return;
+    }
+    let active = true;
+    void Promise.resolve()
+      .then(() => callWorker('agent.task.list', { limit: 50, conversationId }))
+      .then((tasks) => {
+        if (!active) return;
+        const candidate = tasks
+          .filter((task) => ['queued', 'running', 'waiting_review', 'failed'].includes(task.status))
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+        if (!candidate) {
+          stopAgentTaskEventPolling();
+          setAgentTask(undefined);
+          return;
+        }
+        void Promise.resolve()
+          .then(() => callWorker('agent.task.get', { taskId: candidate.id }))
+          .then((detail) => {
+            if (!active) return;
+            setAgentTask(detail);
+            if (['queued', 'running'].includes(detail.task.status)) {
+              startAgentTaskEventPolling(detail.task.id);
+            }
+          })
+          .catch(() => undefined);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [project?.id, conversation?.id]);
 
   const runProjectAction = async (action: () => Promise<ProjectInfo | string | undefined>) => {
     const requestId = ++projectActionRequest.current;
@@ -1319,6 +1385,8 @@ export function App() {
   const cancelGeneration = async () => {
     const current = generation;
     if (!current || !isGenerationActive(current)) return;
+    const agentTaskId = agentTask?.task.id;
+    confirmationResolverRef.current?.(false);
     generationPollVersion.current += 1;
     if (current.executionMode === 'native') {
       await cancelNativeLlmRun();
@@ -1331,6 +1399,14 @@ export function App() {
       setMessages((messages) =>
         mergeGenerationMessage(messages, current.conversationId, cancelled),
       );
+      if (agentTaskId) {
+        const detail = await callWorker('agent.task.get', { taskId: agentTaskId }).catch(
+          () => undefined,
+        );
+        if (detail) {
+          setAgentTask((existing) => (existing?.task.id === agentTaskId ? detail : existing));
+        }
+      }
       setChatMessage('生成已停止');
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : '停止生成失败');
@@ -1338,18 +1414,31 @@ export function App() {
   };
 
   const retryGeneration = async (assistantMessageId: string) => {
-    if (selectedLlmProfile && selectedLlmModel) {
-      const prepared = await callWorker('llm.generation.retryPrepare', {
+    if (retryRequestsRef.current.has(assistantMessageId)) return;
+    retryRequestsRef.current.add(assistantMessageId);
+    try {
+      const idempotencyKey = `desktop-retry:${assistantMessageId}:${crypto.randomUUID()}`;
+      if (selectedLlmProfile && selectedLlmModel) {
+        const prepared = await callWorker('llm.generation.retryPrepare', {
+          assistantMessageId,
+          providerProfileId: selectedLlmProfile.id,
+          modelId: selectedLlmModel.id,
+          idempotencyKey,
+        });
+        launchPreparedGeneration(prepared);
+        return;
+      }
+      const retried = await callWorker('llm.generation.retry', {
         assistantMessageId,
-        providerProfileId: selectedLlmProfile.id,
-        modelId: selectedLlmModel.id,
+        idempotencyKey,
       });
-      launchPreparedGeneration(prepared);
-      return;
+      setGeneration(retried);
+      setMessages((current) => mergeGenerationMessage(current, retried.conversationId, retried));
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '重试生成失败');
+    } finally {
+      retryRequestsRef.current.delete(assistantMessageId);
     }
-    const retried = await callWorker('llm.generation.retry', { assistantMessageId });
-    setGeneration(retried);
-    setMessages((current) => [...current, retried.assistantMessage]);
   };
 
   const promoteMessage = async (
@@ -1873,6 +1962,18 @@ export function App() {
       episodeChapterCount={episodeChapterIds.length}
       contextPreview={contextPreview}
       generation={generation}
+      agentTask={agentTask}
+      confirmation={agentConfirmation}
+      onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
+      onOpenTaskLog={() => {
+        setNavigationMode('project');
+        setView('tasks');
+      }}
+      onContinueAgentTask={() => {
+        const prompt = '请继续完成尚未成功的短剧交付物，并调用已授权工具。';
+        setComposer(prompt);
+        if (conversation && composerMode === 'short-drama') void sendMessage(prompt);
+      }}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
       showCloseAction={false}
       onScopeChange={(scope) => {

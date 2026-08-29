@@ -24,6 +24,8 @@ import type {
   ProviderModelInfo,
   ProviderProfileInfo,
   ProductionContextInfo,
+  AgentToolConfirmationRequest,
+  AgentTaskPendingConfirmationInfo,
 } from '@ai-video/contracts';
 
 type PromotionTarget = 'document' | 'memory' | 'constraint';
@@ -50,6 +52,11 @@ interface ChatPanelProps {
   episodeChapterCount?: number;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
+  agentTask?: import('@ai-video/contracts').AgentTaskDetail;
+  confirmation?: AgentToolConfirmationRequest | AgentTaskPendingConfirmationInfo;
+  onConfirmAgentAction?: (approved: boolean) => void;
+  onOpenTaskLog?: () => void;
+  onContinueAgentTask?: () => void;
   onClose?: () => void;
   showCloseAction?: boolean;
   /** @deprecated Use onClose. Kept temporarily for component consumers outside the workspace host. */
@@ -102,6 +109,11 @@ export function ChatPanel({
   episodeChapterCount = 0,
   contextPreview,
   generation,
+  agentTask,
+  confirmation,
+  onConfirmAgentAction,
+  onOpenTaskLog,
+  onContinueAgentTask,
   onClose,
   showCloseAction = true,
   onCollapse,
@@ -129,6 +141,10 @@ export function ChatPanel({
   onCreateNovelChapter,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
+  const displayedConfirmation = confirmation ?? agentTask?.pendingConfirmation;
+  const confirmationIsActionable = Boolean(
+    confirmation && 'confirmationToken' in confirmation && onConfirmAgentAction,
+  );
   return (
     <section className="chat-panel panel-border" aria-label="项目会话">
       <div className="panel-heading">
@@ -412,6 +428,8 @@ export function ChatPanel({
                     添加约束
                   </button>
                   {message.status === 'failed' &&
+                    (generation?.assistantMessage.id !== message.id ||
+                      generation.retryable !== false) &&
                     (llmStatus?.configured || llmProfiles.length > 0) && (
                       <button type="button" onClick={() => onRetryGeneration(message.id)}>
                         <RefreshCw size={11} />
@@ -425,6 +443,78 @@ export function ChatPanel({
         )}
       </div>
       {statusMessage && <small className="chat-status">{statusMessage}</small>}
+      {agentTask?.plan && (
+        <div className="agent-progress" role="status">
+          <div className="agent-progress-heading">
+            <span>
+              短剧任务 · {agentTask.task.phase === 'waiting_review' ? '等待审核' : '执行中'}
+            </span>
+            <span>
+              {
+                agentTask.plan.deliverables.filter(
+                  (item) => item.required && item.status === 'succeeded',
+                ).length
+              }
+              /{agentTask.plan.deliverables.filter((item) => item.required).length}
+            </span>
+          </div>
+          <div className="agent-progress-items">
+            {agentTask.plan.deliverables
+              .filter((item) => item.required)
+              .map((item) => (
+                <span key={item.kind} className={`agent-progress-item ${item.status}`}>
+                  {item.status === 'succeeded' ? '✓' : item.status === 'in_progress' ? '…' : '○'}{' '}
+                  {item.kind}
+                </span>
+              ))}
+          </div>
+          {agentTask.task.status === 'waiting_review' && onContinueAgentTask && (
+            <button type="button" onClick={onContinueAgentTask}>
+              继续完成缺失交付物
+            </button>
+          )}
+        </div>
+      )}
+      {displayedConfirmation && (
+        <div className="agent-confirmation" role="alert">
+          <strong>
+            需要确认：
+            {displayedConfirmation.action === 'document.archive' ? '归档' : '恢复归档'}文档
+          </strong>
+          <span>“{displayedConfirmation.documentTitle}”</span>
+          <small>确认有效期至 {new Date(displayedConfirmation.expiresAt).toLocaleString()}</small>
+          {confirmationIsActionable ? (
+            <div>
+              <button
+                type="button"
+                className="button primary"
+                onClick={() => onConfirmAgentAction?.(true)}
+              >
+                批准
+              </button>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => onConfirmAgentAction?.(false)}
+              >
+                拒绝
+              </button>
+            </div>
+          ) : (
+            <small>应用已重新启动，原 Provider 会话不可恢复。请重试任务以重新申请确认。</small>
+          )}
+        </div>
+      )}
+      {agentTask?.task.status === 'failed' && agentTask.task.retryable && (
+        <div className="agent-recovery-notice" role="status">
+          <span>上次 Agent 任务未完成；可以重试，或先在任务日志中恢复未完成产物。</span>
+          {onOpenTaskLog && (
+            <button type="button" className="button secondary" onClick={onOpenTaskLog}>
+              查看任务日志
+            </button>
+          )}
+        </div>
+      )}
       <div className="composer">
         <textarea
           aria-label="会话消息"

@@ -42,6 +42,7 @@ const statusLabel: Record<string, string> = {
   failed: '失败',
   cancelled: '已取消',
   rejected: '已拒绝',
+  recovering: '恢复中',
 };
 
 const eventLevelLabel: Record<AgentTaskDetail['events'][number]['level'], string> = {
@@ -94,6 +95,7 @@ function AgentTaskDetailPanel({
   const { task, events, documents, providerSteps, researchSources } = detail;
   const [partials, setPartials] = useState<AgentPartialArtifactInfo[]>([]);
   const [partialBusy, setPartialBusy] = useState<string>();
+  const [partialError, setPartialError] = useState<string>();
 
   useEffect(() => {
     let active = true;
@@ -110,7 +112,9 @@ function AgentTaskDetailPanel({
   }, [task.id]);
 
   const discardPartial = async (partial: AgentPartialArtifactInfo) => {
+    if (!window.confirm('确定丢弃这份未完成产物吗？丢弃后将清除其内容，且无法恢复。')) return;
     setPartialBusy(partial.id);
+    setPartialError(undefined);
     try {
       await callWorker('agent.partial.discard', {
         artifactId: partial.id,
@@ -123,6 +127,8 @@ function AgentTaskDetailPanel({
             : item,
         ),
       );
+    } catch (reason) {
+      setPartialError(reason instanceof Error ? reason.message : '丢弃未完成产物失败');
     } finally {
       setPartialBusy(undefined);
     }
@@ -130,7 +136,9 @@ function AgentTaskDetailPanel({
 
   const recoverPartial = async (partial: AgentPartialArtifactInfo) => {
     if (!partial.documentId) return;
+    if (!window.confirm('将未完成内容恢复为新的用户草稿吗？原有版本不会被覆盖。')) return;
     setPartialBusy(partial.id);
+    setPartialError(undefined);
     try {
       const document = await callWorker('document.get', { documentId: partial.documentId });
       const recovered = await callWorker('agent.partial.recover', {
@@ -146,6 +154,8 @@ function AgentTaskDetailPanel({
         ),
       );
       onOpenDocument?.(recovered.id);
+    } catch (reason) {
+      setPartialError(reason instanceof Error ? reason.message : '恢复未完成产物失败');
     } finally {
       setPartialBusy(undefined);
     }
@@ -380,6 +390,17 @@ function AgentTaskDetailPanel({
         <h3 id="task-log-partials-heading">
           <FileText size={15} /> 未完成产物
         </h3>
+        {task.status === 'failed' &&
+          partials.some((partial) => partial.status === 'recoverable') && (
+            <p className="task-log-detail-notice" role="status">
+              任务失败，但仍有可恢复的未完成产物。请选择“恢复草稿”或“丢弃”。
+            </p>
+          )}
+        {partialError && (
+          <p className="task-log-detail-error" role="alert">
+            {partialError}
+          </p>
+        )}
         {partials.length > 0 ? (
           <ul className="task-log-artifacts">
             {partials.map((partial) => (

@@ -284,6 +284,55 @@ describe('streamPreparedLlmGeneration', () => {
     expect(states.at(-1)).toMatchObject({ status: 'complete' });
   });
 
+  it('fails closed after sixteen provider invocations to prevent a tool-call storm', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+    };
+    let starts = 0;
+    native.invoke.mockImplementation((_command, args) => {
+      starts += 1;
+      const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+        .onEvent;
+      channel.onmessage?.({ type: 'started' });
+      channel.onmessage?.({
+        type: 'toolCalls',
+        providerResponseId: `response-${starts}`,
+        calls: [
+          {
+            id: `call-${starts}`,
+            name: 'document.create_draft',
+            argumentsJson: '{"title":"Draft","contentMarkdown":"# Draft"}',
+            authorizationHandle: 'native-only-handle',
+          },
+        ],
+      });
+      return Promise.resolve();
+    });
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'agent.generation.executeTools')
+        return Promise.resolve({
+          continuation: {
+            protocol: 'openai-responses',
+            previousResponseId: 'response-tool',
+            outputs: [{ callId: 'call', output: '{}' }],
+          },
+        });
+      if (method === 'llm.generation.fail')
+        return Promise.resolve({ ...state('failed', ''), retryable: true });
+      if (method === 'agent.generation.cancel') return Promise.resolve({ cancelled: true });
+      return Promise.resolve(prepared.generation);
+    });
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState: (next) => states.push(next),
+    });
+    await run.completion;
+    expect(starts).toBe(16);
+    expect(states.at(-1)).toMatchObject({ status: 'failed', retryable: true });
+  });
+
   it('subscribes to a Native-owned Agent runtime without duplicating Worker tool execution', async () => {
     const agentPrepared: AgentGenerationPrepareResult = {
       ...prepared,
@@ -317,6 +366,103 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith('llm.generation.get', { generationId: 'generation' });
     expect(callWorker).not.toHaveBeenCalledWith('agent.generation.executeTools', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('agent.providerStep.complete', expect.anything());
+  });
+
+  it('persists Native-owned Agent cancellation and settles when its terminal event is lost', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'native-agent',
+    };
+    native.invoke.mockImplementation((command) => {
+      if (command === 'agent_runtime_start') return Promise.resolve();
+      if (command === 'agent_runtime_cancel') return Promise.resolve(true);
+      throw new Error(`Unexpected native command ${command}`);
+    });
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState: (next) => states.push(next),
+    });
+    await Promise.resolve();
+
+    await run.cancel();
+    await run.completion;
+
+    expect(callWorker).toHaveBeenCalledWith('agent.generation.cancel', {
+      generationId: 'generation',
+    });
+    expect(native.invoke).toHaveBeenCalledWith('agent_runtime_cancel', {
+      attemptId: 'attempt',
+    });
+    expect(callWorker).toHaveBeenCalledWith('llm.generation.cancel', {
+      generationId: 'generation',
+    });
+    expect(states.at(-1)?.status).toBe('cancelled');
+  });
+
+  it('starts and observes a Worker-owned Pi runtime without opening a native socket', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'pi',
+    };
+    let polls = 0;
+    // eslint-disable-next-line @typescript-eslint/require-await
+    vi.mocked(callWorker).mockImplementation(async (method) => {
+      if (method === 'conversation.runtime.start') return { runtime: 'pi', taskId: 'agent-task' };
+      if (method === 'llm.generation.get') {
+        polls += 1;
+        return { ...prepared.generation, status: polls > 1 ? 'complete' : 'streaming' };
+      }
+      return prepared.generation;
+    });
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState: (next) => states.push(next),
+    });
+    await run.completion;
+    expect(native.invoke).not.toHaveBeenCalled();
+    expect(callWorker).toHaveBeenCalledWith(
+      'conversation.runtime.start',
+      expect.objectContaining({ taskId: 'agent-task', mode: 'short-drama' }),
+    );
+    expect(states.at(-1)?.status).toBe('complete');
+  });
+
+  it('fails and cancels the Worker-owned Pi runtime when observation disconnects', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'pi',
+    };
+    // eslint-disable-next-line @typescript-eslint/require-await
+    vi.mocked(callWorker).mockImplementation(async (method) => {
+      if (method === 'conversation.runtime.start') return { runtime: 'pi', taskId: 'agent-task' };
+      if (method === 'llm.generation.get') throw new Error('Worker response channel closed');
+      if (method === 'agent.generation.cancel') return state('cancelled', '');
+      if (method === 'llm.generation.fail') {
+        return {
+          ...prepared.generation,
+          status: 'failed',
+          error: 'Worker response channel closed',
+          retryable: true,
+        };
+      }
+      return prepared.generation;
+    });
+    const states: LlmGenerationInfo[] = [];
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState: (next) => states.push(next),
+    });
+    await run.completion;
+    expect(native.invoke).not.toHaveBeenCalled();
+    expect(callWorker).toHaveBeenCalledWith('agent.generation.cancel', {
+      generationId: 'generation',
+    });
+    expect(states.at(-1)?.status).toBe('failed');
   });
 
   it('returns a Native-owned Agent confirmation to the Native runtime without calling the Worker', async () => {

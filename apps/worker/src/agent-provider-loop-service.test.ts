@@ -941,6 +941,12 @@ describe('AgentProviderLoopService', () => {
       ],
     });
     expect(pending.confirmation?.documentId).toBe(document.id);
+    expect(workflow.getTask({ taskId: agent.taskId }).pendingConfirmation).toMatchObject({
+      action: 'document.archive',
+      documentId: document.id,
+      documentTitle: 'Archive me',
+      status: 'pending',
+    });
     expect(workflow.getDocument(document.id).lifecycleStatus).toBe('active');
     const confirmed = loop.confirmTool({
       ...prepared.stream,
@@ -950,6 +956,7 @@ describe('AgentProviderLoopService', () => {
     expect(confirmed.continuation?.outputs[0]?.output).toContain('archived');
     expect(confirmed.tools?.map((tool) => tool.name)).toEqual(['document.archive']);
     expect(workflow.getDocument(document.id).lifecycleStatus).toBe('archived');
+    expect(workflow.getTask({ taskId: agent.taskId }).pendingConfirmation).toBeUndefined();
     expect(() =>
       loop.confirmTool({
         ...prepared.stream,

@@ -841,6 +841,12 @@ export function validateSessionRequestParams(
         }
       }
       break;
+    case 'conversation.runtime.start':
+      validateIdentity(params, ['taskId', 'mode', 'prompt']);
+      requireId(params, 'taskId');
+      requireEnum(params, 'mode', new Set(['short-drama']));
+      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      break;
     case 'agent.generation.cancel':
       rejectUnknown(params, ['generationId']);
       requireId(params, 'generationId');

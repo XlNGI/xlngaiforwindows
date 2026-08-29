@@ -1,11 +1,301 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessageInfo, ConversationInfo } from '@ai-video/contracts';
+import type {
+  AgentToolConfirmationRequest,
+  ChatMessageInfo,
+  ConversationInfo,
+} from '@ai-video/contracts';
 import { ChatPanel } from './ChatPanel';
 
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
+  it('renders an in-session confirmation card and reports the user decision', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const confirmation: AgentToolConfirmationRequest = {
+      confirmationToken: 'token',
+      action: 'document.archive',
+      documentId: 'document',
+      documentTitle: '旧草稿',
+      expiresAt: '2026-08-03T01:00:00.000Z',
+    };
+    const onConfirm = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        confirmation={confirmation}
+        onConfirmAgentAction={onConfirm}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('旧草稿');
+    fireEvent.click(screen.getByRole('button', { name: '批准' }));
+    expect(onConfirm).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
+    expect(onConfirm).toHaveBeenCalledWith(false);
+  });
+
+  it('shows a restart recovery notice for retryable Agent tasks', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onOpenTaskLog = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentTask={{
+          task: {
+            id: 'task',
+            projectId: 'project',
+            conversationId: conversation.id,
+            taskType: 'document-create',
+            scopeType: 'project',
+            title: '中断任务',
+            status: 'failed',
+            phase: 'recovering',
+            retryable: true,
+            createdAt: '2026-08-03T00:00:00.000Z',
+            updatedAt: '2026-08-03T00:00:01.000Z',
+            rowVersion: 1,
+          },
+          events: [],
+          documents: [],
+          providerSteps: [],
+          researchSources: [],
+        }}
+        onOpenTaskLog={onOpenTaskLog}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/上次 Agent 任务未完成/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看任务日志' }));
+    expect(onOpenTaskLog).toHaveBeenCalledOnce();
+  });
+
+  it('shows persisted confirmation recovery metadata without exposing approval actions', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentTask={{
+          task: {
+            id: 'task',
+            projectId: 'project',
+            conversationId: conversation.id,
+            taskType: 'document-archive',
+            scopeType: 'project',
+            title: '归档任务',
+            status: 'failed',
+            phase: 'recovering',
+            retryable: true,
+            createdAt: '2026-08-03T00:00:00.000Z',
+            updatedAt: '2026-08-03T00:00:01.000Z',
+            rowVersion: 1,
+          },
+          pendingConfirmation: {
+            action: 'document.archive',
+            documentId: 'document',
+            documentTitle: '待归档草稿',
+            expiresAt: '2026-08-03T01:00:00.000Z',
+            status: 'expired',
+          },
+          events: [],
+          documents: [],
+          providerSteps: [],
+          researchSources: [],
+        }}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('待归档草稿');
+    expect(screen.getByText(/原 Provider 会话不可恢复/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '批准' })).not.toBeInTheDocument();
+  });
+
+  it('renders required deliverable progress and sends the missing-item continuation', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onContinue = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentTask={{
+          task: {
+            id: 'task',
+            projectId: 'project',
+            conversationId: conversation.id,
+            taskType: 'document-create',
+            scopeType: 'project',
+            title: '短剧任务',
+            status: 'waiting_review',
+            phase: 'waiting_review',
+            createdAt: '2026-08-03T00:00:00.000Z',
+            updatedAt: '2026-08-03T00:00:01.000Z',
+            rowVersion: 1,
+          },
+          plan: {
+            id: 'plan',
+            taskId: 'task',
+            projectId: 'project',
+            plan: {
+              version: 1,
+              mode: 'short-drama',
+              action: 'generate',
+              deliverables: [
+                { kind: 'episode-outline', required: true, dependsOn: [] },
+                { kind: 'shot-prompts', required: true, dependsOn: ['episode-outline'] },
+              ],
+              constraints: [],
+            },
+            trustedScope: { selectedChapterIds: [] },
+            status: 'active',
+            deliverables: [
+              {
+                id: 'd1',
+                kind: 'episode-outline',
+                required: true,
+                dependsOn: [],
+                status: 'succeeded',
+              },
+              {
+                id: 'd2',
+                kind: 'shot-prompts',
+                required: true,
+                dependsOn: ['episode-outline'],
+                status: 'pending',
+              },
+            ],
+            createdAt: '2026-08-03T00:00:00.000Z',
+            updatedAt: '2026-08-03T00:00:01.000Z',
+          },
+          events: [],
+          documents: [],
+          providerSteps: [],
+          researchSources: [],
+        }}
+        onContinueAgentTask={onContinue}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('1/2')).toBeInTheDocument();
+    expect(screen.getByText(/shot-prompts/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '继续完成缺失交付物' }));
+    expect(onContinue).toHaveBeenCalledOnce();
+  });
+
   it('submits with Enter and keeps Shift+Enter for a newline', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',

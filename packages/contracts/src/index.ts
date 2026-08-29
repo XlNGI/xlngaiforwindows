@@ -826,10 +826,21 @@ export interface AgentResearchSourceInfo {
 
 export interface AgentTaskDetail {
   task: AgentTaskInfo;
+  pendingConfirmation?: AgentTaskPendingConfirmationInfo;
+  plan?: ConversationTaskPlanInfo;
   events: AgentTaskEventInfo[];
   documents: AgentTaskDocumentArtifact[];
   providerSteps: AgentProviderStepInfo[];
   researchSources: AgentResearchSourceInfo[];
+}
+
+/** Safe-to-display confirmation metadata; the one-time token is never persisted or returned. */
+export interface AgentTaskPendingConfirmationInfo {
+  action: AgentToolConfirmationRequest['action'];
+  documentId: string;
+  documentTitle: string;
+  expiresAt: string;
+  status: 'pending' | 'expired';
 }
 
 export interface AgentTaskListParams {
@@ -1509,7 +1520,7 @@ export type AgentGenerationPrepareResult =
   | (LlmGenerationPrepareResult & {
       agentTaskId: string;
       /** Native-owned runs keep executing when a Desktop view unsubscribes. */
-      runtimeOwner?: 'desktop' | 'native-agent';
+      runtimeOwner?: 'desktop' | 'native-agent' | 'pi';
     })
   | { pendingIntent: AgentPendingIntentInfo };
 
@@ -1533,6 +1544,17 @@ export interface AgentPendingIntentInfo {
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConversationRuntimeStartParams extends LlmGenerationIdentity {
+  taskId: string;
+  mode: ConversationTaskMode;
+  prompt: string;
+}
+
+export interface ConversationRuntimeStartResult {
+  runtime: 'pi';
+  taskId: string;
 }
 
 export interface NovelPendingIntentListParams {
@@ -2353,6 +2375,10 @@ export interface WorkerMethodMap {
   'agent.generation.prepare': {
     params: AgentGenerationPrepareParams;
     result: AgentGenerationPrepareResult;
+  };
+  'conversation.runtime.start': {
+    params: ConversationRuntimeStartParams;
+    result: ConversationRuntimeStartResult;
   };
   'agent.generation.executeTools': {
     params: AgentGenerationExecuteToolsParams;

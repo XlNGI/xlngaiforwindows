@@ -8,6 +8,9 @@ export interface ConversationRuntimeStartRequest {
   projectSessionId: string;
   conversationId: string;
   mode: ConversationTaskMode;
+  /** Native generation identity and prompt are supplied by the Worker owner. */
+  identity?: import('@ai-video/contracts').LlmGenerationIdentity;
+  prompt?: string;
 }
 
 export interface ConversationRuntimeStartResult {
