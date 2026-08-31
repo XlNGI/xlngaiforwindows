@@ -8,6 +8,7 @@ import {
   ProviderProfileValidationError,
 } from './app-settings-service.js';
 import { emptyModelCapabilities } from './provider-registry.js';
+import { getAdapter } from '@ai-video/generation-adapters';
 
 const temporaryDirectories: string[] = [];
 
@@ -116,6 +117,40 @@ describe('AppSettingsService', () => {
     const connected = service.completeConnectionTest({ profileId: profile.id, status: 'ready' });
     expect(connected.modelSyncStatus).toBe('unsupported');
     expect(connected.models.every((model) => model.source === 'built-in')).toBe(true);
+    service.close();
+  });
+
+  it('tracks adapter schema proposals, confirmation, rollback, and audits', async () => {
+    const service = await createService();
+    const base = getAdapter('TEXT_TO_IMAGE:vidu:viduq2:v2');
+    if (!base) throw new Error('test adapter missing');
+    const proposed = service.proposeAdapterSchema(
+      {
+        adapterKey: base.key,
+        descriptor: {
+          ...base,
+          schemaVersion: base.schemaVersion + 1,
+          parameterSchema: {
+            ...base.parameterSchema,
+            properties: {
+              ...base.parameterSchema.properties,
+              quality: { type: 'string', title: 'Quality', enum: ['standard', 'high'] },
+            },
+          },
+        },
+        reason: 'official schema update',
+      },
+      ['parameter added: quality'],
+    );
+    expect(proposed).toMatchObject({ status: 'proposed', version: 1, requiresConfirmation: true });
+    expect(service.getAdapterSchema(base.key)).toBeNull();
+    const confirmed = service.confirmAdapterSchema({ adapterKey: base.key, version: 1 });
+    expect(confirmed.status).toBe('confirmed');
+    expect(service.getAdapterSchema(base.key)?.schemaVersion).toBe(2);
+    const audits = service.listAdapterSchemaAudits(base.key);
+    expect(audits.map((audit) => audit.action)).toEqual(['confirmed', 'proposed']);
+    const rolledBack = service.rollbackAdapterSchema({ adapterKey: base.key, version: 1 });
+    expect(rolledBack).toMatchObject({ status: 'rolled_back', rolledBackToVersion: 1, version: 2 });
     service.close();
   });
 

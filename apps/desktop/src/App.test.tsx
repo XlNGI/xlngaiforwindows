@@ -1,7 +1,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
-import { App, mergeGenerationMessage } from './App';
+import {
+  App,
+  buildAgentAttachments,
+  collectReferenceImageInputs,
+  composeImageGenerationPrompt,
+  inferAgentCapability,
+  mergeGenerationMessage,
+  normalizeImageDataUrl,
+} from './App';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readMarkdownDocument } from './markdown-import-client';
@@ -13,6 +21,101 @@ const windowApi = vi.hoisted(() => ({
   onResized: vi.fn().mockResolvedValue(() => undefined),
   toggleMaximize: vi.fn().mockResolvedValue(undefined),
 }));
+
+describe('inferAgentCapability', () => {
+  it('treats prompt rewriting about video as a text Agent task', () => {
+    expect(inferAgentCapability('把这个视频改写为 AI 视频生成提示词')).toBe('document');
+    expect(inferAgentCapability('分析附件中的运镜并总结')).toBe('document');
+  });
+
+  it('reserves media capabilities for explicit generation actions', () => {
+    expect(inferAgentCapability('生成一个视频')).toBe('video');
+    expect(inferAgentCapability('生成一张角色图')).toBe('image');
+    expect(inferAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
+    expect(inferAgentCapability('生成角色三视图提示词')).toBe('document');
+  });
+});
+
+describe('composeImageGenerationPrompt', () => {
+  it('carries the generated prompt document into direct image requests', () => {
+    const result = composeImageGenerationPrompt('直接生成角色三视图', {
+      title: '角色三视图提示词',
+      content: '正面、左侧面、背面并列展示；服装和发型保持一致。',
+    });
+    expect(result).toContain('直接生成角色三视图');
+    expect(result).toContain('角色三视图提示词');
+    expect(result).toContain('服装和发型保持一致');
+  });
+
+  it('keeps adapter prompts within the provider schema limit', () => {
+    const result = composeImageGenerationPrompt('生成角色图', {
+      title: '长文档',
+      content: 'x'.repeat(10_000),
+    });
+    expect(result.length).toBeLessThanOrEqual(5_000);
+  });
+});
+
+describe('buildAgentAttachments', () => {
+  it('sends a bounded video first frame instead of the full video data URL', () => {
+    const attachments = buildAgentAttachments([
+      {
+        id: 'video-1',
+        name: 'result.mp4',
+        mimeType: 'video/mp4',
+        size: 8_000_000,
+        kind: 'video',
+        dataUrl: `data:video/mp4;base64,${'x'.repeat(3_000_000)}`,
+        previewDataUrl: 'data:image/jpeg;base64,preview',
+      },
+    ]);
+    expect(attachments).toHaveLength(2);
+    expect(attachments[0]).not.toHaveProperty('dataUrl');
+    expect(attachments[1]).toMatchObject({
+      mimeType: 'image/jpeg',
+      dataUrl: 'data:image/jpeg;base64,preview',
+    });
+  });
+});
+
+describe('collectReferenceImageInputs', () => {
+  it('uses uploaded images and video first-frame previews for image adapters', () => {
+    expect(
+      collectReferenceImageInputs([
+        {
+          id: 'image-1',
+          name: 'character.png',
+          mimeType: 'image/png',
+          size: 100,
+          kind: 'image',
+          dataUrl: 'data:image/png;base64,image',
+        },
+        {
+          id: 'video-1',
+          name: 'result.mp4',
+          mimeType: 'video/mp4',
+          size: 200,
+          kind: 'video',
+          dataUrl: 'data:video/mp4;base64,video',
+          previewDataUrl: 'data:image/jpeg;base64,preview',
+        },
+      ]),
+    ).toEqual(['data:image/png;base64,image', 'data:image/jpeg;base64,preview']);
+  });
+});
+
+describe('normalizeImageDataUrl', () => {
+  it('normalizes headers and removes whitespace from base64 payloads', () => {
+    expect(normalizeImageDataUrl(' DATA:IMAGE/PNG;BASE64, iVBORw0KGgo=\n ')).toBe(
+      'data:image/png;base64,iVBORw0KGgo=',
+    );
+  });
+
+  it('rejects non-image or malformed data URLs', () => {
+    expect(normalizeImageDataUrl('https://example.com/image.png')).toBeUndefined();
+    expect(normalizeImageDataUrl('data:image/png;base64,not valid!')).toBeUndefined();
+  });
+});
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => windowApi,

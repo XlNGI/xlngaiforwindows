@@ -9,9 +9,90 @@ import {
   type WorkerMetricsSnapshot,
   type WorkerRequest,
 } from '@ai-video/contracts';
-import { handleRequest, parseRequest } from './handler.js';
+import {
+  handleRequest,
+  inferUnifiedAgentCapability,
+  modelMatchesUnifiedAgentRequest,
+  parseRequest,
+} from './handler.js';
 
 const temporaryDirectories: string[] = [];
+
+describe('inferUnifiedAgentCapability', () => {
+  it('does not confuse media prompt writing with media generation', () => {
+    expect(inferUnifiedAgentCapability('改写为 AI 视频生成提示词')).toBe('document');
+    expect(inferUnifiedAgentCapability('分析这个视频附件')).toBe('document');
+    expect(inferUnifiedAgentCapability('制作一个视频')).toBe('video');
+    expect(inferUnifiedAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
+    expect(inferUnifiedAgentCapability('生成角色三视图提示词')).toBe('document');
+  });
+});
+
+describe('modelMatchesUnifiedAgentRequest', () => {
+  const baseModel = {
+    enabled: true,
+    unavailableAt: null,
+    remoteModelId: 'qwen-image-edit-2509',
+    capabilities: {
+      text: false,
+      streaming: false,
+      tools: false,
+      vision: false,
+      imageGeneration: false,
+      imageEditing: true,
+      videoGeneration: false,
+    },
+  };
+
+  it('allows reference-image generation without generic vision capability', () => {
+    expect(
+      modelMatchesUnifiedAgentRequest(
+        'image',
+        baseModel,
+        'unicompapi',
+        [
+          {
+            provider: 'unicompapi',
+            model: baseModel.remoteModelId,
+            capability: 'REFERENCE_TO_IMAGE',
+          },
+        ],
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it('does not offer text-to-image models for a request with a reference image', () => {
+    expect(
+      modelMatchesUnifiedAgentRequest(
+        'image',
+        {
+          ...baseModel,
+          remoteModelId: 'qwen-image',
+          capabilities: { ...baseModel.capabilities, imageEditing: false, imageGeneration: true },
+        },
+        'unicompapi',
+        [{ provider: 'unicompapi', model: 'qwen-image', capability: 'TEXT_TO_IMAGE' }],
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  it('still requires vision for document/image-understanding tasks', () => {
+    expect(
+      modelMatchesUnifiedAgentRequest(
+        'document',
+        {
+          ...baseModel,
+          capabilities: { ...baseModel.capabilities, text: true, streaming: true, tools: true },
+        },
+        'unicompapi',
+        [],
+        true,
+      ),
+    ).toBe(false);
+  });
+});
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })));
@@ -164,6 +245,80 @@ describe('worker handler', () => {
         retryable: false,
         operation: 'agent.generation.prepare',
       },
+    });
+  });
+
+  it('accepts the unified Agent request contract and rejects partial model selection', async () => {
+    const response = await handleRequest({
+      id: 'agent-run-partial-model',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.run',
+      params: {
+        conversationId: 'conversation',
+        prompt: '生成一张角色图',
+        providerProfileId: '11111111-1111-4111-8111-111111111111',
+      },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'agent-run-partial-model',
+        operation: 'agent.run',
+      },
+    });
+  });
+
+  it('accepts image/video parameter payloads at the unified Agent boundary', async () => {
+    const response = await handleRequest({
+      id: 'agent-run-parameters',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.run',
+      params: {
+        conversationId: 'conversation',
+        prompt: '生成一张海报',
+        capability: 'image',
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        parameters: { prompt: '海边日落', aspect_ratio: '16:9' },
+      },
+    } as unknown as WorkerRequest);
+
+    expect(response).toMatchObject({ ok: true });
+  });
+
+  it('exposes read-only model and adapter schema catalog queries', async () => {
+    const models = await handleRequest({
+      id: 'model-catalog-list',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'model.catalog.list',
+      params: { capability: 'image' },
+    } as unknown as WorkerRequest);
+    expect(models).toMatchObject({ ok: true });
+
+    const schema = await handleRequest({
+      id: 'adapter-schema-get',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'adapter.schema.get',
+      params: { adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2' },
+    } as unknown as WorkerRequest);
+    expect(schema).toMatchObject({ ok: true });
+    if (schema.ok) expect(schema.result).toMatchObject({ key: 'TEXT_TO_IMAGE:vidu:viduq2:v2' });
+  });
+
+  it('rejects malformed adapter schema proposals before persistence', async () => {
+    const response = await handleRequest({
+      id: 'adapter-schema-propose-invalid',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'adapter.schema.propose',
+      params: {
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        descriptor: { key: 'TEXT_TO_IMAGE:vidu:viduq2:v2' },
+      },
+    } as unknown as WorkerRequest);
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST', operation: 'adapter.schema.propose' },
     });
   });
 

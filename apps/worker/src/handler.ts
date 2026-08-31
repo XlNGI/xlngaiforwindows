@@ -7,6 +7,17 @@ import {
   type ChatMessageSaveParams,
   type AgentTaskCreateDocumentDraftParams,
   type AgentGenerationPrepareParams,
+  type UnifiedAgentRunParams,
+  type UnifiedAgentCapability,
+  type UnifiedAgentModelCandidate,
+  type UnifiedAgentModelCatalogListParams,
+  type UnifiedAgentModelCatalogGetParams,
+  type UnifiedAgentModelSchemaInfo,
+  type AdapterDescriptor,
+  type UnifiedAgentAdapterSchemaProposeParams,
+  type UnifiedAgentAdapterSchemaConfirmParams,
+  type UnifiedAgentAdapterSchemaRollbackParams,
+  type UnifiedAgentAdapterSchemaAuditListParams,
   type AgentGenerationExecuteToolsParams,
   type AgentGenerationConfirmToolParams,
   type AgentProviderStepCompleteParams,
@@ -92,7 +103,11 @@ import { ImageGenerationService } from './image-generation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { MaintenanceService } from './maintenance-service.js';
 import { SampleProjectService } from './sample-project-service.js';
-import { AppSettingsService, ProviderProfileValidationError } from './app-settings-service.js';
+import {
+  AdapterSchemaValidationError,
+  AppSettingsService,
+  ProviderProfileValidationError,
+} from './app-settings-service.js';
 import { AgentProviderCapabilityError, assertAgentToolLoopSelection } from './provider-registry.js';
 import { UsageService } from './usage-service.js';
 import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
@@ -112,8 +127,184 @@ import { DomainToolGateway } from './domain-tool-gateway.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
+import { setAdapterOverrides } from '@ai-video/generation-adapters';
 
 const WORKER_VERSION = '0.1.0';
+
+export function inferUnifiedAgentCapability(prompt: string): UnifiedAgentCapability {
+  const value = prompt.normalize('NFC');
+  if (/(搜索|查找|联网|最新资料|网页|研究)/u.test(value)) return 'research';
+  // A direct request to render an image must win over the generic document
+  // keywords. Requests such as “生成角色三视图提示词” remain document work,
+  // while “直接生成角色三视图” is an image-generation task.
+  if (
+    /(?:生成|制作|创建|绘制|画出|画一张)/u.test(value) &&
+    /(图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)/u.test(value) &&
+    !/(提示词|prompt|文档)/iu.test(value)
+  )
+    return 'image';
+  if (/(改写|重写|润色|总结|提取|分析|识别|描述|转写|翻译|提示词)/u.test(value)) return 'document';
+  if (
+    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|生成(?:一段|一个|该|这个)?视频|制作(?:一段|一个|该|这个)?视频|创建(?:一段|一个|该|这个)?视频|输出视频|做成视频)/u.test(
+      value,
+    )
+  )
+    return 'video';
+  if (
+    /(文生图|图生图|参考生图|生成(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|制作(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|创建(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|生图)/u.test(
+      value,
+    )
+  )
+    return 'image';
+  if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
+  return 'text';
+}
+
+function capabilityMatchesModel(
+  capability: UnifiedAgentCapability,
+  model: {
+    capabilities: {
+      text: boolean;
+      streaming: boolean;
+      tools: boolean;
+      imageGeneration: boolean;
+      imageEditing?: boolean;
+      videoGeneration: boolean;
+    };
+  },
+): boolean {
+  if (capability === 'image')
+    return model.capabilities.imageGeneration === true || model.capabilities.imageEditing === true;
+  if (capability === 'video') return model.capabilities.videoGeneration === true;
+  return (
+    model.capabilities.text === true &&
+    model.capabilities.streaming === true &&
+    model.capabilities.tools === true
+  );
+}
+
+/**
+ * Applies the media-input rules used by the unified Agent model picker.
+ * Vision is required for image understanding, while reference media is
+ * matched against a dedicated generation adapter (for example
+ * REFERENCE_TO_IMAGE or IMAGE_TO_VIDEO).
+ */
+export function modelMatchesUnifiedAgentRequest(
+  capability: UnifiedAgentCapability,
+  model: {
+    enabled: boolean;
+    unavailableAt?: string | null;
+    remoteModelId: string;
+    capabilities: {
+      text: boolean;
+      streaming: boolean;
+      tools: boolean;
+      vision?: boolean;
+      imageGeneration: boolean;
+      imageEditing?: boolean;
+      videoGeneration: boolean;
+    };
+  },
+  providerType: string,
+  adapters: readonly { provider: string; model: string; capability: string }[],
+  hasImageAttachment: boolean,
+): boolean {
+  if (!model.enabled || model.unavailableAt) return false;
+  if (hasImageAttachment && capability !== 'image' && capability !== 'video') {
+    if (model.capabilities.vision !== true) return false;
+  }
+  if (!capabilityMatchesModel(capability, model)) return false;
+  if (!hasImageAttachment || (capability !== 'image' && capability !== 'video')) return true;
+
+  const providerSupportsReference = adapters.some(
+    (adapter) =>
+      adapter.provider === providerType &&
+      adapter.model === model.remoteModelId &&
+      (capability === 'image'
+        ? adapter.capability === 'REFERENCE_TO_IMAGE'
+        : adapter.capability === 'IMAGE_TO_VIDEO' || adapter.capability === 'REFERENCE_TO_VIDEO'),
+  );
+  return capability === 'image'
+    ? model.capabilities.imageEditing === true || providerSupportsReference
+    : providerSupportsReference;
+}
+
+function adapterMatchesCapability(
+  adapter: { provider: string; model: string; capability: string },
+  providerType: string,
+  remoteModelId: string,
+  capability: UnifiedAgentCapability | undefined,
+): boolean {
+  if (adapter.provider !== providerType || adapter.model !== remoteModelId) return false;
+  if (!capability || capability === 'auto') return true;
+  if (capability === 'image') return adapter.capability.endsWith('TO_IMAGE');
+  if (capability === 'video') return adapter.capability.endsWith('TO_VIDEO');
+  return false;
+}
+
+function toModelSchemaInfo(
+  profile: ReturnType<typeof appSettingsService.listProfiles>[number],
+  model: ReturnType<typeof appSettingsService.listModels>[number],
+  adapters: ReturnType<typeof adapterService.catalog>['adapters'],
+  capability?: UnifiedAgentCapability,
+): UnifiedAgentModelSchemaInfo {
+  const matchingAdapters = adapters.filter((adapter) =>
+    adapterMatchesCapability(adapter, profile.providerType, model.remoteModelId, capability),
+  );
+  const persistedForModel = appSettingsService.listAdapterSchemaRecords().flatMap((record) => {
+    try {
+      const descriptor = JSON.parse(record.descriptorJson) as AdapterDescriptor;
+      return descriptor.provider === profile.providerType &&
+        descriptor.model === model.remoteModelId
+        ? [record]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const pendingSchema =
+    matchingAdapters.some(
+      (adapter) =>
+        appSettingsService.getAdapterSchemaRecord(adapter.key)?.status === 'needs_confirmation',
+    ) || persistedForModel.some((record) => record.status === 'needs_confirmation');
+  const manualSchema =
+    matchingAdapters.some(
+      (adapter) => appSettingsService.getAdapterSchemaRecord(adapter.key)?.source === 'manual',
+    ) || persistedForModel.some((record) => record.source === 'manual');
+  const schemaRelevant = capability === 'image' || capability === 'video';
+  const required = [
+    ...new Set(matchingAdapters.flatMap((adapter) => adapter.parameterSchema.required)),
+  ];
+  return {
+    providerProfileId: profile.id,
+    providerName: profile.name,
+    providerType: profile.providerType,
+    modelId: model.id,
+    remoteModelId: model.remoteModelId,
+    modelName: model.displayName,
+    modelCapabilities: model.capabilities,
+    modelSource: model.source,
+    modelEnabled: model.enabled,
+    modelUnavailableAt: model.unavailableAt,
+    schemaStatus: !schemaRelevant
+      ? 'confirmed'
+      : pendingSchema
+        ? 'needs_confirmation'
+        : matchingAdapters.length > 0
+          ? 'confirmed'
+          : 'missing',
+    schemaSource: !schemaRelevant
+      ? 'official-adapter'
+      : pendingSchema || manualSchema
+        ? 'manual'
+        : matchingAdapters.length > 0
+          ? 'official-adapter'
+          : 'missing',
+    adapters: matchingAdapters,
+    missingRequired: required,
+    updatedAt: model.updatedAt,
+  };
+}
 const methods = new Set<WorkerMethod>([
   'health',
   'sqlite.probe',
@@ -186,6 +377,14 @@ const methods = new Set<WorkerMethod>([
   'agent.task.get',
   'agent.task.events',
   'agent.generation.prepare',
+  'agent.run',
+  'model.catalog.list',
+  'model.catalog.get',
+  'adapter.schema.get',
+  'adapter.schema.propose',
+  'adapter.schema.confirm',
+  'adapter.schema.rollback',
+  'adapter.schema.audit.list',
   'conversation.runtime.start',
   'agent.generation.executeTools',
   'agent.generation.cancel',
@@ -278,6 +477,7 @@ const packagedSqliteBinding = isPackaged
   : undefined;
 const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding });
 const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqliteBinding });
+setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
 const contentService = new ContentService(projectService);
 const documentWorkflowService = new DocumentWorkflowService(projectService);
 const novelService = new NovelService(projectService);
@@ -657,6 +857,278 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             params as unknown as AgentTaskEventsParams,
           );
           break;
+        case 'model.catalog.list': {
+          const catalogParams = params as unknown as UnifiedAgentModelCatalogListParams;
+          const capability =
+            catalogParams.capability && catalogParams.capability !== 'auto'
+              ? catalogParams.capability
+              : undefined;
+          const adapters = adapterService.catalog().adapters;
+          const models = appSettingsService.listProfiles(false).flatMap((profile) => {
+            if (!profile.enabled) return [];
+            if (catalogParams.providerProfileId && profile.id !== catalogParams.providerProfileId)
+              return [];
+            return appSettingsService
+              .listModels(profile.id)
+              .filter(
+                (model) =>
+                  model.enabled &&
+                  (catalogParams.includeUnavailable || !model.unavailableAt) &&
+                  (!capability || capabilityMatchesModel(capability, model)),
+              )
+              .map((model) => toModelSchemaInfo(profile, model, adapters, capability));
+          });
+          result = { models, generatedAt: new Date().toISOString() };
+          break;
+        }
+        case 'model.catalog.get': {
+          const catalogParams = params as unknown as UnifiedAgentModelCatalogGetParams;
+          const profile = appSettingsService.getProfile(catalogParams.providerProfileId);
+          const model = profile
+            ? appSettingsService
+                .listModels(profile.id)
+                .find((candidate) => candidate.id === catalogParams.modelId)
+            : undefined;
+          result =
+            profile && model
+              ? toModelSchemaInfo(
+                  profile,
+                  model,
+                  adapterService.catalog().adapters,
+                  catalogParams.capability,
+                )
+              : null;
+          break;
+        }
+        case 'adapter.schema.get': {
+          const schemaParams = params as { adapterKey: string };
+          result =
+            appSettingsService.getAdapterSchema(schemaParams.adapterKey) ??
+            adapterService
+              .catalog()
+              .adapters.find((adapter) => adapter.key === schemaParams.adapterKey) ??
+            null;
+          break;
+        }
+        case 'adapter.schema.propose': {
+          const schemaParams = params as unknown as UnifiedAgentAdapterSchemaProposeParams;
+          validateAdapterDescriptorProposal(schemaParams.adapterKey, schemaParams.descriptor);
+          const existing =
+            appSettingsService.getAdapterSchema(schemaParams.adapterKey) ??
+            adapterService
+              .catalog()
+              .adapters.find((adapter) => adapter.key === schemaParams.adapterKey);
+          if (
+            existing &&
+            (existing.endpoint !== schemaParams.descriptor.endpoint ||
+              existing.credentialProvider !== schemaParams.descriptor.credentialProvider ||
+              existing.provider !== schemaParams.descriptor.provider)
+          ) {
+            throw new RequestValidationError(
+              'Agent schema proposals cannot change provider connection or credential settings.',
+            );
+          }
+          const diff = diffAdapterDescriptors(existing, schemaParams.descriptor);
+          result = appSettingsService.proposeAdapterSchema(schemaParams, diff);
+          break;
+        }
+        case 'adapter.schema.confirm': {
+          const schemaParams = params as unknown as UnifiedAgentAdapterSchemaConfirmParams;
+          result = appSettingsService.confirmAdapterSchema(schemaParams);
+          setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
+          break;
+        }
+        case 'adapter.schema.rollback': {
+          const schemaParams = params as unknown as UnifiedAgentAdapterSchemaRollbackParams;
+          result = appSettingsService.rollbackAdapterSchema(schemaParams);
+          setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
+          break;
+        }
+        case 'adapter.schema.audit.list': {
+          const schemaParams = params as unknown as UnifiedAgentAdapterSchemaAuditListParams;
+          result = appSettingsService.listAdapterSchemaAudits(
+            schemaParams.adapterKey,
+            schemaParams.limit,
+          );
+          break;
+        }
+        case 'agent.run': {
+          const agentParams = params as unknown as UnifiedAgentRunParams;
+          const capability =
+            agentParams.capability && agentParams.capability !== 'auto'
+              ? agentParams.capability
+              : inferUnifiedAgentCapability(agentParams.prompt);
+          const hasImageAttachment =
+            agentParams.attachments?.some((attachment) =>
+              attachment.mimeType.toLowerCase().startsWith('image/'),
+            ) ?? false;
+          const adapterCatalog = adapterService.catalog().adapters;
+          const profiles = appSettingsService.listProfiles(false);
+          const candidates: UnifiedAgentModelCandidate[] = profiles.flatMap((profile) =>
+            profile.enabled && profile.connectionStatus === 'ready'
+              ? appSettingsService
+                  .listModels(profile.id)
+                  .filter((model) =>
+                    modelMatchesUnifiedAgentRequest(
+                      capability,
+                      model,
+                      profile.providerType,
+                      adapterCatalog,
+                      hasImageAttachment,
+                    ),
+                  )
+                  .map((model) => ({
+                    providerProfileId: profile.id,
+                    providerName: profile.name,
+                    modelId: model.id,
+                    remoteModelId: model.remoteModelId,
+                    modelName: model.displayName,
+                    capabilities: model.capabilities,
+                    source: model.source,
+                    schemaReady:
+                      capability !== 'image' && capability !== 'video'
+                        ? true
+                        : adapterService
+                            .catalog()
+                            .adapters.some(
+                              (adapter) =>
+                                adapter.provider === profile.providerType &&
+                                adapter.model === model.remoteModelId &&
+                                appSettingsService.getAdapterSchemaRecord(adapter.key)?.status !==
+                                  'needs_confirmation' &&
+                                (capability === 'image'
+                                  ? adapter.capability.endsWith('TO_IMAGE')
+                                  : adapter.capability.endsWith('TO_VIDEO')),
+                            ),
+                  }))
+              : [],
+          );
+
+          if (!agentParams.providerProfileId || !agentParams.modelId) {
+            result = {
+              status: 'needs_model_selection',
+              capability,
+              reason: 'missing_model',
+              models: candidates,
+            };
+            break;
+          }
+
+          const selected = candidates.find(
+            (candidate) =>
+              candidate.providerProfileId === agentParams.providerProfileId &&
+              candidate.modelId === agentParams.modelId,
+          );
+          if (!selected) {
+            result = {
+              status: 'needs_model_selection',
+              capability,
+              reason: candidates.some(
+                (candidate) =>
+                  candidate.providerProfileId === agentParams.providerProfileId &&
+                  candidate.modelId === agentParams.modelId,
+              )
+                ? 'capability_mismatch'
+                : 'model_unavailable',
+              models: candidates,
+            };
+            break;
+          }
+
+          if (capability === 'image' || capability === 'video') {
+            const adapters = adapterService
+              .catalog()
+              .adapters.filter(
+                (adapter) =>
+                  adapter.provider ===
+                    profiles.find((profile) => profile.id === selected.providerProfileId)
+                      ?.providerType &&
+                  adapter.model === selected.remoteModelId &&
+                  (capability === 'image'
+                    ? adapter.capability.endsWith('TO_IMAGE')
+                    : adapter.capability.endsWith('TO_VIDEO')),
+              );
+            if (!agentParams.adapterKey || !agentParams.parameters) {
+              result = {
+                status: 'needs_parameters',
+                capability,
+                providerProfileId: selected.providerProfileId,
+                modelId: selected.modelId,
+                modelName: selected.modelName,
+                adapters,
+                missingRequired: adapters.flatMap((adapter) => adapter.parameterSchema.required),
+                affectsCost: true,
+              };
+              break;
+            }
+            const adapter = adapters.find((item) => item.key === agentParams.adapterKey);
+            if (!adapter)
+              throw new Error('The selected generation adapter is not available for this model.');
+            const schemaRecord = appSettingsService.getAdapterSchemaRecord(adapter.key);
+            if (schemaRecord?.status === 'needs_confirmation') {
+              throw new AdapterSchemaValidationError(
+                'This adapter schema is awaiting confirmation and cannot be submitted yet.',
+              );
+            }
+            const parameters = agentParams.parameters;
+            if (capability === 'image') {
+              const job = imageGenerationService.prepare({
+                shotId: agentParams.shotId,
+                adapterKey: adapter.key,
+                parameters,
+              } satisfies ImageGenerationPrepareParams);
+              result = { status: 'image_prepared', capability: 'image', job };
+            } else {
+              const job = videoGenerationService.prepare({
+                shotId: agentParams.shotId,
+                adapterKey: adapter.key,
+                parameters,
+                providerRegion: agentParams.providerRegion ?? 'global',
+                providerProfileId: selected.providerProfileId,
+                modelId: selected.remoteModelId,
+                assetKind:
+                  agentParams.assetKind === 'generated-video' ||
+                  agentParams.assetKind === 'shot-video'
+                    ? agentParams.assetKind
+                    : undefined,
+              } satisfies VideoGenerationPrepareParams);
+              result = { status: 'video_prepared', capability: 'video', job };
+            }
+            break;
+          }
+
+          const profile = appSettingsService.getProfile(selected.providerProfileId);
+          if (!profile) throw new ProviderProfileValidationError('Provider profile was not found.');
+          const model = appSettingsService
+            .listModels(selected.providerProfileId)
+            .find((candidate) => candidate.id === selected.modelId);
+          assertAgentToolLoopSelection(profile, model);
+          const prepared = generationService.prepare({
+            conversationId: agentParams.conversationId,
+            prompt: agentParams.prompt,
+            providerProfileId: selected.providerProfileId,
+            modelId: selected.modelId,
+            attachments: agentParams.attachments,
+            budgetTokens: agentParams.budgetTokens,
+            idempotencyKey: agentParams.idempotencyKey,
+          });
+          const agent = agentProviderLoopService.prepare(
+            prepared.stream,
+            agentParams.prompt,
+            undefined,
+            undefined,
+            'auto',
+          );
+          generationService.configureAgentTools(prepared.stream, agent.tools);
+          result = {
+            status: 'started',
+            capability,
+            ...prepared,
+            agentTaskId: agent.taskId,
+            runtimeOwner: 'native-agent',
+          };
+          break;
+        }
         case 'agent.generation.prepare': {
           const agentParams = params as unknown as AgentGenerationPrepareParams;
           if (agentParams.agentMode === 'novel-writing') {
@@ -1186,6 +1658,117 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
   }
 }
 
+function validateAdapterDescriptorProposal(
+  adapterKey: string,
+  descriptor: AdapterDescriptor,
+): void {
+  if (!descriptor || typeof descriptor !== 'object' || descriptor.key !== adapterKey) {
+    throw new RequestValidationError('descriptor.key must match adapterKey.');
+  }
+  const requiredStrings: Array<keyof AdapterDescriptor> = [
+    'key',
+    'capabilityLabel',
+    'provider',
+    'providerLabel',
+    'model',
+    'modelLabel',
+    'apiVersion',
+    'endpoint',
+    'documentationUrl',
+    'credentialProvider',
+  ];
+  for (const field of requiredStrings) {
+    if (typeof descriptor[field] !== 'string' || !String(descriptor[field]).trim()) {
+      throw new RequestValidationError(`descriptor.${String(field)} must be a non-empty string.`);
+    }
+  }
+  if (!/^https:\/\//i.test(descriptor.endpoint)) {
+    throw new RequestValidationError('descriptor.endpoint must use HTTPS.');
+  }
+  const schema = descriptor.parameterSchema;
+  if (!schema || schema.type !== 'object' || schema.additionalProperties !== false) {
+    throw new RequestValidationError(
+      'descriptor.parameterSchema must be an object schema with additionalProperties=false.',
+    );
+  }
+  if (
+    !schema.properties ||
+    typeof schema.properties !== 'object' ||
+    !Array.isArray(schema.required)
+  ) {
+    throw new RequestValidationError(
+      'descriptor.parameterSchema must define properties and required.',
+    );
+  }
+  for (const field of schema.required) {
+    if (
+      typeof field !== 'string' ||
+      !Object.prototype.hasOwnProperty.call(schema.properties, field)
+    ) {
+      throw new RequestValidationError(
+        `descriptor.parameterSchema.required contains unknown field: ${String(field)}.`,
+      );
+    }
+  }
+  for (const [key, property] of Object.entries(schema.properties)) {
+    if (
+      !property ||
+      typeof property !== 'object' ||
+      !['string', 'integer', 'boolean', 'array'].includes(property.type)
+    ) {
+      throw new RequestValidationError(
+        `descriptor.parameterSchema.properties.${key} has an invalid type.`,
+      );
+    }
+  }
+}
+
+function diffAdapterDescriptors(
+  previous: AdapterDescriptor | undefined,
+  next: AdapterDescriptor,
+): string[] {
+  if (!previous) return ['new adapter schema'];
+  const diff: string[] = [];
+  for (const field of [
+    'capability',
+    'provider',
+    'model',
+    'apiVersion',
+    'endpoint',
+    'credentialProvider',
+  ] as const) {
+    if (previous[field] !== next[field]) diff.push(`${field} changed`);
+  }
+  const previousProperties = previous.parameterSchema.properties;
+  const nextProperties = next.parameterSchema.properties;
+  for (const key of Object.keys(previousProperties)) {
+    if (!Object.prototype.hasOwnProperty.call(nextProperties, key))
+      diff.push(`parameter removed: ${key}`);
+    else if (JSON.stringify(previousProperties[key]) !== JSON.stringify(nextProperties[key])) {
+      diff.push(`parameter changed: ${key}`);
+    }
+  }
+  for (const key of Object.keys(nextProperties)) {
+    if (!Object.prototype.hasOwnProperty.call(previousProperties, key))
+      diff.push(`parameter added: ${key}`);
+  }
+  if (
+    JSON.stringify(previous.parameterSchema.required) !==
+    JSON.stringify(next.parameterSchema.required)
+  ) {
+    diff.push('required parameters changed');
+  }
+  if (
+    JSON.stringify(previous.parameterSchema.allOf ?? []) !==
+    JSON.stringify(next.parameterSchema.allOf ?? [])
+  ) {
+    diff.push('parameter dependencies changed');
+  }
+  if (JSON.stringify(previous.uiSchema) !== JSON.stringify(next.uiSchema))
+    diff.push('ui schema changed');
+  return diff.length > 0 ? diff : ['no structural changes'];
+}
+
 function mapWorkerError(operation: string, error: unknown): WorkerError {
   const message = error instanceof Error ? error.message : 'Unexpected worker error.';
   if (error instanceof RequestValidationError) {
@@ -1221,6 +1804,9 @@ function mapWorkerError(operation: string, error: unknown): WorkerError {
     };
   }
   if (error instanceof ProviderProfileValidationError) {
+    return { code: 'INVALID_PARAMETERS', message, retryable: false, operation };
+  }
+  if (error instanceof AdapterSchemaValidationError) {
     return { code: 'INVALID_PARAMETERS', message, retryable: false, operation };
   }
   if (error instanceof AgentProviderCapabilityError) {

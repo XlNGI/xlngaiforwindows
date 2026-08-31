@@ -64,9 +64,22 @@ struct LlmRuntimeRequest {
     context: String,
     prompt: String,
     #[serde(default)]
+    attachments: Vec<LlmInputAttachment>,
+    #[serde(default)]
     tools: Vec<LlmToolDefinition>,
     #[serde(default)]
     continuation: Option<LlmToolContinuation>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LlmInputAttachment {
+    name: String,
+    mime_type: String,
+    #[serde(default)]
+    data_url: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1196,10 +1209,32 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
         runtime.context, runtime.prompt
     );
     let value = if runtime.protocol == "openai-responses" {
+        let input = if runtime.attachments.is_empty() {
+            serde_json::Value::String(context.clone())
+        } else {
+            let mut content = vec![serde_json::json!({ "type": "input_text", "text": context })];
+            for attachment in &runtime.attachments {
+                if let Some(data_url) = &attachment.data_url {
+                    if attachment.mime_type.starts_with("image/") {
+                        content.push(serde_json::json!({
+                            "type": "input_image",
+                            "image_url": data_url,
+                        }));
+                    }
+                }
+                if let Some(text) = &attachment.text {
+                    content.push(serde_json::json!({
+                        "type": "input_text",
+                        "text": format!("\n\n[附件 {}]\n{}", attachment.name, text),
+                    }));
+                }
+            }
+            serde_json::json!([{ "role": "user", "content": content }])
+        };
         let mut value = serde_json::json!({
             "model": runtime.remote_model_id,
             "instructions": runtime.system_instruction,
-            "input": context,
+            "input": input,
             "store": false,
             "stream": true
         });
@@ -1218,6 +1253,11 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                     })
                     .collect(),
             );
+            // Document mutations are authorized one at a time. Disabling
+            // provider-side parallel calls prevents a model from emitting
+            // multiple primary document mutations in one response, which
+            // cannot be safely committed under a single-use authorization.
+            value["parallel_tool_calls"] = serde_json::Value::Bool(false);
         }
         if let Some(continuation) = &runtime.continuation {
             let LlmToolContinuation::Responses {
@@ -1260,9 +1300,34 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                 runtime.system_instruction, runtime.context
             )
         };
+        let user_content = if runtime.attachments.is_empty() {
+            serde_json::Value::String(runtime.prompt.clone())
+        } else {
+            let mut content = vec![serde_json::json!({
+                "type": "text",
+                "text": runtime.prompt.clone(),
+            })];
+            for attachment in &runtime.attachments {
+                if let Some(data_url) = &attachment.data_url {
+                    if attachment.mime_type.starts_with("image/") {
+                        content.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": { "url": data_url },
+                        }));
+                    }
+                }
+                if let Some(text) = &attachment.text {
+                    content.push(serde_json::json!({
+                        "type": "text",
+                        "text": format!("\n\n[附件 {}]\n{}", attachment.name, text),
+                    }));
+                }
+            }
+            serde_json::Value::Array(content)
+        };
         let mut messages = vec![
             serde_json::json!({ "role": "system", "content": system }),
-            serde_json::json!({ "role": "user", "content": runtime.prompt }),
+            serde_json::json!({ "role": "user", "content": user_content }),
         ];
         if let Some(continuation) = &runtime.continuation {
             let LlmToolContinuation::ChatCompletions {
@@ -1302,7 +1367,11 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                     .collect(),
             );
             value["tool_choice"] = serde_json::Value::String("auto".to_string());
-            value["parallel_tool_calls"] = serde_json::Value::Bool(true);
+            // Document mutations are authorized one at a time. Disabling
+            // provider-side parallel calls prevents a model from emitting
+            // multiple primary document mutations in one response, which
+            // cannot be safely committed under a single-use authorization.
+            value["parallel_tool_calls"] = serde_json::Value::Bool(false);
         }
         value
     };
@@ -2501,6 +2570,7 @@ mod tests {
             system_instruction: "System".to_string(),
             context: "Context".to_string(),
             prompt: "Prompt".to_string(),
+            attachments: Vec::new(),
             tools: vec![super::LlmToolDefinition {
                 name: "document.create_draft".to_string(),
                 description: "Create a reviewable draft".to_string(),
@@ -2557,6 +2627,7 @@ mod tests {
             system_instruction: "System".to_string(),
             context: "Context".to_string(),
             prompt: "Prompt".to_string(),
+            attachments: Vec::new(),
             tools: vec![super::LlmToolDefinition {
                 name: "document.create_draft".to_string(),
                 description: "Create a draft".to_string(),
@@ -2573,8 +2644,43 @@ mod tests {
             "document__dot__create_draft"
         );
         assert_eq!(value["tool_choice"], "auto");
-        assert_eq!(value["parallel_tool_calls"], true);
+        assert_eq!(value["parallel_tool_calls"], false);
         assert!(!String::from_utf8_lossy(&body).contains("native-only-handle"));
+    }
+
+    #[test]
+    fn sends_image_attachments_as_native_multimodal_content() {
+        let runtime = LlmRuntimeRequest {
+            generation_id: "generation".to_string(),
+            attempt_id: "attempt".to_string(),
+            project_id: "project".to_string(),
+            project_session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            provider_profile_id: "profile".to_string(),
+            model_id: "model".to_string(),
+            remote_model_id: "remote-model".to_string(),
+            protocol: "openai-responses".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            system_instruction: "System".to_string(),
+            context: "Context".to_string(),
+            prompt: "Analyze this image".to_string(),
+            attachments: vec![super::LlmInputAttachment {
+                name: "reference.png".to_string(),
+                mime_type: "image/png".to_string(),
+                data_url: Some("data:image/png;base64,AAAA".to_string()),
+                text: None,
+            }],
+            tools: Vec::new(),
+            continuation: None,
+        };
+        let body = super::build_request_body(&runtime).expect("multimodal request should build");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("body should be JSON");
+        assert_eq!(value["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(value["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            value["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 
     #[test]
@@ -2593,6 +2699,7 @@ mod tests {
             system_instruction: "System".to_string(),
             context: "Context".to_string(),
             prompt: "Prompt".to_string(),
+            attachments: Vec::new(),
             tools: Vec::new(),
             continuation: Some(super::LlmToolContinuation::ChatCompletions {
                 provider_response_id: "chatcmpl_tool".to_string(),
@@ -2641,6 +2748,7 @@ mod tests {
             system_instruction: "System".to_string(),
             context: "Context".to_string(),
             prompt: "Prompt".to_string(),
+            attachments: Vec::new(),
             tools: Vec::new(),
             continuation: Some(super::LlmToolContinuation::ChatCompletions {
                 provider_response_id: "chatcmpl_tool".to_string(),
@@ -2748,6 +2856,7 @@ mod tests {
             system_instruction: "System".to_string(),
             context: "Context".to_string(),
             prompt: "Prompt".to_string(),
+            attachments: Vec::new(),
             tools: Vec::new(),
             continuation: None,
         };

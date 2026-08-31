@@ -95,6 +95,7 @@ export class ImageGenerationService {
         record,
         repositories.assets.listByProject(project.id),
         repositories.generationResults.listByJob(record.id),
+        params.parameters,
       );
     });
   }
@@ -835,6 +836,7 @@ export class ImageGenerationService {
       providerUrl?: string;
       createdAt: string;
     }[],
+    runtimeRequest?: AdapterParameters,
   ): ImageGenerationJobInfo {
     const assetById = new Map(assets.map((asset) => [asset.id, asset]));
     return {
@@ -842,7 +844,10 @@ export class ImageGenerationService {
       shotId: job.shotId,
       adapterKey: job.adapterKey,
       status: job.status as ImageGenerationJobInfo['status'],
-      request: JSON.parse(job.requestJson) as AdapterParameters,
+      // Keep local image Data URLs available for the immediate provider
+      // submission, while persisted/reloaded jobs continue to use the
+      // redacted snapshot stored in SQLite.
+      request: runtimeRequest ?? (JSON.parse(job.requestJson) as AdapterParameters),
       results: results.map((result) => ({
         ...result,
         asset: result.assetId

@@ -1,4 +1,4 @@
-export const CURRENT_APP_SCHEMA_VERSION = 3;
+export const CURRENT_APP_SCHEMA_VERSION = 4;
 
 export const APP_MIGRATION_V1 = `
 CREATE TABLE app_schema_migrations (
@@ -101,4 +101,31 @@ CREATE UNIQUE INDEX idx_provider_profiles_migration_source
 export const APP_MIGRATION_V3 = `
 ALTER TABLE model_pricing ADD COLUMN credit_price TEXT
   CHECK (credit_price IS NULL OR length(trim(credit_price)) > 0);
+`;
+
+export const APP_MIGRATION_V4 = `
+CREATE TABLE adapter_schemas (
+  adapter_key TEXT PRIMARY KEY CHECK (length(trim(adapter_key)) > 0),
+  descriptor_json TEXT NOT NULL CHECK (json_valid(descriptor_json)),
+  source TEXT NOT NULL CHECK (source IN ('official-adapter', 'manual', 'synced-catalog', 'missing')),
+  status TEXT NOT NULL CHECK (status IN ('confirmed', 'needs_confirmation', 'missing')),
+  version INTEGER NOT NULL CHECK (version > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE adapter_schema_audits (
+  id TEXT PRIMARY KEY,
+  adapter_key TEXT NOT NULL REFERENCES adapter_schemas(adapter_key) ON DELETE CASCADE,
+  version INTEGER NOT NULL CHECK (version > 0),
+  action TEXT NOT NULL CHECK (action IN ('proposed', 'confirmed', 'rolled_back')),
+  actor_type TEXT NOT NULL CHECK (actor_type IN ('user', 'agent', 'system')),
+  conversation_id TEXT,
+  reason TEXT,
+  before_json TEXT CHECK (before_json IS NULL OR json_valid(before_json)),
+  after_json TEXT CHECK (after_json IS NULL OR json_valid(after_json)),
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_adapter_schema_audits_key ON adapter_schema_audits(adapter_key, version DESC, created_at DESC);
 `;

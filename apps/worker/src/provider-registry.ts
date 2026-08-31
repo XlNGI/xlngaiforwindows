@@ -217,6 +217,7 @@ function inferUniCompApiCapabilities(modelId: string): ProviderModelCapabilities
   capabilities.streaming = capabilities.text;
   capabilities.reasoning = features.has('text_reasoning');
   capabilities.tools = features.has('tools');
+  capabilities.vision = features.has('vision');
   capabilities.imageGeneration = features.has('text_to_image');
   capabilities.imageEditing = features.has('image_edit');
   capabilities.videoGeneration = features.has('text_to_video') || features.has('image_to_video');
@@ -239,7 +240,7 @@ const UNICOMPAPI_MODEL_FEATURES: Record<string, readonly string[]> = {
   'glm-5.1': ['text_chat', 'text_reasoning'],
   'glm-5.2': ['text_chat', 'text_reasoning'],
   'gpt-5.6-luna': ['text_chat'],
-  'gpt-5.6-sol': ['text_chat', 'tools'],
+  'gpt-5.6-sol': ['text_chat', 'tools', 'vision'],
   'gpt-5.6-terra': ['text_chat'],
   'happyhorse-1.0-i2v': ['image_to_video'],
   'happyhorse-1.0-r2v': [],

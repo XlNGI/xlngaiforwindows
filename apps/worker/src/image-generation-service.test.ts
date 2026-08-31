@@ -54,7 +54,7 @@ describe('ImageGenerationService', () => {
       },
     });
 
-    expect(job.request.images).toEqual(['local-image://omitted']);
+    expect(job.request.images).toEqual([localImage]);
     project.access(false, (database) => {
       const row = database
         .prepare('SELECT request_json FROM generation_jobs WHERE id = ?')

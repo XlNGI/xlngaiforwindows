@@ -2,8 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type Database from 'better-sqlite3';
-import type { LlmGenerationAttemptRecord, ProjectRecord, UsageIndexRecord } from '@ai-video/domain';
 import type {
+  AdapterSchemaRecord,
+  LlmGenerationAttemptRecord,
+  ProjectRecord,
+  UsageIndexRecord,
+} from '@ai-video/domain';
+import type {
+  AdapterDescriptor,
+  UnifiedAgentAdapterSchemaAuditInfo,
+  UnifiedAgentAdapterSchemaConfirmParams,
+  UnifiedAgentAdapterSchemaConfirmResult,
+  UnifiedAgentAdapterSchemaProposeParams,
+  UnifiedAgentAdapterSchemaProposeResult,
+  UnifiedAgentAdapterSchemaRollbackParams,
+  UnifiedAgentAdapterSchemaRollbackResult,
   ProviderConnectionCompleteParams,
   ProviderConnectionResult,
   ProviderDefinitionInfo,
@@ -53,6 +66,8 @@ export interface AppSettingsServiceOptions {
 
 export class ProviderProfileValidationError extends Error {}
 
+export class AdapterSchemaValidationError extends Error {}
+
 export interface ResolvedLlmSelection {
   providerProfileId: string;
   providerName: string;
@@ -81,6 +96,185 @@ export class AppSettingsService {
     this.appDataDirectory = resolve(configuredDirectory);
     this.nativeBinding = options.nativeBinding;
     this.now = options.now ?? (() => new Date().toISOString());
+  }
+
+  getAdapterSchema(adapterKey: string): AdapterDescriptor | null {
+    const record = this.repositories().adapterSchemas.get(adapterKey);
+    if (!record || record.status !== 'confirmed') return null;
+    try {
+      return JSON.parse(record.descriptorJson) as AdapterDescriptor;
+    } catch {
+      throw new AdapterSchemaValidationError('Stored adapter schema is invalid JSON.');
+    }
+  }
+
+  getAdapterSchemaRecord(adapterKey: string): AdapterSchemaRecord | undefined {
+    return this.repositories().adapterSchemas.get(adapterKey);
+  }
+
+  listAdapterSchemaRecords(): AdapterSchemaRecord[] {
+    return this.repositories().adapterSchemas.list();
+  }
+
+  listConfirmedAdapterSchemas(): AdapterDescriptor[] {
+    return this.repositories()
+      .adapterSchemas.list()
+      .filter((record) => record.status === 'confirmed')
+      .flatMap((record) => {
+        try {
+          return [JSON.parse(record.descriptorJson) as AdapterDescriptor];
+        } catch {
+          return [];
+        }
+      });
+  }
+
+  proposeAdapterSchema(
+    params: UnifiedAgentAdapterSchemaProposeParams,
+    diff: string[],
+  ): UnifiedAgentAdapterSchemaProposeResult {
+    const now = this.now();
+    const repositories = this.repositories();
+    const existing = repositories.adapterSchemas.get(params.adapterKey);
+    const version = (existing?.version ?? 0) + 1;
+    const beforeJson = existing?.descriptorJson;
+    const descriptorJson = JSON.stringify(params.descriptor);
+    this.getDatabase().transaction(() => {
+      repositories.adapterSchemas.save({
+        adapterKey: params.adapterKey,
+        descriptorJson,
+        source: 'manual',
+        status: 'needs_confirmation',
+        version,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+      repositories.adapterSchemas.saveAudit({
+        id: randomUUID(),
+        adapterKey: params.adapterKey,
+        version,
+        action: 'proposed',
+        actorType: params.actorType ?? 'agent',
+        conversationId: params.conversationId,
+        reason: params.reason,
+        beforeJson,
+        afterJson: descriptorJson,
+        createdAt: now,
+      });
+    })();
+    return {
+      status: 'proposed',
+      adapterKey: params.adapterKey,
+      version,
+      requiresConfirmation: true,
+      diff,
+    };
+  }
+
+  confirmAdapterSchema(
+    params: UnifiedAgentAdapterSchemaConfirmParams,
+  ): UnifiedAgentAdapterSchemaConfirmResult {
+    const repositories = this.repositories();
+    const existing = repositories.adapterSchemas.get(params.adapterKey);
+    if (!existing) throw new AdapterSchemaValidationError('No pending schema proposal exists.');
+    if (existing.status !== 'needs_confirmation') {
+      throw new AdapterSchemaValidationError('Adapter schema is not awaiting confirmation.');
+    }
+    if (existing.version !== params.version) {
+      throw new AdapterSchemaValidationError('Only the latest schema proposal can be confirmed.');
+    }
+    const descriptor = parseAdapterDescriptor(existing.descriptorJson);
+    const now = this.now();
+    this.getDatabase().transaction(() => {
+      repositories.adapterSchemas.save({ ...existing, status: 'confirmed', updatedAt: now });
+      repositories.adapterSchemas.saveAudit({
+        id: randomUUID(),
+        adapterKey: params.adapterKey,
+        version: existing.version,
+        action: 'confirmed',
+        actorType: params.actorType ?? 'user',
+        conversationId: params.conversationId,
+        reason: params.reason,
+        beforeJson: existing.descriptorJson,
+        afterJson: existing.descriptorJson,
+        createdAt: now,
+      });
+    })();
+    return {
+      status: 'confirmed',
+      adapterKey: params.adapterKey,
+      version: existing.version,
+      descriptor,
+    };
+  }
+
+  rollbackAdapterSchema(
+    params: UnifiedAgentAdapterSchemaRollbackParams,
+  ): UnifiedAgentAdapterSchemaRollbackResult {
+    const repositories = this.repositories();
+    const existing = repositories.adapterSchemas.get(params.adapterKey);
+    if (!existing) throw new AdapterSchemaValidationError('Adapter schema was not found.');
+    const target = repositories.adapterSchemas
+      .listAudits(params.adapterKey, 200)
+      .find(
+        (audit) =>
+          audit.action === 'confirmed' && audit.version === params.version && audit.afterJson,
+      );
+    if (!target?.afterJson) {
+      throw new AdapterSchemaValidationError(
+        'The requested confirmed schema version was not found.',
+      );
+    }
+    const descriptor = parseAdapterDescriptor(target.afterJson);
+    const version = existing.version + 1;
+    const now = this.now();
+    this.getDatabase().transaction(() => {
+      repositories.adapterSchemas.save({
+        ...existing,
+        descriptorJson: target.afterJson!,
+        source: 'manual',
+        status: 'confirmed',
+        version,
+        updatedAt: now,
+      });
+      repositories.adapterSchemas.saveAudit({
+        id: randomUUID(),
+        adapterKey: params.adapterKey,
+        version,
+        action: 'rolled_back',
+        actorType: params.actorType ?? 'user',
+        conversationId: params.conversationId,
+        reason: params.reason,
+        beforeJson: existing.descriptorJson,
+        afterJson: target.afterJson,
+        createdAt: now,
+      });
+    })();
+    return {
+      status: 'rolled_back',
+      adapterKey: params.adapterKey,
+      version,
+      rolledBackToVersion: params.version,
+      descriptor,
+    };
+  }
+
+  listAdapterSchemaAudits(
+    adapterKey: string,
+    limit?: number,
+  ): UnifiedAgentAdapterSchemaAuditInfo[] {
+    return this.repositories()
+      .adapterSchemas.listAudits(adapterKey, limit)
+      .map((audit) => ({
+        id: audit.id,
+        adapterKey: audit.adapterKey,
+        version: audit.version,
+        action: audit.action,
+        actorType: audit.actorType,
+        conversationId: audit.conversationId,
+        reason: audit.reason,
+        createdAt: audit.createdAt,
+      }));
   }
 
   listProfiles(includeArchived = false): ProviderProfileInfo[] {
@@ -271,8 +465,16 @@ export class AppSettingsService {
   }
 
   listModels(profileId: string): ProviderModelInfo[] {
-    const normalizedProfileId = this.requireActiveProfile(profileId).id;
-    return this.repositories().providerModels.listByProfile(normalizedProfileId).map(toModelInfo);
+    const profile = this.requireActiveProfile(profileId);
+    return this.repositories()
+      .providerModels.listByProfile(profile.id)
+      .map((record) => {
+        const model = toModelInfo(record);
+        if (record.source === 'manual') return model;
+        const inferred = inferKnownModelCapabilities(profile.providerType, model.remoteModelId);
+        if (!hasAnyModelCapability(inferred)) return model;
+        return { ...model, capabilities: inferred };
+      });
   }
 
   createManualModel(params: ProviderModelCreateParams): ProviderModelInfo {
@@ -536,7 +738,7 @@ export class AppSettingsService {
         remoteModelId: remote.id,
         displayName: remote.displayName ?? existing?.displayName ?? remote.id,
         capabilitiesJson:
-          existing?.source === 'manual' || existing?.source === 'built-in'
+          existing?.source === 'manual'
             ? (existing.capabilitiesJson ??
               JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)))
             : JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)),
@@ -598,6 +800,19 @@ function normalizeProfileInput(
     throw error;
   }
   return profile;
+}
+
+function parseAdapterDescriptor(value: string): AdapterDescriptor {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new AdapterSchemaValidationError('Adapter schema descriptor is invalid JSON.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new AdapterSchemaValidationError('Adapter schema descriptor must be an object.');
+  }
+  return parsed as AdapterDescriptor;
 }
 
 export function normalizeBaseUrl(value: string): string {

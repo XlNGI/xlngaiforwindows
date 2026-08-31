@@ -564,8 +564,11 @@ fn unicompapi_qwen_image_edit_payload(
     let image_source = images[0]
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or("UniCompAPI image editing requires one input image")?;
-    validate_image_edit_source(image_source)?;
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("UniCompAPI image editing requires one input image")?
+        .to_string();
+    validate_image_edit_source(&image_source)?;
     let prompt = object
         .get("prompt")
         .and_then(serde_json::Value::as_str)
@@ -610,8 +613,9 @@ fn unicompapi_qwen_image_edit_payload(
 }
 
 fn validate_image_edit_source(value: &str) -> Result<(), String> {
+    let value = value.trim();
     if value.starts_with("https://") {
-        if value.len() > 4096 || value.trim() != value || value.chars().any(char::is_control) {
+        if value.len() > 4096 || value.chars().any(char::is_control) {
             return Err("UniCompAPI image editing received an invalid HTTPS image URL".to_string());
         }
         return Ok(());
@@ -619,12 +623,14 @@ fn validate_image_edit_source(value: &str) -> Result<(), String> {
     let (header, encoded) = value
         .split_once(',')
         .ok_or("UniCompAPI image editing requires a valid image Data URL")?;
-    let media_type = match header {
+    let normalized_header = header.trim().to_ascii_lowercase();
+    let media_type = match normalized_header.as_str() {
         "data:image/png;base64" => "image/png",
         "data:image/jpeg;base64" | "data:image/jpg;base64" => "image/jpeg",
         "data:image/webp;base64" => "image/webp",
         _ => return Err("UniCompAPI image editing received an unsupported image type".to_string()),
     };
+    let encoded = encoded.trim();
     if encoded.is_empty() || encoded.len() > (UNICOMPAPI_IMAGE_INPUT_LIMIT * 4 / 3) + 4 {
         return Err("UniCompAPI image editing input exceeds the native limit".to_string());
     }
@@ -2986,6 +2992,20 @@ mod tests {
         .expect("public HTTPS images should be preserved");
         let parsed: serde_json::Value = serde_json::from_slice(&remote).expect("valid JSON");
         assert_eq!(parsed["image"], "https://example.com/image.png");
+    }
+
+    #[test]
+    fn unicompapi_qwen_image_edit_accepts_trimmed_data_url_headers() {
+        let remote = unicompapi_payload(
+            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
+            json!({
+                "images": ["  DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=  "],
+                "prompt": "edit"
+            }),
+        )
+        .expect("trimmed/case-insensitive image data URL should be accepted");
+        let parsed: serde_json::Value = serde_json::from_slice(&remote).expect("valid JSON");
+        assert_eq!(parsed["image"], "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=");
     }
 
     #[test]

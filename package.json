@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build && pnpm --filter @ai-video/desktop build",
-    "dev": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm --parallel --filter @ai-video/worker --filter @ai-video/desktop dev",
+    "dev": "pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm --filter @ai-video/worker build && pnpm --parallel --filter @ai-video/worker --filter @ai-video/desktop dev",
     "dev:worker": "pnpm --filter @ai-video/worker dev",
     "dev:desktop": "pnpm --filter @ai-video/desktop tauri:dev",
     "typecheck": "pnpm -r --if-present typecheck",

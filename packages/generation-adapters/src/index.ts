@@ -947,6 +947,25 @@ const ajv = new Ajv2020({ allErrors: true, strict: true });
 const addFormats = addFormatsModule as unknown as (instance: Ajv2020) => Ajv2020;
 addFormats(ajv);
 const validators = new Map<string, ValidateFunction>();
+let runtimeOverrides = new Map<string, AdapterDescriptor>();
+
+/** Replace built-in adapters with confirmed, locally persisted descriptors. */
+export function setAdapterOverrides(overrides: AdapterDescriptor[]): void {
+  runtimeOverrides = new Map(overrides.map((adapter) => [adapter.key, adapter]));
+  validators.clear();
+}
+
+function effectiveCatalogAdapters(): AdapterDescriptor[] {
+  const byKey = new Map(catalogAdapters.map((adapter) => [adapter.key, adapter]));
+  for (const [key, adapter] of runtimeOverrides) byKey.set(key, adapter);
+  return [...byKey.values()];
+}
+
+function effectiveLookupAdapters(): AdapterDescriptor[] {
+  const byKey = new Map(lookupAdapters.map((adapter) => [adapter.key, adapter]));
+  for (const [key, adapter] of runtimeOverrides) byKey.set(key, adapter);
+  return [...byKey.values()];
+}
 
 function validationErrors(errors: ErrorObject[] | null | undefined): AdapterValidationError[] {
   return (errors ?? []).map((error) => ({
@@ -958,7 +977,8 @@ function validationErrors(errors: ErrorObject[] | null | undefined): AdapterVali
 export function getAdapterCatalog(): AdapterCatalogResult {
   const capabilities = new Map<string, string>();
   const providers = new Map<string, string>();
-  for (const adapter of catalogAdapters) {
+  const catalog = effectiveCatalogAdapters();
+  for (const adapter of catalog) {
     capabilities.set(adapter.capability, adapter.capabilityLabel);
     providers.set(adapter.provider, adapter.providerLabel);
   }
@@ -967,16 +987,16 @@ export function getAdapterCatalog(): AdapterCatalogResult {
       .filter((key) => capabilities.has(key))
       .map((key) => ({ key, label: capabilities.get(key)! })),
     providers: [...providers].map(([key, label]) => ({ key, label })),
-    adapters: catalogAdapters,
+    adapters: catalog,
   };
 }
 
 export function getAdapter(adapterKey: string): AdapterDescriptor | undefined {
-  return lookupAdapters.find((adapter) => adapter.key === adapterKey);
+  return effectiveLookupAdapters().find((adapter) => adapter.key === adapterKey);
 }
 
 export function resolveAdapter(selection: AdapterResolveParams): AdapterDescriptor {
-  const matches = catalogAdapters.filter(
+  const matches = effectiveCatalogAdapters().filter(
     (adapter) =>
       adapter.capability === selection.capability &&
       adapter.provider === selection.provider &&

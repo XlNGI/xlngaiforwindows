@@ -49,8 +49,13 @@ import type {
   SceneInfo,
   ShotInfo,
   SqliteProbeResult,
+  UnifiedAgentModelSelectionRequest,
+  AdapterDescriptor,
+  UnifiedAgentCapability,
+  LlmInputAttachment,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
+import { submitProviderRequest, submitVideoProviderTask } from './provider-client';
 import { useProjectMaintenance } from './use-project-maintenance';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { useConversationWorkspace } from './use-conversation-workspace';
@@ -58,7 +63,7 @@ import { useAssetWorkspace } from './use-asset-workspace';
 import { useProductionState } from './use-production-state';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
-import { ChatPanel, type ComposerMode } from './ChatPanel';
+import { ChatPanel, type ChatAttachment, type ComposerMode } from './ChatPanel';
 import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
@@ -117,6 +122,7 @@ function detachedConfigMatchesSnapshot(
 
 const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
 const LLM_SELECTION_STORAGE_KEY = 'ai-video.llm-selection';
+const AGENT_MODEL_PREFERENCES_STORAGE_KEY = 'ai-video.agent-model-preferences';
 
 export function inferDocumentIntent(
   prompt: string,
@@ -225,8 +231,118 @@ function initialComposerMode(): ComposerMode {
   }
 }
 
+function initialAgentModelPreferences(): Record<
+  string,
+  Partial<Record<UnifiedAgentCapability, { providerProfileId: string; modelId: string }>>
+> {
+  try {
+    const stored = window.localStorage.getItem(AGENT_MODEL_PREFERENCES_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    const result: Record<
+      string,
+      Partial<Record<UnifiedAgentCapability, { providerProfileId: string; modelId: string }>>
+    > = {};
+    for (const [conversationId, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object') continue;
+      const preferences: Partial<
+        Record<UnifiedAgentCapability, { providerProfileId: string; modelId: string }>
+      > = {};
+      for (const [capability, selection] of Object.entries(value)) {
+        if (!selection || typeof selection !== 'object') continue;
+        const candidate = selection as { providerProfileId?: unknown; modelId?: unknown };
+        if (
+          typeof candidate.providerProfileId === 'string' &&
+          typeof candidate.modelId === 'string'
+        ) {
+          preferences[capability as UnifiedAgentCapability] = {
+            providerProfileId: candidate.providerProfileId,
+            modelId: candidate.modelId,
+          };
+        }
+      }
+      if (Object.keys(preferences).length > 0) result[conversationId] = preferences;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+const MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_CHAT_TOTAL_BYTES = 40 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS = 8;
+const MAX_TEXT_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+
+function attachmentKind(file: File): ChatAttachment['kind'] {
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type.startsWith('video/')) return 'video';
+  return 'file';
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取文件：${file.name}`));
+    reader.onabort = () => reject(new Error(`读取已取消：${file.name}`));
+    reader.onload = () =>
+      typeof reader.result === 'string'
+        ? resolve(reader.result)
+        : reject(new Error(`无法读取文件：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function readImageAsDataUrl(file: File): Promise<string> {
+  const original = await readFileAsDataUrl(file);
+  const maxDataUrlLength = 1_850_000;
+  if (original.length <= maxDataUrlLength) return original;
+  if (typeof window.Image === 'undefined' || typeof document === 'undefined') return original;
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const element = new window.Image();
+    element.onload = () => resolve(element);
+    element.onerror = () => reject(new Error(`无法解码图片：${file.name}`));
+    element.src = original;
+  });
+  const maxDimension = 2048;
+  let scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) return original;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    for (const quality of [0.86, 0.72, 0.58]) {
+      const compressed = canvas.toDataURL('image/jpeg', quality);
+      if (compressed.length <= maxDataUrlLength) return compressed;
+    }
+    scale *= 0.72;
+  }
+  throw new Error(`图片压缩后仍超过传输限制：${file.name}`);
+}
+
+function readTextFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取文件：${file.name}`));
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.readAsText(file);
+  });
+}
+
 function isGenerationActive(generation: LlmGenerationInfo | undefined): boolean {
   return generation?.status === 'prepared' || generation?.status === 'streaming';
+}
+
+function readableFailure(reason: unknown, fallback: string): string {
+  if (reason instanceof Error && reason.message.trim()) return reason.message;
+  if (typeof reason === 'string' && reason.trim()) return reason;
+  if (reason && typeof reason === 'object' && 'message' in reason) {
+    const message = (reason as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return fallback;
 }
 
 function documentStateLabel(state: DocumentVersionInfo['state'] | 'new'): string {
@@ -260,6 +376,158 @@ export function mergeGenerationMessage(
     ...messages.filter((message) => message.id !== next.assistantMessage.id),
     next.assistantMessage,
   ];
+}
+
+export function inferAgentCapability(prompt: string): UnifiedAgentCapability {
+  const value = prompt.normalize('NFC');
+  if (/(搜索|查找|联网|最新资料|网页|研究)/u.test(value)) return 'research';
+  // Direct rendering requests should not be mistaken for prompt/document work.
+  // Keep “生成角色三视图提示词” as document work, but route
+  // “直接生成角色三视图” to the image model selection flow.
+  if (
+    /(?:生成|制作|创建|绘制|画出|画一张)/u.test(value) &&
+    /(图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)/u.test(value) &&
+    !/(提示词|prompt|文档)/iu.test(value)
+  )
+    return 'image';
+  if (/(改写|重写|润色|总结|提取|分析|识别|描述|转写|翻译|提示词)/u.test(value)) return 'document';
+  if (
+    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|生成(?:一段|一个|该|这个)?视频|制作(?:一段|一个|该|这个)?视频|创建(?:一段|一个|该|这个)?视频|输出视频|做成视频)/u.test(
+      value,
+    )
+  )
+    return 'video';
+  if (
+    /(文生图|图生图|参考生图|生成(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|制作(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|创建(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|生图)/u.test(
+      value,
+    )
+  )
+    return 'image';
+  if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
+  return 'text';
+}
+
+/**
+ * Combines the user's direct image request with the most relevant generated
+ * prompt document. Image adapters only receive their `prompt` parameter, so
+ * without this bridge a request such as “直接生成角色三视图” would silently
+ * discard the detailed character/scene constraints produced earlier by the
+ * Agent.
+ */
+export function composeImageGenerationPrompt(
+  userPrompt: string,
+  source?: { title: string; content: string },
+): string {
+  const request = userPrompt.trim();
+  if (!source) return request;
+  const content = source.content.trim();
+  if (!content) return request;
+  const prefix = `${request}\n\n请依据以下项目提示词文档生成图片，保持人物、服装、构图和三视图约束一致。\n【${source.title}】\n`;
+  const maximum = 5_000;
+  if (prefix.length >= maximum) return prefix.slice(0, maximum);
+  return `${prefix}${content.slice(0, maximum - prefix.length)}`;
+}
+
+export function buildAgentAttachments(attachments: ChatAttachment[]): LlmInputAttachment[] {
+  return attachments.flatMap((attachment): LlmInputAttachment[] => {
+    if (attachment.kind === 'video') {
+      const metadata: LlmInputAttachment = {
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        text: '这是一个视频附件。当前分析使用视频首帧作为视觉参考。',
+      };
+      return attachment.previewDataUrl
+        ? [
+            metadata,
+            {
+              name: `${attachment.name}（首帧）`,
+              mimeType: 'image/jpeg',
+              dataUrl: attachment.previewDataUrl,
+            },
+          ]
+        : [metadata];
+    }
+    return [
+      {
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        ...(attachment.dataUrl ? { dataUrl: attachment.dataUrl } : {}),
+        ...(attachment.text !== undefined ? { text: attachment.text } : {}),
+      },
+    ];
+  });
+}
+
+/** Returns image data suitable for media adapters' `images` reference field. */
+export function collectReferenceImageInputs(attachments: ChatAttachment[]): string[] {
+  return attachments.flatMap((attachment) => {
+    if (attachment.kind === 'image' && attachment.dataUrl) {
+      const normalized = normalizeImageDataUrl(attachment.dataUrl);
+      return normalized ? [normalized] : [];
+    }
+    if (attachment.kind === 'video' && attachment.previewDataUrl) {
+      const normalized = normalizeImageDataUrl(attachment.previewDataUrl);
+      return normalized ? [normalized] : [];
+    }
+    return [];
+  });
+}
+
+/** Canonicalizes browser/file Data URLs before they cross the native boundary. */
+export function normalizeImageDataUrl(value: string): string | undefined {
+  const comma = value.indexOf(',');
+  if (comma < 0) return undefined;
+  const header = value.slice(0, comma).trim().toLowerCase();
+  if (!/^data:image\/(?:png|jpe?g|webp);base64$/u.test(header)) return undefined;
+  const encoded = value
+    .slice(comma + 1)
+    .replace(/[\s\r\n]+/gu, '')
+    .trim();
+  if (!encoded || !/^[a-z0-9+/]*={0,2}$/iu.test(encoded)) return undefined;
+  const mime = header.includes('jpeg') || header.includes('jpg') ? 'jpeg' : header.slice(11, -7);
+  return `data:image/${mime};base64,${encoded}`;
+}
+
+function readVideoPreviewAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    const objectUrl = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(objectUrl);
+      video.remove();
+    };
+    video.muted = true;
+    video.preload = 'metadata';
+    video.onloadeddata = () => {
+      const width = video.videoWidth || 1280;
+      const height = video.videoHeight || 720;
+      const scale = Math.min(1, 1280 / Math.max(width, height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) {
+        cleanup();
+        reject(new Error(`无法提取视频首帧：${file.name}`));
+        return;
+      }
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.78));
+      cleanup();
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error(`无法读取视频：${file.name}`));
+    };
+    video.src = objectUrl;
+  });
+}
+
+function isModelSchemaQuery(prompt: string): boolean {
+  return (
+    /(模型|参数|schema|适配器)/iu.test(prompt) &&
+    /(查看|查询|支持|有哪些|列出|告诉我)/u.test(prompt)
+  );
 }
 
 export function App() {
@@ -301,7 +569,26 @@ export function App() {
   const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
+  const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [chatMessage, setChatMessage] = useState('');
+  const [agentModelSelection, setAgentModelSelection] =
+    useState<UnifiedAgentModelSelectionRequest>();
+  const [agentModelPreferences, setAgentModelPreferences] = useState<
+    Record<
+      string,
+      Partial<Record<UnifiedAgentCapability, { providerProfileId: string; modelId: string }>>
+    >
+  >(initialAgentModelPreferences);
+  const [agentParameterRequest, setAgentParameterRequest] = useState<{
+    prompt: string;
+    capability: 'image' | 'video';
+    providerProfileId: string;
+    modelId: string;
+    modelName: string;
+    adapters: AdapterDescriptor[];
+    affectsCost: boolean;
+    referenceImageInputs?: string[];
+  }>();
   const [contextPreview, setContextPreview] = useState<ProductionContextInfo>();
   const [llmStatus, setLlmStatus] = useState<LlmStatusResult>();
   const [initialLlmSelectionValue] = useState(initialLlmSelection);
@@ -569,6 +856,7 @@ export function App() {
   };
 
   const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
+    setChatAttachments([]);
     const agentTaskId =
       'agentTaskId' in prepared && typeof prepared.agentTaskId === 'string'
         ? prepared.agentTaskId
@@ -785,6 +1073,15 @@ export function App() {
     }
   };
 
+  const ensureWorkerProjectSession = async (): Promise<boolean> => {
+    if (!project?.rootPath) return false;
+    const current = await callWorker('project.current', {});
+    if (current) return true;
+    await callWorker('project.open', { rootPath: project.rootPath });
+    await loadProjectContent();
+    return true;
+  };
+
   useEffect(() => {
     void checkRuntime();
     void loadLlmCatalog();
@@ -800,6 +1097,17 @@ export function App() {
       .catch(() => undefined)
       .finally(() => setStartupLoaded(true));
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        AGENT_MODEL_PREFERENCES_STORAGE_KEY,
+        JSON.stringify(agentModelPreferences),
+      );
+    } catch {
+      // Local persistence is best effort; the active session remains authoritative.
+    }
+  }, [agentModelPreferences]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return () => undefined;
@@ -1220,46 +1528,209 @@ export function App() {
     }
   };
 
-  const sendMessage = async (composerValue = composer) => {
-    if (!composerValue.trim() || !conversation) return;
+  const sendMessage = async (
+    composerValue = composer,
+    modelSelection?: {
+      providerProfileId: string;
+      modelId: string;
+      adapterKey?: string;
+      parameters?: Record<string, string | number | boolean | string[]>;
+    },
+  ) => {
+    if ((!composerValue.trim() && chatAttachments.length === 0) || !conversation) return;
+    // A Worker sidecar can restart independently of the Desktop window. In
+    // that case restore the project session before any Agent/media operation.
+    try {
+      await ensureWorkerProjectSession();
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '项目会话未打开');
+      return;
+    }
     const prompt = composerValue;
+    const attachmentContext = chatAttachments.length
+      ? `\n\n[附件：${chatAttachments.map((attachment) => attachment.name).join('、')}]${chatAttachments
+          .filter((attachment) => attachment.text)
+          .map((attachment) => `\n\n--- ${attachment.name} ---\n${attachment.text}`)
+          .join('')}`
+      : '';
+    const promptForAgent = prompt.includes('[附件：') ? prompt : `${prompt}${attachmentContext}`;
     setComposer('');
+    if (composerMode === 'chat' && isModelSchemaQuery(prompt)) {
+      try {
+        const capability = inferAgentCapability(prompt);
+        const catalog = await callWorker('model.catalog.list', {
+          capability: capability === 'image' || capability === 'video' ? capability : undefined,
+        });
+        const summary = catalog.models
+          .map(
+            (item) =>
+              `${item.providerName} / ${item.modelName}: ${item.schemaStatus === 'confirmed' ? `${item.adapters.length} 个适配器，必填 ${item.missingRequired.join('、') || '无'}` : 'schema 尚未配置'}`,
+          )
+          .join('\n');
+        setChatMessage(summary || '当前没有找到匹配的模型或参数 schema。');
+      } catch (reason) {
+        setChatMessage(reason instanceof Error ? reason.message : '模型目录查询失败');
+      }
+      return;
+    }
     if (composerMode === 'novel-writing') {
-      await createNovelDraft(prompt);
+      await createNovelDraft(promptForAgent);
       return;
     }
     if (composerMode === 'short-drama') {
-      await runShortDramaGeneration(prompt);
+      await runShortDramaGeneration(promptForAgent);
+      return;
+    }
+    if (
+      composerMode === 'chat' &&
+      (selectedLlmProfile || llmProfiles.length > 0) &&
+      (modelSelection || (selectedLlmProfile && selectedLlmModel) || llmProfiles.length > 0)
+    ) {
+      try {
+        setAgentModelSelection(undefined);
+        setAgentParameterRequest(undefined);
+        const capability = inferAgentCapability(prompt);
+        let agentPrompt = promptForAgent;
+        if (capability === 'image') {
+          const isImagePromptDocument = (item: { kind: string; title: string }) =>
+            (item.kind === 'character' || item.kind === 'scene') &&
+            /(提示词|三视图|立绘|角色)/u.test(item.title);
+          let promptDocument =
+            document?.currentVersion?.contentMarkdown &&
+            document.title &&
+            isImagePromptDocument(document)
+              ? { title: document.title, content: document.currentVersion.contentMarkdown }
+              : undefined;
+          if (!promptDocument) {
+            const candidate = [...documents]
+              .filter(isImagePromptDocument)
+              .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+            if (candidate) {
+              const detail = await callWorker('document.get', { documentId: candidate.id });
+              if (detail.currentVersion?.contentMarkdown) {
+                promptDocument = {
+                  title: detail.title,
+                  content: detail.currentVersion.contentMarkdown,
+                };
+              }
+            }
+          }
+          agentPrompt = composeImageGenerationPrompt(promptForAgent, promptDocument);
+        }
+        const remembered = conversation
+          ? agentModelPreferences[conversation.id]?.[capability]
+          : undefined;
+        const providerProfileId =
+          modelSelection?.providerProfileId ??
+          remembered?.providerProfileId ??
+          selectedLlmProfile?.id;
+        const modelId = modelSelection?.modelId ?? remembered?.modelId ?? selectedLlmModel?.id;
+        // Media parameter submission already carries local reference data in
+        // `parameters.images`/video fields. Sending the same data again as
+        // Agent attachments can push the JSON sidecar envelope over 2 MiB.
+        const agentAttachments = modelSelection?.parameters
+          ? undefined
+          : buildAgentAttachments(chatAttachments);
+        const unified = await callWorker('agent.run', {
+          conversationId: conversation.id,
+          prompt: agentPrompt || '请分析我提供的附件。',
+          capability,
+          ...(agentAttachments ? { attachments: agentAttachments } : {}),
+          ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
+          ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
+          ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
+        });
+        if (unified.status === 'needs_model_selection') {
+          setComposer(prompt);
+          setChatMessage('');
+          setAgentModelSelection({
+            prompt: agentPrompt || '请分析我提供的附件。',
+            capability: unified.capability,
+            models: unified.models,
+          });
+          return;
+        }
+        if (unified.status === 'needs_parameters') {
+          setComposer(prompt);
+          setAgentParameterRequest({
+            referenceImageInputs: collectReferenceImageInputs(chatAttachments),
+            prompt: agentPrompt || '请根据附件生成内容。',
+            ...unified,
+          });
+          setChatMessage('');
+          return;
+        }
+        if (unified.status === 'image_prepared' || unified.status === 'video_prepared') {
+          if (unified.status === 'image_prepared') {
+            let response: Awaited<ReturnType<typeof submitProviderRequest>>;
+            try {
+              response = await submitProviderRequest(
+                unified.job.adapterKey,
+                unified.job.request,
+                providerProfileId!,
+                'global',
+              );
+            } catch (reason) {
+              await callWorker('image.generate.fail', { jobId: unified.job.id }).catch(
+                () => undefined,
+              );
+              throw reason;
+            }
+            const completed = await callWorker('image.generate.complete', {
+              jobId: unified.job.id,
+              providerStatus: response.status,
+              providerBody: response.body,
+              assetKind: 'generated-image',
+            });
+            if (completed.status === 'succeeded') {
+              const nextAssets = await callWorker('asset.list', {});
+              updateAssets(nextAssets, completed.results[0]?.asset?.id);
+            }
+            setChatMessage(
+              completed.status === 'succeeded'
+                ? '图片已生成并新增到素材库。'
+                : (completed.error ?? '图片生成失败。'),
+            );
+          } else {
+            const response = await submitVideoProviderTask(
+              unified.job.adapterKey,
+              unified.job.request,
+              providerProfileId!,
+              'global',
+            );
+            if (response.status < 200 || response.status >= 300 || !response.taskId) {
+              const failed = await callWorker('video.generate.fail', {
+                jobId: unified.job.id,
+                failureKind: 'provider',
+                message: response.errorMessage ?? `Provider HTTP ${response.status}`,
+              });
+              setChatMessage(failed.error ?? '视频任务提交失败。');
+            } else {
+              await callWorker('video.generate.attachTask', {
+                jobId: unified.job.id,
+                providerTaskId: response.taskId,
+              });
+              setChatMessage('视频任务已提交，可能产生费用；请在制作面板查看进度。');
+            }
+          }
+          setChatAttachments([]);
+          return;
+        }
+        if (!('generation' in unified) || !('stream' in unified)) {
+          setComposer(prompt);
+          setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
+          return;
+        }
+        launchPreparedGeneration(unified);
+      } catch (reason) {
+        setComposer(prompt);
+        setChatMessage(readableFailure(reason, '生成启动失败'));
+        void loadLlmCatalog();
+      }
       return;
     }
     if (selectedLlmProfile && selectedLlmModel) {
       try {
-        if (composerMode === 'chat') {
-          const inferred = inferDocumentIntent(prompt, document?.id);
-          if (inferred.needsTarget) {
-            setComposer(prompt);
-            setChatMessage('请先打开唯一的目标文档，再执行文档读取、更新、归档或恢复。');
-            return;
-          }
-          if (inferred.intent) {
-            const prepared = await callWorker('agent.generation.prepare', {
-              conversationId: conversation.id,
-              prompt,
-              providerProfileId: selectedLlmProfile.id,
-              modelId: selectedLlmModel.id,
-              agentMode: 'document',
-              researchMode,
-              documentIntent: inferred.intent,
-            });
-            if ('pendingIntent' in prepared) {
-              setComposer(prompt);
-              setChatMessage('文档目标需要进一步澄清；本次没有创建或修改文档。');
-              return;
-            }
-            launchPreparedGeneration(prepared);
-            return;
-          }
-        }
         const prepared = await callWorker('llm.generation.prepare', {
           conversationId: conversation.id,
           prompt,
@@ -1269,7 +1740,7 @@ export function App() {
         launchPreparedGeneration(prepared);
       } catch (reason) {
         setComposer(prompt);
-        setChatMessage(reason instanceof Error ? reason.message : '生成启动失败');
+        setChatMessage(readableFailure(reason, '生成启动失败'));
         void loadLlmCatalog();
       }
       return;
@@ -1295,6 +1766,64 @@ export function App() {
     });
     setMessages((current) => [...current, saved]);
     setChatMessage('消息已保存；在供应商与模型中添加 LLM 连接后可生成回复');
+  };
+
+  const addChatAttachments = async (files: FileList | File[]) => {
+    const incoming = Array.from(files);
+    if (incoming.length === 0) return;
+    if (chatAttachments.length + incoming.length > MAX_CHAT_ATTACHMENTS) {
+      setChatMessage(`最多同时添加 ${MAX_CHAT_ATTACHMENTS} 个附件。`);
+      return;
+    }
+    if (
+      chatAttachments.reduce((total, attachment) => total + attachment.size, 0) +
+        incoming.reduce((total, file) => total + file.size, 0) >
+      MAX_CHAT_TOTAL_BYTES
+    ) {
+      setChatMessage('附件总大小不能超过 40 MiB。');
+      return;
+    }
+    try {
+      const next: ChatAttachment[] = [];
+      for (const file of incoming) {
+        if (!file.name.trim() || file.size <= 0) throw new Error(`文件为空：${file.name}`);
+        if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+          throw new Error(`附件不能超过 20 MiB：${file.name}`);
+        }
+        const kind = attachmentKind(file);
+        const attachment: ChatAttachment = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          name: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          size: file.size,
+          kind,
+        };
+        if (kind === 'image') attachment.dataUrl = await readImageAsDataUrl(file);
+        else if (kind === 'video') {
+          attachment.dataUrl = await readFileAsDataUrl(file);
+          try {
+            attachment.previewDataUrl = await readVideoPreviewAsDataUrl(file);
+          } catch {
+            // Keep the original video preview; the Agent will receive metadata
+            // and a clear limitation instead of failing the whole request.
+          }
+        } else if (
+          file.size <= MAX_TEXT_ATTACHMENT_BYTES &&
+          /\.(txt|md|json|csv|xml|yaml|yml)$/iu.test(file.name)
+        ) {
+          attachment.text = await readTextFile(file);
+        }
+        next.push(attachment);
+      }
+      setChatAttachments((current) => [...current, ...next]);
+      setChatMessage('附件已添加，可以继续描述任务后发送。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '添加附件失败');
+    }
+  };
+
+  const removeChatAttachment = (id: string) => {
+    setChatAttachments((current) => current.filter((attachment) => attachment.id !== id));
   };
 
   const createDocumentDraft = async () => {
@@ -1964,6 +2493,22 @@ export function App() {
       generation={generation}
       agentTask={agentTask}
       confirmation={agentConfirmation}
+      agentModelSelection={agentModelSelection}
+      onSelectAgentModel={(providerProfileId, modelId) => {
+        setSelectedLlmProfileId(providerProfileId);
+        setSelectedLlmModelId(modelId);
+        const pending = agentModelSelection;
+        if (pending) {
+          setAgentModelPreferences((current) => ({
+            ...current,
+            [conversation?.id ?? '']: {
+              ...current[conversation?.id ?? ''],
+              [pending.capability]: { providerProfileId, modelId },
+            },
+          }));
+          void sendMessage(pending.prompt, { providerProfileId, modelId });
+        }
+      }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
       onOpenTaskLog={() => {
         setNavigationMode('project');
@@ -2003,14 +2548,68 @@ export function App() {
       }}
       onLlmModelChange={setSelectedLlmModelId}
       onResearchModeChange={setResearchMode}
-      onComposerModeChange={setComposerMode}
       onOpenProviderSettings={() => {
         setSettingsInitialPage('providers');
         setSettingsOpen(true);
       }}
       onComposerChange={setComposer}
+      attachments={chatAttachments}
+      onAddAttachments={(files) => void addChatAttachments(files)}
+      onRemoveAttachment={removeChatAttachment}
       onCancelGeneration={() => void cancelGeneration()}
       onSendMessage={() => void sendMessage()}
+      agentParameterRequest={agentParameterRequest}
+      onSubmitAgentParameters={(adapterKey, parameters) => {
+        const pending = agentParameterRequest;
+        if (!pending) return;
+        const imageInputs = collectReferenceImageInputs(chatAttachments);
+        const videoInputs = chatAttachments
+          .filter((attachment) => attachment.kind === 'video' && attachment.dataUrl)
+          .flatMap((attachment) => (attachment.dataUrl ? [attachment.dataUrl] : []));
+        const selectedAdapter = pending.adapters.find((adapter) => adapter.key === adapterKey);
+        const adapterProperties = selectedAdapter?.parameterSchema.properties ?? {};
+        let adapterParameters = { ...parameters };
+        if (
+          imageInputs.length > 0 &&
+          Object.prototype.hasOwnProperty.call(adapterProperties, 'images')
+        ) {
+          const existingImages = Array.isArray(adapterParameters.images)
+            ? adapterParameters.images
+                .map((input) =>
+                  typeof input === 'string'
+                    ? input.trim().startsWith('https://')
+                      ? input.trim()
+                      : normalizeImageDataUrl(input)
+                    : undefined,
+                )
+                .filter((input): input is string => Boolean(input))
+            : [];
+          adapterParameters = {
+            ...adapterParameters,
+            images: [
+              ...existingImages,
+              ...imageInputs.filter((input) => !existingImages.includes(input)),
+            ],
+          };
+        }
+        const videoField = ['video', 'video_url', 'videoUrl'].find((key) =>
+          Object.prototype.hasOwnProperty.call(adapterProperties, key),
+        );
+        const videoInput = videoInputs[0];
+        if (videoInput && videoField) {
+          adapterParameters = {
+            ...adapterParameters,
+            [videoField]: videoInput,
+          };
+        }
+        setAgentParameterRequest(undefined);
+        void sendMessage(pending.prompt, {
+          providerProfileId: pending.providerProfileId,
+          modelId: pending.modelId,
+          adapterKey,
+          parameters: adapterParameters,
+        });
+      }}
       onCreateDocumentDraft={() => void createDocumentDraft()}
       onCreateNovelChapter={() => void createNovelChapter()}
     />

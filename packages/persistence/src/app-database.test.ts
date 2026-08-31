@@ -33,11 +33,11 @@ describe('app settings database', () => {
     const projectDatabase = openProjectDatabase(join(directory, 'project.sqlite'));
 
     expect(getAppSchemaVersion(appDatabase)).toBe(0);
-    expect(migrateAppDatabase(appDatabase)).toBe(3);
-    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 3 });
+    expect(migrateAppDatabase(appDatabase)).toBe(4);
+    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 4 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
     expect(migrateDatabase(projectDatabase)).toBe(31);
-    expect(getAppSchemaVersion(appDatabase)).toBe(3);
+    expect(getAppSchemaVersion(appDatabase)).toBe(4);
 
     const providerColumns = appDatabase
       .prepare("SELECT name FROM pragma_table_info('provider_profiles')")
@@ -78,7 +78,7 @@ describe('app settings database', () => {
         '2026-08-03T00:00:00.000Z',
       );
 
-    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(3);
+    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(4);
     expect(createAppRepositories(database).providerProfiles.list()).toMatchObject([
       { name: 'Existing Vidu', migrationSource: undefined },
     ]);
@@ -133,6 +133,32 @@ describe('app settings database', () => {
       modelId: 'model-record',
       updatedAt: '2026-08-03T00:00:00.000Z',
     });
+    repositories.adapterSchemas.save({
+      adapterKey: 'TEXT_TO_IMAGE:manual:new-model:v1',
+      descriptorJson: JSON.stringify({ key: 'TEXT_TO_IMAGE:manual:new-model:v1' }),
+      source: 'manual',
+      status: 'needs_confirmation',
+      version: 1,
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    });
+    repositories.adapterSchemas.saveAudit({
+      id: 'schema-audit-1',
+      adapterKey: 'TEXT_TO_IMAGE:manual:new-model:v1',
+      version: 1,
+      action: 'proposed',
+      actorType: 'agent',
+      reason: 'manual model setup',
+      afterJson: JSON.stringify({ key: 'TEXT_TO_IMAGE:manual:new-model:v1' }),
+      createdAt: '2026-08-03T00:00:00.000Z',
+    });
+    expect(repositories.adapterSchemas.get('TEXT_TO_IMAGE:manual:new-model:v1')).toMatchObject({
+      status: 'needs_confirmation',
+      version: 1,
+    });
+    expect(
+      repositories.adapterSchemas.listAudits('TEXT_TO_IMAGE:manual:new-model:v1'),
+    ).toHaveLength(1);
     repositories.usageIndex.save({
       attemptId: 'attempt',
       projectId: 'project',

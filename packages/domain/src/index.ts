@@ -1030,6 +1030,41 @@ export interface ProviderModelRepository {
   listByProfile(providerProfileId: string): ProviderModelRecord[];
 }
 
+export type AdapterSchemaRecordSource =
+  'official-adapter' | 'manual' | 'synced-catalog' | 'missing';
+export type AdapterSchemaRecordStatus = 'confirmed' | 'needs_confirmation' | 'missing';
+
+export interface AdapterSchemaRecord {
+  adapterKey: string;
+  descriptorJson: string;
+  source: AdapterSchemaRecordSource;
+  status: AdapterSchemaRecordStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdapterSchemaAuditRecord {
+  id: string;
+  adapterKey: string;
+  version: number;
+  action: 'proposed' | 'confirmed' | 'rolled_back';
+  actorType: 'user' | 'agent' | 'system';
+  conversationId?: string;
+  reason?: string;
+  beforeJson?: string;
+  afterJson?: string;
+  createdAt: string;
+}
+
+export interface AdapterSchemaRepository {
+  save(record: AdapterSchemaRecord): void;
+  get(adapterKey: string): AdapterSchemaRecord | undefined;
+  list(): AdapterSchemaRecord[];
+  saveAudit(record: AdapterSchemaAuditRecord): void;
+  listAudits(adapterKey: string, limit?: number): AdapterSchemaAuditRecord[];
+}
+
 export interface ModelPricingRepository {
   save(record: ModelPricingRecord): void;
   get(providerProfileId: string, modelId: string): ModelPricingRecord | undefined;

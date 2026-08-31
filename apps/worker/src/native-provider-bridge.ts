@@ -524,6 +524,7 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
     'systemInstruction',
     'context',
     'prompt',
+    'attachments',
     'tools',
     'continuation',
   ]);

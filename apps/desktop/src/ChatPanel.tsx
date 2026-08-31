@@ -8,11 +8,13 @@ import {
   FilePlus2,
   MessageSquarePlus,
   PanelRightClose,
+  Paperclip,
   Pencil,
   RefreshCw,
   RotateCcw,
   Square,
 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentResearchMode,
   ChatMessageInfo,
@@ -26,10 +28,26 @@ import type {
   ProductionContextInfo,
   AgentToolConfirmationRequest,
   AgentTaskPendingConfirmationInfo,
+  AdapterDescriptor,
+  AdapterParameters,
+  AdapterParameterProperty,
+  UnifiedAgentModelSelectionRequest,
 } from '@ai-video/contracts';
 
 type PromotionTarget = 'document' | 'memory' | 'constraint';
 export type ComposerMode = 'chat' | 'document' | 'novel-writing' | 'short-drama';
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: 'image' | 'video' | 'file';
+  dataUrl?: string;
+  /** Bounded still frame sent to vision models instead of the full video payload. */
+  previewDataUrl?: string;
+  text?: string;
+}
 
 interface ChatPanelProps {
   scopeType: ConversationScopeType;
@@ -81,6 +99,22 @@ interface ChatPanelProps {
   onComposerChange: (value: string) => void;
   onCancelGeneration: () => void;
   onSendMessage: () => void;
+  attachments?: ChatAttachment[];
+  onAddAttachments?: (files: FileList | File[]) => void;
+  onRemoveAttachment?: (id: string) => void;
+  agentModelSelection?: UnifiedAgentModelSelectionRequest;
+  onSelectAgentModel?: (providerProfileId: string, modelId: string) => void;
+  agentParameterRequest?: {
+    prompt: string;
+    capability: 'image' | 'video';
+    providerProfileId: string;
+    modelId: string;
+    modelName: string;
+    adapters: AdapterDescriptor[];
+    affectsCost: boolean;
+    referenceImageInputs?: string[];
+  };
+  onSubmitAgentParameters?: (adapterKey: string, parameters: AdapterParameters) => void;
   onCreateDocumentDraft?: () => void;
   onCreateNovelChapter?: () => void;
 }
@@ -137,10 +171,19 @@ export function ChatPanel({
   onComposerChange,
   onCancelGeneration,
   onSendMessage,
+  attachments = [],
+  onAddAttachments,
+  onRemoveAttachment,
+  agentModelSelection,
+  onSelectAgentModel,
+  agentParameterRequest,
+  onSubmitAgentParameters,
   onCreateDocumentDraft,
   onCreateNovelChapter,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
+  const fileInputId = 'chat-attachment-input';
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const displayedConfirmation = confirmation ?? agentTask?.pendingConfirmation;
   const confirmationIsActionable = Boolean(
     confirmation && 'confirmationToken' in confirmation && onConfirmAgentAction,
@@ -443,6 +486,40 @@ export function ChatPanel({
         )}
       </div>
       {statusMessage && <small className="chat-status">{statusMessage}</small>}
+      {agentModelSelection && (
+        <div className="agent-model-selection" role="dialog" aria-label="选择 Agent 模型">
+          <strong>
+            已识别为
+            {agentModelSelection.capability === 'image'
+              ? '图片'
+              : agentModelSelection.capability === 'video'
+                ? '视频'
+                : 'Agent'}
+            任务，请选择模型
+          </strong>
+          {agentModelSelection.models.length === 0 && (
+            <small>当前没有满足该能力的可用模型，请先在供应商设置中启用模型。</small>
+          )}
+          <div className="agent-model-options">
+            {agentModelSelection.models.map((model) => (
+              <button
+                type="button"
+                key={`${model.providerProfileId}:${model.modelId}`}
+                onClick={() => onSelectAgentModel?.(model.providerProfileId, model.modelId)}
+              >
+                <span>{model.modelName}</span>
+                <small>
+                  {model.providerName}
+                  {model.schemaReady === false ? ' · 需要补充参数 schema' : ''}
+                </small>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {agentParameterRequest && (
+        <AgentParameterCard request={agentParameterRequest} onSubmit={onSubmitAgentParameters} />
+      )}
       {agentTask?.plan && (
         <div className="agent-progress" role="status">
           <div className="agent-progress-heading">
@@ -515,7 +592,42 @@ export function ChatPanel({
           )}
         </div>
       )}
-      <div className="composer">
+      <div
+        className="composer"
+        onDragOver={(event) => {
+          if (onAddAttachments) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          if (!onAddAttachments || event.dataTransfer.files.length === 0) return;
+          event.preventDefault();
+          onAddAttachments(event.dataTransfer.files);
+        }}
+      >
+        {attachments.length > 0 && (
+          <div className="chat-attachments" aria-label="已添加附件">
+            {attachments.map((attachment) => (
+              <span className="chat-attachment" key={attachment.id}>
+                {attachment.kind === 'image' && attachment.dataUrl && (
+                  <img src={attachment.dataUrl} alt="" className="chat-attachment-thumb" />
+                )}
+                {attachment.kind === 'video' && attachment.dataUrl && (
+                  <video src={attachment.dataUrl} className="chat-attachment-thumb" muted />
+                )}
+                <span title={attachment.name}>{attachment.name}</span>
+                {onRemoveAttachment && (
+                  <button
+                    type="button"
+                    className="chat-attachment-remove"
+                    aria-label={`移除 ${attachment.name}`}
+                    onClick={() => onRemoveAttachment(attachment.id)}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
         <textarea
           aria-label="会话消息"
           placeholder={
@@ -530,13 +642,19 @@ export function ChatPanel({
           rows={3}
           value={composer}
           onChange={(event) => onComposerChange(event.target.value)}
+          onPaste={(event) => {
+            if (event.clipboardData.files.length > 0) {
+              event.preventDefault();
+              onAddAttachments?.(event.clipboardData.files);
+            }
+          }}
           onKeyDown={(event) => {
             if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
             event.preventDefault();
             if (
               generation?.status !== 'prepared' &&
               generation?.status !== 'streaming' &&
-              composer.trim() &&
+              (composer.trim() || attachments.length > 0) &&
               conversation &&
               writable
             ) {
@@ -578,12 +696,37 @@ export function ChatPanel({
                 <BookOpenText size={16} />
               </button>
             )}
+            <input
+              ref={fileInputRef}
+              id={fileInputId}
+              className="visually-hidden"
+              aria-hidden="true"
+              tabIndex={-1}
+              type="file"
+              multiple
+              accept="*/*"
+              onChange={(event) => {
+                if (event.target.files?.length) onAddAttachments?.(event.target.files);
+                event.currentTarget.value = '';
+              }}
+              disabled={!conversation || !writable}
+            />
+            <button
+              type="button"
+              className="icon-button subtle attachment-button"
+              title="添加图片、视频或文件"
+              aria-label="添加图片、视频或文件"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!conversation || !writable}
+            >
+              <Paperclip size={16} />
+            </button>
             <button
               className="icon-button send-button"
               type="button"
               title="发送消息"
               onClick={onSendMessage}
-              disabled={!composer.trim() || !conversation}
+              disabled={(!composer.trim() && attachments.length === 0) || !conversation}
             >
               <ChevronRight size={18} />
             </button>
@@ -697,4 +840,225 @@ function formatLatency(startAt: string, endAt: string | undefined): string {
   return milliseconds < 1_000
     ? `${milliseconds} ms`
     : `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 2 : 1)} s`;
+}
+
+function AgentParameterCard({
+  request,
+  onSubmit,
+}: {
+  request: NonNullable<ChatPanelProps['agentParameterRequest']>;
+  onSubmit?: (adapterKey: string, parameters: AdapterParameters) => void;
+}) {
+  const firstAdapter = request.adapters[0];
+  const [adapterKey, setAdapterKey] = useState(firstAdapter?.key ?? '');
+  const adapter = request.adapters.find((item) => item.key === adapterKey) ?? firstAdapter;
+  const initialValues = useMemo<AdapterParameters>(() => {
+    if (!adapter) return {};
+    const values: AdapterParameters = {};
+    for (const [key, property] of Object.entries(adapter.parameterSchema.properties)) {
+      if (property.default !== undefined) values[key] = property.default;
+      else if (key === 'prompt' && property.type === 'string') values[key] = request.prompt;
+    }
+    if (
+      request.referenceImageInputs &&
+      request.referenceImageInputs.length > 0 &&
+      Object.prototype.hasOwnProperty.call(adapter.parameterSchema.properties, 'images')
+    ) {
+      values.images = request.referenceImageInputs;
+    }
+    return values;
+  }, [adapter, request.referenceImageInputs, request.prompt]);
+  const [parameters, setParameters] = useState<AdapterParameters>(initialValues);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!adapter) return;
+    setAdapterKey(adapter.key);
+    setParameters(initialValues);
+    setError('');
+  }, [adapter?.key, initialValues]);
+
+  if (!adapter) {
+    return (
+      <div className="agent-parameter-card" role="alert">
+        <strong>当前模型还没有可用的参数 schema</strong>
+        <small>请在会话中告诉 Agent 补充或更新该模型的参数配置。</small>
+      </div>
+    );
+  }
+
+  const fields = Object.entries(adapter.parameterSchema.properties).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const update = (key: string, value: AdapterParameters[string] | undefined) => {
+    setParameters((current) => {
+      const next = { ...current };
+      if (value === undefined || value === '') delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  };
+  const submit = () => {
+    const missing = adapter.parameterSchema.required.filter((key) => {
+      const value = parameters[key];
+      return value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
+    });
+    if (missing.length > 0) {
+      setError(`请填写必填参数：${missing.join('、')}`);
+      return;
+    }
+    setError('');
+    onSubmit?.(adapter.key, parameters);
+  };
+
+  return (
+    <div className="agent-parameter-card" role="dialog" aria-label="补充生成参数">
+      <strong>{request.capability === 'image' ? '图片' : '视频'}参数</strong>
+      <small>{request.modelName} · 参数会先校验，通过后才会创建草稿任务。</small>
+      {request.affectsCost && (
+        <small className="agent-cost-warning">此操作可能产生费用，当前暂不计算具体金额。</small>
+      )}
+      {request.adapters.length > 1 && (
+        <label className="agent-parameter-adapter">
+          <span>生成方式</span>
+          <select
+            value={adapter.key}
+            onChange={(event) => {
+              setAdapterKey(event.target.value);
+              setParameters({});
+            }}
+          >
+            {request.adapters.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.capabilityLabel} · {item.apiVersion}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <div className="agent-parameter-fields">
+        {fields.map(([key, property]) => (
+          <AgentParameterField
+            key={key}
+            name={key}
+            property={property}
+            required={adapter.parameterSchema.required.includes(key)}
+            value={parameters[key]}
+            onChange={(value) => update(key, value)}
+          />
+        ))}
+      </div>
+      {error && <small className="agent-parameter-error">{error}</small>}
+      <button className="button primary" type="button" onClick={submit}>
+        提交生成
+      </button>
+    </div>
+  );
+}
+
+function AgentParameterField({
+  name,
+  property,
+  required,
+  value,
+  onChange,
+}: {
+  name: string;
+  property: AdapterParameterProperty;
+  required: boolean;
+  value?: AdapterParameters[string];
+  onChange: (value: AdapterParameters[string] | undefined) => void;
+}) {
+  const id = `agent-parameter-${name}`;
+  const label = `${property.title || name}${required ? ' *' : ''}`;
+  const metadata = (
+    <small className="agent-parameter-meta">
+      {property.affectsCost ? '可能产生费用 · ' : ''}
+      {property.overwritesExisting ? '可能覆盖已有内容 · ' : ''}
+      {property.mutuallyExclusiveWith?.length
+        ? `与 ${property.mutuallyExclusiveWith.join('、')} 互斥 · `
+        : ''}
+      {property.requires?.length ? `依赖 ${property.requires.join('、')} · ` : ''}
+      {property.description ?? ''}
+    </small>
+  );
+  if (property.type === 'boolean') {
+    return (
+      <label className="agent-parameter-toggle">
+        <input
+          id={id}
+          type="checkbox"
+          checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        {label}
+        {metadata}
+      </label>
+    );
+  }
+  if (property.enum && property.enum.length > 0) {
+    return (
+      <label className="parameter-field" htmlFor={id}>
+        <span>{label}</span>
+        <select
+          id={id}
+          value={value === undefined ? '' : String(value)}
+          onChange={(e) => onChange(e.target.value || undefined)}
+        >
+          <option value="">请选择</option>
+          {property.enum.map((item) => (
+            <option key={String(item)} value={String(item)}>
+              {String(item)}
+            </option>
+          ))}
+        </select>
+        {metadata}
+      </label>
+    );
+  }
+  if (property.type === 'array') {
+    const list = Array.isArray(value) ? value.join('\n') : '';
+    return (
+      <label className="parameter-field" htmlFor={id}>
+        <span>{label}</span>
+        <textarea
+          id={id}
+          value={list}
+          placeholder="每行一个值"
+          onChange={(e) =>
+            onChange(
+              e.target.value
+                .split(/\r?\n/u)
+                .map((item) => item.trim())
+                .filter(Boolean),
+            )
+          }
+        />
+        {metadata}
+      </label>
+    );
+  }
+  const numeric = property.type === 'integer';
+  return (
+    <label className="parameter-field" htmlFor={id}>
+      <span>{label}</span>
+      <input
+        id={id}
+        type={numeric ? 'number' : 'text'}
+        value={value === undefined ? '' : String(value)}
+        min={property.minimum}
+        max={property.maximum}
+        onChange={(e) =>
+          onChange(
+            numeric
+              ? e.target.value === ''
+                ? undefined
+                : Number(e.target.value)
+              : e.target.value || undefined,
+          )
+        }
+      />
+      {metadata}
+    </label>
+  );
 }

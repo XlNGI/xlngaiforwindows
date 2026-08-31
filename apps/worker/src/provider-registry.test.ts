@@ -123,6 +123,7 @@ describe('provider registry', () => {
       text: true,
       streaming: true,
       tools: true,
+      vision: true,
     });
     expect(inferKnownModelCapabilities('unicompapi', 'vendor-experimental-model')).toEqual({
       text: false,

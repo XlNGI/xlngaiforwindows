@@ -11,6 +11,9 @@ import type {
   ProviderProfileRepository,
   UsageIndexRecord,
   UsageIndexRepository,
+  AdapterSchemaRecord,
+  AdapterSchemaAuditRecord,
+  AdapterSchemaRepository,
 } from '@ai-video/domain';
 
 class SqliteProviderProfileRepository implements ProviderProfileRepository {
@@ -424,6 +427,131 @@ class SqliteUsageIndexRepository implements UsageIndexRepository {
   }
 }
 
+class SqliteAdapterSchemaRepository implements AdapterSchemaRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  save(record: AdapterSchemaRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO adapter_schemas
+         (adapter_key, descriptor_json, source, status, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(adapter_key) DO UPDATE SET
+           descriptor_json = excluded.descriptor_json,
+           source = excluded.source,
+           status = excluded.status,
+           version = excluded.version,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        record.adapterKey,
+        record.descriptorJson,
+        record.source,
+        record.status,
+        record.version,
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  get(adapterKey: string): AdapterSchemaRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM adapter_schemas WHERE adapter_key = ?')
+      .get(adapterKey) as AdapterSchemaRow | undefined;
+    return row ? mapAdapterSchema(row) : undefined;
+  }
+
+  list(): AdapterSchemaRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM adapter_schemas ORDER BY adapter_key')
+        .all() as AdapterSchemaRow[]
+    ).map(mapAdapterSchema);
+  }
+
+  saveAudit(record: AdapterSchemaAuditRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO adapter_schema_audits
+         (id, adapter_key, version, action, actor_type, conversation_id, reason, before_json, after_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.adapterKey,
+        record.version,
+        record.action,
+        record.actorType,
+        record.conversationId ?? null,
+        record.reason ?? null,
+        record.beforeJson ?? null,
+        record.afterJson ?? null,
+        record.createdAt,
+      );
+  }
+
+  listAudits(adapterKey: string, limit = 50): AdapterSchemaAuditRecord[] {
+    return (
+      this.database
+        .prepare(
+          `SELECT * FROM adapter_schema_audits
+           WHERE adapter_key = ? ORDER BY version DESC, created_at DESC LIMIT ?`,
+        )
+        .all(adapterKey, Math.max(1, Math.min(200, limit))) as AdapterSchemaAuditRow[]
+    ).map(mapAdapterSchemaAudit);
+  }
+}
+
+interface AdapterSchemaRow {
+  adapter_key: string;
+  descriptor_json: string;
+  source: AdapterSchemaRecord['source'];
+  status: AdapterSchemaRecord['status'];
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AdapterSchemaAuditRow {
+  id: string;
+  adapter_key: string;
+  version: number;
+  action: AdapterSchemaAuditRecord['action'];
+  actor_type: AdapterSchemaAuditRecord['actorType'];
+  conversation_id: string | null;
+  reason: string | null;
+  before_json: string | null;
+  after_json: string | null;
+  created_at: string;
+}
+
+function mapAdapterSchema(row: AdapterSchemaRow): AdapterSchemaRecord {
+  return {
+    adapterKey: row.adapter_key,
+    descriptorJson: row.descriptor_json,
+    source: row.source,
+    status: row.status,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapAdapterSchemaAudit(row: AdapterSchemaAuditRow): AdapterSchemaAuditRecord {
+  return {
+    id: row.id,
+    adapterKey: row.adapter_key,
+    version: row.version,
+    action: row.action,
+    actorType: row.actor_type,
+    conversationId: row.conversation_id ?? undefined,
+    reason: row.reason ?? undefined,
+    beforeJson: row.before_json ?? undefined,
+    afterJson: row.after_json ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
 interface UsageIndexRow {
   attempt_id: string;
   project_id: string;
@@ -470,6 +598,7 @@ export function createAppRepositories(database: Database.Database): {
   modelPricing: ModelPricingRepository;
   providerDefaults: ProviderDefaultRepository;
   usageIndex: UsageIndexRepository;
+  adapterSchemas: AdapterSchemaRepository;
 } {
   return {
     providerProfiles: new SqliteProviderProfileRepository(database),
@@ -477,5 +606,6 @@ export function createAppRepositories(database: Database.Database): {
     modelPricing: new SqliteModelPricingRepository(database),
     providerDefaults: new SqliteProviderDefaultRepository(database),
     usageIndex: new SqliteUsageIndexRepository(database),
+    adapterSchemas: new SqliteAdapterSchemaRepository(database),
   };
 }

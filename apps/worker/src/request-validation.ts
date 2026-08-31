@@ -77,6 +77,14 @@ const sessionMethods = new Set<WorkerMethod>([
   'llm.generation.retry',
   'llm.generation.retryPrepare',
   'agent.generation.prepare',
+  'agent.run',
+  'model.catalog.list',
+  'model.catalog.get',
+  'adapter.schema.get',
+  'adapter.schema.propose',
+  'adapter.schema.confirm',
+  'adapter.schema.rollback',
+  'adapter.schema.audit.list',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
@@ -738,6 +746,7 @@ export function validateSessionRequestParams(
         'providerProfileId',
         'modelId',
         'idempotencyKey',
+        'attachments',
       ]);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
@@ -745,6 +754,7 @@ export function validateSessionRequestParams(
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
+      validateLlmAttachments(params.attachments);
       break;
     case 'llm.generation.runtime':
       validateIdentity(params);
@@ -807,6 +817,7 @@ export function validateSessionRequestParams(
         'novelIntent',
         'selectedChapterIds',
         'targetPlatform',
+        'attachments',
       ]);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
@@ -814,6 +825,7 @@ export function validateSessionRequestParams(
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
+      validateLlmAttachments(params.attachments);
       requireEnum(params, 'agentMode', new Set(['document', 'novel-writing', 'short-drama']));
       optionalEnum(params, 'researchMode', agentResearchModes);
       optionalString(params, 'title', MAX_TITLE_LENGTH);
@@ -840,6 +852,133 @@ export function validateSessionRequestParams(
           throw new RequestValidationError('targetPlatform is only allowed in short-drama mode.');
         }
       }
+      break;
+    case 'agent.run':
+      rejectUnknown(params, [
+        'conversationId',
+        'prompt',
+        'capability',
+        'providerProfileId',
+        'modelId',
+        'budgetTokens',
+        'idempotencyKey',
+        'adapterKey',
+        'parameters',
+        'shotId',
+        'providerRegion',
+        'assetKind',
+        'attachments',
+      ]);
+      requireId(params, 'conversationId');
+      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      optionalEnum(
+        params,
+        'capability',
+        new Set([
+          'text',
+          'image',
+          'video',
+          'document',
+          'novel',
+          'short-drama',
+          'research',
+          'asset',
+          'auto',
+        ]),
+      );
+      optionalId(params, 'providerProfileId');
+      optionalId(params, 'modelId');
+      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalId(params, 'idempotencyKey');
+      optionalId(params, 'adapterKey');
+      optionalId(params, 'shotId');
+      validateLlmAttachments(params.attachments);
+      optionalEnum(params, 'providerRegion', new Set(['global', 'cn', 'unicompapi']));
+      optionalEnum(
+        params,
+        'assetKind',
+        new Set([
+          'character',
+          'scene',
+          'first-frame',
+          'last-frame',
+          'generated-image',
+          'generated-video',
+          'shot-video',
+        ]),
+      );
+      if (params.parameters !== undefined) requireObject(params.parameters, 'parameters');
+      if ((params.providerProfileId === undefined) !== (params.modelId === undefined)) {
+        throw new RequestValidationError(
+          'providerProfileId and modelId must be provided together.',
+        );
+      }
+      break;
+    case 'model.catalog.list':
+      rejectUnknown(params, ['capability', 'providerProfileId', 'includeUnavailable']);
+      optionalEnum(
+        params,
+        'capability',
+        new Set([
+          'text',
+          'image',
+          'video',
+          'document',
+          'novel',
+          'short-drama',
+          'research',
+          'asset',
+          'auto',
+        ]),
+      );
+      optionalId(params, 'providerProfileId');
+      optionalBoolean(params, 'includeUnavailable');
+      break;
+    case 'model.catalog.get':
+      rejectUnknown(params, ['providerProfileId', 'modelId', 'capability']);
+      requireId(params, 'providerProfileId');
+      requireId(params, 'modelId');
+      optionalEnum(
+        params,
+        'capability',
+        new Set([
+          'text',
+          'image',
+          'video',
+          'document',
+          'novel',
+          'short-drama',
+          'research',
+          'asset',
+          'auto',
+        ]),
+      );
+      break;
+    case 'adapter.schema.get':
+      rejectUnknown(params, ['adapterKey']);
+      requireString(params, 'adapterKey', 200);
+      break;
+    case 'adapter.schema.propose':
+      rejectUnknown(params, ['adapterKey', 'descriptor', 'reason', 'conversationId', 'actorType']);
+      requireString(params, 'adapterKey', 200);
+      validateAdapterDescriptorRequest(params.descriptor, params.adapterKey as string);
+      optionalString(params, 'reason', MAX_ERROR_LENGTH);
+      optionalId(params, 'conversationId');
+      optionalEnum(params, 'actorType', new Set(['user', 'agent', 'system']));
+      break;
+    case 'adapter.schema.confirm':
+    case 'adapter.schema.rollback':
+      rejectUnknown(params, ['adapterKey', 'version', 'reason', 'conversationId', 'actorType']);
+      requireString(params, 'adapterKey', 200);
+      requireInteger(params, 'version', 1, Number.MAX_SAFE_INTEGER);
+      optionalString(params, 'reason', MAX_ERROR_LENGTH);
+      optionalId(params, 'conversationId');
+      optionalEnum(params, 'actorType', new Set(['user', 'agent', 'system']));
+      break;
+    case 'adapter.schema.audit.list':
+      rejectUnknown(params, ['adapterKey', 'limit']);
+      requireString(params, 'adapterKey', 200);
+      optionalInteger(params, 'limit', 1, 200);
       break;
     case 'conversation.runtime.start':
       validateIdentity(params, ['taskId', 'mode', 'prompt']);
@@ -1024,6 +1163,53 @@ function requireObject(value: unknown, name: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function validateAdapterDescriptorRequest(value: unknown, adapterKey: string): void {
+  const descriptor = requireObject(value, 'descriptor');
+  if (descriptor.key !== adapterKey)
+    throw new RequestValidationError('descriptor.key must match adapterKey.');
+  for (const key of [
+    'capability',
+    'capabilityLabel',
+    'provider',
+    'providerLabel',
+    'model',
+    'modelLabel',
+    'apiVersion',
+    'endpoint',
+    'documentationUrl',
+    'credentialProvider',
+  ])
+    requireString(descriptor, key, 500);
+  requireInteger(descriptor, 'schemaVersion', 1, Number.MAX_SAFE_INTEGER);
+  const schema = requireObject(descriptor.parameterSchema, 'descriptor.parameterSchema');
+  if (schema.type !== 'object' || schema.additionalProperties !== false) {
+    throw new RequestValidationError(
+      'descriptor.parameterSchema must be an object schema with additionalProperties=false.',
+    );
+  }
+  const properties = requireObject(schema.properties, 'descriptor.parameterSchema.properties');
+  const required = schema.required;
+  if (!Array.isArray(required) || required.some((item) => typeof item !== 'string')) {
+    throw new RequestValidationError(
+      'descriptor.parameterSchema.required must be an array of strings.',
+    );
+  }
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(properties, key)) {
+      throw new RequestValidationError(
+        `descriptor.parameterSchema.required contains unknown field: ${key}.`,
+      );
+    }
+  }
+  for (const [key, raw] of Object.entries(properties)) {
+    const property = requireObject(raw, `descriptor.parameterSchema.properties.${key}`);
+    requireEnum(property, 'type', new Set(['string', 'integer', 'boolean', 'array']));
+  }
+  const uiSchema = requireObject(descriptor.uiSchema, 'descriptor.uiSchema');
+  if (!Array.isArray(uiSchema.fields))
+    throw new RequestValidationError('descriptor.uiSchema.fields must be an array.');
+}
+
 function rejectUnknown(value: Record<string, unknown>, allowed: string[]): void {
   const allowedKeys = new Set(allowed);
   const unknown = Object.keys(value).find((key) => !allowedKeys.has(key));
@@ -1131,6 +1317,24 @@ function requireBoolean(value: Record<string, unknown>, key: string): boolean {
 function optionalBoolean(value: Record<string, unknown>, key: string): boolean | undefined {
   if (value[key] === undefined) return undefined;
   return requireBoolean(value, key);
+}
+
+function validateLlmAttachments(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new RequestValidationError('attachments must contain at most 8 items.');
+  }
+  value.forEach((raw, index) => {
+    const item = requireObject(raw, `attachments[${index}]`);
+    rejectUnknown(item, ['name', 'mimeType', 'dataUrl', 'text']);
+    requireString(item, 'name', 240);
+    requireString(item, 'mimeType', 160);
+    if (item.dataUrl !== undefined) requireString(item, 'dataUrl', 2_000_000);
+    if (item.text !== undefined) requireString(item, 'text', 2_000_000, true);
+    if (item.dataUrl === undefined && item.text === undefined) {
+      throw new RequestValidationError(`attachments[${index}] must contain dataUrl or text.`);
+    }
+  });
 }
 
 function validateAgentChangeSetCreate(params: Record<string, unknown>): void {

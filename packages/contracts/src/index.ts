@@ -141,6 +141,115 @@ export interface ProviderModelInfo {
   updatedAt: string;
 }
 
+export type UnifiedAgentSchemaSource = 'official-adapter' | 'manual' | 'synced-catalog' | 'missing';
+export type UnifiedAgentSchemaStatus = 'confirmed' | 'needs_confirmation' | 'missing';
+
+export interface UnifiedAgentModelCatalogListParams {
+  capability?: UnifiedAgentCapability;
+  providerProfileId?: string;
+  includeUnavailable?: boolean;
+}
+
+export interface UnifiedAgentModelSchemaInfo {
+  providerProfileId: string;
+  providerName: string;
+  providerType: string;
+  modelId: string;
+  remoteModelId: string;
+  modelName: string;
+  modelCapabilities: ProviderModelCapabilities;
+  modelSource: ProviderModelSource;
+  modelEnabled: boolean;
+  modelUnavailableAt?: string;
+  schemaStatus: UnifiedAgentSchemaStatus;
+  schemaSource: UnifiedAgentSchemaSource;
+  adapters: AdapterDescriptor[];
+  missingRequired: string[];
+  updatedAt: string;
+}
+
+export interface UnifiedAgentModelCatalogListResult {
+  models: UnifiedAgentModelSchemaInfo[];
+  generatedAt: string;
+}
+
+export interface UnifiedAgentModelCatalogGetParams {
+  providerProfileId: string;
+  modelId: string;
+  capability?: UnifiedAgentCapability;
+}
+
+export type UnifiedAgentModelCatalogGetResult = UnifiedAgentModelSchemaInfo;
+
+export interface UnifiedAgentAdapterSchemaGetParams {
+  adapterKey: string;
+}
+
+export interface UnifiedAgentAdapterSchemaProposeParams {
+  adapterKey: string;
+  descriptor: AdapterDescriptor;
+  reason?: string;
+  conversationId?: string;
+  actorType?: 'user' | 'agent' | 'system';
+}
+
+export interface UnifiedAgentAdapterSchemaProposeResult {
+  status: 'proposed';
+  adapterKey: string;
+  version: number;
+  requiresConfirmation: boolean;
+  diff: string[];
+}
+
+export interface UnifiedAgentAdapterSchemaConfirmParams {
+  adapterKey: string;
+  version: number;
+  reason?: string;
+  conversationId?: string;
+  actorType?: 'user' | 'agent' | 'system';
+}
+
+export interface UnifiedAgentAdapterSchemaConfirmResult {
+  status: 'confirmed';
+  adapterKey: string;
+  version: number;
+  descriptor: AdapterDescriptor;
+}
+
+export interface UnifiedAgentAdapterSchemaRollbackParams {
+  adapterKey: string;
+  version: number;
+  reason?: string;
+  conversationId?: string;
+  actorType?: 'user' | 'agent' | 'system';
+}
+
+export interface UnifiedAgentAdapterSchemaRollbackResult {
+  status: 'rolled_back';
+  adapterKey: string;
+  version: number;
+  rolledBackToVersion: number;
+  descriptor: AdapterDescriptor;
+}
+
+export interface UnifiedAgentAdapterSchemaAuditListParams {
+  adapterKey: string;
+  limit?: number;
+}
+
+export type UnifiedAgentAdapterSchemaAuditListResult = UnifiedAgentAdapterSchemaAuditInfo[];
+
+export interface UnifiedAgentAdapterSchemaAuditInfo {
+  id: string;
+  adapterKey: string;
+  version: number;
+  action: 'proposed' | 'confirmed' | 'rolled_back';
+  actorType: 'user' | 'agent' | 'system';
+  conversationId?: string;
+  reason?: string;
+  createdAt: string;
+}
+
 export interface ModelPricingInfo {
   providerProfileId: string;
   modelId: string;
@@ -1222,10 +1331,20 @@ export interface LlmGenerationIdentity {
   conversationId: string;
 }
 
+/** Local attachment content supplied to a multimodal Agent invocation. */
+export interface LlmInputAttachment {
+  name: string;
+  mimeType: string;
+  /** Data URL for image inputs. Binary files are not persisted or exposed to tools. */
+  dataUrl?: string;
+  text?: string;
+}
+
 export interface LlmGenerationPrepareParams extends ContextPreviewParams {
   prompt: string;
   providerProfileId: string;
   modelId: string;
+  attachments?: LlmInputAttachment[];
   idempotencyKey?: string;
 }
 
@@ -1248,6 +1367,7 @@ export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
   systemInstruction: string;
   context: string;
   prompt: string;
+  attachments?: LlmInputAttachment[];
   tools?: LlmToolDefinition[];
   continuation?: LlmToolContinuation;
 }
@@ -1306,6 +1426,7 @@ export interface NativeProviderStreamStartParams extends LlmGenerationIdentity {
   systemInstruction: string;
   context: string;
   prompt: string;
+  attachments?: LlmInputAttachment[];
   tools?: Array<Pick<LlmToolDefinition, 'name' | 'description' | 'parameters'>>;
   continuation?:
     | LlmResponsesToolContinuation
@@ -1405,6 +1526,76 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
   /** Trusted Desktop intent. Provider tool arguments never carry these targets. */
   novelIntent?: NovelWritingIntent;
 }
+
+/** Capabilities that the unified conversational Agent may route to. */
+export type UnifiedAgentCapability =
+  'text' | 'image' | 'video' | 'document' | 'novel' | 'short-drama' | 'research' | 'asset' | 'auto';
+
+export interface UnifiedAgentModelCandidate {
+  providerProfileId: string;
+  providerName: string;
+  modelId: string;
+  remoteModelId: string;
+  modelName: string;
+  capabilities: ProviderModelCapabilities;
+  source: ProviderModelSource;
+  /** False when the model exists but its parameter schema still needs configuration. */
+  schemaReady?: boolean;
+}
+
+export interface UnifiedAgentRunParams {
+  conversationId: string;
+  prompt: string;
+  attachments?: LlmInputAttachment[];
+  capability?: UnifiedAgentCapability;
+  /** The conversation-scoped model selected by the user, when already known. */
+  providerProfileId?: string;
+  modelId?: string;
+  /** Selected generation adapter for image/video requests. */
+  adapterKey?: string;
+  /** User-supplied adapter parameters, validated by the Worker. */
+  parameters?: AdapterParameters;
+  shotId?: string;
+  providerRegion?: VideoProviderRegion;
+  assetKind?: ImageAssetKind | VideoAssetKind;
+  budgetTokens?: number;
+  idempotencyKey?: string;
+}
+
+export interface UnifiedAgentModelSelectionRequest {
+  prompt: string;
+  capability: UnifiedAgentCapability;
+  models: UnifiedAgentModelCandidate[];
+}
+
+export type UnifiedAgentRunResult =
+  | {
+      status: 'needs_model_selection';
+      capability: UnifiedAgentCapability;
+      reason: 'missing_model' | 'model_unavailable' | 'capability_mismatch';
+      models: UnifiedAgentModelCandidate[];
+    }
+  | {
+      status: 'needs_parameters';
+      capability: 'image' | 'video';
+      providerProfileId: string;
+      modelId: string;
+      modelName: string;
+      adapters: AdapterDescriptor[];
+      missingRequired: string[];
+      affectsCost: boolean;
+    }
+  | {
+      status: 'image_prepared';
+      capability: 'image';
+      job: ImageGenerationJobInfo;
+    }
+  | {
+      status: 'video_prepared';
+      capability: 'video';
+      job: VideoGenerationJobInfo;
+    }
+  | ({ status: 'started'; capability: UnifiedAgentCapability } & AgentGenerationPrepareResult);
 
 /** Versioned, model-proposed business plan. Authority fields are injected by the Worker. */
 export type ConversationTaskMode = 'document' | 'novel-writing' | 'short-drama';
@@ -1821,6 +2012,11 @@ export interface AdapterParameterProperty {
   maximum?: number;
   minItems?: number;
   maxItems?: number;
+  /** Product-level metadata surfaced before submission. */
+  affectsCost?: boolean;
+  overwritesExisting?: boolean;
+  mutuallyExclusiveWith?: string[];
+  requires?: string[];
   items?: {
     type: 'string';
     format?: 'uri';
@@ -2375,6 +2571,39 @@ export interface WorkerMethodMap {
   'agent.generation.prepare': {
     params: AgentGenerationPrepareParams;
     result: AgentGenerationPrepareResult;
+  };
+  /** Unified natural-language entry point. It may ask for a model or parameters before starting. */
+  'agent.run': {
+    params: UnifiedAgentRunParams;
+    result: UnifiedAgentRunResult;
+  };
+  'model.catalog.list': {
+    params: UnifiedAgentModelCatalogListParams;
+    result: UnifiedAgentModelCatalogListResult;
+  };
+  'model.catalog.get': {
+    params: UnifiedAgentModelCatalogGetParams;
+    result: UnifiedAgentModelCatalogGetResult | null;
+  };
+  'adapter.schema.get': {
+    params: UnifiedAgentAdapterSchemaGetParams;
+    result: AdapterDescriptor | null;
+  };
+  'adapter.schema.propose': {
+    params: UnifiedAgentAdapterSchemaProposeParams;
+    result: UnifiedAgentAdapterSchemaProposeResult;
+  };
+  'adapter.schema.confirm': {
+    params: UnifiedAgentAdapterSchemaConfirmParams;
+    result: UnifiedAgentAdapterSchemaConfirmResult;
+  };
+  'adapter.schema.rollback': {
+    params: UnifiedAgentAdapterSchemaRollbackParams;
+    result: UnifiedAgentAdapterSchemaRollbackResult;
+  };
+  'adapter.schema.audit.list': {
+    params: UnifiedAgentAdapterSchemaAuditListParams;
+    result: UnifiedAgentAdapterSchemaAuditListResult;
   };
   'conversation.runtime.start': {
     params: ConversationRuntimeStartParams;

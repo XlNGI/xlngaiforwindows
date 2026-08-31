@@ -7,6 +7,7 @@ import type {
   LlmGenerationFailParams,
   LlmGenerationIdentity,
   LlmGenerationInfo,
+  LlmInputAttachment,
   LlmGenerationObserveParams,
   LlmGenerationPrepareParams,
   LlmGenerationPrepareResult,
@@ -156,6 +157,7 @@ export class GenerationService {
       'agentMode' in params && params.agentMode === 'short-drama'
         ? params.selectedChapterIds
         : undefined,
+      params.attachments,
     );
   }
 
@@ -513,6 +515,7 @@ export class GenerationService {
     novelMode = false,
     novelFocusChapterId?: string,
     selectedChapterIds?: string[],
+    attachments?: LlmInputAttachment[],
   ): LlmGenerationPrepareResult {
     const existing = this.findIdempotent(options.idempotencyKey);
     if (existing) return prepareResultOf(existing);
@@ -543,6 +546,7 @@ export class GenerationService {
       systemInstruction,
       context,
       prompt,
+      attachments: attachments?.map((attachment) => ({ ...attachment })),
     };
     return {
       generation: publicState(state),

@@ -10,6 +10,134 @@ import { ChatPanel } from './ChatPanel';
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
+  it('provides an attachment picker for image, video, and document files', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '浠诲姟',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onAdd = vi.fn();
+    const onSend = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        attachments={[
+          { id: 'a1', name: 'reference.png', mimeType: 'image/png', size: 12, kind: 'image' },
+        ]}
+        onAddAttachments={onAdd}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={onSend}
+      />,
+    );
+    expect(screen.getByRole('button', { name: '添加图片、视频或文件' })).toBeInTheDocument();
+    expect(screen.getByText('reference.png')).toBeInTheDocument();
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(onAdd).toHaveBeenCalled();
+    const composer = screen.getByRole('textbox', { name: '会话消息' });
+    fireEvent.keyDown(composer, {
+      key: 'Enter',
+      code: 'Enter',
+      nativeEvent: { isComposing: false },
+    });
+    expect(onSend).toHaveBeenCalled();
+  });
+
+  it('renders unified Agent model candidates as an actionable card', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onSelect = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentModelSelection={{
+          prompt: '生成一张角色图',
+          capability: 'image',
+          models: [
+            {
+              providerProfileId: 'profile',
+              providerName: '测试供应商',
+              modelId: 'model',
+              remoteModelId: 'image-model',
+              modelName: '测试图片模型',
+              capabilities: {
+                text: false,
+                vision: false,
+                streaming: false,
+                reasoning: false,
+                tools: false,
+                structuredOutput: false,
+                embeddings: false,
+                imageGeneration: true,
+                videoGeneration: false,
+              },
+              source: 'manual',
+              schemaReady: false,
+            },
+          ],
+        }}
+        onSelectAgentModel={onSelect}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /测试图片模型/ }));
+    expect(onSelect).toHaveBeenCalledWith('profile', 'model');
+    expect(screen.getByText(/需要补充参数 schema/)).toBeInTheDocument();
+  });
+
   it('renders an in-session confirmation card and reports the user decision', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
