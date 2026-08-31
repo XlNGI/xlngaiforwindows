@@ -33,6 +33,9 @@ import {
   MIGRATION_V29,
   MIGRATION_V30,
   MIGRATION_V31,
+  MIGRATION_V32,
+  MIGRATION_V33,
+  MIGRATION_V34,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
@@ -334,6 +337,47 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(31, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 31) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V32);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(32, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 32) {
+    database.transaction(() => {
+      const column = database
+        .prepare(
+          "SELECT name FROM pragma_table_info('generation_jobs') WHERE name = 'task_snapshot_json'",
+        )
+        .get();
+      if (!column) {
+        database.exec(MIGRATION_V33);
+      } else {
+        database.exec(`
+          CREATE TRIGGER IF NOT EXISTS generation_jobs_task_snapshot_immutable
+          BEFORE UPDATE OF task_snapshot_json ON generation_jobs
+          WHEN OLD.task_snapshot_json IS NOT NULL
+            AND (NEW.task_snapshot_json IS NULL OR NEW.task_snapshot_json <> OLD.task_snapshot_json)
+          BEGIN
+            SELECT RAISE(ABORT, 'generation task snapshot is immutable');
+          END;
+        `);
+      }
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(33, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 33) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V34);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(34, now);
     })();
   }
   return getSchemaVersion(database);

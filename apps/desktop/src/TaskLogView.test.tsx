@@ -5,6 +5,7 @@ import type {
   ImageGenerationJobInfo,
   TaskLogItem,
   VideoGenerationJobInfo,
+  GenerationJobEventInfo,
 } from '@ai-video/contracts';
 import { TaskLogView } from './TaskLogView';
 import { callWorker } from './worker-client';
@@ -181,6 +182,27 @@ const videoJob: VideoGenerationJobInfo = {
   updatedAt: '2026-08-16T01:06:00.000Z',
 };
 
+const generationEvents: GenerationJobEventInfo[] = [
+  {
+    id: 'generation-event-1',
+    jobId: 'image-job-1',
+    sequence: 0,
+    phase: 'prepare',
+    status: 'running',
+    summary: 'Image generation job prepared.',
+    createdAt: '2026-08-16T00:59:00.000Z',
+  },
+  {
+    id: 'generation-event-2',
+    jobId: 'image-job-1',
+    sequence: 1,
+    phase: 'complete',
+    status: 'succeeded',
+    summary: 'Image result downloaded and committed locally.',
+    createdAt: '2026-08-16T01:01:00.000Z',
+  },
+];
+
 describe('TaskLogView', () => {
   beforeEach(() => {
     vi.mocked(callWorker).mockImplementation((method) => {
@@ -189,6 +211,8 @@ describe('TaskLogView', () => {
       if (method === 'agent.task.get') return Promise.resolve(agentDetail);
       if (method === 'image.generate.get') return Promise.resolve(imageJob);
       if (method === 'video.generate.get') return Promise.resolve(videoJob);
+      if (method === 'generation.job.events.list')
+        return Promise.resolve({ events: generationEvents, nextSequence: 1, hasMore: false });
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
   });
@@ -236,6 +260,13 @@ describe('TaskLogView', () => {
     expect(await screen.findByRole('heading', { name: '请求参数摘要' })).toBeInTheDocument();
     expect(screen.getByText('image-job-1')).toBeInTheDocument();
     expect(screen.getByText('assets/images/generated.png')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Provider 生命周期' })).toBeInTheDocument();
+    expect(screen.getByText('图片已保存到本地素材库。')).toBeInTheDocument();
+    expect(screen.getByText('完成 (complete)')).toBeInTheDocument();
+    expect(callWorker).toHaveBeenCalledWith('generation.job.events.list', {
+      jobId: 'image-job-1',
+      limit: 100,
+    });
     expect(callWorker).not.toHaveBeenCalledWith('agent.task.get', expect.anything());
   });
 
@@ -251,6 +282,8 @@ describe('TaskLogView', () => {
       if (method === 'task.log.list')
         return Promise.resolve({ items: [videoItem], nextCursor: undefined });
       if (method === 'video.generate.get') return Promise.resolve(videoJob);
+      if (method === 'generation.job.events.list')
+        return Promise.resolve({ events: generationEvents, nextSequence: 1, hasMore: false });
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
     render(<TaskLogView projectId="project-1" />);

@@ -27,6 +27,9 @@ const sessionMethods = new Set<WorkerMethod>([
   'conversation.update',
   'conversation.archive',
   'conversation.restore',
+  'conversation.modelPreference.get',
+  'conversation.modelPreference.set',
+  'conversation.modelPreference.clear',
   'chat.message.list',
   'chat.message.save',
   'chat.message.toDocument',
@@ -65,6 +68,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'agent.task.get',
   'agent.task.events',
   'task.log.list',
+  'generation.job.events.list',
   'context.preview',
   'llm.generate',
   'llm.generation.prepare',
@@ -627,6 +631,12 @@ export function validateSessionRequestParams(
       optionalEnum(params, 'kind', taskLogKinds);
       optionalString(params, 'status', 80);
       break;
+    case 'generation.job.events.list':
+      rejectUnknown(params, ['jobId', 'afterSequence', 'limit']);
+      requireId(params, 'jobId');
+      optionalInteger(params, 'afterSequence', 0, Number.MAX_SAFE_INTEGER);
+      optionalInteger(params, 'limit', 1, 100);
+      break;
     case 'conversation.list':
       rejectUnknown(params, [
         'scopeType',
@@ -665,6 +675,45 @@ export function validateSessionRequestParams(
     case 'conversation.restore':
       rejectUnknown(params, ['conversationId']);
       requireId(params, 'conversationId');
+      break;
+    case 'conversation.modelPreference.get':
+    case 'conversation.modelPreference.clear':
+      rejectUnknown(params, ['conversationId', 'capability']);
+      requireId(params, 'conversationId');
+      requireEnum(
+        params,
+        'capability',
+        new Set([
+          'text',
+          'image',
+          'video',
+          'document',
+          'novel',
+          'short-drama',
+          'research',
+          'asset',
+        ]),
+      );
+      break;
+    case 'conversation.modelPreference.set':
+      rejectUnknown(params, ['conversationId', 'capability', 'providerProfileId', 'modelId']);
+      requireId(params, 'conversationId');
+      requireEnum(
+        params,
+        'capability',
+        new Set([
+          'text',
+          'image',
+          'video',
+          'document',
+          'novel',
+          'short-drama',
+          'research',
+          'asset',
+        ]),
+      );
+      requireId(params, 'providerProfileId');
+      requireId(params, 'modelId');
       break;
     case 'maintenance.contextSnapshots.cleanup':
       rejectUnknown(params, ['olderThanDays']);

@@ -85,10 +85,33 @@ export class ImageGenerationService {
         adapterKey: params.adapterKey,
         status: 'running',
         requestJson: JSON.stringify(redactParameters(params.parameters)),
+        taskSnapshotJson: JSON.stringify({
+          version: 1,
+          capability: 'image',
+          adapterKey: params.adapterKey,
+          schemaVersion: adapter.schemaVersion,
+          schemaSource: 'official-adapter',
+          providerProfileId: params.providerProfileId,
+          modelId: params.modelId,
+          conversationId: params.conversationId,
+          originalPrompt: params.originalPrompt,
+          costNoticeAcknowledged: params.costNoticeAcknowledged === true,
+          parameters: redactParameters(params.parameters),
+          createdAt: now,
+        }),
         createdAt: now,
         updatedAt: now,
       };
       repositories.jobs.save(record);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: record.id,
+        projectId: project.id,
+        phase: 'prepare',
+        status: record.status,
+        summary: 'Image generation job prepared.',
+        createdAt: now,
+      });
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.toInfo(
@@ -174,6 +197,19 @@ export class ImageGenerationService {
           repositories.assets.save(asset);
           repositories.generationResults.save(result);
           repositories.jobs.save(completed);
+          repositories.generationJobEvents.append({
+            id: randomUUID(),
+            jobId: current.id,
+            projectId: project.id,
+            phase: 'complete',
+            status: completed.status,
+            summary: 'Image result downloaded and committed locally.',
+            detailsJson: JSON.stringify({
+              contentType: image.contentType,
+              sizeBytes: image.bytes.byteLength,
+            }),
+            createdAt: now,
+          });
           repositories.projects.touch(now);
         })();
         committed = true;
@@ -794,6 +830,15 @@ export class ImageGenerationService {
         updatedAt: now,
       };
       repositories.jobs.save(failed);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: job.id,
+        projectId: project.id,
+        phase: 'fail',
+        status: failed.status,
+        summary: message,
+        createdAt: now,
+      });
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.toInfo(failed, [], repositories.generationResults.listByJob(job.id));
@@ -818,6 +863,18 @@ export class ImageGenerationService {
             errorJson: message ? JSON.stringify({ message }) : undefined,
             updatedAt: now,
           });
+          if (status === 'failed' && message) {
+            repositories.generationJobEvents.append({
+              id: randomUUID(),
+              jobId: job.id,
+              projectId: project.id,
+              phase: 'fail',
+              status: 'failed',
+              summary: message,
+              detailsJson: JSON.stringify({ recovery: true, failureKind: 'interrupted' }),
+              createdAt: now,
+            });
+          }
         }
         repositories.projects.touch(now);
       })();

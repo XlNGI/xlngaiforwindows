@@ -273,6 +273,16 @@ const savedAsset: AssetInfo = {
   createdAt: '2026-08-02T00:00:00.000Z',
 };
 
+const savedVideoAsset: AssetInfo = {
+  id: 'video-asset-generated',
+  projectId: 'project',
+  kind: 'shot-video',
+  relativePath: 'assets/videos/generated.mp4',
+  contentHash: 'video-hash',
+  sizeBytes: 102_400,
+  createdAt: '2026-08-02T00:05:00.000Z',
+};
+
 describe('ProductionPanel', () => {
   afterEach(() => cleanup());
 
@@ -1097,7 +1107,11 @@ describe('ProductionPanel', () => {
         message,
       }),
     );
-    expect(await screen.findAllByText(message)).not.toHaveLength(0);
+    expect(
+      await screen.findAllByText(
+        '当前模型不接受这组参数。请检查必填项；如果界面参数与官方文档不一致，请更新模型 Schema 或更换模型。',
+      ),
+    ).not.toHaveLength(0);
   });
 
   it('stores dropped asset references in the draft and resolves them for submission', async () => {
@@ -1282,6 +1296,7 @@ describe('ProductionPanel', () => {
 
     render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
     expect(await screen.findByText('生成中')).toBeInTheDocument();
+    expect(screen.getByText(/视频通常需要几分钟生成/)).toBeInTheDocument();
     await waitFor(() =>
       expect(pollVideoProviderTask).toHaveBeenCalledWith(
         videoDescriptor.key,
@@ -1301,6 +1316,37 @@ describe('ProductionPanel', () => {
       'provider-task',
       'cn',
     );
+  });
+
+  it('offers a primary material action when a video task completes', async () => {
+    const completed = {
+      ...videoJob('succeeded'),
+      results: [
+        {
+          id: 'video-result',
+          jobId: 'video-job',
+          asset: savedVideoAsset,
+          createdAt: '2026-08-02T00:05:00.000Z',
+        },
+      ],
+    };
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list') return Promise.resolve([savedVideoAsset]);
+      if (method === 'video.generate.list') return Promise.resolve([completed]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(
+      <ProductionPanel projectId="project" shotId="shot" writable assets={[savedVideoAsset]} />,
+    );
+
+    expect(await screen.findByText(/结果已进入素材库/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看素材' }));
+    expect(await screen.findByText('视频已就绪')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '播放视频' })).toBeInTheDocument();
   });
 
   it('downloads completed UniCompAPI video content through the native credential bridge', async () => {

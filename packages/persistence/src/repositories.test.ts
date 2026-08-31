@@ -11,6 +11,54 @@ afterEach(async () => {
 });
 
 describe('repositories', () => {
+  it('persists conversation-scoped model preferences independently by capability', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-model-preferences-'));
+    temporaryDirectories.push(directory);
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Preferences', 'now', 'now');
+    const repositories = createRepositories(database);
+    repositories.conversations.save({
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Chat',
+      createdAt: 'now',
+      updatedAt: 'now',
+    });
+    repositories.conversationModelPreferences.save({
+      conversationId: 'conversation',
+      capability: 'image',
+      providerProfileId: 'profile-image',
+      modelId: 'model-image',
+      confirmedAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+    });
+    repositories.conversationModelPreferences.save({
+      conversationId: 'conversation',
+      capability: 'video',
+      providerProfileId: 'profile-video',
+      modelId: 'model-video',
+      confirmedAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+    });
+
+    expect(repositories.conversationModelPreferences.get('conversation', 'image')).toMatchObject({
+      modelId: 'model-image',
+    });
+    expect(
+      repositories.conversationModelPreferences.listByConversation('conversation'),
+    ).toHaveLength(2);
+    repositories.conversationModelPreferences.delete('conversation', 'image');
+    expect(repositories.conversationModelPreferences.get('conversation', 'image')).toBeUndefined();
+    expect(repositories.conversationModelPreferences.get('conversation', 'video')).toMatchObject({
+      modelId: 'model-video',
+    });
+    database.close();
+  });
+
   it('persists and reads every M1 aggregate root', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ai-video-repositories-'));
     temporaryDirectories.push(directory);
@@ -140,8 +188,43 @@ describe('repositories', () => {
       adapterKey: 'image:test:v1',
       status: 'draft',
       requestJson: '{}',
+      taskSnapshotJson: '{"version":1,"adapterKey":"image:test:v1"}',
       createdAt: 'now',
       updatedAt: 'now',
+    });
+    repositories.generationJobEvents.append({
+      id: 'event-prepare',
+      jobId: 'job',
+      projectId: 'project',
+      phase: 'prepare',
+      status: 'running',
+      summary: 'prepared',
+      createdAt: 'now',
+    });
+    repositories.generationJobEvents.append({
+      id: 'event-complete',
+      jobId: 'job',
+      projectId: 'project',
+      phase: 'complete',
+      status: 'succeeded',
+      summary: 'complete',
+      createdAt: 'later',
+    });
+    expect(repositories.generationJobEvents.listByJob('job')).toMatchObject([
+      { sequence: 0, phase: 'prepare' },
+      { sequence: 1, phase: 'complete' },
+    ]);
+    expect(repositories.generationJobEvents.listByJobPage('job', 0, 2)).toMatchObject([
+      { sequence: 1, phase: 'complete' },
+    ]);
+    repositories.jobs.save({
+      id: 'job',
+      projectId: 'project',
+      adapterKey: 'image:test:v1',
+      status: 'succeeded',
+      requestJson: '{}',
+      createdAt: 'now',
+      updatedAt: 'later',
     });
     repositories.contextSnapshots.save({
       id: 'snapshot',
@@ -206,7 +289,21 @@ describe('repositories', () => {
     expect(repositories.generationDrafts.get('shot', 'TEXT_TO_IMAGE:vidu:viduq2:v2')).toMatchObject(
       { id: 'draft', parametersJson: '{"prompt":"updated"}', updatedAt: 'later' },
     );
-    expect(repositories.jobs.listByProject('project')).toMatchObject([{ status: 'draft' }]);
+    expect(repositories.jobs.listByProject('project')).toMatchObject([
+      { status: 'succeeded', taskSnapshotJson: '{"version":1,"adapterKey":"image:test:v1"}' },
+    ]);
+    expect(() =>
+      repositories.jobs.save({
+        id: 'job',
+        projectId: 'project',
+        adapterKey: 'image:test:v1',
+        status: 'succeeded',
+        requestJson: '{}',
+        taskSnapshotJson: '{"version":2}',
+        createdAt: 'now',
+        updatedAt: 'later',
+      }),
+    ).toThrow('generation task snapshot is immutable');
     expect(repositories.contextSnapshots.get('snapshot')).toMatchObject({
       purpose: 'test-context',
       contentJson: '{"version":1}',

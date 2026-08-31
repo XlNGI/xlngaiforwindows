@@ -744,6 +744,7 @@ export interface JobRecord {
   requestJson: string;
   errorJson?: string;
   metadataJson?: string;
+  taskSnapshotJson?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -930,6 +931,26 @@ export interface ConversationRepository {
   listByProject(projectId: string): ConversationRecord[];
 }
 
+export interface ConversationModelPreferenceRecord {
+  conversationId: string;
+  capability:
+    'text' | 'image' | 'video' | 'document' | 'novel' | 'short-drama' | 'research' | 'asset';
+  providerProfileId: string;
+  modelId: string;
+  confirmedAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationModelPreferenceRepository {
+  save(record: ConversationModelPreferenceRecord): void;
+  get(
+    conversationId: string,
+    capability: ConversationModelPreferenceRecord['capability'],
+  ): ConversationModelPreferenceRecord | undefined;
+  listByConversation(conversationId: string): ConversationModelPreferenceRecord[];
+  delete(conversationId: string, capability: ConversationModelPreferenceRecord['capability']): void;
+}
+
 export interface ChatMessageRepository {
   save(record: ChatMessageRecord): void;
   get(id: string): ChatMessageRecord | undefined;
@@ -1007,6 +1028,27 @@ export interface JobRepository {
   save(record: JobRecord): void;
   get(id: string): JobRecord | undefined;
   listByProject(projectId: string): JobRecord[];
+}
+
+export type GenerationJobEventPhase =
+  'prepare' | 'submit' | 'poll' | 'download' | 'complete' | 'fail';
+
+export interface GenerationJobEventRecord {
+  id: string;
+  jobId: string;
+  projectId: string;
+  sequence?: number;
+  phase: GenerationJobEventPhase;
+  status: string;
+  summary: string;
+  detailsJson?: string;
+  createdAt: string;
+}
+
+export interface GenerationJobEventRepository {
+  append(record: GenerationJobEventRecord): void;
+  listByJob(jobId: string): GenerationJobEventRecord[];
+  listByJobPage(jobId: string, afterSequence: number, limit: number): GenerationJobEventRecord[];
 }
 
 export interface GenerationResultRepository {

@@ -29,6 +29,8 @@ import type {
   ContextSnapshotRepository,
   ConversationRecord,
   ConversationRepository,
+  ConversationModelPreferenceRecord,
+  ConversationModelPreferenceRepository,
   DocumentRecord,
   DocumentWorkflowAuditRecord,
   DocumentWorkflowAuditRepository,
@@ -42,6 +44,8 @@ import type {
   GenerationDraftRepository,
   GenerationResultRecord,
   GenerationResultRepository,
+  GenerationJobEventRecord,
+  GenerationJobEventRepository,
   JobRecord,
   JobRepository,
   LlmGenerationRecord,
@@ -1228,6 +1232,88 @@ class SqliteConversationRepository
         .all(projectId) as ConversationRow[]
     ).map(mapConversation);
   }
+}
+
+class SqliteConversationModelPreferenceRepository
+  extends ProjectScopedRepository
+  implements ConversationModelPreferenceRepository
+{
+  save(record: ConversationModelPreferenceRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO conversation_model_preferences
+         (conversation_id, capability, provider_profile_id, model_id, confirmed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, capability) DO UPDATE SET
+           provider_profile_id = excluded.provider_profile_id,
+           model_id = excluded.model_id,
+           confirmed_at = excluded.confirmed_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        record.conversationId,
+        record.capability,
+        record.providerProfileId,
+        record.modelId,
+        record.confirmedAt,
+        record.updatedAt,
+      );
+  }
+
+  get(
+    conversationId: string,
+    capability: ConversationModelPreferenceRecord['capability'],
+  ): ConversationModelPreferenceRecord | undefined {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM conversation_model_preferences WHERE conversation_id = ? AND capability = ?',
+      )
+      .get(conversationId, capability) as ConversationModelPreferenceRow | undefined;
+    return row ? mapConversationModelPreference(row) : undefined;
+  }
+
+  listByConversation(conversationId: string): ConversationModelPreferenceRecord[] {
+    return (
+      this.database
+        .prepare(
+          'SELECT * FROM conversation_model_preferences WHERE conversation_id = ? ORDER BY capability',
+        )
+        .all(conversationId) as ConversationModelPreferenceRow[]
+    ).map(mapConversationModelPreference);
+  }
+
+  delete(
+    conversationId: string,
+    capability: ConversationModelPreferenceRecord['capability'],
+  ): void {
+    this.database
+      .prepare(
+        'DELETE FROM conversation_model_preferences WHERE conversation_id = ? AND capability = ?',
+      )
+      .run(conversationId, capability);
+  }
+}
+
+interface ConversationModelPreferenceRow {
+  conversation_id: string;
+  capability: string;
+  provider_profile_id: string;
+  model_id: string;
+  confirmed_at: string;
+  updated_at: string;
+}
+
+function mapConversationModelPreference(
+  row: ConversationModelPreferenceRow,
+): ConversationModelPreferenceRecord {
+  return {
+    conversationId: row.conversation_id,
+    capability: row.capability as ConversationModelPreferenceRecord['capability'],
+    providerProfileId: row.provider_profile_id,
+    modelId: row.model_id,
+    confirmedAt: row.confirmed_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface ConversationRow {
@@ -3188,11 +3274,12 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
       .prepare(
         `INSERT INTO generation_jobs
          (id, project_id, shot_id, adapter_key, provider_task_id, status,
-          request_json, error_json, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          request_json, error_json, metadata_json, task_snapshot_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            provider_task_id = excluded.provider_task_id, status = excluded.status,
            error_json = excluded.error_json, metadata_json = excluded.metadata_json,
+           task_snapshot_json = COALESCE(excluded.task_snapshot_json, generation_jobs.task_snapshot_json),
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -3205,6 +3292,7 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
         record.requestJson,
         record.errorJson ?? null,
         record.metadataJson ?? null,
+        record.taskSnapshotJson ?? null,
         record.createdAt,
         record.updatedAt,
       );
@@ -3223,6 +3311,80 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
         .all(projectId) as JobRow[]
     ).map(mapJob);
   }
+}
+
+class SqliteGenerationJobEventRepository
+  extends ProjectScopedRepository
+  implements GenerationJobEventRepository
+{
+  append(record: GenerationJobEventRecord): void {
+    const nextSequence = this.database
+      .prepare(
+        'SELECT COALESCE(MAX(sequence), -1) + 1 AS value FROM generation_job_events WHERE job_id = ?',
+      )
+      .get(record.jobId) as { value: number };
+    this.database
+      .prepare(
+        `INSERT INTO generation_job_events
+         (id, job_id, project_id, sequence, phase, status, summary, details_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.jobId,
+        record.projectId,
+        record.sequence ?? nextSequence.value,
+        record.phase,
+        record.status,
+        record.summary.slice(0, 500),
+        record.detailsJson ?? null,
+        record.createdAt,
+      );
+  }
+
+  listByJob(jobId: string): GenerationJobEventRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM generation_job_events WHERE job_id = ? ORDER BY sequence, id')
+        .all(jobId) as GenerationJobEventRow[]
+    ).map(mapGenerationJobEvent);
+  }
+
+  listByJobPage(jobId: string, afterSequence: number, limit: number): GenerationJobEventRecord[] {
+    return (
+      this.database
+        .prepare(
+          'SELECT * FROM generation_job_events WHERE job_id = ? AND sequence > ? ORDER BY sequence, id LIMIT ?',
+        )
+        .all(jobId, afterSequence, limit) as GenerationJobEventRow[]
+    ).map(mapGenerationJobEvent);
+  }
+}
+
+interface GenerationJobEventRow {
+  id: string;
+  job_id: string;
+  project_id: string;
+  sequence: number;
+  phase: GenerationJobEventRecord['phase'];
+  status: string;
+  summary: string;
+  details_json: string | null;
+  created_at: string;
+}
+
+function mapGenerationJobEvent(row: GenerationJobEventRow): GenerationJobEventRecord {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    projectId: row.project_id,
+    sequence: row.sequence,
+    phase: row.phase,
+    status: row.status,
+    summary: row.summary,
+    detailsJson: row.details_json ?? undefined,
+    createdAt: row.created_at,
+  };
 }
 
 class SqliteGenerationResultRepository
@@ -3292,6 +3454,7 @@ interface JobRow {
   request_json: string;
   error_json: string | null;
   metadata_json: string | null;
+  task_snapshot_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3307,6 +3470,7 @@ function mapJob(row: JobRow): JobRecord {
     requestJson: row.request_json,
     errorJson: row.error_json ?? undefined,
     metadataJson: row.metadata_json ?? undefined,
+    taskSnapshotJson: row.task_snapshot_json ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3325,6 +3489,7 @@ export function createRepositories(database: Database.Database): {
   scenes: SceneRepository;
   shots: ShotRepository;
   conversations: ConversationRepository;
+  conversationModelPreferences: ConversationModelPreferenceRepository;
   chatMessages: ChatMessageRepository;
   llmGenerations: LlmGenerationRepository;
   llmGenerationAttempts: LlmGenerationAttemptRepository;
@@ -3343,6 +3508,7 @@ export function createRepositories(database: Database.Database): {
   assets: AssetRepository;
   generationDrafts: GenerationDraftRepository;
   jobs: JobRepository;
+  generationJobEvents: GenerationJobEventRepository;
   generationResults: GenerationResultRepository;
 } {
   return {
@@ -3358,6 +3524,7 @@ export function createRepositories(database: Database.Database): {
     scenes: new SqliteSceneRepository(database),
     shots: new SqliteShotRepository(database),
     conversations: new SqliteConversationRepository(database),
+    conversationModelPreferences: new SqliteConversationModelPreferenceRepository(database),
     chatMessages: new SqliteChatMessageRepository(database),
     llmGenerations: new SqliteLlmGenerationRepository(database),
     llmGenerationAttempts: new SqliteLlmGenerationAttemptRepository(database),
@@ -3376,6 +3543,7 @@ export function createRepositories(database: Database.Database): {
     assets: new SqliteAssetRepository(database),
     generationDrafts: new SqliteGenerationDraftRepository(database),
     jobs: new SqliteJobRepository(database),
+    generationJobEvents: new SqliteGenerationJobEventRepository(database),
     generationResults: new SqliteGenerationResultRepository(database),
   };
 }

@@ -99,8 +99,8 @@
 
 ### 4.4 验证基线
 
-- [x] Desktop 测试通过：158 tests。
-- [x] Worker 测试通过：275 tests。
+- [x] Desktop 测试通过：167 tests。
+- [x] Worker 测试通过：283 tests。
 - [x] Contracts、Desktop、Worker TypeScript 检查通过。
 - [x] ESLint、Prettier、`git diff --check` 通过。
 
@@ -114,12 +114,12 @@
 
 - [x] 定义模型/schema 查询合同，包括来源、版本、状态、更新时间和确认状态。
 - [x] 支持官方适配器、手工配置和同步目录三种来源的只读标识；手工写入能力待后续阶段实现。
-- [ ] 支持创建手工模型记录，不修改 Provider 凭据。
-- [ ] 支持更新模型能力标记，但禁止越权修改连接配置。
-- [ ] 支持新增、修改、停用和恢复参数 schema。
-- [ ] 为 schema 变更记录操作者、会话、原因、旧值、新值和时间。
-- [ ] 为高风险变更生成差异预览和确认请求。
-- [ ] 提供回滚到上一 schema 版本的接口。
+- [x] 支持创建手工模型记录，不修改 Provider 凭据。
+- [x] 支持更新模型能力标记，但禁止越权修改连接配置。
+- [x] 支持新增、修改、停用和恢复参数 schema。
+- [x] 为 schema 变更记录操作者、会话、原因、旧值、新值和时间。
+- [x] 为高风险变更生成差异预览和确认请求。
+- [x] 提供回滚到上一 schema 版本的接口。
 - [x] 未确认 schema 在统一查询结果中明确标记，统一 Agent 生成仍拒绝缺失 schema。
 
 阶段 A 只读子阶段已完成：新增 `model.catalog.list`、`model.catalog.get` 和 `adapter.schema.get` IPC 查询，返回模型能力、来源、schema 状态、适配器和必填字段；普通会话支持通过自然语言查询模型/schema 摘要。写入、审计和回滚仍属于阶段 A 后续子阶段。
@@ -155,11 +155,11 @@ adapter.schema.audit.list
 
 任务：
 
-- [ ] 增加 conversation model preferences 数据结构。
-- [ ] 按 `text/image/video/vision/research` 等能力保存 Provider profile、模型和确认时间。
-- [ ] 切换会话时隔离偏好，不能串用其他会话的选择。
-- [ ] 模型失效时不静默替换，重新展示候选模型。
-- [ ] 用户明确说“换模型”时清除或更新对应能力偏好。
+- [x] 增加 conversation model preferences 数据结构。
+- [x] 按 `text/image/video/document/novel/short-drama/research/asset` 能力保存 Provider profile、模型和确认时间。
+- [x] 切换会话时隔离偏好，不能串用其他会话的选择。
+- [x] 模型失效时不静默替换，重新展示候选模型。
+- [x] 用户明确说“换模型”时清除或更新对应能力偏好。
 - [ ] 为已创建任务保存使用的偏好来源和确认记录。
 
 ### 阶段 C：任务快照和生命周期
@@ -168,13 +168,13 @@ adapter.schema.audit.list
 
 任务：
 
-- [ ] 在图片/视频任务中冻结模型 ID、远程模型 ID、适配器 key。
-- [ ] 冻结 schema 内容、schema 版本和来源。
-- [ ] 冻结经过解析和资源引用替换后的参数快照。
-- [ ] 记录费用提示状态，但不伪造费用金额。
-- [ ] 记录任务创建会话、原始 prompt 和用户确认记录。
-- [ ] Worker 重启后根据快照恢复任务，不重新读取最新 schema 覆盖历史参数。
-- [ ] 对 Provider submit、poll、download、complete 分别记录可追踪事件。
+- [x] 在图片/视频任务中冻结已知的模型 ID、远程模型 ID、适配器 key。
+- [x] 冻结 schema 版本和来源，并保留适配器 key 以便重建 schema。
+- [x] 冻结经过脱敏/资源引用处理后的参数快照。
+- [x] 记录费用提示状态，但不伪造费用金额。
+- [x] 记录任务创建会话、原始 prompt 和费用提示确认状态。
+- [x] Worker 重启后根据快照识别并恢复任务，不重新读取最新 schema 覆盖历史参数。
+- [x] 对 Provider submit、poll、download、complete 分别记录可追踪事件。
 
 ### 阶段 D：Agent schema 管理工具接入
 
@@ -208,9 +208,9 @@ adapter.schema.audit.list
 
 - [ ] 统一展示模型选择、参数补充、确认、提交、轮询、完成和失败状态。
 - [ ] 错误信息转换为用户可理解的中文提示，同时保留技术错误码供日志查看。
-- [ ] 图片生成完成后直接显示素材入口。
-- [ ] 视频生成中显示轮询状态、预计等待说明和取消入口。
-- [ ] Provider 不支持某字段时，提示替代模型或让用户修改 schema。
+- [x] 图片生成完成后直接显示素材入口。
+- [x] 视频生成中显示轮询状态、预计等待说明和取消入口。
+- [x] Provider 不支持某字段时，提示检查必填项、修改 schema 或更换模型。
 - [ ] 普通入口隐藏旧的功能模式选择器，高级设置保留兼容入口。
 
 ## 6. 数据和权限边界
@@ -304,23 +304,31 @@ adapter.schema.audit.list
 
 ## 10. 当前下一步
 
-下一步优先实现阶段 A 的只读能力：
+阶段 A 的查询、提议、确认、审计和回滚已经完成，阶段 B 的项目级会话模型偏好基础能力也已接通。下一步按顺序推进：
 
-1. 增加模型/schema 查询合同。
-2. 返回 schema 来源、版本、确认状态和缺失字段。
-3. 增加 Worker IPC 校验和测试。
-4. 在会话中支持“查看当前模型参数”的自然语言查询。
-
-在只读查询稳定后，再实现 schema 修改、确认和回滚，避免 Agent 在缺少审计和版本控制时直接写入配置。
-## 11. Latest implementation status (2026-08-31)
+1. 将 schema 维护操作纳入受控 Agent tool loop，并补齐高风险变更的对话确认体验。
+2. 为图片/视频任务冻结模型、适配器、schema 和参数快照。
+3. 将模型偏好来源和确认记录绑定到任务快照，并在 Worker 重启后按快照恢复。
+4. 收口统一任务状态、错误提示和媒体结果入口。
+## 11. Latest implementation status (2026-09-01)
 
 - [x] Added `adapter.schema.propose`, `adapter.schema.confirm`, `adapter.schema.rollback`, and `adapter.schema.audit.list` contracts and IPC routes.
 - [x] Added descriptor validation, required-field checks, HTTPS endpoint checks, and malformed-schema protection.
 - [x] Proposals persist as `needs_confirmation`; only confirmed descriptors load into the runtime adapter registry.
 - [x] Added schema audits with actor, conversation, reason, before/after JSON, and version.
 - [x] Added rollback to a previously confirmed version and runtime refresh after confirmation/rollback.
-- [x] Added focused AppSettingsService lifecycle coverage; Worker suite passes (277 tests).
-- [ ] Agent tool-loop commands for schema maintenance and conversation preference persistence remain subsequent phases.
+- [x] Added focused AppSettingsService lifecycle coverage; Worker suite passes (283 tests).
+- [x] Agent tool-loop commands for schema maintenance are available through the controlled schema proposal/confirmation routes; conversation preference persistence is now project-local and Worker-backed.
+- [ ] Agent tool-loop commands for conversational schema maintenance and full task lifecycle provenance remain subsequent phases.
+- [x] Project schema v32 adds conversation-scoped model preferences with isolated get/set/clear IPC, migration coverage, and Agent fallback lookup.
+- [x] Project schema v33 adds immutable `generation_jobs.task_snapshot_json`; image/video preparation stores capability, adapter, schema version/source, model identity when available, and sanitized parameters.
+- [x] Media task snapshots now also retain the originating conversation ID, original prompt, and whether the cost notice was acknowledged; snapshot updates are rejected after creation.
+- [x] Project schema v34 adds immutable `generation_job_events`; image/video jobs record prepare, submit, poll, download, complete, and fail lifecycle facts with bounded summaries and project-scope checks.
+- [x] Added project-scoped, bounded `generation.job.events.list` pagination; Worker restart recovery now records explicit poll/fail lifecycle facts for media jobs.
+- [x] Task Log media details now load and render the persisted Provider lifecycle timeline, including restart recovery facts.
+- [x] Added shared Desktop media status/error feedback: Production and Task Log use the same Chinese progress vocabulary, while Task Log retains expandable failure kinds and technical details.
+- [x] Video tasks now show state-specific waiting guidance without inventing a completion time; completed tasks expose a primary `查看素材` action plus playback/file-location actions.
+- [x] Invalid/unsupported Provider parameter responses now preserve their bounded technical detail but guide users to fix required fields, update the model Schema, or switch models.
 - [x] Added unified chat attachment input for local images, videos, and common document files, including picker, drag/drop, paste, removable chips, previews, size limits, text extraction for plain-text files, and automatic image reference injection into media adapter parameters.
 - [x] Replaced the label-based picker with a real disabled-aware button so Tauri/WebView file selection is triggered reliably; arbitrary file types are now selectable and attachment-only messages can be sent with Enter.
 - [x] Distinguished media generation requests from media analysis/prompt-rewrite requests; a video attachment no longer forces the Agent into the video-generation model route.
@@ -332,8 +340,8 @@ adapter.schema.audit.list
 - [x] Carry the selected/latest character or scene prompt document into direct image-generation parameters, preserving project context while respecting the adapter's 5,000-character prompt limit.
 - [x] Replace full video data URLs in Agent analysis requests with bounded first-frame image previews plus video metadata, avoiding the 2 MiB sidecar startup failure while providing a useful visual reference.
 - [x] Match image/video reference attachments to reference-capable media adapters instead of incorrectly requiring generic vision; `qwen-image-edit-2509` is now offered for “生成三视图” with an uploaded image.
-- [x] Added regression coverage for reference-image generation, text-to-image exclusion when a reference is present, and vision requirements for image-understanding tasks; Worker suite passes (282 tests).
-- [x] When a video is used as a reference for image generation, the extracted bounded first-frame preview is automatically injected into the adapter `images` field; Desktop suite passes (165 tests).
+- [x] Added regression coverage for reference-image generation, text-to-image exclusion when a reference is present, and vision requirements for image-understanding tasks; Worker suite passes (283 tests).
+- [x] When a video is used as a reference for image generation, the extracted bounded first-frame preview is automatically injected into the adapter `images` field; Desktop suite passes (167 tests).
 - [x] Reference images are prefilled in the parameter form before validation, so required `images` fields no longer block submission when the source is an uploaded image or video.
 - [x] Media parameter submissions no longer resend the same large local data URL as both Agent attachment and adapter parameter, preventing duplicate payloads from exceeding the 2 MiB sidecar limit.
 - [x] De-duplicated prefilled and automatically injected reference images so clicking “提交生成” sends each local image only once.

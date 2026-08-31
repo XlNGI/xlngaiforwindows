@@ -2707,6 +2707,22 @@ button {
   line-height: 1.5;
 }
 
+.task-log-detail-error details {
+  margin-top: 6px;
+  color: #a98d89;
+}
+
+.task-log-detail-error summary {
+  cursor: pointer;
+}
+
+.task-log-detail-error code {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .task-log-detail-error-block {
   margin: 14px;
 }
@@ -2780,12 +2796,46 @@ button {
 
 .task-log-timeline,
 .task-log-artifacts,
-.task-log-research-sources {
+.task-log-research-sources,
+.task-log-event-list {
   display: grid;
   gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.task-log-event-list li {
+  display: grid;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid #343b3e;
+  background: #1d2224;
+}
+
+.task-log-event-list li > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-log-event-list strong {
+  color: #d2b866;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.task-log-event-list span,
+.task-log-event-list small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.task-log-event-list p {
+  margin: 0;
+  color: #b2b9bd;
+  font-size: 10px;
+  line-height: 1.45;
 }
 
 .task-log-event {
@@ -3746,6 +3796,13 @@ button {
   text-overflow: ellipsis;
 }
 
+.video-task-summary .video-task-guidance {
+  overflow: visible;
+  color: #b9ab78;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .video-task-actions {
   display: flex;
   align-items: start;
@@ -3755,6 +3812,13 @@ button {
 .video-task-actions .icon-button {
   width: 26px;
   height: 26px;
+}
+
+.video-task-actions .video-task-result-button {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .video-task-empty {

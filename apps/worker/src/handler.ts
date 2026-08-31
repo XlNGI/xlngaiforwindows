@@ -24,12 +24,18 @@ import {
   type AgentProviderStepStartParams,
   type AgentTaskGetParams,
   type AgentTaskEventsParams,
+  type GenerationJobEventsListParams,
+  type GenerationJobEventsPage,
+  type GenerationJobEventInfo,
   type AdapterResolveParams,
   type AdapterValidateParams,
   type ConversationArchiveParams,
   type ConversationCreateParams,
   type ConversationRestoreParams,
   type ConversationUpdateParams,
+  type ConversationModelPreferenceGetParams,
+  type ConversationModelPreferenceSetParams,
+  type ConversationModelPreferenceClearParams,
   type DocumentRestoreParams,
   type DocumentDraftSaveParams,
   type DocumentPublishParams,
@@ -128,6 +134,7 @@ import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { setAdapterOverrides } from '@ai-video/generation-adapters';
+import { createRepositories } from '@ai-video/persistence';
 
 const WORKER_VERSION = '0.1.0';
 
@@ -392,6 +399,7 @@ const methods = new Set<WorkerMethod>([
   'agent.providerStep.complete',
   'agent.providerStep.start',
   'task.log.list',
+  'generation.job.events.list',
   'agent.changeSet.create',
   'agent.changeSet.list',
   'agent.changeSet.apply',
@@ -407,6 +415,9 @@ const methods = new Set<WorkerMethod>([
   'conversation.update',
   'conversation.archive',
   'conversation.restore',
+  'conversation.modelPreference.get',
+  'conversation.modelPreference.set',
+  'conversation.modelPreference.clear',
   'chat.message.list',
   'chat.message.save',
   'chat.message.toDocument',
@@ -650,6 +661,57 @@ function requireNumber(params: Record<string, unknown>, key: string): number {
     throw new Error(`${key} must be a number.`);
   }
   return value;
+}
+
+function listGenerationJobEvents(params: GenerationJobEventsListParams): GenerationJobEventsPage {
+  const jobId = requireString(params as unknown as Record<string, unknown>, 'jobId');
+  const afterSequence = Math.max(-1, Math.floor(params.afterSequence ?? -1));
+  const limit = Math.min(Math.max(Math.floor(params.limit ?? 50), 1), 100);
+  return projectService.access(false, (database, project) => {
+    const repositories = createRepositories(database);
+    const job = repositories.jobs.get(jobId);
+    if (!job || job.projectId !== project.id) throw new Error('Generation job was not found.');
+    const rows = repositories.generationJobEvents.listByJobPage(jobId, afterSequence, limit + 1);
+    const hasMore = rows.length > limit;
+    const events: GenerationJobEventInfo[] = rows.slice(0, limit).map((event) => {
+      let details: Record<string, unknown> | undefined;
+      if (event.detailsJson) {
+        try {
+          const parsed: unknown = JSON.parse(event.detailsJson);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            details = redactGenerationEventDetails(parsed as Record<string, unknown>);
+          }
+        } catch {
+          // Ignore malformed historical details rather than exposing raw persistence data.
+        }
+      }
+      return {
+        id: event.id,
+        jobId: event.jobId,
+        sequence: event.sequence ?? 0,
+        phase: event.phase,
+        status: event.status,
+        summary: event.summary,
+        details,
+        createdAt: event.createdAt,
+      };
+    });
+    return {
+      events,
+      nextSequence: events.length > 0 ? events[events.length - 1]!.sequence : afterSequence,
+      hasMore,
+    };
+  });
+}
+
+function redactGenerationEventDetails(input: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input).slice(0, 20)) {
+    if (typeof value === 'string') output[key] = value.slice(0, 256);
+    else if (typeof value === 'number' && Number.isFinite(value)) output[key] = value;
+    else if (typeof value === 'boolean') output[key] = value;
+  }
+  return output;
 }
 
 function optionalNumber(params: Record<string, unknown>, key: string): number | undefined {
@@ -1004,11 +1066,28 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               : [],
           );
 
-          if (!agentParams.providerProfileId || !agentParams.modelId) {
+          let storedPreference: ReturnType<
+            ContentService['getConversationModelPreference']
+          > | null = null;
+          if (!agentParams.providerProfileId && !agentParams.modelId && capability !== 'auto') {
+            try {
+              storedPreference = contentService.getConversationModelPreference({
+                conversationId: agentParams.conversationId,
+                capability,
+              });
+            } catch {
+              // Catalog/model-selection validation remains useful before a project is open.
+            }
+          }
+          const requestedProviderProfileId =
+            agentParams.providerProfileId ?? storedPreference?.providerProfileId;
+          const requestedModelId = agentParams.modelId ?? storedPreference?.modelId;
+
+          if (!requestedProviderProfileId || !requestedModelId) {
             result = {
               status: 'needs_model_selection',
               capability,
-              reason: 'missing_model',
+              reason: storedPreference ? 'model_unavailable' : 'missing_model',
               models: candidates,
             };
             break;
@@ -1016,8 +1095,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
 
           const selected = candidates.find(
             (candidate) =>
-              candidate.providerProfileId === agentParams.providerProfileId &&
-              candidate.modelId === agentParams.modelId,
+              candidate.providerProfileId === requestedProviderProfileId &&
+              candidate.modelId === requestedModelId,
           );
           if (!selected) {
             result = {
@@ -1025,8 +1104,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               capability,
               reason: candidates.some(
                 (candidate) =>
-                  candidate.providerProfileId === agentParams.providerProfileId &&
-                  candidate.modelId === agentParams.modelId,
+                  candidate.providerProfileId === requestedProviderProfileId &&
+                  candidate.modelId === requestedModelId,
               )
                 ? 'capability_mismatch'
                 : 'model_unavailable',
@@ -1054,6 +1133,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                 capability,
                 providerProfileId: selected.providerProfileId,
                 modelId: selected.modelId,
+                conversationId: agentParams.conversationId,
+                originalPrompt: agentParams.prompt,
+                costNoticeAcknowledged: true,
                 modelName: selected.modelName,
                 adapters,
                 missingRequired: adapters.flatMap((adapter) => adapter.parameterSchema.required),
@@ -1076,6 +1158,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                 shotId: agentParams.shotId,
                 adapterKey: adapter.key,
                 parameters,
+                providerProfileId: selected.providerProfileId,
+                modelId: selected.modelId,
               } satisfies ImageGenerationPrepareParams);
               result = { status: 'image_prepared', capability: 'image', job };
             } else {
@@ -1086,6 +1170,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                 providerRegion: agentParams.providerRegion ?? 'global',
                 providerProfileId: selected.providerProfileId,
                 modelId: selected.remoteModelId,
+                conversationId: agentParams.conversationId,
+                originalPrompt: agentParams.prompt,
+                costNoticeAcknowledged: true,
                 assetKind:
                   agentParams.assetKind === 'generated-video' ||
                   agentParams.assetKind === 'shot-video'
@@ -1302,6 +1389,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'task.log.list':
           result = documentWorkflowService.listTaskLog(params);
           break;
+        case 'generation.job.events.list':
+          result = listGenerationJobEvents(params as unknown as GenerationJobEventsListParams);
+          break;
         case 'scene.list':
           result = contentService.listScenes();
           break;
@@ -1337,6 +1427,21 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'conversation.restore':
           result = contentService.restoreConversation(
             params as unknown as ConversationRestoreParams,
+          );
+          break;
+        case 'conversation.modelPreference.get':
+          result = contentService.getConversationModelPreference(
+            params as unknown as ConversationModelPreferenceGetParams,
+          );
+          break;
+        case 'conversation.modelPreference.set':
+          result = contentService.setConversationModelPreference(
+            params as unknown as ConversationModelPreferenceSetParams,
+          );
+          break;
+        case 'conversation.modelPreference.clear':
+          result = contentService.clearConversationModelPreference(
+            params as unknown as ConversationModelPreferenceClearParams,
           );
           break;
         case 'chat.message.list':

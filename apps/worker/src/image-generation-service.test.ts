@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRepositories } from '@ai-video/persistence';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ImageGenerationService } from './image-generation-service.js';
 import { ProjectService } from './project-service.js';
@@ -52,15 +53,27 @@ describe('ImageGenerationService', () => {
         aspect_ratio: '16:9',
         resolution: '1080p',
       },
+      conversationId: 'conversation',
+      originalPrompt: '生成角色三视图',
+      costNoticeAcknowledged: true,
     });
 
     expect(job.request.images).toEqual([localImage]);
     project.access(false, (database) => {
       const row = database
-        .prepare('SELECT request_json FROM generation_jobs WHERE id = ?')
-        .get(job.id) as { request_json: string };
+        .prepare('SELECT request_json, task_snapshot_json FROM generation_jobs WHERE id = ?')
+        .get(job.id) as { request_json: string; task_snapshot_json: string };
       expect(row.request_json).toContain('local-image://omitted');
       expect(row.request_json).not.toContain('iVBORw0KGgo=');
+      expect(JSON.parse(row.task_snapshot_json)).toMatchObject({
+        capability: 'image',
+        adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+        schemaVersion: 1,
+        parameters: { images: ['local-image://omitted'] },
+        conversationId: 'conversation',
+        originalPrompt: '生成角色三视图',
+        costNoticeAcknowledged: true,
+      });
     });
   });
 
@@ -670,6 +683,14 @@ describe('ImageGenerationService', () => {
     expect(service.get(job.id)).toMatchObject({
       status: 'failed',
       error: 'Generation was interrupted before completion.',
+    });
+    project.access(false, (database) => {
+      expect(
+        createRepositories(database).generationJobEvents.listByJob(job.id).at(-1),
+      ).toMatchObject({
+        phase: 'fail',
+        status: 'failed',
+      });
     });
     expect(service.recoverInterrupted()).toBe(0);
   });

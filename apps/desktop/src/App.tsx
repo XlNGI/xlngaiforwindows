@@ -1625,6 +1625,14 @@ export function App() {
           remembered?.providerProfileId ??
           selectedLlmProfile?.id;
         const modelId = modelSelection?.modelId ?? remembered?.modelId ?? selectedLlmModel?.id;
+        if (providerProfileId && modelId && conversation && capability !== 'auto') {
+          void callWorker('conversation.modelPreference.set', {
+            conversationId: conversation.id,
+            capability,
+            providerProfileId,
+            modelId,
+          }).catch(() => undefined);
+        }
         // Media parameter submission already carries local reference data in
         // `parameters.images`/video fields. Sending the same data again as
         // Agent attachments can push the JSON sidecar envelope over 2 MiB.

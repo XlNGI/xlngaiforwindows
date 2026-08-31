@@ -46,6 +46,11 @@ import {
 } from './provider-client';
 import { VideoPollingScheduler } from './video-polling-scheduler';
 import {
+  generationErrorFeedback,
+  generationStatusLabel,
+  videoProgressGuidance,
+} from './generation-feedback';
+import {
   hasLocalImageParameters,
   isLocalImageDataUrl,
   MAX_LOCAL_IMAGE_TOTAL_BYTES,
@@ -125,20 +130,6 @@ async function resolveAssetReferences(parameters: AdapterParameters): Promise<Ad
   return resolved;
 }
 
-function videoStatusLabel(status: VideoGenerationJobInfo['status']): string {
-  const labels: Record<VideoGenerationJobInfo['status'], string> = {
-    pending: '正在提交',
-    polling: '生成中',
-    downloading: '下载中',
-    paused: '已暂停',
-    succeeded: '已完成',
-    failed: '失败',
-    'timed-out': '已超时',
-    cancelled: '已取消',
-  };
-  return labels[status];
-}
-
 function isVideoCapability(capability: GenerationCapability | undefined): boolean {
   return (
     capability === 'TEXT_TO_VIDEO' ||
@@ -193,7 +184,7 @@ function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   const title = job.status === 'succeeded' ? '视频生成完成' : '视频任务已结束';
   try {
-    new Notification(title, { body: videoStatusLabel(job.status) });
+    new Notification(title, { body: generationStatusLabel(job.status) });
   } catch {
     // The task center remains the durable notification surface when OS notifications are unavailable.
   }
@@ -472,7 +463,11 @@ export function ProductionPanel({
           },
           onTerminal: (job) => {
             if (!active || job.projectId !== projectId) return;
-            setGenerationStatus(job.error ?? `视频任务${videoStatusLabel(job.status)}。`);
+            setGenerationStatus(
+              job.error
+                ? generationErrorFeedback(job.error, job.metadata.failureKind).userMessage
+                : `视频任务${generationStatusLabel(job.status)}。`,
+            );
             notifyVideoTerminal(job);
             if (job.status === 'succeeded') {
               const assetId = job.results[0]?.asset.id;
@@ -725,6 +720,8 @@ export function ProductionPanel({
         shotId,
         adapterKey: adapter.key,
         parameters: submissionParameters,
+        providerProfileId: selectedProfile.id,
+        modelId: selectedModel.remoteModelId,
       });
       preparedJobId = job.id;
       setGenerationJobId(job.id);
@@ -755,7 +752,9 @@ export function ProductionPanel({
           ? '图片已保存到本地素材库。'
           : completed.status === 'cancelled'
             ? '已取消图片生成。'
-            : (completed.error ?? '生成失败。'),
+            : completed.error
+              ? generationErrorFeedback(completed.error).userMessage
+              : '生成失败。',
       );
     } catch (reason) {
       if (preparedJobId) {
@@ -830,7 +829,11 @@ export function ProductionPanel({
           message: failureMessage,
         });
         setVideoJobs((current) => upsertVideoJob(current, failed));
-        setGenerationStatus(failed.error ?? '视频任务提交失败。');
+        setGenerationStatus(
+          failed.error
+            ? generationErrorFeedback(failed.error, 'provider').userMessage
+            : '视频任务提交失败。',
+        );
         return;
       }
       const attached = await callWorker('video.generate.attachTask', {
@@ -1183,14 +1186,24 @@ export function ProductionPanel({
                       return (
                         <div className="video-task-row" key={job.id}>
                           <div className="video-task-summary">
-                            <strong>{videoStatusLabel(job.status)}</strong>
+                            <strong>{generationStatusLabel(job.status)}</strong>
                             <span>{formatElapsed(job.elapsedMs)}</span>
                             <small>
                               {formatVideoCost(job.metadata.cost)}
                               {' · '}
                               查询 {job.metadata.pollAttempts} 次
                             </small>
-                            {job.error && <small className="error-copy">{job.error}</small>}
+                            <small className="video-task-guidance">
+                              {videoProgressGuidance(job)}
+                            </small>
+                            {job.error && (
+                              <small className="error-copy">
+                                {
+                                  generationErrorFeedback(job.error, job.metadata.failureKind)
+                                    .userMessage
+                                }
+                              </small>
+                            )}
                           </div>
                           <div className="video-task-actions">
                             {job.status === 'polling' && (
@@ -1227,19 +1240,20 @@ export function ProductionPanel({
                             )}
                             {resultAsset && (
                               <button
-                                className="icon-button subtle"
+                                className="button primary video-task-result-button"
                                 type="button"
-                                title="预览结果"
+                                title="查看生成素材"
                                 onClick={() => setSelectedAssetId(resultAsset.id)}
                               >
                                 <Eye size={13} />
+                                查看素材
                               </button>
                             )}
                             {resultAsset && (
                               <button
                                 className="icon-button subtle"
                                 type="button"
-                                title="播放视频"
+                                title="使用系统播放器打开"
                                 onClick={() => void openAsset(resultAsset)}
                               >
                                 <Play size={13} />

@@ -77,9 +77,15 @@ describe('VideoGenerationService', () => {
     expect(job.request.images).toEqual(['local-image://omitted', 'local-image://omitted']);
     project.access(false, (database) => {
       const row = database
-        .prepare('SELECT request_json FROM generation_jobs WHERE id = ?')
-        .get(job.id) as { request_json: string };
+        .prepare('SELECT request_json, task_snapshot_json FROM generation_jobs WHERE id = ?')
+        .get(job.id) as { request_json: string; task_snapshot_json: string };
       expect(row.request_json).not.toContain('iVBORw0KGgo=');
+      expect(JSON.parse(row.task_snapshot_json)).toMatchObject({
+        capability: 'video',
+        adapterKey: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
+        schemaVersion: 1,
+        parameters: { images: ['local-image://omitted', 'local-image://omitted'] },
+      });
     });
   });
 
@@ -538,6 +544,8 @@ describe('VideoGenerationService', () => {
       const repositories = createRepositories(database);
       const current = repositories.jobs.get(downloading.id)!;
       repositories.jobs.save({ ...current, status: 'downloading' });
+      const pendingCurrent = repositories.jobs.get(pending.id)!;
+      repositories.jobs.save({ ...pendingCurrent, adapterKey: 'removed-adapter:v1' });
     });
     project.close();
     project.open(rootPath);
@@ -561,6 +569,21 @@ describe('VideoGenerationService', () => {
     expect(service.get(downloading.id)).toMatchObject({
       status: 'polling',
       providerTaskId: 'provider-download-task',
+    });
+    project.access(false, (database) => {
+      const events = createRepositories(database).generationJobEvents;
+      expect(events.listByJob(pending.id).at(-1)).toMatchObject({
+        phase: 'fail',
+        status: 'failed',
+      });
+      expect(events.listByJob(attached.id).at(-1)).toMatchObject({
+        phase: 'submit',
+        status: 'polling',
+      });
+      expect(events.listByJob(downloading.id).at(-1)).toMatchObject({
+        phase: 'poll',
+        status: 'polling',
+      });
     });
     expect(service.recoverInterrupted()).toBe(0);
   });

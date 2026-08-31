@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 31;
+export const CURRENT_SCHEMA_VERSION = 34;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -2127,5 +2127,77 @@ WHEN (OLD.status = 'pending' AND NEW.status NOT IN ('pending', 'ready', 'blocked
   OR (OLD.status IN ('succeeded', 'cancelled') AND NEW.status <> OLD.status)
 BEGIN
   SELECT RAISE(ABORT, 'invalid agent task deliverable status transition');
+END;
+`;
+
+/** Conversation-scoped model selections survive Desktop restarts and move with the project. */
+export const MIGRATION_V32 = `
+CREATE TABLE conversation_model_preferences (
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  capability TEXT NOT NULL CHECK (capability IN (
+    'text', 'image', 'video', 'document', 'novel', 'short-drama', 'research', 'asset'
+  )),
+  provider_profile_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  confirmed_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, capability)
+);
+
+CREATE INDEX idx_conversation_model_preferences_conversation
+  ON conversation_model_preferences(conversation_id, capability);
+`;
+
+/** Immutable provider/model/schema/parameter snapshot for media generation jobs. */
+export const MIGRATION_V33 = `
+ALTER TABLE generation_jobs ADD COLUMN task_snapshot_json TEXT
+  CHECK (task_snapshot_json IS NULL OR (json_valid(task_snapshot_json) AND json_type(task_snapshot_json) = 'object'));
+
+CREATE TRIGGER generation_jobs_task_snapshot_immutable
+BEFORE UPDATE OF task_snapshot_json ON generation_jobs
+WHEN OLD.task_snapshot_json IS NOT NULL
+  AND (NEW.task_snapshot_json IS NULL OR NEW.task_snapshot_json <> OLD.task_snapshot_json)
+BEGIN
+  SELECT RAISE(ABORT, 'generation task snapshot is immutable');
+END;
+`;
+
+/** Immutable, bounded lifecycle facts for image/video provider jobs. */
+export const MIGRATION_V34 = `
+CREATE TABLE generation_job_events (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK (sequence >= 0),
+  phase TEXT NOT NULL CHECK (phase IN ('prepare', 'submit', 'poll', 'download', 'complete', 'fail')),
+  status TEXT NOT NULL CHECK (length(trim(status)) > 0 AND length(status) <= 80),
+  summary TEXT NOT NULL CHECK (length(trim(summary)) > 0 AND length(summary) <= 500),
+  details_json TEXT CHECK (details_json IS NULL OR (json_valid(details_json) AND json_type(details_json) = 'object')),
+  created_at TEXT NOT NULL,
+  UNIQUE(job_id, sequence)
+);
+
+CREATE INDEX idx_generation_job_events_job ON generation_job_events(job_id, sequence);
+
+CREATE TRIGGER generation_job_event_project_match
+BEFORE INSERT ON generation_job_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM generation_jobs
+  WHERE generation_jobs.id = NEW.job_id AND generation_jobs.project_id = NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'generation job event does not match job project');
+END;
+
+CREATE TRIGGER generation_job_events_update_immutable
+BEFORE UPDATE ON generation_job_events
+BEGIN
+  SELECT RAISE(ABORT, 'generation job events are immutable');
+END;
+
+CREATE TRIGGER generation_job_events_delete_immutable
+BEFORE DELETE ON generation_job_events
+BEGIN
+  SELECT RAISE(ABORT, 'generation job events are immutable');
 END;
 `;

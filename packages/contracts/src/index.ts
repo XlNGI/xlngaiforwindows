@@ -1021,6 +1021,30 @@ export interface TaskLogPage {
   nextCursor?: string;
 }
 
+/** Safe, project-scoped lifecycle facts for an image/video generation job. */
+export interface GenerationJobEventInfo {
+  id: string;
+  jobId: string;
+  sequence: number;
+  phase: 'prepare' | 'submit' | 'poll' | 'download' | 'complete' | 'fail';
+  status: string;
+  summary: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface GenerationJobEventsListParams {
+  jobId: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+export interface GenerationJobEventsPage {
+  events: GenerationJobEventInfo[];
+  nextSequence: number;
+  hasMore: boolean;
+}
+
 export interface DocumentVersionsParams {
   documentId: string;
 }
@@ -1196,6 +1220,34 @@ export interface ConversationArchiveParams {
 
 export interface ConversationRestoreParams {
   conversationId: string;
+}
+
+export type ConversationModelPreferenceCapability = Exclude<UnifiedAgentCapability, 'auto'>;
+
+export interface ConversationModelPreferenceInfo {
+  conversationId: string;
+  capability: ConversationModelPreferenceCapability;
+  providerProfileId: string;
+  modelId: string;
+  confirmedAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationModelPreferenceGetParams {
+  conversationId: string;
+  capability: ConversationModelPreferenceCapability;
+}
+
+export interface ConversationModelPreferenceSetParams {
+  conversationId: string;
+  capability: ConversationModelPreferenceCapability;
+  providerProfileId: string;
+  modelId: string;
+}
+
+export interface ConversationModelPreferenceClearParams {
+  conversationId: string;
+  capability: ConversationModelPreferenceCapability;
 }
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -2163,6 +2215,11 @@ export interface ImageGenerationPrepareParams {
   shotId?: string;
   adapterKey: string;
   parameters: AdapterParameters;
+  providerProfileId?: string;
+  modelId?: string;
+  conversationId?: string;
+  originalPrompt?: string;
+  costNoticeAcknowledged?: boolean;
 }
 
 export interface ImageGenerationCompleteParams {
@@ -2258,6 +2315,9 @@ export interface VideoGenerationPrepareParams {
   providerProfileId?: string;
   modelId?: string;
   assetKind?: VideoAssetKind;
+  conversationId?: string;
+  originalPrompt?: string;
+  costNoticeAcknowledged?: boolean;
 }
 
 export interface VideoGenerationAttachTaskParams {
@@ -2627,6 +2687,10 @@ export interface WorkerMethodMap {
     result: Record<string, never>;
   };
   'task.log.list': { params: TaskLogListParams; result: TaskLogPage };
+  'generation.job.events.list': {
+    params: GenerationJobEventsListParams;
+    result: GenerationJobEventsPage;
+  };
   'scene.list': { params: Record<string, never>; result: SceneInfo[] };
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
@@ -2654,6 +2718,18 @@ export interface WorkerMethodMap {
   'conversation.update': { params: ConversationUpdateParams; result: ConversationInfo };
   'conversation.archive': { params: ConversationArchiveParams; result: ConversationInfo };
   'conversation.restore': { params: ConversationRestoreParams; result: ConversationInfo };
+  'conversation.modelPreference.get': {
+    params: ConversationModelPreferenceGetParams;
+    result: ConversationModelPreferenceInfo | null;
+  };
+  'conversation.modelPreference.set': {
+    params: ConversationModelPreferenceSetParams;
+    result: ConversationModelPreferenceInfo;
+  };
+  'conversation.modelPreference.clear': {
+    params: ConversationModelPreferenceClearParams;
+    result: { cleared: boolean };
+  };
   'chat.message.list': { params: ChatMessageListParams; result: ChatMessagePage };
   'chat.message.save': { params: ChatMessageSaveParams; result: ChatMessageInfo };
   'chat.message.toDocument': { params: MessageDocumentParams; result: DocumentDetail };

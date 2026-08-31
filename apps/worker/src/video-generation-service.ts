@@ -136,6 +136,20 @@ export class VideoGenerationService {
         adapterKey: params.adapterKey,
         status: 'pending',
         requestJson: JSON.stringify(cloneParameters(params.parameters)),
+        taskSnapshotJson: JSON.stringify({
+          version: 1,
+          capability: 'video',
+          adapterKey: params.adapterKey,
+          schemaVersion: adapter.schemaVersion,
+          schemaSource: 'official-adapter',
+          providerProfileId,
+          modelId,
+          conversationId: params.conversationId,
+          originalPrompt: params.originalPrompt,
+          costNoticeAcknowledged: params.costNoticeAcknowledged === true,
+          parameters: cloneParameters(params.parameters),
+          createdAt: now,
+        }),
         metadataJson: JSON.stringify({
           assetKind,
           providerRegion,
@@ -148,6 +162,15 @@ export class VideoGenerationService {
         updatedAt: now,
       };
       repositories.jobs.save(record);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: record.id,
+        projectId: project.id,
+        phase: 'prepare',
+        status: record.status,
+        summary: 'Video generation job prepared.',
+        createdAt: now,
+      });
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.toInfo(record, [], []);
@@ -190,6 +213,16 @@ export class VideoGenerationService {
       };
       database.transaction(() => {
         repositories.jobs.save(attached);
+        repositories.generationJobEvents.append({
+          id: randomUUID(),
+          jobId: attached.id,
+          projectId: project.id,
+          phase: 'submit',
+          status: attached.status,
+          summary: 'Provider video task submitted.',
+          detailsJson: JSON.stringify({ providerTaskId }),
+          createdAt: now,
+        });
         repositories.projects.touch(now);
       })();
       project.updatedAt = now;
@@ -375,7 +408,7 @@ export class VideoGenerationService {
       const assets = repositories.assets.listByProject(project.id);
       return repositories.jobs
         .listByProject(project.id)
-        .filter((job) => VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? ''))
+        .filter((job) => this.isVideoJob(job))
         .map((job) => this.toInfo(job, assets, repositories.generationResults.listByJob(job.id)))
         .reverse();
     });
@@ -389,7 +422,7 @@ export class VideoGenerationService {
       const repositories = createRepositories(database);
       const jobs = repositories.jobs
         .listByProject(project.id)
-        .filter((job) => VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? ''));
+        .filter((job) => this.isVideoJob(job));
       const interrupted = jobs.filter(
         (job) =>
           job.status === 'pending' ||
@@ -403,6 +436,17 @@ export class VideoGenerationService {
         for (const job of interrupted) {
           if (job.providerTaskId) {
             repositories.jobs.save({ ...job, status: 'polling', updatedAt: now });
+            repositories.generationJobEvents.append({
+              id: randomUUID(),
+              jobId: job.id,
+              projectId: project.id,
+              phase: 'poll',
+              status: 'polling',
+              summary:
+                'Worker restarted; Provider video polling resumed from the persisted task snapshot.',
+              detailsJson: JSON.stringify({ providerTaskId: job.providerTaskId, recovery: true }),
+              createdAt: now,
+            });
           } else {
             const metadata = this.metadata(job);
             repositories.jobs.save({
@@ -416,6 +460,16 @@ export class VideoGenerationService {
                 failureKind: 'interrupted',
               } satisfies VideoJobMetadata),
               updatedAt: now,
+            });
+            repositories.generationJobEvents.append({
+              id: randomUUID(),
+              jobId: job.id,
+              projectId: project.id,
+              phase: 'fail',
+              status: 'failed',
+              summary: 'Video submission was interrupted before a provider task was recorded.',
+              detailsJson: JSON.stringify({ recovery: true, failureKind: 'interrupted' }),
+              createdAt: now,
             });
           }
         }
@@ -442,6 +496,20 @@ export class VideoGenerationService {
       const now = new Date().toISOString();
       const updated = { ...job, metadataJson: JSON.stringify(metadata), updatedAt: now };
       repositories.jobs.save(updated);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: updated.id,
+        projectId: project.id,
+        phase: 'poll',
+        status: updated.status,
+        summary: 'Provider video task polled.',
+        detailsJson: JSON.stringify({
+          providerTaskId,
+          providerState: metadata.providerState,
+          pollAttempts: metadata.pollAttempts,
+        }),
+        createdAt: now,
+      });
       return this.infoFromRepositories(updated);
     });
   }
@@ -494,6 +562,15 @@ export class VideoGenerationService {
         updatedAt: now,
       };
       repositories.jobs.save(failed);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: failed.id,
+        projectId: project.id,
+        phase: 'fail',
+        status: failed.status,
+        summary: message,
+        createdAt: now,
+      });
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.infoFromRepositories(failed);
@@ -521,6 +598,16 @@ export class VideoGenerationService {
         updatedAt: now,
       };
       repositories.jobs.save(downloading);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: downloading.id,
+        projectId: project.id,
+        phase: 'download',
+        status: downloading.status,
+        summary: 'Provider video output is downloading.',
+        detailsJson: JSON.stringify({ providerTaskId }),
+        createdAt: now,
+      });
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.infoFromRepositories(downloading);
@@ -641,6 +728,16 @@ export class VideoGenerationService {
           repositories.assets.save(asset);
           repositories.generationResults.save(result);
           repositories.jobs.save(completed);
+          repositories.generationJobEvents.append({
+            id: randomUUID(),
+            jobId: completed.id,
+            projectId: project.id,
+            phase: 'complete',
+            status: completed.status,
+            summary: 'Video output downloaded and committed locally.',
+            detailsJson: JSON.stringify({ sizeBytes: downloaded.sizeBytes }),
+            createdAt: now,
+          });
           repositories.projects.touch(now);
         })();
       } catch (error) {
@@ -653,13 +750,23 @@ export class VideoGenerationService {
   }
 
   private requireVideoJob(job: JobRecord | undefined, projectId: string): asserts job is JobRecord {
-    if (
-      !job ||
-      job.projectId !== projectId ||
-      !VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? '')
-    ) {
+    if (!job || job.projectId !== projectId || !this.isVideoJob(job)) {
       throw new Error('Video generation job was not found.');
     }
+  }
+
+  /** Prefer the immutable task snapshot when the current adapter catalog has changed. */
+  private isVideoJob(job: JobRecord): boolean {
+    if (job.taskSnapshotJson) {
+      try {
+        const snapshot = JSON.parse(job.taskSnapshotJson) as { capability?: unknown };
+        if (snapshot.capability === 'video') return true;
+        if (snapshot.capability === 'image') return false;
+      } catch {
+        // Fall back to the adapter registry for legacy/corrupt snapshots.
+      }
+    }
+    return VIDEO_CAPABILITIES.has(getAdapter(job.adapterKey)?.capability ?? '');
   }
 
   private metadata(job: JobRecord): VideoJobMetadata {

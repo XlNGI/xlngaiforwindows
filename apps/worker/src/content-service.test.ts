@@ -23,6 +23,42 @@ async function setup() {
 }
 
 describe('ContentService', () => {
+  it('persists and clears model preferences per conversation and capability', async () => {
+    const { content } = await setup();
+    const conversation = content.createConversation({ scopeType: 'project' });
+
+    expect(
+      content.getConversationModelPreference({
+        conversationId: conversation.id,
+        capability: 'image',
+      }),
+    ).toBeNull();
+    const saved = content.setConversationModelPreference({
+      conversationId: conversation.id,
+      capability: 'image',
+      providerProfileId: 'profile-image',
+      modelId: 'model-image',
+    });
+    expect(saved).toMatchObject({
+      conversationId: conversation.id,
+      capability: 'image',
+      modelId: 'model-image',
+    });
+    expect(content.listConversationModelPreferences(conversation.id)).toHaveLength(1);
+    expect(
+      content.clearConversationModelPreference({
+        conversationId: conversation.id,
+        capability: 'image',
+      }),
+    ).toEqual({ cleared: true });
+    expect(
+      content.clearConversationModelPreference({
+        conversationId: conversation.id,
+        capability: 'image',
+      }),
+    ).toEqual({ cleared: false });
+  });
+
   it('creates immutable document versions and restores by creating a new version', async () => {
     const { content } = await setup();
     const first = content.saveDocument({

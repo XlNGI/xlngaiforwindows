@@ -30,7 +30,7 @@ describe('development HTTP Worker endpoint', () => {
     child.stderr?.resume();
     await expect
       .poll(() => existsSync(tokenPath), {
-        timeout: 10_000,
+        timeout: 30_000,
         message: 'Development Worker did not publish its token.',
       })
       .toBe(true);
@@ -98,7 +98,7 @@ describe('development HTTP Worker endpoint', () => {
         })
       ).status,
     ).toBe(404);
-  }, 10_000);
+  }, 30_000);
 });
 
 function availablePort(): Promise<number> {

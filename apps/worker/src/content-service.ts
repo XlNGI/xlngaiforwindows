@@ -8,6 +8,10 @@ import type {
   ConversationArchiveParams,
   ConversationCreateParams,
   ConversationInfo,
+  ConversationModelPreferenceGetParams,
+  ConversationModelPreferenceInfo,
+  ConversationModelPreferenceSetParams,
+  ConversationModelPreferenceClearParams,
   ConversationListParams,
   ConversationPage,
   ConversationRestoreParams,
@@ -30,7 +34,11 @@ import type {
   ShotSaveParams,
   ShotStoryboardSaveParams,
 } from '@ai-video/contracts';
-import type { ConversationRecord, LlmGenerationAttemptRecord } from '@ai-video/domain';
+import type {
+  ConversationModelPreferenceRecord,
+  ConversationRecord,
+  LlmGenerationAttemptRecord,
+} from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -355,6 +363,80 @@ export class ContentService {
       repositories.projects.touch(now);
       project.updatedAt = now;
       return asConversation(record);
+    });
+  }
+
+  getConversationModelPreference(
+    params: ConversationModelPreferenceGetParams,
+  ): ConversationModelPreferenceInfo | null {
+    return this.projects.access(false, (database, project) => {
+      const repositories = createRepositories(database);
+      const conversation = repositories.conversations.get(params.conversationId);
+      if (!conversation || conversation.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      return (
+        repositories.conversationModelPreferences.get(params.conversationId, params.capability) ??
+        null
+      );
+    });
+  }
+
+  listConversationModelPreferences(conversationId: string): ConversationModelPreferenceInfo[] {
+    return this.projects.access(false, (database, project) => {
+      const repositories = createRepositories(database);
+      const conversation = repositories.conversations.get(conversationId);
+      if (!conversation || conversation.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      return repositories.conversationModelPreferences.listByConversation(conversationId);
+    });
+  }
+
+  setConversationModelPreference(
+    params: ConversationModelPreferenceSetParams,
+  ): ConversationModelPreferenceInfo {
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const conversation = repositories.conversations.get(params.conversationId);
+      if (!conversation || conversation.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      if (conversation.archivedAt) throw new Error('Archived conversations cannot be updated.');
+      const providerProfileId = required(params.providerProfileId, 'Provider profile ID');
+      const modelId = required(params.modelId, 'Model ID');
+      const now = new Date().toISOString();
+      const record: ConversationModelPreferenceRecord = {
+        conversationId: conversation.id,
+        capability: params.capability,
+        providerProfileId,
+        modelId,
+        confirmedAt: now,
+        updatedAt: now,
+      };
+      repositories.conversationModelPreferences.save(record);
+      repositories.projects.touch(now);
+      return record;
+    });
+  }
+
+  clearConversationModelPreference(params: ConversationModelPreferenceClearParams): {
+    cleared: boolean;
+  } {
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const conversation = repositories.conversations.get(params.conversationId);
+      if (!conversation || conversation.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      if (conversation.archivedAt) throw new Error('Archived conversations cannot be updated.');
+      const existed = repositories.conversationModelPreferences.get(
+        conversation.id,
+        params.capability,
+      );
+      repositories.conversationModelPreferences.delete(conversation.id, params.capability);
+      if (existed) repositories.projects.touch(new Date().toISOString());
+      return { cleared: Boolean(existed) };
     });
   }
 
