@@ -13,6 +13,7 @@ import { ProjectService } from './project-service.js';
 import { ResearchService } from './research-service.js';
 import { NovelContextService } from './novel-context-service.js';
 import { NovelService } from './novel-service.js';
+import { getAdapter } from '@ai-video/generation-adapters';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -61,6 +62,159 @@ async function setup(
 }
 
 describe('AgentProviderLoopService', () => {
+  it('queries an adapter schema through a separately authorized read-only tool step', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const descriptor = getAdapter('TEXT_TO_IMAGE:vidu:viduq2:v2');
+    if (!descriptor) throw new Error('Expected the Vidu Q2 adapter fixture.');
+    const loop = new AgentProviderLoopService(project, workflow, undefined, undefined, {
+      get: (adapterKey) => (adapterKey === descriptor.key ? descriptor : null),
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '查看图片模型支持哪些参数',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '查看图片模型支持哪些参数',
+      '查询 Schema',
+      { operation: 'adapter.schema.get' },
+      'network_disabled',
+    );
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['adapter.schema.get']);
+    loop.startProviderStep(prepared.stream);
+    const tool = agent.tools[0]!;
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_schema',
+      calls: [
+        {
+          id: 'call_schema',
+          name: 'adapter.schema.get',
+          authorizationHandle: tool.authorizationHandle,
+          argumentsJson: JSON.stringify({ adapterKey: descriptor.key }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain(descriptor.key);
+    const returned = JSON.parse(result.continuation!.outputs[0]!.output) as {
+      descriptor?: Record<string, unknown>;
+    };
+    expect(returned.descriptor).not.toHaveProperty('endpoint');
+    expect(returned.descriptor).not.toHaveProperty('credentialProvider');
+    const persisted = project.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            `SELECT tool_name, status, arguments_summary_json FROM agent_tool_calls
+           WHERE task_id = ? ORDER BY created_at`,
+          )
+          .all(agent.taskId) as Array<{
+          tool_name: string;
+          status: string;
+          arguments_summary_json: string;
+        }>,
+    );
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({ tool_name: 'adapter.schema.get', status: 'succeeded' });
+    expect(persisted[0]?.arguments_summary_json).toContain(descriptor.key);
+    expect(
+      project.access(false, (database) =>
+        database
+          .prepare('SELECT status, outcome, task_type FROM agent_tasks WHERE id = ?')
+          .get(agent.taskId),
+      ),
+    ).toEqual({ status: 'completed', outcome: 'read-only', task_type: 'schema-query' });
+  });
+
+  it('records a schema proposal and leaves the task waiting for explicit confirmation', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const descriptor = getAdapter('TEXT_TO_IMAGE:vidu:viduq2:v2');
+    if (!descriptor) throw new Error('Expected the Vidu Q2 adapter fixture.');
+    let proposed = false;
+    const loop = new AgentProviderLoopService(
+      project,
+      workflow,
+      undefined,
+      undefined,
+      {
+        get: () => descriptor,
+      },
+      {
+        propose: ({ adapterKey, descriptor: next, reason, conversationId }) => {
+          proposed =
+            adapterKey === descriptor.key &&
+            next.key === descriptor.key &&
+            conversationId === conversation.id;
+          return {
+            status: 'proposed',
+            adapterKey,
+            version: 2,
+            requiresConfirmation: true,
+            diff: [reason ?? 'parameter changed'],
+          };
+        },
+        listAudits: (adapterKey) => [
+          {
+            id: 'audit-1',
+            adapterKey,
+            version: 1,
+            action: 'confirmed',
+            actorType: 'user',
+            reason: 'initial',
+            createdAt: '2026-09-02T00:00:00.000Z',
+          },
+        ],
+      },
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '修改图片模型参数 Schema',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '修改图片模型参数 Schema',
+      '提议 Schema 修改',
+      { operation: 'adapter.schema.propose' },
+      'network_disabled',
+    );
+    expect(agent.tools.map((tool) => tool.name)).toEqual(['adapter.schema.propose']);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_schema_propose',
+      calls: [
+        {
+          id: 'call_schema_propose',
+          name: 'adapter.schema.propose',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            adapterKey: descriptor.key,
+            descriptor,
+            reason: '补充默认值',
+          }),
+        },
+      ],
+    });
+    expect(proposed).toBe(true);
+    expect(result.continuation?.outputs[0]?.output).toContain('requiresUserConfirmation');
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT status, phase FROM agent_tasks WHERE id = ?').get(agent.taskId),
+      ),
+    ).toEqual({ status: 'running', phase: 'waiting_confirmation' });
+    expect(workflow.getTask({ taskId: agent.taskId }).pendingSchemaConfirmation).toMatchObject({
+      action: 'adapter.schema.propose',
+      adapterKey: descriptor.key,
+      version: 2,
+      status: 'pending',
+    });
+  });
+
   it('freezes the trusted target platform with a short-drama task snapshot', async () => {
     const { conversation, generations, loop, project } = await setup();
     const prepared = generations.prepare({

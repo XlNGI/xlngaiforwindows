@@ -86,6 +86,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'model.catalog.get',
   'adapter.schema.get',
   'adapter.schema.propose',
+  'adapter.schema.audit.list',
   'adapter.schema.confirm',
   'adapter.schema.rollback',
   'adapter.schema.audit.list',
@@ -110,6 +111,8 @@ const documentKinds = new Set(['outline', 'plan', 'character', 'scene', 'storybo
 const documentAuthors = new Set(['user', 'import']);
 const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video']);
 const agentDocumentOperations = new Set([
+  'adapter.schema.get',
+  'adapter.schema.propose',
   'document.create_draft',
   'document.list',
   'document.read',

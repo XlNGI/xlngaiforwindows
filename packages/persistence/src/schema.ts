@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 34;
+export const CURRENT_SCHEMA_VERSION = 35;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (

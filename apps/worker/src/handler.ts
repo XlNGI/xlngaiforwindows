@@ -7,6 +7,7 @@ import {
   type ChatMessageSaveParams,
   type AgentTaskCreateDocumentDraftParams,
   type AgentGenerationPrepareParams,
+  type AgentDocumentIntent,
   type UnifiedAgentRunParams,
   type UnifiedAgentCapability,
   type UnifiedAgentModelCandidate,
@@ -118,7 +119,10 @@ import { AgentProviderCapabilityError, assertAgentToolLoopSelection } from './pr
 import { UsageService } from './usage-service.js';
 import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
 import { executeInfrastructureCommand } from './worker-commands.js';
-import { AgentProviderLoopService } from './agent-provider-loop-service.js';
+import {
+  AgentProviderLoopService,
+  type AgentSchemaManager,
+} from './agent-provider-loop-service.js';
 import { NovelService, NovelServiceError } from './novel-service.js';
 import {
   AgentOrchestrationError,
@@ -133,7 +137,7 @@ import { DomainToolGateway } from './domain-tool-gateway.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
-import { setAdapterOverrides } from '@ai-video/generation-adapters';
+import { getAdapter, setAdapterOverrides } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 
 const WORKER_VERSION = '0.1.0';
@@ -165,6 +169,34 @@ export function inferUnifiedAgentCapability(prompt: string): UnifiedAgentCapabil
     return 'image';
   if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
   return 'text';
+}
+
+/**
+ * Map read-only schema questions onto the controlled Agent tool loop.
+ *
+ * This intentionally stays conservative: only an explicit inspection-style
+ * request containing schema/parameter vocabulary is classified as a schema
+ * query. Everything else keeps the normal document-draft default.
+ */
+export function inferAgentDocumentIntent(prompt: string): AgentDocumentIntent {
+  const value = prompt.normalize('NFC').trim();
+  const mentionsSchema = /(schema|参数|字段|配置项|输入项|接口定义|能力描述)/iu.test(value);
+  const asksToInspect =
+    /(?:查看|查询|查一下|了解|支持哪些|有哪些|哪些|什么|列出|获取|inspect|show|get|list|what|which)/iu.test(
+      value,
+    );
+  if (mentionsSchema && /(?:历史|审计|记录|版本|history|audit|changes)/iu.test(value)) {
+    return { operation: 'adapter.schema.audit.list' };
+  }
+  if (
+    mentionsSchema &&
+    /(?:添加|新增|修改|更新|补充|调整|add|update|modify|change)/iu.test(value)
+  ) {
+    return { operation: 'adapter.schema.propose' };
+  }
+  return mentionsSchema && asksToInspect
+    ? { operation: 'adapter.schema.get' }
+    : { operation: 'document.create_draft' };
 }
 
 function capabilityMatchesModel(
@@ -550,6 +582,52 @@ const agentProviderLoopService = new AgentProviderLoopService(
   documentWorkflowService,
   undefined,
   changeSetService,
+  {
+    get: (adapterKey) =>
+      appSettingsService.getAdapterSchema(adapterKey) ?? getAdapter(adapterKey) ?? null,
+  },
+  {
+    propose: ({ adapterKey, descriptor, reason, conversationId }) => {
+      validateAdapterDescriptorProposal(adapterKey, descriptor);
+      const existing =
+        appSettingsService.getAdapterSchema(adapterKey) ??
+        adapterService.catalog().adapters.find((adapter) => adapter.key === adapterKey);
+      if (
+        existing &&
+        (existing.endpoint !== descriptor.endpoint ||
+          existing.credentialProvider !== descriptor.credentialProvider ||
+          existing.provider !== descriptor.provider)
+      ) {
+        throw new AdapterSchemaValidationError(
+          'Agent schema proposals cannot change provider connection or credential settings.',
+        );
+      }
+      const diff = diffAdapterDescriptors(existing, descriptor);
+      const proposal = appSettingsService.proposeAdapterSchema(
+        {
+          adapterKey,
+          descriptor,
+          reason,
+          conversationId,
+          actorType: 'agent',
+        },
+        diff,
+      );
+      if (!schemaDiffRequiresConfirmation(diff)) {
+        appSettingsService.confirmAdapterSchema({
+          adapterKey,
+          version: proposal.version,
+          reason: '低风险 Schema 字段变更自动确认',
+          conversationId,
+          actorType: 'agent',
+        });
+        return { ...proposal, requiresConfirmation: false };
+      }
+      return proposal;
+    },
+    listAudits: (adapterKey, limit) =>
+      appSettingsService.listAdapterSchemaAudits(adapterKey, limit),
+  } satisfies AgentSchemaManager,
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
@@ -998,12 +1076,48 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           const schemaParams = params as unknown as UnifiedAgentAdapterSchemaConfirmParams;
           result = appSettingsService.confirmAdapterSchema(schemaParams);
           setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
+          // Close the project-local Agent task that produced this proposal.
+          // The app-settings confirmation is intentionally separate from the
+          // project database, so correlate only the bounded adapter/version
+          // summary persisted by the controlled tool call.
+          projectService.access(true, (database, project) => {
+            const now = new Date().toISOString();
+            database
+              .prepare(
+                `UPDATE agent_tasks SET status = 'completed', outcome = 'read-only',
+                 completed_at = ?, updated_at = ?, row_version = row_version + 1
+                 WHERE project_id = ? AND task_type = 'schema-query' AND status = 'running'
+                   AND id IN (
+                     SELECT task_id FROM agent_tool_calls
+                     WHERE tool_name = 'adapter.schema.propose' AND status = 'succeeded'
+                       AND json_extract(result_summary_json, '$.adapterKey') = ?
+                       AND json_extract(result_summary_json, '$.version') = ?
+                   )`,
+              )
+              .run(now, now, project.id, schemaParams.adapterKey, schemaParams.version);
+          });
           break;
         }
         case 'adapter.schema.rollback': {
           const schemaParams = params as unknown as UnifiedAgentAdapterSchemaRollbackParams;
           result = appSettingsService.rollbackAdapterSchema(schemaParams);
           setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
+          projectService.access(true, (database, project) => {
+            const now = new Date().toISOString();
+            database
+              .prepare(
+                `UPDATE agent_tasks SET status = 'completed', outcome = 'read-only',
+                 completed_at = ?, updated_at = ?, row_version = row_version + 1
+                 WHERE project_id = ? AND task_type = 'schema-query' AND status = 'running'
+                   AND id IN (
+                     SELECT task_id FROM agent_tool_calls
+                     WHERE tool_name = 'adapter.schema.propose' AND status = 'succeeded'
+                       AND json_extract(result_summary_json, '$.adapterKey') = ?
+                       AND json_extract(result_summary_json, '$.version') = ?
+                   )`,
+              )
+              .run(now, now, project.id, schemaParams.adapterKey, schemaParams.version + 1);
+          });
           break;
         }
         case 'adapter.schema.audit.list': {
@@ -1203,7 +1317,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             prepared.stream,
             agentParams.prompt,
             undefined,
-            undefined,
+            inferAgentDocumentIntent(agentParams.prompt),
             'auto',
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
@@ -1291,7 +1405,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             prepared.stream,
             agentParams.prompt,
             agentParams.title,
-            agentParams.documentIntent,
+            agentParams.documentIntent ?? inferAgentDocumentIntent(agentParams.prompt),
             agentParams.researchMode,
             undefined,
             agentParams.agentMode === 'short-drama' ? agentParams.selectedChapterIds : undefined,
@@ -1872,6 +1986,14 @@ function diffAdapterDescriptors(
   if (JSON.stringify(previous.uiSchema) !== JSON.stringify(next.uiSchema))
     diff.push('ui schema changed');
   return diff.length > 0 ? diff : ['no structural changes'];
+}
+
+function schemaDiffRequiresConfirmation(diff: string[]): boolean {
+  return diff.some((item) =>
+    /new adapter schema|removed|required parameters changed|dependencies changed|provider changed|endpoint changed|credentialProvider changed|parameter changed/u.test(
+      item,
+    ),
+  );
 }
 
 function mapWorkerError(operation: string, error: unknown): WorkerError {

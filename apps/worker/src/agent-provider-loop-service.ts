@@ -17,6 +17,9 @@ import type {
   LlmToolContinuation,
   LlmToolDefinition,
   LlmToolOutput,
+  AdapterDescriptor,
+  UnifiedAgentAdapterSchemaProposeResult,
+  UnifiedAgentAdapterSchemaAuditInfo,
 } from '@ai-video/contracts';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -40,7 +43,66 @@ const RESEARCH_FETCH_CALL_LIMIT = 8;
 const RESEARCH_STEP_CALL_LIMIT = 8;
 
 type ResearchOperation = 'research.search' | 'research.fetch';
-type AgentToolOperation = AgentDocumentOperation | ResearchOperation;
+type SchemaOperation =
+  'adapter.schema.get' | 'adapter.schema.propose' | 'adapter.schema.audit.list';
+type AgentToolOperation = AgentDocumentOperation | ResearchOperation | SchemaOperation;
+
+export interface AgentSchemaResolver {
+  get(adapterKey: string): AdapterDescriptor | null;
+}
+
+export interface AgentSchemaManager {
+  propose(input: {
+    adapterKey: string;
+    descriptor: AdapterDescriptor;
+    reason?: string;
+    conversationId: string;
+  }): UnifiedAgentAdapterSchemaProposeResult;
+  listAudits?(adapterKey: string, limit?: number): UnifiedAgentAdapterSchemaAuditInfo[];
+}
+
+export const SCHEMA_AGENT_TOOLS: LlmToolDefinition[] = [
+  {
+    name: 'adapter.schema.get',
+    description:
+      'Inspect one image/video adapter parameter schema, including its version, source, required fields, and confirmation status. This is read-only.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['adapterKey'],
+      properties: { adapterKey: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
+    name: 'adapter.schema.propose',
+    description:
+      'Propose a parameter schema change for one adapter. It is validated and audited, remains pending confirmation, and cannot change connection or credential settings.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['adapterKey', 'descriptor'],
+      properties: {
+        adapterKey: { type: 'string', minLength: 1, maxLength: 200 },
+        descriptor: { type: 'object', additionalProperties: true },
+        reason: { type: 'string', minLength: 1, maxLength: 500 },
+      },
+    },
+  },
+  {
+    name: 'adapter.schema.audit.list',
+    description:
+      'List the bounded audit history for one adapter Schema, including versions, actions, actors, reasons, and timestamps. This is read-only.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['adapterKey'],
+      properties: {
+        adapterKey: { type: 'string', minLength: 1, maxLength: 200 },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+    },
+  },
+];
 
 export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
@@ -226,7 +288,7 @@ export const RESEARCH_AGENT_TOOLS: LlmToolDefinition[] = [
   },
 ];
 
-const AGENT_TOOLS = [...DOCUMENT_AGENT_TOOLS, ...RESEARCH_AGENT_TOOLS];
+const AGENT_TOOLS = [...DOCUMENT_AGENT_TOOLS, ...RESEARCH_AGENT_TOOLS, ...SCHEMA_AGENT_TOOLS];
 
 export function conversationTaskToolDefinition(
   name: Extract<
@@ -332,6 +394,8 @@ export class AgentProviderLoopService {
     private readonly documents: DocumentWorkflowService,
     private readonly research: ResearchService = new ResearchService(),
     private readonly changeSets: ChangeSetService = new ChangeSetService(projects),
+    private readonly schemaResolver?: AgentSchemaResolver,
+    private readonly schemaManager?: AgentSchemaManager,
   ) {}
 
   cancelGeneration(generationId: string): boolean {
@@ -488,7 +552,12 @@ export class AgentProviderLoopService {
             taskTypeFor(authorization.operation),
             authorization.scopeType ?? conversation.scope_type,
             authorization.scopeId ?? conversation.scope_id,
-            normalizeTitle(title ?? 'Agent document draft'),
+            normalizeTitle(
+              title ??
+                (authorization.operation === 'adapter.schema.get'
+                  ? 'Agent schema query'
+                  : 'Agent document draft'),
+            ),
             JSON.stringify({
               promptHash: requestHash,
               agentMode: selectedChapterIds ? 'short-drama' : 'document',
@@ -537,6 +606,12 @@ export class AgentProviderLoopService {
   async executeTools(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
+    if (params.calls.every((call) => isSchemaOperation(call.name))) {
+      return this.executeSchemaTool(params);
+    }
+    if (params.calls.some((call) => isSchemaOperation(call.name))) {
+      throw new Error('Schema inspection tools must run in a separate Provider step.');
+    }
     if (params.calls.every((call) => isResearchOperation(call.name))) {
       return this.executeResearchTools(params);
     }
@@ -544,6 +619,158 @@ export class AgentProviderLoopService {
       throw new Error('Research and document mutation tools must run in separate Provider steps.');
     }
     return this.executeDocumentTool(params);
+  }
+
+  private executeSchemaTool(
+    params: AgentGenerationExecuteToolsParams,
+  ): AgentGenerationExecuteToolsResult {
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        if (!params.providerResponseId.trim()) throw new Error('Provider response ID is required.');
+        if (params.calls.length !== 1) throw new Error('Exactly one schema tool call is allowed.');
+        const activeGeneration = this.requireActiveGeneration(database, project.id, params);
+        const task = this.requireTask(database, project.id, params.generationId);
+        const step = this.requireOpenStep(database, params.attemptId);
+        const call = params.calls[0]!;
+        const authorization = database
+          .prepare(
+            `SELECT id, row_version, authorization_handle_hash,
+                    allowed_operation AS operation, target_document_id AS targetDocumentId,
+                    scope_type AS scopeType, scope_id AS scopeId, base_version_id AS baseVersionId,
+                    expected_document_row_version AS expectedDocumentRowVersion
+             FROM agent_tool_authorizations
+             WHERE provider_step_id = ? AND task_id = ? AND allowed_operation = ?
+               AND status = 'issued' AND used_call_count < max_call_uses AND expires_at > ?`,
+          )
+          .get(step.id, task.id, call.name, new Date().toISOString()) as
+          AuthorizationRow | undefined;
+        if (
+          !authorization ||
+          !call.authorizationHandle ||
+          hash(call.authorizationHandle) !== authorization.authorization_handle_hash
+        ) {
+          throw new Error('Provider schema tool call is not authorized for this step.');
+        }
+        let args: SchemaToolArguments;
+        try {
+          args = parseSchemaToolArguments(call.argumentsJson);
+        } catch (error) {
+          return toolErrorContinuation(activeGeneration.protocol, params, call, error);
+        }
+        const now = new Date().toISOString();
+        this.reserveExecution(database, authorization, task.id, now, 'model_running');
+        const toolCallId = randomUUID();
+        let output: unknown;
+        if (call.name === 'adapter.schema.get') {
+          if ('descriptor' in args || 'reason' in args) {
+            throw new Error('Schema get accepts only adapterKey.');
+          }
+          const descriptor = this.schemaResolver?.get(args.adapterKey) ?? null;
+          output = descriptor
+            ? {
+                status: 'succeeded',
+                adapterKey: descriptor.key,
+                descriptor: toAgentSchemaDescriptor(descriptor),
+              }
+            : { status: 'not_found', adapterKey: args.adapterKey };
+        } else if (call.name === 'adapter.schema.audit.list') {
+          if (!this.schemaManager?.listAudits)
+            throw new Error('Schema audit manager is not configured.');
+          if ('descriptor' in args || 'reason' in args) {
+            throw new Error('Schema audit list accepts only adapterKey and limit.');
+          }
+          output = {
+            status: 'succeeded',
+            adapterKey: args.adapterKey,
+            audits: this.schemaManager.listAudits(args.adapterKey, args.limit),
+          };
+        } else {
+          if (!this.schemaManager) throw new Error('Schema proposal manager is not configured.');
+          if (!('descriptor' in args)) throw new Error('Schema proposal descriptor is required.');
+          const proposal = this.schemaManager.propose({
+            adapterKey: args.adapterKey,
+            descriptor: args.descriptor,
+            reason: args.reason,
+            conversationId: params.conversationId,
+          });
+          output = { ...proposal, requiresUserConfirmation: proposal.requiresConfirmation };
+        }
+        database
+          .prepare(
+            `INSERT INTO agent_tool_calls
+             (id, project_id, task_id, generation_id, attempt_id, authorization_id, provider_step_id,
+              provider_call_id, tool_ordinal, tool_name, normalized_arguments_hash,
+              arguments_summary_json, status, created_at, started_at, completed_at, version, redaction_state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'succeeded', ?, ?, ?, 1, 'native')`,
+          )
+          .run(
+            toolCallId,
+            project.id,
+            task.id,
+            params.generationId,
+            params.attemptId,
+            authorization.id,
+            step.id,
+            call.id,
+            call.name,
+            hash(JSON.stringify(args)),
+            JSON.stringify({
+              operation: call.name,
+              adapterKey: args.adapterKey,
+              ...(call.name === 'adapter.schema.propose' && 'descriptor' in args
+                ? {
+                    descriptorKey: args.descriptor.key,
+                    schemaVersion: args.descriptor.schemaVersion,
+                    reason: args.reason,
+                  }
+                : {}),
+            }),
+            now,
+            now,
+            now,
+          );
+        const requiresUserConfirmation =
+          call.name === 'adapter.schema.propose' &&
+          (output as { requiresUserConfirmation?: unknown }).requiresUserConfirmation === true;
+        if (call.name === 'adapter.schema.get' || !requiresUserConfirmation) {
+          database
+            .prepare(
+              "UPDATE agent_tasks SET status = 'completed', outcome = 'read-only', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+            )
+            .run(now, now, task.id);
+        } else {
+          database
+            .prepare(
+              "UPDATE agent_tasks SET phase = 'waiting_confirmation', updated_at = ? WHERE id = ? AND status = 'running'",
+            )
+            .run(now, task.id);
+          database
+            .prepare(
+              'UPDATE agent_tool_calls SET result_summary_json = ?, version = version + 1 WHERE id = ?',
+            )
+            .run(JSON.stringify(output), toolCallId);
+        }
+        this.completeStep(
+          database,
+          step,
+          params.providerResponseId,
+          params.calls.length,
+          params.usage,
+          now,
+          'tool_calls',
+          JSON.stringify({ version: 1, callIds: [call.id], schema: true }),
+        );
+        const summary = JSON.stringify(output);
+        return {
+          continuation: createToolContinuation(
+            activeGeneration.protocol,
+            params.providerResponseId,
+            params.calls,
+            [{ callId: call.id, output: summary }],
+          ),
+        };
+      })(),
+    );
   }
 
   private executeDocumentTool(
@@ -2297,6 +2524,10 @@ function authorizationSpecsForTask(
   researchMode: AgentResearchMode,
 ): AuthorizationSpec[] {
   const authorizations = [primary];
+  // Schema inspection is a standalone, explicitly selected Agent task. Keep
+  // it out of ordinary document/research steps so the model cannot mix a
+  // read-only adapter lookup into a mutation step and grants remain
+  // least-privilege.
   if (researchMode !== 'auto') return authorizations;
   const budget = researchBudget(database, taskId);
   if (budget.taskRemaining <= 0) return authorizations;
@@ -2401,6 +2632,89 @@ function isResearchOperation(value: string): value is ResearchOperation {
   return value === 'research.search' || value === 'research.fetch';
 }
 
+function isSchemaOperation(value: string): value is SchemaOperation {
+  return (
+    value === 'adapter.schema.get' ||
+    value === 'adapter.schema.propose' ||
+    value === 'adapter.schema.audit.list'
+  );
+}
+
+type SchemaToolArguments =
+  | { adapterKey: string; limit?: number }
+  | { adapterKey: string; descriptor: AdapterDescriptor; reason?: string };
+
+function parseSchemaToolArguments(value: string): SchemaToolArguments {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('Schema tool arguments are not valid JSON.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Schema tool arguments must be an object.');
+  }
+  const record = parsed as Record<string, unknown>;
+  if (
+    Object.keys(record).some(
+      (key) => !['adapterKey', 'descriptor', 'reason', 'limit'].includes(key),
+    )
+  ) {
+    throw new Error('Schema tool arguments contain unsupported fields.');
+  }
+  if (typeof record.adapterKey !== 'string') throw new Error('Schema adapterKey is required.');
+  const adapterKey = record.adapterKey.normalize('NFC').trim();
+  if (!adapterKey || adapterKey.length > 200) throw new Error('Schema adapterKey is invalid.');
+  if (record.descriptor === undefined) {
+    if (record.reason !== undefined) throw new Error('Schema get does not accept reason.');
+    if (
+      record.limit !== undefined &&
+      (typeof record.limit !== 'number' ||
+        !Number.isInteger(record.limit) ||
+        record.limit < 1 ||
+        record.limit > 50)
+    ) {
+      throw new Error('Schema audit limit is invalid.');
+    }
+    return { adapterKey, ...(record.limit === undefined ? {} : { limit: record.limit }) };
+  }
+  if (
+    !record.descriptor ||
+    typeof record.descriptor !== 'object' ||
+    Array.isArray(record.descriptor)
+  ) {
+    throw new Error('Schema descriptor must be an object.');
+  }
+  if (record.reason !== undefined && (typeof record.reason !== 'string' || !record.reason.trim())) {
+    throw new Error('Schema proposal reason is invalid.');
+  }
+  return {
+    adapterKey,
+    descriptor: record.descriptor as AdapterDescriptor,
+    reason: typeof record.reason === 'string' ? record.reason.trim() : undefined,
+  };
+}
+
+/** Remove connection details before a schema descriptor is returned to the model. */
+function toAgentSchemaDescriptor(
+  descriptor: AdapterDescriptor,
+): Omit<AdapterDescriptor, 'endpoint' | 'credentialProvider'> {
+  return {
+    key: descriptor.key,
+    capability: descriptor.capability,
+    capabilityLabel: descriptor.capabilityLabel,
+    provider: descriptor.provider,
+    providerLabel: descriptor.providerLabel,
+    model: descriptor.model,
+    modelLabel: descriptor.modelLabel,
+    apiVersion: descriptor.apiVersion,
+    schemaVersion: descriptor.schemaVersion,
+    documentationUrl: descriptor.documentationUrl,
+    parameterSchema: descriptor.parameterSchema,
+    uiSchema: descriptor.uiSchema,
+  };
+}
+
 function optionalBoundedInteger(
   value: unknown,
   minimum: number,
@@ -2427,7 +2741,7 @@ function optionalPatternString(
   return normalized;
 }
 
-function taskTypeFor(operation: AgentDocumentOperation): string {
+function taskTypeFor(operation: AgentToolOperation): string {
   switch (operation) {
     case 'document.create_draft':
     case 'novel.episode.submit_draft':
@@ -2445,8 +2759,12 @@ function taskTypeFor(operation: AgentDocumentOperation): string {
       return 'document-archive';
     case 'document.restore':
       return 'document-restore';
+    case 'adapter.schema.get':
+    case 'adapter.schema.propose':
+    case 'adapter.schema.audit.list':
+      return 'schema-query';
   }
-  throw new Error('Unsupported document operation.');
+  throw new Error('Unsupported Agent tool operation.');
 }
 
 const DOCUMENT_KIND_SET = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);

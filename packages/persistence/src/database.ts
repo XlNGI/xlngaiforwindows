@@ -40,6 +40,7 @@ import {
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
+import { addSchemaQueryTaskType } from './migration-v35.js';
 import { backfillCurrentNovelRagChunks } from './novel-rag-chunks.js';
 
 export interface OpenDatabaseOptions {
@@ -379,6 +380,9 @@ export function migrateDatabase(
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(34, now);
     })();
+  }
+  if (getSchemaVersion(database) === 34) {
+    addSchemaQueryTaskType(database, now);
   }
   return getSchemaVersion(database);
 }

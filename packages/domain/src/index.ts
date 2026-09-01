@@ -153,7 +153,8 @@ export type AgentTaskType =
   | 'document-update'
   | 'document-query'
   | 'document-archive'
-  | 'document-restore';
+  | 'document-restore'
+  | 'schema-query';
 export type AgentTaskStatus =
   'queued' | 'running' | 'waiting_review' | 'completed' | 'failed' | 'cancelled';
 export type AgentTaskOutcome =

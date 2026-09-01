@@ -71,6 +71,8 @@ interface ChatPanelProps {
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
   agentTask?: import('@ai-video/contracts').AgentTaskDetail;
+  onConfirmSchemaProposal?: (adapterKey: string, version: number) => void;
+  onRejectSchemaProposal?: (adapterKey: string, version: number) => void;
   confirmation?: AgentToolConfirmationRequest | AgentTaskPendingConfirmationInfo;
   onConfirmAgentAction?: (approved: boolean) => void;
   onOpenTaskLog?: () => void;
@@ -146,6 +148,8 @@ export function ChatPanel({
   agentTask,
   confirmation,
   onConfirmAgentAction,
+  onConfirmSchemaProposal,
+  onRejectSchemaProposal,
   onOpenTaskLog,
   onContinueAgentTask,
   onClose,
@@ -579,6 +583,49 @@ export function ChatPanel({
             </div>
           ) : (
             <small>应用已重新启动，原 Provider 会话不可恢复。请重试任务以重新申请确认。</small>
+          )}
+        </div>
+      )}
+      {agentTask?.pendingSchemaConfirmation && (
+        <div className="agent-confirmation" role="alert">
+          <strong>需要确认：Schema 修改提议</strong>
+          <span>适配器：{agentTask.pendingSchemaConfirmation.adapterKey}</span>
+          <ul>
+            {agentTask.pendingSchemaConfirmation.diff.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+          {onConfirmSchemaProposal ? (
+            <div>
+              <button
+                type="button"
+                className="button primary"
+                onClick={() =>
+                  onConfirmSchemaProposal(
+                    agentTask.pendingSchemaConfirmation!.adapterKey,
+                    agentTask.pendingSchemaConfirmation!.version,
+                  )
+                }
+              >
+                确认 Schema 修改
+              </button>
+              {onRejectSchemaProposal && agentTask.pendingSchemaConfirmation.version > 1 && (
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() =>
+                    onRejectSchemaProposal(
+                      agentTask.pendingSchemaConfirmation!.adapterKey,
+                      agentTask.pendingSchemaConfirmation!.version,
+                    )
+                  }
+                >
+                  拒绝并回滚上一版本
+                </button>
+              )}
+            </div>
+          ) : (
+            <small>请在适配器设置中确认此 Schema 提议。</small>
           )}
         </div>
       )}

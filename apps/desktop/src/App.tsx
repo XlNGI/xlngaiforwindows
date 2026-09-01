@@ -1950,6 +1950,44 @@ export function App() {
     }
   };
 
+  const confirmSchemaProposal = async (adapterKey: string, version: number) => {
+    if (!conversation || !agentTask) return;
+    if (!window.confirm(`确认应用适配器 ${adapterKey} 的 Schema 第 ${version} 版修改？`)) return;
+    try {
+      await callWorker('adapter.schema.confirm', {
+        adapterKey,
+        version,
+        conversationId: conversation.id,
+        actorType: 'user',
+        reason: '用户在会话中确认 Schema 修改提议',
+      });
+      const detail = await callWorker('agent.task.get', { taskId: agentTask.task.id });
+      setAgentTask(detail);
+      setChatMessage('Schema 修改已确认并生效。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : 'Schema 修改确认失败');
+    }
+  };
+
+  const rejectSchemaProposal = async (adapterKey: string, version: number) => {
+    if (!conversation || !agentTask || version <= 1) return;
+    if (!window.confirm(`拒绝此提议并回滚适配器 ${adapterKey} 到上一已确认版本？`)) return;
+    try {
+      await callWorker('adapter.schema.rollback', {
+        adapterKey,
+        version: version - 1,
+        conversationId: conversation.id,
+        actorType: 'user',
+        reason: '用户拒绝 Schema 修改提议并回滚上一版本',
+      });
+      const detail = await callWorker('agent.task.get', { taskId: agentTask.task.id });
+      setAgentTask(detail);
+      setChatMessage('Schema 提议已拒绝，已回滚到上一确认版本。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : 'Schema 提议回滚失败');
+    }
+  };
+
   const retryGeneration = async (assistantMessageId: string) => {
     if (retryRequestsRef.current.has(assistantMessageId)) return;
     retryRequestsRef.current.add(assistantMessageId);
@@ -2518,6 +2556,12 @@ export function App() {
         }
       }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
+      onConfirmSchemaProposal={(adapterKey, version) => {
+        void confirmSchemaProposal(adapterKey, version);
+      }}
+      onRejectSchemaProposal={(adapterKey, version) => {
+        void rejectSchemaProposal(adapterKey, version);
+      }}
       onOpenTaskLog={() => {
         setNavigationMode('project');
         setView('tasks');

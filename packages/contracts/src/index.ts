@@ -832,7 +832,8 @@ export type AgentTaskType =
   | 'document-update'
   | 'document-query'
   | 'document-archive'
-  | 'document-restore';
+  | 'document-restore'
+  | 'schema-query';
 export type AgentTaskStatus =
   'queued' | 'running' | 'waiting_review' | 'completed' | 'failed' | 'cancelled';
 export type AgentTaskOutcome =
@@ -936,11 +937,20 @@ export interface AgentResearchSourceInfo {
 export interface AgentTaskDetail {
   task: AgentTaskInfo;
   pendingConfirmation?: AgentTaskPendingConfirmationInfo;
+  pendingSchemaConfirmation?: AgentTaskPendingSchemaConfirmationInfo;
   plan?: ConversationTaskPlanInfo;
   events: AgentTaskEventInfo[];
   documents: AgentTaskDocumentArtifact[];
   providerSteps: AgentProviderStepInfo[];
   researchSources: AgentResearchSourceInfo[];
+}
+
+export interface AgentTaskPendingSchemaConfirmationInfo {
+  action: 'adapter.schema.propose';
+  adapterKey: string;
+  version: number;
+  diff: string[];
+  status: 'pending';
 }
 
 /** Safe-to-display confirmation metadata; the one-time token is never persisted or returned. */
@@ -1850,6 +1860,9 @@ export interface NovelAdaptationProposalInfo {
 }
 
 export type AgentDocumentOperation =
+  | 'adapter.schema.get'
+  | 'adapter.schema.propose'
+  | 'adapter.schema.audit.list'
   | 'document.create_draft'
   | 'document.list'
   | 'document.read'

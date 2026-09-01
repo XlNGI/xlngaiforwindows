@@ -11,6 +11,7 @@ import {
 } from '@ai-video/contracts';
 import {
   handleRequest,
+  inferAgentDocumentIntent,
   inferUnifiedAgentCapability,
   modelMatchesUnifiedAgentRequest,
   parseRequest,
@@ -25,6 +26,29 @@ describe('inferUnifiedAgentCapability', () => {
     expect(inferUnifiedAgentCapability('制作一个视频')).toBe('video');
     expect(inferUnifiedAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferUnifiedAgentCapability('生成角色三视图提示词')).toBe('document');
+  });
+});
+
+describe('inferAgentDocumentIntent', () => {
+  it('routes explicit adapter parameter questions to the read-only schema tool', () => {
+    expect(inferAgentDocumentIntent('查看当前视频模型支持哪些参数')).toEqual({
+      operation: 'adapter.schema.get',
+    });
+    expect(inferAgentDocumentIntent('What fields does this adapter schema expose?')).toEqual({
+      operation: 'adapter.schema.get',
+    });
+    expect(inferAgentDocumentIntent('修改这个模型的参数 Schema')).toEqual({
+      operation: 'adapter.schema.propose',
+    });
+    expect(inferAgentDocumentIntent('查看这个适配器的 Schema 修改历史')).toEqual({
+      operation: 'adapter.schema.audit.list',
+    });
+  });
+
+  it('keeps ordinary drafting prompts on the document tool', () => {
+    expect(inferAgentDocumentIntent('根据这些参数写一份视频分镜文档')).toEqual({
+      operation: 'document.create_draft',
+    });
   });
 });
 

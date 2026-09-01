@@ -11,6 +11,7 @@ import type {
   AgentTaskEventsResult,
   AgentTaskInfo,
   AgentTaskPendingConfirmationInfo,
+  AgentTaskPendingSchemaConfirmationInfo,
   ConversationTaskPlanInfo,
   AgentTaskListParams,
   DocumentDetail,
@@ -331,6 +332,7 @@ function taskType(value: string): AgentTaskInfo['taskType'] {
       'document-query',
       'document-archive',
       'document-restore',
+      'schema-query',
     ].includes(value)
   ) {
     return value as AgentTaskInfo['taskType'];
@@ -1495,9 +1497,52 @@ export class DocumentWorkflowService {
             status: confirmationRow.status,
           } satisfies AgentTaskPendingConfirmationInfo)
         : undefined;
+      const schemaProposalRow = database
+        .prepare(
+          `SELECT result_summary_json FROM agent_tool_calls
+             WHERE task_id = ? AND tool_name = 'adapter.schema.propose' AND status = 'succeeded'
+             ORDER BY created_at DESC, id DESC LIMIT 1`,
+        )
+        .get(task.id) as { result_summary_json: string | null } | undefined;
+      let pendingSchemaConfirmation: AgentTaskPendingSchemaConfirmationInfo | undefined;
+      if (
+        task.task_type === 'schema-query' &&
+        task.status === 'running' &&
+        schemaProposalRow?.result_summary_json
+      ) {
+        try {
+          const proposal = JSON.parse(schemaProposalRow.result_summary_json) as {
+            status?: unknown;
+            adapterKey?: unknown;
+            version?: unknown;
+            diff?: unknown;
+            requiresUserConfirmation?: unknown;
+          };
+          if (
+            proposal.status === 'proposed' &&
+            proposal.requiresUserConfirmation === true &&
+            typeof proposal.adapterKey === 'string' &&
+            typeof proposal.version === 'number' &&
+            Number.isInteger(proposal.version) &&
+            Array.isArray(proposal.diff) &&
+            proposal.diff.every((item) => typeof item === 'string')
+          ) {
+            pendingSchemaConfirmation = {
+              action: 'adapter.schema.propose',
+              adapterKey: proposal.adapterKey,
+              version: proposal.version,
+              diff: proposal.diff,
+              status: 'pending',
+            };
+          }
+        } catch {
+          // Malformed tool summaries are ignored; the task log retains the raw audit record.
+        }
+      }
       return {
         task: toTask(task),
         ...(pendingConfirmation ? { pendingConfirmation } : {}),
+        ...(pendingSchemaConfirmation ? { pendingSchemaConfirmation } : {}),
         ...(plan ? { plan } : {}),
         events,
         documents,

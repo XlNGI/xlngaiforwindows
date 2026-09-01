@@ -100,7 +100,7 @@
 ### 4.4 验证基线
 
 - [x] Desktop 测试通过：167 tests。
-- [x] Worker 测试通过：283 tests。
+- [x] Worker 测试通过：287 tests。
 - [x] Contracts、Desktop、Worker TypeScript 检查通过。
 - [x] ESLint、Prettier、`git diff --check` 通过。
 
@@ -192,9 +192,12 @@ adapter.schema.audit.list
 
 任务：
 
-- [ ] 将 schema 管理工具加入受控 Agent tool registry。
-- [ ] 查询类操作默认自动执行。
-- [ ] 低风险新增描述、默认值和 UI 提示可自动保存并记录审计。
+- [x] 将只读 `adapter.schema.get` 查询工具加入受控 Agent tool registry。
+- [x] Schema 查询类操作默认自动执行；写入和高风险变更仍需后续确认流程。
+- [x] Schema 提议工具 `adapter.schema.propose` 已接入受控循环；提议经过字段/连接边界校验并记录差异审计，保持待确认状态。
+- [x] 会话确认卡片支持确认提议，或在存在上一已确认版本时拒绝并回滚；两种操作都会刷新任务状态和 Schema 目录。
+- [x] 新增只读 `adapter.schema.audit.list` 工具；会话可按自然语言查询 Schema 版本、操作人、原因和时间线。
+- [x] 低风险新增参数和 UI 提示变更可自动确认保存并记录审计；参数结构变化仍要求确认。
 - [ ] 删除字段、改变必填、改变互斥/依赖关系必须请求确认。
 - [ ] Agent 不能把未确认的 schema 直接用于生成。
 - [ ] UI 展示变更差异、来源、版本和待确认状态。
@@ -319,11 +322,13 @@ adapter.schema.audit.list
 - [x] Added rollback to a previously confirmed version and runtime refresh after confirmation/rollback.
 - [x] Added focused AppSettingsService lifecycle coverage; Worker suite passes (283 tests).
 - [x] Agent tool-loop commands for schema maintenance are available through the controlled schema proposal/confirmation routes; conversation preference persistence is now project-local and Worker-backed.
-- [ ] Agent tool-loop commands for conversational schema maintenance and full task lifecycle provenance remain subsequent phases.
+- [x] Read-only `adapter.schema.get` is available in the controlled Agent tool loop with explicit authorization, bounded arguments, audit records, and a `schema-query` task type.
+- [ ] Agent tool-loop commands for conversational schema writes and full task lifecycle provenance remain subsequent phases.
 - [x] Project schema v32 adds conversation-scoped model preferences with isolated get/set/clear IPC, migration coverage, and Agent fallback lookup.
 - [x] Project schema v33 adds immutable `generation_jobs.task_snapshot_json`; image/video preparation stores capability, adapter, schema version/source, model identity when available, and sanitized parameters.
 - [x] Media task snapshots now also retain the originating conversation ID, original prompt, and whether the cost notice was acknowledged; snapshot updates are rejected after creation.
 - [x] Project schema v34 adds immutable `generation_job_events`; image/video jobs record prepare, submit, poll, download, complete, and fail lifecycle facts with bounded summaries and project-scope checks.
+- [x] Project schema v35 adds the read-only `schema-query` Agent task type used by the controlled adapter Schema tool loop, with migration coverage preserving existing task records and lifecycle triggers.
 - [x] Added project-scoped, bounded `generation.job.events.list` pagination; Worker restart recovery now records explicit poll/fail lifecycle facts for media jobs.
 - [x] Task Log media details now load and render the persisted Provider lifecycle timeline, including restart recovery facts.
 - [x] Added shared Desktop media status/error feedback: Production and Task Log use the same Chinese progress vocabulary, while Task Log retains expandable failure kinds and technical details.
