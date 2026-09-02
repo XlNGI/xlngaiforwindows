@@ -21,7 +21,6 @@ import type {
   AssetMediaSourceInfo,
   AssetSourceInfo,
   AssetTagInfo,
-  ImagePreviewInfo,
 } from '@ai-video/contracts';
 import { callWorker } from '../worker-client';
 
@@ -69,7 +68,6 @@ export function AssetLibraryView({
   const [selectedIds, setSelectedIds] = useState<string[]>(
     selectedAssetId ? [selectedAssetId] : [],
   );
-  const [previewById, setPreviewById] = useState<Record<string, ImagePreviewInfo>>({});
   const [mediaSourceById, setMediaSourceById] = useState<Record<string, AssetMediaSourceInfo>>({});
   const [groupAssets, setGroupAssets] = useState<Record<string, AssetInfo[]>>({});
   const [message, setMessage] = useState('');
@@ -146,41 +144,11 @@ export function AssetLibraryView({
   }, [mediaFilter, showTrash, keyword, createdFrom, createdTo, sort, tagFilter.join(',')]);
 
   useEffect(() => {
-    const images = assets.filter(
-      (asset) => !asset.kind.includes('video') && !previewById[asset.id] && !asset.deletedAt,
-    );
-    if (!images.length) return;
+    const media = assets.filter((asset) => !mediaSourceById[asset.id] && !asset.deletedAt);
+    if (!media.length) return;
     let active = true;
     void Promise.all(
-      images.map(async (asset) => {
-        try {
-          return [asset.id, await callWorker('asset.preview', { assetId: asset.id })] as const;
-        } catch {
-          return undefined;
-        }
-      }),
-    ).then((entries) => {
-      if (active)
-        setPreviewById((current) => ({
-          ...current,
-          ...Object.fromEntries(
-            entries.filter(Boolean) as Array<readonly [string, ImagePreviewInfo]>,
-          ),
-        }));
-    });
-    return () => {
-      active = false;
-    };
-  }, [assets]);
-
-  useEffect(() => {
-    const videos = assets.filter(
-      (asset) => asset.kind.includes('video') && !mediaSourceById[asset.id] && !asset.deletedAt,
-    );
-    if (!videos.length) return;
-    let active = true;
-    void Promise.all(
-      videos.map(async (asset) => {
+      media.map(async (asset) => {
         try {
           return [asset.id, await callWorker('asset.mediaSource', { assetId: asset.id })] as const;
         } catch {
@@ -686,8 +654,8 @@ export function AssetLibraryView({
                   }}
                 >
                   <div className="asset-thumb">
-                    {previewById[asset.id] ? (
-                      <img src={previewById[asset.id]!.dataUrl} alt="" />
+                    {!asset.kind.includes('video') && mediaSourceById[asset.id] ? (
+                      <img src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)} alt="" />
                     ) : asset.kind.includes('video') && mediaSourceById[asset.id] ? (
                       <video
                         src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
@@ -737,8 +705,11 @@ export function AssetLibraryView({
                     ) : (
                       <Video size={32} />
                     )
-                  ) : previewById[selected.id] ? (
-                    <img src={previewById[selected.id]!.dataUrl} alt={displayName(selected)} />
+                  ) : mediaSourceById[selected.id] ? (
+                    <img
+                      src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)}
+                      alt={displayName(selected)}
+                    />
                   ) : (
                     <Image size={32} />
                   )}

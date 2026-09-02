@@ -95,6 +95,8 @@ const sessionMethods = new Set<WorkerMethod>([
   'agent.generation.confirmTool',
   'agent.providerStep.complete',
   'agent.providerStep.start',
+  'image.generate.prepare',
+  'video.generate.prepare',
   'agent.changeSet.create',
   'agent.changeSet.list',
   'agent.changeSet.apply',
@@ -782,6 +784,50 @@ export function validateSessionRequestParams(
       break;
     case 'novel.context.consistencyReport':
       rejectUnknown(params, []);
+      break;
+    case 'image.generate.prepare':
+      rejectUnknown(params, [
+        'shotId',
+        'adapterKey',
+        'parameters',
+        'providerProfileId',
+        'modelId',
+        'conversationId',
+        'originalPrompt',
+        'costNoticeAcknowledged',
+      ]);
+      optionalId(params, 'shotId');
+      requireString(params, 'adapterKey', 200);
+      requireObject(params.parameters, 'parameters');
+      requireId(params, 'providerProfileId');
+      requireId(params, 'modelId');
+      optionalId(params, 'conversationId');
+      optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
+      optionalBoolean(params, 'costNoticeAcknowledged');
+      break;
+    case 'video.generate.prepare':
+      rejectUnknown(params, [
+        'shotId',
+        'adapterKey',
+        'parameters',
+        'providerRegion',
+        'providerProfileId',
+        'modelId',
+        'assetKind',
+        'conversationId',
+        'originalPrompt',
+        'costNoticeAcknowledged',
+      ]);
+      optionalId(params, 'shotId');
+      requireString(params, 'adapterKey', 200);
+      requireObject(params.parameters, 'parameters');
+      requireEnum(params, 'providerRegion', new Set(['global', 'cn', 'unicompapi']));
+      requireId(params, 'providerProfileId');
+      requireId(params, 'modelId');
+      optionalEnum(params, 'assetKind', new Set(['generated-video', 'shot-video']));
+      optionalId(params, 'conversationId');
+      optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
+      optionalBoolean(params, 'costNoticeAcknowledged');
       break;
     case 'llm.generate':
       rejectUnknown(params, ['conversationId', 'budgetTokens', 'prompt', 'idempotencyKey']);

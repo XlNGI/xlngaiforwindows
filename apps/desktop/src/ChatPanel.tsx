@@ -491,7 +491,17 @@ export function ChatPanel({
       </div>
       {statusMessage && <small className="chat-status">{statusMessage}</small>}
       {agentModelSelection && (
-        <div className="agent-model-selection" role="dialog" aria-label="选择 Agent 模型">
+        <div
+          className="agent-model-selection"
+          role="dialog"
+          aria-label={`选择${
+            agentModelSelection.capability === 'image'
+              ? '图片生成'
+              : agentModelSelection.capability === 'video'
+                ? '视频生成'
+                : 'Agent'
+          }模型`}
+        >
           <strong>
             已识别为
             {agentModelSelection.capability === 'image'
@@ -499,7 +509,13 @@ export function ChatPanel({
               : agentModelSelection.capability === 'video'
                 ? '视频'
                 : 'Agent'}
-            任务，请选择模型
+            任务，请选择
+            {agentModelSelection.capability === 'image'
+              ? '图片生成'
+              : agentModelSelection.capability === 'video'
+                ? '视频生成'
+                : 'Agent'}
+            模型
           </strong>
           {agentModelSelection.models.length === 0 && (
             <small>当前没有满足该能力的可用模型，请先在供应商设置中启用模型。</small>

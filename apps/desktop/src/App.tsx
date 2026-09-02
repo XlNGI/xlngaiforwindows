@@ -124,6 +124,27 @@ const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
 const LLM_SELECTION_STORAGE_KEY = 'ai-video.llm-selection';
 const AGENT_MODEL_PREFERENCES_STORAGE_KEY = 'ai-video.agent-model-preferences';
 
+export interface ConversationModelSelection {
+  providerProfileId: string;
+  modelId: string;
+}
+
+/**
+ * Agent and media models are separate user choices. A selected Agent model may
+ * be used for text/tool-loop work, but it must never become an implicit image
+ * or video Provider model.
+ */
+export function resolveAgentRunModelSelection(
+  capability: UnifiedAgentCapability,
+  explicitSelection?: ConversationModelSelection,
+  rememberedSelection?: ConversationModelSelection,
+  agentSelection?: ConversationModelSelection,
+): ConversationModelSelection | undefined {
+  if (explicitSelection) return explicitSelection;
+  if (capability === 'image' || capability === 'video') return rememberedSelection;
+  return agentSelection ?? rememberedSelection;
+}
+
 export function inferDocumentIntent(
   prompt: string,
   targetDocumentId?: string,
@@ -1620,19 +1641,21 @@ export function App() {
         const remembered = conversation
           ? agentModelPreferences[conversation.id]?.[capability]
           : undefined;
-        const providerProfileId =
-          modelSelection?.providerProfileId ??
-          remembered?.providerProfileId ??
-          selectedLlmProfile?.id;
-        const modelId = modelSelection?.modelId ?? remembered?.modelId ?? selectedLlmModel?.id;
-        if (providerProfileId && modelId && conversation && capability !== 'auto') {
-          void callWorker('conversation.modelPreference.set', {
-            conversationId: conversation.id,
-            capability,
-            providerProfileId,
-            modelId,
-          }).catch(() => undefined);
-        }
+        const runModel = resolveAgentRunModelSelection(
+          capability,
+          modelSelection
+            ? {
+                providerProfileId: modelSelection.providerProfileId,
+                modelId: modelSelection.modelId,
+              }
+            : undefined,
+          remembered,
+          selectedLlmProfile && selectedLlmModel
+            ? { providerProfileId: selectedLlmProfile.id, modelId: selectedLlmModel.id }
+            : undefined,
+        );
+        const providerProfileId = runModel?.providerProfileId;
+        const modelId = runModel?.modelId;
         // Media parameter submission already carries local reference data in
         // `parameters.images`/video fields. Sending the same data again as
         // Agent attachments can push the JSON sidecar envelope over 2 MiB.
@@ -1648,6 +1671,20 @@ export function App() {
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         });
+        if (
+          unified.status !== 'needs_model_selection' &&
+          providerProfileId &&
+          modelId &&
+          conversation &&
+          capability !== 'auto'
+        ) {
+          void callWorker('conversation.modelPreference.set', {
+            conversationId: conversation.id,
+            capability,
+            providerProfileId,
+            modelId,
+          }).catch(() => undefined);
+        }
         if (unified.status === 'needs_model_selection') {
           setComposer(prompt);
           setChatMessage('');
@@ -1676,7 +1713,6 @@ export function App() {
                 unified.job.adapterKey,
                 unified.job.request,
                 providerProfileId!,
-                'global',
               );
             } catch (reason) {
               await callWorker('image.generate.fail', { jobId: unified.job.id }).catch(
@@ -1704,7 +1740,7 @@ export function App() {
               unified.job.adapterKey,
               unified.job.request,
               providerProfileId!,
-              'global',
+              unified.job.metadata.providerRegion,
             );
             if (response.status < 200 || response.status >= 300 || !response.taskId) {
               const failed = await callWorker('video.generate.fail', {
@@ -2541,9 +2577,11 @@ export function App() {
       confirmation={agentConfirmation}
       agentModelSelection={agentModelSelection}
       onSelectAgentModel={(providerProfileId, modelId) => {
-        setSelectedLlmProfileId(providerProfileId);
-        setSelectedLlmModelId(modelId);
         const pending = agentModelSelection;
+        if (!pending || (pending.capability !== 'image' && pending.capability !== 'video')) {
+          setSelectedLlmProfileId(providerProfileId);
+          setSelectedLlmModelId(modelId);
+        }
         if (pending) {
           setAgentModelPreferences((current) => ({
             ...current,

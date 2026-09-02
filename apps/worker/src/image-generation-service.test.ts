@@ -1,5 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@ai-video/persistence';
@@ -95,6 +95,148 @@ describe('ImageGenerationService', () => {
       existsSync(join(project.current()!.rootPath, result.results[0]!.asset!.relativePath)),
     ).toBe(true);
     expect(result.preview?.dataUrl).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it('consumes a native image output without returning an oversized inline preview', async () => {
+    const { project, service } = await setup();
+    const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    mkdirSync(nativeDirectory, { recursive: true });
+    const nativePath = join(nativeDirectory, `image-${process.pid}-${Date.now()}.png`);
+    writeFileSync(
+      nativePath,
+      Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(1024 * 1024)]),
+    );
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { nativeImageFilePath: nativePath, contentType: 'image/png' },
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(result.preview).toBeUndefined();
+    expect(existsSync(nativePath)).toBe(false);
+    expect(
+      existsSync(join(project.current()!.rootPath, result.results[0]!.asset!.relativePath)),
+    ).toBe(true);
+  });
+
+  it('accepts a Data URL in b64_json and normalizes wrapped Base64', async () => {
+    const { service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: {
+        data: [{ b64_json: 'data:image/png;base64,\niVBORw0K Ggo\r\n' }],
+      },
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]?.asset?.relativePath).toMatch(/\.png$/);
+  });
+
+  it('commits every native provider image as an independent asset', async () => {
+    const { project, service } = await setup();
+    const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    mkdirSync(nativeDirectory, { recursive: true });
+    const paths = [0, 1].map((index) => {
+      const path = join(nativeDirectory, `image-${process.pid}-${Date.now()}-${index}.png`);
+      writeFileSync(
+        path,
+        Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from([index])]),
+      );
+      return path;
+    });
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'two frames', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: {
+        data: paths.map((path) => ({ nativeImageFilePath: path, contentType: 'image/png' })),
+      },
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(result.results).toHaveLength(2);
+    expect(new Set(result.results.map((item) => item.asset?.id)).size).toBe(2);
+    expect(service.listAssets({})).toHaveLength(2);
+    expect(paths.every((path) => !existsSync(path))).toBe(true);
+    for (const item of result.results) {
+      expect(existsSync(join(project.current()!.rootPath, item.asset!.relativePath))).toBe(true);
+    }
+  });
+
+  it('fails atomically and removes all native outputs when one result is invalid', async () => {
+    const { service } = await setup();
+    const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    mkdirSync(nativeDirectory, { recursive: true });
+    const validPath = join(nativeDirectory, `image-${process.pid}-${Date.now()}-valid.png`);
+    const invalidPath = join(nativeDirectory, `image-${process.pid}-${Date.now()}-invalid.png`);
+    writeFileSync(validPath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    writeFileSync(invalidPath, Buffer.from('not an image'));
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'two frames', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: {
+        data: [
+          { nativeImageFilePath: validPath, contentType: 'image/png' },
+          { nativeImageFilePath: invalidPath, contentType: 'image/png' },
+        ],
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.results).toHaveLength(0);
+    expect(service.listAssets({})).toHaveLength(0);
+    expect(existsSync(validPath)).toBe(false);
+    expect(existsSync(invalidPath)).toBe(false);
+  });
+
+  it('rejects an excessive result count and removes every native output', async () => {
+    const { service } = await setup();
+    const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    mkdirSync(nativeDirectory, { recursive: true });
+    const paths = Array.from({ length: 5 }, (_, index) => {
+      const path = join(nativeDirectory, `image-${process.pid}-${Date.now()}-extra-${index}.png`);
+      writeFileSync(path, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      return path;
+    });
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'too many frames', aspect_ratio: '16:9', resolution: '1080p' },
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: {
+        data: paths.map((path) => ({ nativeImageFilePath: path, contentType: 'image/png' })),
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('more than 4');
+    expect(service.listAssets({})).toHaveLength(0);
+    expect(paths.every((path) => !existsSync(path))).toBe(true);
   });
 
   it('previews and reveals only registered local assets', async () => {

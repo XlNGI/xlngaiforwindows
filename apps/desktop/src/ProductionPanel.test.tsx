@@ -94,6 +94,14 @@ function mockWorker(
   vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
     if (method === 'provider.profile.list') return Promise.resolve([providerProfile]);
     if (method === 'provider.model.list') return Promise.resolve(providerModels);
+    if (method === 'asset.mediaSource') {
+      const assetId = params.assetId as string;
+      return Promise.resolve({
+        assetId,
+        path: `D:\\Project\\assets\\images\\${assetId}.png`,
+        contentType: 'image/png',
+      });
+    }
     return implementation(method, params);
   }) as typeof callWorker);
 }
@@ -776,7 +784,7 @@ describe('ProductionPanel', () => {
     expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
     expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
       'src',
-      'data:image/png;base64,asset',
+      `/worker-media/${savedAsset.id}`,
     );
     expect(onAssetsChanged).toHaveBeenCalledWith([savedAsset], savedAsset.id);
 
@@ -866,9 +874,11 @@ describe('ProductionPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
-      'src',
-      'data:image/png;base64,asset',
+    await waitFor(() =>
+      expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
+        'src',
+        `/worker-media/${savedAsset.id}`,
+      ),
     );
     expect(screen.queryByRole('button', { name: '保存到素材库' })).not.toBeInTheDocument();
   });
@@ -916,12 +926,6 @@ describe('ProductionPanel', () => {
               createdAt: '2026-08-02T00:00:01.000Z',
             },
           ],
-          preview: {
-            jobId: 'job',
-            assetId: savedAsset.id,
-            dataUrl: 'data:image/png;base64,asset',
-            contentType: 'image/png',
-          },
           createdAt: '2026-08-02T00:00:00.000Z',
           updatedAt: '2026-08-02T00:00:01.000Z',
         });
@@ -953,7 +957,7 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
       'src',
-      'data:image/png;base64,asset',
+      `/worker-media/${savedAsset.id}`,
     );
     expect(screen.getAllByText(savedAsset.relativePath).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);

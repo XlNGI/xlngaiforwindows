@@ -148,6 +148,10 @@ Pi 内存 transcript 是一次 task run 的执行视图，不是权威记录。�
 
 Worker 只发送 `providerProfileId`、`modelId`、无密钥请求体和工具 Schema。Rust 从受控凭据存储读取 secret 并执行网络请求；任何 Worker/Pi 消息均不得包含 secret。
 
+### D5a：媒体 Provider/模型必须由用户明确选择
+
+会话 Agent LLM 与图片/视频生成模型是两项独立选择。Pi 只能调用 `media.image.prepare` / `media.video.prepare` 请求兼容候选；Desktop 展示候选并把用户选定的 `providerProfileId`、`modelId` 作为本次请求显式传回。Worker 只校验 Provider、区域、Adapter、Schema 和权限并冻结快照，不从 Agent LLM 或持久化记录自动推导媒体模型，也不静默替换用户选择。已保存的媒体偏好只能由 Desktop 作为下一次请求的明确参数发送。
+
 ### D6：建立 Worker ↔ Native 双向 Provider bridge
 
 现有 Native-owned Agent loop 保留为 Legacy Runtime。Pi Runtime 需要可复用的双向、带关联 ID 和序号的 host bridge，使 Worker 发起 Provider stream，而 Rust 只承担 Provider broker。

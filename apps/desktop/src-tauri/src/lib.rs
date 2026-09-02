@@ -1,5 +1,6 @@
 use std::{
-    fs::{create_dir_all, write, File},
+    borrow::Cow,
+    fs::{create_dir_all, read_dir, remove_file, write, File},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -45,8 +46,12 @@ const SIDECAR_ENVELOPE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_REQUEST_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const PROVIDER_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
-const UNICOMPAPI_RESPONSE_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const UNICOMPAPI_IMAGE_INPUT_LIMIT: usize = 20 * 1024 * 1024;
+const NATIVE_IMAGE_OUTPUT_LIMIT: usize = 25 * 1024 * 1024;
+const NATIVE_IMAGE_RESULT_LIMIT: usize = 4;
+// Four maximum-size Base64 results need roughly 134 MiB before externalization.
+const UNICOMPAPI_RESPONSE_BODY_LIMIT: usize = 140 * 1024 * 1024;
+const NATIVE_IMAGE_STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_TASK_ID_LIMIT: usize = 256;
@@ -293,14 +298,9 @@ fn resolve_media_selection(
     provider_region: Option<&str>,
     state: &WorkerState,
 ) -> Result<MediaCredentialSelection, String> {
-    let Some(profile_id) = provider_profile_id.filter(|value| !value.is_empty()) else {
-        let region = provider_region.ok_or("A provider profile is required")?;
-        let (credential_subject, _) = provider_region_target(region)?;
-        return Ok(MediaCredentialSelection {
-            credential_subject: credential_subject.to_string(),
-            provider_region: region.to_string(),
-        });
-    };
+    let profile_id = provider_profile_id
+        .filter(|value| !value.is_empty())
+        .ok_or("A provider profile is required for media generation")?;
     if !is_profile_id(profile_id) {
         return Err("Provider profile ID is invalid".to_string());
     }
@@ -349,6 +349,11 @@ fn resolve_media_selection(
         ("unicompapi", Some("https://unicompapi.com/v1")) => "unicompapi",
         _ => return Err("Provider profile uses an unsupported media Base URL".to_string()),
     };
+    if let Some(requested_region) = provider_region.filter(|value| !value.is_empty()) {
+        if requested_region != region {
+            return Err("Selected provider profile does not match the requested region".to_string());
+        }
+    }
     let adapter_model = if provider_type == "unicompapi" {
         unicompapi_adapter_model(adapter_key)?
     } else {
@@ -832,6 +837,310 @@ fn is_image_source(value: &str) -> bool {
         || value.starts_with("https://")
 }
 
+fn decoded_image_type(
+    bytes: &[u8],
+    declared_subtype: Option<&str>,
+) -> Result<(&'static str, &'static str), String> {
+    let detected = if bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
+        ("image/png", "png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        ("image/jpeg", "jpg")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        ("image/webp", "webp")
+    } else {
+        return Err("Provider returned an unsupported embedded image".to_string());
+    };
+    if let Some(subtype) = declared_subtype {
+        let normalized = subtype.to_ascii_lowercase();
+        let matches = match detected.0 {
+            "image/png" => normalized == "png",
+            "image/jpeg" => normalized == "jpeg" || normalized == "jpg",
+            "image/webp" => normalized == "webp",
+            _ => false,
+        };
+        if !matches {
+            return Err("Provider image media type does not match its signature".to_string());
+        }
+    }
+    Ok(detected)
+}
+
+fn embedded_image_parts(value: &str) -> Result<(&str, Option<String>), String> {
+    let trimmed = value.trim();
+    if !trimmed
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        return Ok((trimmed, None));
+    }
+    let (header, encoded) = trimmed
+        .split_once(',')
+        .ok_or("Provider returned a malformed image Data URL")?;
+    let normalized = header.to_ascii_lowercase();
+    let media_type = normalized
+        .strip_prefix("data:image/")
+        .and_then(|value| value.strip_suffix(";base64"))
+        .filter(|value| !value.is_empty())
+        .ok_or("Provider returned a malformed image Data URL")?;
+    Ok((encoded.trim(), Some(media_type.to_string())))
+}
+
+fn decode_embedded_image(
+    value: &str,
+    location: &str,
+) -> Result<(Vec<u8>, &'static str, &'static str), String> {
+    let (encoded, declared_subtype) = embedded_image_parts(value)?;
+    let compact = if encoded
+        .chars()
+        .any(|character| character.is_ascii_whitespace())
+    {
+        Cow::Owned(
+            encoded
+                .chars()
+                .filter(|character| !character.is_ascii_whitespace())
+                .collect::<String>(),
+        )
+    } else {
+        Cow::Borrowed(encoded)
+    };
+    if compact.is_empty() || compact.len() > (NATIVE_IMAGE_OUTPUT_LIMIT * 4 / 3) + 4 {
+        return Err(format!(
+            "Provider image output at {location} exceeds the 25 MiB limit"
+        ));
+    }
+    let padded = match compact.len() % 4 {
+        0 => Cow::Borrowed(compact.as_ref()),
+        2 | 3 if !compact.contains('=') => {
+            let mut value = compact.to_string();
+            for _ in 0..(4 - value.len() % 4) {
+                value.push('=');
+            }
+            Cow::Owned(value)
+        }
+        _ => Cow::Borrowed(compact.as_ref()),
+    };
+    let bytes = BASE64_STANDARD.decode(padded.as_bytes()).map_err(|_| {
+        format!(
+            "Provider returned invalid image Base64 at {location} ({} characters{})",
+            compact.len(),
+            if declared_subtype.is_some() {
+                ", Data URL"
+            } else {
+                ""
+            }
+        )
+    })?;
+    if bytes.is_empty() || bytes.len() > NATIVE_IMAGE_OUTPUT_LIMIT {
+        return Err(format!(
+            "Provider image output at {location} exceeds the 25 MiB limit"
+        ));
+    }
+    let (content_type, extension) = decoded_image_type(&bytes, declared_subtype.as_deref())?;
+    Ok((bytes, content_type, extension))
+}
+
+fn cleanup_stale_native_images(directory: &Path) {
+    let Ok(entries) = read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_managed_image = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.starts_with("image-"))
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| matches!(value, "png" | "jpg" | "webp"));
+        let is_stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= NATIVE_IMAGE_STALE_AGE);
+        if is_managed_image && is_stale {
+            let _ = remove_file(path);
+        }
+    }
+}
+
+fn store_embedded_image(
+    value: &str,
+    location: &str,
+    directory: &Path,
+    nonce: u128,
+    index: usize,
+) -> Result<(PathBuf, &'static str), String> {
+    let (bytes, content_type, extension) = decode_embedded_image(value, location)?;
+    let temporary_path = directory.join(format!(
+        "image-{}-{nonce}-{index}.{extension}",
+        std::process::id()
+    ));
+    write(&temporary_path, bytes)
+        .map_err(|error| format!("Unable to store provider image output: {error}"))?;
+    Ok((temporary_path, content_type))
+}
+
+fn externalize_image_object(
+    values: &mut serde_json::Map<String, serde_json::Value>,
+    location: &str,
+    directory: &Path,
+    nonce: u128,
+    paths: &mut Vec<PathBuf>,
+) -> Result<bool, String> {
+    let base64_key = ["b64_json", "b64", "base64"].into_iter().find(|key| {
+        values
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    let data_url_key = [
+        "url",
+        "uri",
+        "image_url",
+        "imageUrl",
+        "cover_url",
+        "coverUrl",
+    ]
+    .into_iter()
+    .find(|key| {
+        values
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| {
+                value
+                    .trim()
+                    .get(..11)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"))
+            })
+    });
+    if base64_key.is_some() && data_url_key.is_some() {
+        return Err(format!(
+            "Provider returned multiple inline image payloads at {location}"
+        ));
+    }
+    let Some(key) = base64_key.or(data_url_key) else {
+        return Ok(false);
+    };
+    if paths.len() >= NATIVE_IMAGE_RESULT_LIMIT {
+        return Err("Provider returned more than 4 image results".to_string());
+    }
+    let serde_json::Value::String(value) = values
+        .remove(key)
+        .expect("selected image field must still exist")
+    else {
+        unreachable!("selected image field must be a string")
+    };
+    let field_location = format!("{location}.{key}");
+    let (path, content_type) =
+        store_embedded_image(&value, &field_location, directory, nonce, paths.len())?;
+    paths.push(path.clone());
+    values.insert(
+        "nativeImageFilePath".to_string(),
+        serde_json::Value::String(path.to_string_lossy().into_owned()),
+    );
+    values.insert(
+        "contentType".to_string(),
+        serde_json::Value::String(content_type.to_string()),
+    );
+    Ok(true)
+}
+
+fn externalize_image_value(
+    value: &mut serde_json::Value,
+    location: &str,
+    directory: &Path,
+    nonce: u128,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for (index, item) in values.iter_mut().enumerate() {
+                externalize_image_value(
+                    item,
+                    &format!("{location}[{index}]"),
+                    directory,
+                    nonce,
+                    paths,
+                )?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if externalize_image_object(values, location, directory, nonce, paths)? {
+                return Ok(());
+            }
+            for key in [
+                "data",
+                "images",
+                "creations",
+                "Creations",
+                "results",
+                "output",
+            ] {
+                if let Some(child) = values.get_mut(key) {
+                    externalize_image_value(
+                        child,
+                        &format!("{location}.{key}"),
+                        directory,
+                        nonce,
+                        paths,
+                    )?;
+                }
+            }
+        }
+        serde_json::Value::String(_) => {
+            let serde_json::Value::String(source) = std::mem::take(value) else {
+                unreachable!("image source must be a string")
+            };
+            let is_data_url = source
+                .trim()
+                .get(..11)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"));
+            if !is_data_url {
+                *value = serde_json::Value::String(source);
+                return Ok(());
+            }
+            if paths.len() >= NATIVE_IMAGE_RESULT_LIMIT {
+                return Err("Provider returned more than 4 image results".to_string());
+            }
+            let (path, content_type) =
+                store_embedded_image(&source, location, directory, nonce, paths.len())?;
+            paths.push(path.clone());
+            *value = serde_json::json!({
+                "nativeImageFilePath": path.to_string_lossy(),
+                "contentType": content_type,
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn externalize_embedded_images(response: &mut ProviderHttpResponse) -> Result<(), String> {
+    if !(200..300).contains(&response.status) {
+        return Ok(());
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "System clock is invalid")?
+        .as_nanos();
+    let directory = std::env::temp_dir().join("ai-video-workspace-unicompapi");
+    create_dir_all(&directory)
+        .map_err(|error| format!("Unable to create provider image directory: {error}"))?;
+    cleanup_stale_native_images(&directory);
+    let mut paths = Vec::new();
+    match externalize_image_value(&mut response.body, "$", &directory, nonce, &mut paths) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            for path in paths {
+                let _ = remove_file(path);
+            }
+            Err(error)
+        }
+    }
+}
+
 fn provider_task_error(body: &serde_json::Value) -> String {
     let code = body
         .get("err_code")
@@ -1132,7 +1441,7 @@ fn provider_submit_blocking(
     if provider_region == "unicompapi" {
         let (capability, _) = unicompapi_adapter_parts(adapter_key)?;
         let secret = credential_read(credential_subject)?;
-        return match capability {
+        let mut response = match capability {
             "TEXT_TO_IMAGE" => {
                 let body = unicompapi_payload(adapter_key, payload)?;
                 request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))
@@ -1142,16 +1451,19 @@ fn provider_submit_blocking(
                 request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))
             }
             _ => Err("UniCompAPI adapter must use the matching media bridge".to_string()),
-        };
+        }?;
+        externalize_embedded_images(&mut response)?;
+        return Ok(response);
     }
     let target = provider_target(adapter_key, provider_region)?;
     let body = provider_payload(target, payload)?;
     let secret = credential_read(credential_subject)?;
-    let response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
+    let mut response = request_provider_json(target, &secret, "POST", target.path, Some(&body))?;
     if response.status < 200 || response.status >= 300 {
         return Ok(response);
     }
     if contains_image_source(&response.body) {
+        externalize_embedded_images(&mut response)?;
         return Ok(response);
     }
 
@@ -1163,11 +1475,12 @@ fn provider_submit_blocking(
     let task_path = provider_task_path(task_id)?;
     let deadline = Instant::now() + PROVIDER_POLL_TIMEOUT;
     loop {
-        let poll = request_provider_json(target, &secret, "GET", &task_path, None)?;
+        let mut poll = request_provider_json(target, &secret, "GET", &task_path, None)?;
         if poll.status < 200 || poll.status >= 300 {
             return Ok(poll);
         }
         if contains_image_source(&poll.body) {
+            externalize_embedded_images(&mut poll)?;
             return Ok(poll);
         }
         match poll.body.get("state").and_then(serde_json::Value::as_str) {
@@ -2296,15 +2609,17 @@ pub fn run() {
 mod tests {
     use super::{
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
-        ensure_video_adapter, is_profile_id, provider_cancel_path, provider_payload,
-        provider_state, provider_submit_error, provider_target, provider_task_error,
-        provider_task_id, provider_task_path, resolve_media_selection, unicompapi_adapter_model,
-        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
-        validate_credential_provider, validate_host_request_envelope,
-        validate_provider_stream_params, WorkerProcess, WorkerState, BUNDLED_WORKER_FILENAME,
-        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES,
-        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
+        ensure_video_adapter, externalize_embedded_images, is_profile_id, provider_cancel_path,
+        provider_payload, provider_state, provider_submit_error, provider_target,
+        provider_task_error, provider_task_id, provider_task_path, resolve_media_selection,
+        unicompapi_adapter_model, unicompapi_payload, unicompapi_video_content_path,
+        unicompapi_video_task_path, validate_credential_provider, validate_host_request_envelope,
+        validate_provider_stream_params, ProviderHttpResponse, WorkerProcess, WorkerState,
+        BASE64_STANDARD, BUNDLED_WORKER_FILENAME, MARKDOWN_IMPORT_LIMIT,
+        PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES, UNICOMPAPI_AUTHORIZATION_SCHEME,
+        UNICOMPAPI_HOST,
     };
+    use base64::Engine as _;
     use serde_json::json;
     use std::{
         fs::{create_dir_all, remove_dir_all, write},
@@ -2616,6 +2931,59 @@ mod tests {
     }
 
     #[test]
+    fn media_profile_resolution_rejects_an_unmatched_requested_region() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let app_data_dir = std::env::temp_dir().join(format!(
+            "ai-video-rust-media-region-{}-{nonce}",
+            std::process::id()
+        ));
+        create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
+
+        {
+            let state =
+                WorkerState::new(app_data_dir.clone()).expect("research bridge should start");
+            let created = state
+                .request(&json!({
+                    "id": "rust-media-region-profile-create",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.create",
+                    "params": {
+                        "name": "Vidu China Region",
+                        "category": "multi",
+                        "providerType": "vidu",
+                        "accessType": "official",
+                        "protocol": "vidu-v2",
+                        "baseUrl": "https://api.vidu.cn"
+                    }
+                }))
+                .expect("profile create response should be valid");
+            let profile_id = created["result"]["id"]
+                .as_str()
+                .expect("created profile should have an ID");
+            state
+                .request(&json!({
+                    "id": "rust-media-region-profile-ready",
+                    "protocolVersion": 1,
+                    "method": "provider.connection.complete",
+                    "params": { "profileId": profile_id, "status": "ready" }
+                }))
+                .expect("connection completion response should be valid");
+            let result = resolve_media_selection(
+                "TEXT_TO_IMAGE:vidu:viduq2:v2",
+                Some(profile_id),
+                Some("global"),
+                &state,
+            );
+            assert!(result.is_err());
+        }
+
+        remove_dir_all(&app_data_dir).expect("temporary app data directory should be removed");
+    }
+
+    #[test]
     fn unicompapi_media_resolution_requires_synced_enabled_exact_capabilities() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2867,6 +3235,75 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(parsed["model"], "qwen-image");
         assert_eq!(parsed["size"], "1024x1024");
+    }
+
+    #[test]
+    fn provider_bridge_externalizes_base64_image_outputs_before_ipc() {
+        let png = [137, 80, 78, 71, 13, 10, 26, 10];
+        let mut response = ProviderHttpResponse {
+            status: 200,
+            body: json!({ "data": [{ "b64_json": BASE64_STANDARD.encode(png) }] }),
+        };
+
+        externalize_embedded_images(&mut response).expect("externalize provider image");
+
+        let path = response.body["data"][0]["nativeImageFilePath"]
+            .as_str()
+            .map(Path::new)
+            .expect("native image path");
+        assert!(path.exists());
+        assert_eq!(response.body["data"][0]["contentType"], "image/png");
+        assert_eq!(std::fs::read(path).expect("read native image"), png);
+        std::fs::remove_file(path).expect("remove native image fixture");
+    }
+
+    #[test]
+    fn provider_bridge_externalizes_all_data_url_images_with_ascii_whitespace() {
+        let png = [137, 80, 78, 71, 13, 10, 26, 10];
+        let mut response = ProviderHttpResponse {
+            status: 200,
+            body: json!({
+                "data": [
+                    { "b64_json": "data:image/png;base64,\niVBORw0K Ggo\r\n" },
+                    { "url": "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=" }
+                ]
+            }),
+        };
+
+        externalize_embedded_images(&mut response).expect("externalize provider images");
+
+        for item in response.body["data"].as_array().expect("image results") {
+            let path = item["nativeImageFilePath"]
+                .as_str()
+                .map(Path::new)
+                .expect("native image path");
+            assert!(path.exists());
+            assert_eq!(item["contentType"], "image/png");
+            assert_eq!(std::fs::read(path).expect("read native image"), png);
+            std::fs::remove_file(path).expect("remove native image fixture");
+        }
+    }
+
+    #[test]
+    fn provider_bridge_removes_partial_outputs_when_any_image_is_invalid() {
+        let mut response = ProviderHttpResponse {
+            status: 200,
+            body: json!({
+                "data": [
+                    { "b64_json": "iVBORw0KGgo=" },
+                    { "b64_json": "not-valid-base64" }
+                ]
+            }),
+        };
+
+        let error = externalize_embedded_images(&mut response).expect_err("invalid second image");
+
+        assert!(error.contains("$.data[1].b64_json"));
+        let first_path = response.body["data"][0]["nativeImageFilePath"]
+            .as_str()
+            .map(Path::new)
+            .expect("first image was externalized before the failure");
+        assert!(!first_path.exists());
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
   inferUnifiedAgentCapability,
   modelMatchesUnifiedAgentRequest,
   parseRequest,
+  resolveMediaProviderRegion,
 } from './handler.js';
 
 const temporaryDirectories: string[] = [];
@@ -49,6 +50,20 @@ describe('inferAgentDocumentIntent', () => {
     expect(inferAgentDocumentIntent('根据这些参数写一份视频分镜文档')).toEqual({
       operation: 'document.create_draft',
     });
+  });
+});
+
+describe('resolveMediaProviderRegion', () => {
+  it('derives the Provider route from the selected connection profile', () => {
+    expect(
+      resolveMediaProviderRegion({ providerType: 'unicompapi', baseUrl: 'https://example.com' }),
+    ).toBe('unicompapi');
+    expect(
+      resolveMediaProviderRegion({ providerType: 'vidu', baseUrl: 'https://api.vidu.cn' }),
+    ).toBe('cn');
+    expect(
+      resolveMediaProviderRegion({ providerType: 'vidu', baseUrl: 'https://api.vidu.com' }),
+    ).toBe('global');
   });
 });
 
@@ -309,6 +324,53 @@ describe('worker handler', () => {
     } as unknown as WorkerRequest);
 
     expect(response).toMatchObject({ ok: true });
+    if (response.ok) {
+      expect(response.result).toMatchObject({
+        status: 'needs_model_selection',
+        capability: 'image',
+      });
+      expect(response.result).not.toMatchObject({ status: 'image_prepared' });
+    }
+  });
+
+  it('requires an explicit media Provider and model for direct image/video preparation', async () => {
+    const imageResponse = await handleRequest({
+      id: 'image-prepare-missing-selection',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'image.generate.prepare',
+      params: {
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        parameters: { prompt: '海报' },
+      },
+    } as unknown as WorkerRequest);
+    expect(imageResponse).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'image-prepare-missing-selection',
+        operation: 'image.generate.prepare',
+      },
+    });
+
+    const videoResponse = await handleRequest({
+      id: 'video-prepare-missing-selection',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'video.generate.prepare',
+      params: {
+        adapterKey: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2',
+        parameters: { prompt: '天空' },
+        providerRegion: 'cn',
+        providerProfileId: 'profile-only',
+      },
+    } as unknown as WorkerRequest);
+    expect(videoResponse).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_REQUEST',
+        requestId: 'video-prepare-missing-selection',
+        operation: 'video.generate.prepare',
+      },
+    });
   });
 
   it('exposes read-only model and adapter schema catalog queries', async () => {

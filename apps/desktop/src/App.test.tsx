@@ -9,6 +9,7 @@ import {
   inferAgentCapability,
   mergeGenerationMessage,
   normalizeImageDataUrl,
+  resolveAgentRunModelSelection,
 } from './App';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -33,6 +34,38 @@ describe('inferAgentCapability', () => {
     expect(inferAgentCapability('生成一张角色图')).toBe('image');
     expect(inferAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferAgentCapability('生成角色三视图提示词')).toBe('document');
+  });
+});
+
+describe('resolveAgentRunModelSelection', () => {
+  const agentModel = { providerProfileId: 'agent-profile', modelId: 'agent-model' };
+  const mediaModel = { providerProfileId: 'media-profile', modelId: 'media-model' };
+
+  it('does not use the selected Agent model for media generation', () => {
+    expect(
+      resolveAgentRunModelSelection('video', undefined, undefined, agentModel),
+    ).toBeUndefined();
+    expect(
+      resolveAgentRunModelSelection('image', undefined, undefined, agentModel),
+    ).toBeUndefined();
+  });
+
+  it('uses an explicitly selected or remembered media model', () => {
+    expect(resolveAgentRunModelSelection('video', mediaModel, undefined, agentModel)).toEqual(
+      mediaModel,
+    );
+    expect(resolveAgentRunModelSelection('image', undefined, mediaModel, agentModel)).toEqual(
+      mediaModel,
+    );
+  });
+
+  it('uses the selected Agent model for non-media work', () => {
+    expect(resolveAgentRunModelSelection('text', undefined, undefined, agentModel)).toEqual(
+      agentModel,
+    );
+    expect(resolveAgentRunModelSelection('text', undefined, mediaModel, agentModel)).toEqual(
+      agentModel,
+    );
   });
 });
 

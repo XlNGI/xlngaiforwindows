@@ -96,7 +96,8 @@ describe('AssetLibraryView', () => {
     callWorker.mockImplementation((method: string) => {
       if (method === 'asset.list') return Promise.resolve(assets);
       if (method === 'tag.list') return Promise.resolve([tag]);
-      if (method === 'asset.preview') return Promise.reject(new Error('fixture image unavailable'));
+      if (method === 'asset.mediaSource')
+        return Promise.reject(new Error('fixture image unavailable'));
       if (method === 'asset.tags.add') return Promise.resolve(assets);
       return Promise.resolve([]);
     });
@@ -149,17 +150,14 @@ describe('AssetLibraryView', () => {
     ];
     callWorker.mockImplementation((method: string, params: { assetId?: string }) => {
       if (method === 'asset.list') return Promise.resolve(assets);
-      if (method === 'asset.preview')
-        return Promise.resolve({
-          assetId: params.assetId,
-          dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
-          contentType: 'image/png',
-        });
       if (method === 'asset.mediaSource')
         return Promise.resolve({
           assetId: params.assetId,
-          path: 'C:\\project\\assets\\video.mp4',
-          contentType: 'video/mp4',
+          path:
+            params.assetId === 'image-1'
+              ? 'C:\\project\\assets\\image.png'
+              : 'C:\\project\\assets\\video.mp4',
+          contentType: params.assetId === 'image-1' ? 'image/png' : 'video/mp4',
         });
       return Promise.resolve([]);
     });
@@ -173,6 +171,10 @@ describe('AssetLibraryView', () => {
       '/worker-media/video-1',
     );
     expect(container.querySelector('.asset-thumb img')).toBeInTheDocument();
+    expect(container.querySelector('.asset-thumb img')).toHaveAttribute(
+      'src',
+      '/worker-media/image-1',
+    );
     await waitFor(() =>
       expect(container.querySelector('.asset-inspector-preview video')).toHaveAttribute('controls'),
     );

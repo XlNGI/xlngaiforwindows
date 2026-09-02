@@ -10,7 +10,8 @@ import {
   copyFileSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, extname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import type {
   AdapterParameters,
   AssetInfo,
@@ -38,12 +39,19 @@ import { assertStorageCapacity } from './storage-capacity.js';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_INLINE_PREVIEW_BYTES = 1024 * 1024;
 
 interface DownloadedImage {
   bytes: Uint8Array;
   contentType: string;
   sourceUrl?: string;
 }
+
+type ImageSource =
+  | { kind: 'native-file'; path: string }
+  | { kind: 'data-url'; value: string }
+  | { kind: 'base64'; value: string; declaredContentType?: string }
+  | { kind: 'remote-url'; value: string };
 
 interface PersistedImage {
   asset: AssetRecord;
@@ -142,13 +150,18 @@ export class ImageGenerationService {
           : `Provider request failed with HTTP ${params.providerStatus}.`;
       return this.fail(job.id, message);
     }
-    let image: DownloadedImage;
+    let images: DownloadedImage[];
+    let sources: ImageSource[] = [];
     try {
-      image = await downloadImage(extractImageSource(params.providerBody));
+      sources = extractImageSources(params.providerBody);
+      images = [];
+      for (const source of sources) images.push(await downloadImage(source));
     } catch (error) {
       if (this.projects.current() !== projectSession)
         throw new Error('Project session changed during generation.');
       return this.fail(job.id, error instanceof Error ? error.message : 'Image download failed.');
+    } finally {
+      cleanupNativeImageSources(sources);
     }
 
     if (this.projects.current() !== projectSession)
@@ -163,12 +176,17 @@ export class ImageGenerationService {
     });
     if (activeJob.status !== 'running') return this.get(activeJob.id);
 
-    const persisted = this.persistDownloadedImage(projectSession.rootPath, image, {
-      projectId: projectSession.id,
-      assetKind: params.assetKind,
-    });
+    const persisted: PersistedImage[] = [];
     let committed = false;
     try {
+      for (const image of images) {
+        persisted.push(
+          this.persistDownloadedImage(projectSession.rootPath, image, {
+            projectId: projectSession.id,
+            assetKind: params.assetKind,
+          }),
+        );
+      }
       const info = this.projects.access(true, (database, project) => {
         if (project !== projectSession)
           throw new Error('Project session changed during generation.');
@@ -184,18 +202,21 @@ export class ImageGenerationService {
           );
         }
         const now = new Date().toISOString();
-        const asset: AssetRecord = { ...persisted.asset, createdAt: now };
+        const assets: AssetRecord[] = persisted.map((entry) => ({
+          ...entry.asset,
+          createdAt: now,
+        }));
         const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
-        const result = {
+        const results = assets.map((asset, index) => ({
           id: randomUUID(),
           jobId: current.id,
           assetId: asset.id,
-          providerUrl: sanitizeRemoteUrlForPersistence(image.sourceUrl),
+          providerUrl: sanitizeRemoteUrlForPersistence(images[index]?.sourceUrl),
           createdAt: now,
-        };
+        }));
         database.transaction(() => {
-          repositories.assets.save(asset);
-          repositories.generationResults.save(result);
+          for (const asset of assets) repositories.assets.save(asset);
+          for (const result of results) repositories.generationResults.save(result);
           repositories.jobs.save(completed);
           repositories.generationJobEvents.append({
             id: randomUUID(),
@@ -203,10 +224,11 @@ export class ImageGenerationService {
             projectId: project.id,
             phase: 'complete',
             status: completed.status,
-            summary: 'Image result downloaded and committed locally.',
+            summary: 'Image results downloaded and committed locally.',
             detailsJson: JSON.stringify({
-              contentType: image.contentType,
-              sizeBytes: image.bytes.byteLength,
+              resultCount: images.length,
+              totalSizeBytes: images.reduce((total, image) => total + image.bytes.byteLength, 0),
+              contentTypes: images.map((image) => image.contentType),
             }),
             createdAt: now,
           });
@@ -214,15 +236,21 @@ export class ImageGenerationService {
         })();
         committed = true;
         project.updatedAt = now;
+        const preview = toInlinePreviewInfo(images[0]!, {
+          assetId: assets[0]!.id,
+          jobId: completed.id,
+        });
         return {
-          ...this.toInfo(completed, [asset], [result]),
-          preview: toPreviewInfo(image, { assetId: asset.id, jobId: completed.id }),
+          ...this.toInfo(completed, assets, results),
+          ...(preview ? { preview } : {}),
         };
       });
-      if (!committed) rmSync(persisted.finalPath, { force: true });
+      if (!committed) {
+        for (const entry of persisted) rmSync(entry.finalPath, { force: true });
+      }
       return info;
     } catch (error) {
-      rmSync(persisted.finalPath, { force: true });
+      for (const entry of persisted) rmSync(entry.finalPath, { force: true });
       if (this.projects.current() === projectSession) {
         try {
           const message = error instanceof Error ? error.message : 'Unknown database error.';
@@ -942,6 +970,15 @@ function toPreviewInfo(
   };
 }
 
+function toInlinePreviewInfo(
+  image: DownloadedImage,
+  params: { assetId?: string; jobId?: string } = {},
+): ImagePreviewInfo | undefined {
+  return image.bytes.byteLength <= MAX_INLINE_PREVIEW_BYTES
+    ? toPreviewInfo(image, params)
+    : undefined;
+}
+
 function sanitizeRemoteUrlForPersistence(value?: string): string | undefined {
   if (!value) return undefined;
   try {
@@ -981,27 +1018,56 @@ function redactParameters(parameters: AdapterParameters): AdapterParameters {
   );
 }
 
-function extractImageSource(body: unknown): string {
-  const creation = findCreationImageSource(body);
-  if (creation) return creation;
+function extractImageSources(body: unknown): ImageSource[] {
+  const sources: ImageSource[] = [];
+  try {
+    collectImageSources(body, sources);
+    if (sources.length === 0)
+      throw new Error('Provider response did not contain an image URL or Base64 image.');
+    if (sources.length > 4) throw new Error('Provider returned more than 4 image results.');
+    const nativePaths = sources
+      .filter(
+        (source): source is Extract<ImageSource, { kind: 'native-file' }> =>
+          source.kind === 'native-file',
+      )
+      .map((source) => source.path);
+    if (new Set(nativePaths).size !== nativePaths.length)
+      throw new Error('Provider returned duplicate native image file paths.');
+    return sources;
+  } catch (error) {
+    cleanupNativeImageSources(sources);
+    throw error;
+  }
+}
 
-  const embedded = findString(body, isEmbeddedImageSource);
-  if (embedded) return embedded;
-
-  const found = findString(body, isRemoteImageSource);
-  if (!found) throw new Error('Provider response did not contain an image URL or Base64 image.');
-  return found;
+function nativeImageFilePath(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = (value as Record<string, unknown>).nativeImageFilePath;
+  if (typeof candidate !== 'string' || candidate.length < 1 || candidate.length > 32_767) {
+    return undefined;
+  }
+  const root = resolve(tmpdir(), 'ai-video-workspace-unicompapi');
+  const path = resolve(candidate);
+  const extension = extname(path).toLowerCase();
+  if (
+    !path.startsWith(`${root}${sep}`) ||
+    !basename(path).startsWith('image-') ||
+    !['.png', '.jpg', '.jpeg', '.webp'].includes(extension)
+  ) {
+    throw new Error('Provider returned an unsafe native image file path.');
+  }
+  return path;
 }
 
 function isEmbeddedImageSource(value: string): boolean {
-  return value.toLowerCase().startsWith('data:image/');
+  return value.trimStart().slice(0, 11).toLowerCase() === 'data:image/';
 }
 
 function isRemoteImageSource(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
 
-const CREATION_IMAGE_FIELDS = [
+const IMAGE_RESULT_FIELDS = [
   'url',
   'uri',
   'image_url',
@@ -1010,107 +1076,240 @@ const CREATION_IMAGE_FIELDS = [
   'coverUrl',
 ] as const;
 
-function findCreationImageSource(value: unknown): string | undefined {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findCreationImageSource(item);
-      if (found) return found;
+const IMAGE_RESULT_CONTAINERS = [
+  'data',
+  'images',
+  'creations',
+  'Creations',
+  'results',
+  'output',
+] as const;
+
+function collectImageSources(value: unknown, sources: ImageSource[]): boolean {
+  if (typeof value === 'string') {
+    if (isEmbeddedImageSource(value)) {
+      sources.push({ kind: 'data-url', value });
+      return true;
     }
-    return undefined;
+    if (isRemoteImageSource(value)) {
+      sources.push({ kind: 'remote-url', value });
+      return true;
+    }
+    return false;
   }
-  if (!value || typeof value !== 'object') return undefined;
+  if (Array.isArray(value)) {
+    let found = false;
+    for (const item of value) found = collectImageSources(item, sources) || found;
+    return found;
+  }
+  if (!value || typeof value !== 'object') return false;
 
   const object = value as Record<string, unknown>;
-  for (const key of ['creations', 'Creations']) {
-    const creations = object[key];
-    if (!Array.isArray(creations)) continue;
-    for (const creation of creations) {
-      const found = findCreationField(creation);
-      if (found) return found;
-    }
+  const direct = directImageSource(object);
+  if (direct) {
+    sources.push(direct);
+    return true;
   }
-  for (const item of Object.values(object)) {
-    const found = findCreationImageSource(item);
-    if (found) return found;
+  for (const key of IMAGE_RESULT_CONTAINERS) {
+    const before = sources.length;
+    collectImageSources(object[key], sources);
+    if (sources.length > before) return true;
   }
-  return undefined;
+  return false;
 }
 
-function findCreationField(value: unknown): string | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const object = value as Record<string, unknown>;
-  for (const key of CREATION_IMAGE_FIELDS) {
+function directImageSource(object: Record<string, unknown>): ImageSource | undefined {
+  const nativePath = nativeImageFilePath(object);
+  if (nativePath) return { kind: 'native-file', path: nativePath };
+
+  const base64 = ['b64_json', 'b64', 'base64']
+    .map((key) => object[key])
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  let resultUrl: string | undefined;
+  for (const key of IMAGE_RESULT_FIELDS) {
     const candidate = object[key];
     if (
       typeof candidate === 'string' &&
       (isEmbeddedImageSource(candidate) || isRemoteImageSource(candidate))
     ) {
-      return candidate;
+      resultUrl = candidate;
+      break;
     }
   }
-  return undefined;
+  if (base64 && resultUrl)
+    throw new Error('Provider returned multiple image payloads for one result.');
+  if (base64) {
+    if (isEmbeddedImageSource(base64)) return { kind: 'data-url', value: base64 };
+    return {
+      kind: 'base64',
+      value: base64,
+      declaredContentType: declaredImageContentType(object),
+    };
+  }
+  if (!resultUrl) return undefined;
+  return isEmbeddedImageSource(resultUrl)
+    ? { kind: 'data-url', value: resultUrl }
+    : { kind: 'remote-url', value: resultUrl };
 }
 
-function findString(value: unknown, predicate: (value: string) => boolean): string | undefined {
-  if (typeof value === 'string') return predicate(value) ? value : undefined;
-  if (Array.isArray(value))
-    for (const item of value) {
-      const found = findString(item, predicate);
-      if (found) return found;
-    }
-  if (value && typeof value === 'object')
-    for (const item of Object.values(value)) {
-      const found = findString(item, predicate);
-      if (found) return found;
-    }
-  return undefined;
+function declaredImageContentType(object: Record<string, unknown>): string | undefined {
+  for (const key of ['contentType', 'content_type', 'mimeType', 'mime_type']) {
+    const value = object[key];
+    if (typeof value === 'string' && value.trim()) return value.trim().toLowerCase();
+  }
+  const outputFormat = object.output_format;
+  if (typeof outputFormat !== 'string') return undefined;
+  const formats: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+  };
+  return formats[outputFormat.trim().toLowerCase()];
 }
 
-async function downloadImage(source: string): Promise<DownloadedImage> {
-  if (source.startsWith('data:image/')) {
-    const match = source.match(/^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=]+)$/);
-    if (!match) throw new Error('Image Base64 input is invalid.');
-    const encoded = match[2];
-    const contentType = match[1];
-    if (!encoded || !contentType) throw new Error('Image Base64 input is invalid.');
-    const bytes = Buffer.from(encoded, 'base64');
-    if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES)
-      throw new Error('Image size is invalid.');
-    return { bytes, contentType };
+function cleanupNativeImageSources(sources: readonly ImageSource[]): void {
+  for (const source of sources) {
+    if (source.kind === 'native-file') rmSync(source.path, { force: true });
+  }
+}
+
+async function downloadImage(source: ImageSource): Promise<DownloadedImage> {
+  if (source.kind === 'native-file') {
+    try {
+      return validatedDownloadedImage(readFileSync(source.path), contentTypeFor(source.path));
+    } finally {
+      rmSync(source.path, { force: true });
+    }
+  }
+  if (source.kind === 'data-url') {
+    const match = source.value.trim().match(/^data:(image\/[\w.+-]+);base64,([\s\S]+)$/i);
+    if (!match?.[1] || !match[2]) throw new Error('Image Base64 input is invalid.');
+    return validatedDownloadedImage(decodeImageBase64(match[2]), match[1].toLowerCase());
+  }
+  if (source.kind === 'base64') {
+    return validatedDownloadedImage(decodeImageBase64(source.value), source.declaredContentType);
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
   try {
     let response: Response;
     try {
-      response = await fetch(source, { signal: controller.signal });
+      response = await fetch(source.value, { signal: controller.signal });
     } catch (error) {
-      throw formatImageDownloadError(source, error);
+      throw formatImageDownloadError(source.value, error);
     }
     if (!response.ok)
       throw new Error(
-        `Image download failed${sourceHostSuffix(source)} with HTTP ${response.status}.`,
+        `Image download failed${sourceHostSuffix(source.value)} with HTTP ${response.status}.`,
       );
     const contentType =
       response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
     if (!contentType.startsWith('image/'))
-      throw new Error(`Downloaded result${sourceHostSuffix(source)} is not an image.`);
-    let bytes: Uint8Array;
+      throw new Error(`Downloaded result${sourceHostSuffix(source.value)} is not an image.`);
     try {
-      bytes = new Uint8Array(await response.arrayBuffer());
+      const bytes = await readBoundedResponseBody(response);
+      return validatedDownloadedImage(bytes, contentType, source.value);
     } catch (error) {
-      throw formatImageDownloadError(source, error, 'while reading the image body');
+      if (error instanceof Error && error.message === 'Image size is invalid.') throw error;
+      throw formatImageDownloadError(source.value, error, 'while reading the image body');
     }
-    if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES)
-      throw new Error('Image size is invalid.');
-    return { bytes, contentType, sourceUrl: source };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError')
-      throw new Error(`Image download${sourceHostSuffix(source)} timed out.`);
+      throw new Error(`Image download${sourceHostSuffix(source.value)} timed out.`);
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function decodeImageBase64(value: string): Uint8Array {
+  const encoded = value.replace(/[ \t\r\n\f]+/gu, '');
+  if (
+    encoded.length === 0 ||
+    encoded.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/u.test(encoded) ||
+    (encoded.includes('=') && encoded.length % 4 !== 0) ||
+    encoded.length % 4 === 1
+  ) {
+    throw new Error('Image Base64 input is invalid.');
+  }
+  const padded = encoded.includes('=')
+    ? encoded
+    : encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '=');
+  const bytes = Buffer.from(padded, 'base64');
+  if (
+    bytes.length === 0 ||
+    bytes.length > MAX_IMAGE_BYTES ||
+    bytes.toString('base64').replace(/=+$/u, '') !== encoded.replace(/=+$/u, '')
+  )
+    throw new Error('Image Base64 input is invalid.');
+  return bytes;
+}
+
+function validatedDownloadedImage(
+  bytes: Uint8Array,
+  declaredContentType?: string,
+  sourceUrl?: string,
+): DownloadedImage {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES)
+    throw new Error('Image size is invalid.');
+  const detectedContentType = detectImageContentType(bytes);
+  if (!detectedContentType) throw new Error('Image signature is invalid or unsupported.');
+  const normalizedDeclared =
+    declaredContentType?.toLowerCase() === 'image/jpg'
+      ? 'image/jpeg'
+      : declaredContentType?.toLowerCase();
+  if (normalizedDeclared?.startsWith('image/') && normalizedDeclared !== detectedContentType) {
+    throw new Error('Image media type does not match its signature.');
+  }
+  return { bytes, contentType: detectedContentType, sourceUrl };
+}
+
+function detectImageContentType(
+  bytes: Uint8Array,
+): 'image/png' | 'image/jpeg' | 'image/webp' | undefined {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+    return 'image/png';
+  if (buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return 'image/jpeg';
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  )
+    return 'image/webp';
+  return undefined;
+}
+
+async function readBoundedResponseBody(response: Response): Promise<Uint8Array> {
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_BYTES)
+    throw new Error('Image size is invalid.');
+  if (!response.body) throw new Error('Image download returned an empty body.');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_IMAGE_BYTES) {
+        await reader.cancel();
+        throw new Error('Image size is invalid.');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (total === 0) throw new Error('Image size is invalid.');
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    total,
+  );
 }
 
 function sourceHostSuffix(source: string): string {

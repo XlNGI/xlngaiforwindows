@@ -20,7 +20,8 @@
 | 模型候选 | 同时展示多个供应商的可用模型，并显示供应商、模型和能力信息 |
 | 参数来源 | 参数 schema 来自官方适配器、手工配置或同步后的能力目录 |
 | 未确认 schema | 新模型或未确认参数必须提示用户补充；未确认参数不能直接提交 Provider |
-| 会话模型 | 同一会话按能力记住第一次确认的模型；用户明确要求更换时才重新选择 |
+| Agent 会话模型 | 用户在会话中选择支持 Tool Call 的 LLM；会话期间不因生图或生视频再次替换 |
+| 媒体生成模型 | 生图/生视频的 Provider 和具体模型由用户在任务需要时明确选择；Worker 只筛选、校验和冻结，不得自动替换 |
 | 费用 | 图片/视频任务先提示可能产生费用，不计算不确定的具体金额 |
 | 草稿 | 每次生成创建新的草稿或任务，不覆盖已有草稿；用户自行修改、删除和发布 |
 | Agent 修改 schema | 用户可在会话中要求 Agent 查询、补充、修改模型参数 schema，并可二次增删改查 |
@@ -40,11 +41,11 @@
         |
         +--> 文本/文档/研究：按会话模型偏好直接执行
         |
-        +--> 图片/视频：查询候选模型
+        +--> 图片/视频：查询兼容的媒体模型候选
         |          |
-        |          +--> 已有会话选择：直接使用
+        |          +--> 用户已明确选择的媒体偏好：由 Desktop 显式带入本次请求
         |          |
-        |          +--> 没有选择：展示跨供应商模型卡片
+        |          +--> 没有可用的明确选择：展示跨供应商模型卡片并等待用户选择
         |                         |
         |                         v
         |                 展示适配器和动态参数表单
@@ -94,7 +95,8 @@
 - [x] 参数提交前进行前端校验，Worker 再次校验。
 - [x] 图片任务通过 Native Provider 通道提交并写回素材库。
 - [x] 视频任务通过 Native Provider 通道提交并绑定轮询任务。
-- [x] 同一会话按能力记忆模型选择。
+- [x] 会话 Agent LLM 选择与图片/视频媒体模型选择分离。
+- [x] 已明确选择的媒体 Provider/模型按会话和能力记忆，由 Desktop 显式带入后由 Worker 校验；Worker 不从 Agent LLM 或持久化记录自动推导媒体模型。
 - [x] 失败时将图片/视频任务标记为终止，避免悬挂状态。
 
 ### 4.4 验证基线
@@ -354,3 +356,4 @@ adapter.schema.audit.list
 - [x] Canonicalized image Data URLs in the Desktop submission path, removing embedded whitespace and rejecting malformed image sources before they reach the native Provider bridge.
 - [x] Preserved runtime image parameters separately from redacted SQLite job snapshots; local reference Data URLs are now available for the immediate Provider submission without persisting image bytes in project data.
 - [x] Desktop restores the project session automatically when the Worker sidecar restarts, preventing stale UI state from producing `No project is open.` during Agent/media submissions.
+- [x] Media model selection boundary verified: `agent.run` returns `needs_model_selection` when an image/video request has no explicit Provider/model, and direct image/video preparation rejects missing or partial selections; Worker never falls back to Agent or persisted media defaults (Worker 294 tests, Desktop 174 tests, Worker typecheck).

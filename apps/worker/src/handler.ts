@@ -52,6 +52,7 @@ import {
   type ImageGenerationCompleteParams,
   type ImageGenerationSavePreviewParams,
   type VideoAssetKind,
+  type VideoProviderRegion,
   type VideoGenerationAttachTaskParams,
   type VideoGenerationFailParams,
   type VideoGenerationFailureKind,
@@ -169,6 +170,107 @@ export function inferUnifiedAgentCapability(prompt: string): UnifiedAgentCapabil
     return 'image';
   if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
   return 'text';
+}
+
+/** Resolve the Provider route from the user-selected profile, never from a
+ * generic media default. The profile's base URL is part of its protected
+ * connection configuration and therefore authoritative for region routing. */
+export function resolveMediaProviderRegion(profile: {
+  providerType: string;
+  baseUrl: string;
+}): VideoProviderRegion {
+  if (profile.providerType === 'unicompapi') return 'unicompapi';
+  if (profile.providerType === 'vidu' && profile.baseUrl === 'https://api.vidu.cn') return 'cn';
+  return 'global';
+}
+
+/**
+ * Validate the complete user-selected media tuple at every Worker entrypoint.
+ * The UI is allowed to send either a local model ID or a remote model ID for
+ * compatibility with older callers, but the resulting task always stores the
+ * canonical local ID. No provider, model, adapter, or region is inferred.
+ */
+function resolveMediaSelectionForRequest(
+  capability: 'image' | 'video',
+  adapterKey: string,
+  providerProfileId: string | undefined,
+  modelId: string | undefined,
+  requestedRegion?: VideoProviderRegion,
+): {
+  profile: ReturnType<AppSettingsService['listProfiles']>[number];
+  model: ReturnType<AppSettingsService['listModels']>[number];
+  adapter: AdapterDescriptor;
+  providerRegion: VideoProviderRegion;
+} {
+  if (!providerProfileId || !modelId) {
+    throw new ProviderProfileValidationError(
+      'Provider profile and model are required for media generation.',
+    );
+  }
+  const profile = appSettingsService.getProfile(providerProfileId);
+  if (!profile) throw new ProviderProfileValidationError('Provider profile was not found.');
+  if (!profile.enabled || profile.connectionStatus !== 'ready') {
+    throw new ProviderProfileValidationError(
+      'Select an enabled provider connection that passed its connectivity test.',
+    );
+  }
+  const supportedProfile =
+    (profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
+    (profile.providerType === 'unicompapi' && profile.protocol === 'openai-chat-completions');
+  if (!supportedProfile) {
+    throw new ProviderProfileValidationError(
+      'The selected provider does not support media generation.',
+    );
+  }
+  const model = appSettingsService
+    .listModels(profile.id)
+    .find((candidate) => candidate.id === modelId || candidate.remoteModelId === modelId);
+  if (!model) throw new ProviderProfileValidationError('Provider model was not found.');
+  if (!model.enabled || model.unavailableAt) {
+    throw new ProviderProfileValidationError('Select an enabled and available media model.');
+  }
+  const adapter = adapterService
+    .catalog()
+    .adapters.find((candidate) => candidate.key === adapterKey);
+  if (!adapter) throw new AdapterNotFoundError(`Adapter ${adapterKey} was not found.`);
+  if (adapter.provider !== profile.providerType || adapter.model !== model.remoteModelId) {
+    throw new ProviderProfileValidationError(
+      'The selected provider, model, and adapter do not match.',
+    );
+  }
+  if (capability === 'image') {
+    if (!adapter.capability.endsWith('TO_IMAGE')) {
+      throw new ProviderProfileValidationError('The selected adapter is not an image generator.');
+    }
+    const supportsImage =
+      adapter.capability === 'REFERENCE_TO_IMAGE'
+        ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration === true
+        : model.capabilities.imageGeneration === true;
+    if (!supportsImage) {
+      throw new ProviderProfileValidationError(
+        'The selected model does not support this image adapter.',
+      );
+    }
+  } else {
+    if (!adapter.capability.endsWith('TO_VIDEO') || model.capabilities.videoGeneration !== true) {
+      throw new ProviderProfileValidationError(
+        'The selected model does not support this video adapter.',
+      );
+    }
+  }
+  const schemaRecord = appSettingsService.getAdapterSchemaRecord(adapter.key);
+  if (schemaRecord?.status === 'needs_confirmation') {
+    throw new AdapterSchemaValidationError(
+      'This adapter schema is awaiting confirmation and cannot be submitted yet.',
+    );
+  }
+  const providerRegion = resolveMediaProviderRegion(profile);
+  if (requestedRegion !== undefined && requestedRegion !== providerRegion) {
+    throw new ProviderProfileValidationError(
+      'The selected provider profile does not match the requested region.',
+    );
+  }
+  return { profile, model, adapter, providerRegion };
 }
 
 /**
@@ -1183,7 +1285,16 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           let storedPreference: ReturnType<
             ContentService['getConversationModelPreference']
           > | null = null;
-          if (!agentParams.providerProfileId && !agentParams.modelId && capability !== 'auto') {
+          // Media Provider/model selection is an explicit user decision. The
+          // Worker may validate a remembered selection when Desktop sends it
+          // explicitly, but must not select a media model from persistence.
+          if (
+            !agentParams.providerProfileId &&
+            !agentParams.modelId &&
+            capability !== 'auto' &&
+            capability !== 'image' &&
+            capability !== 'video'
+          ) {
             try {
               storedPreference = contentService.getConversationModelPreference({
                 conversationId: agentParams.conversationId,
@@ -1229,13 +1340,17 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           }
 
           if (capability === 'image' || capability === 'video') {
+            const selectedProfile = profiles.find(
+              (profile) => profile.id === selected.providerProfileId,
+            );
+            if (!selectedProfile) {
+              throw new ProviderProfileValidationError('Provider profile was not found.');
+            }
             const adapters = adapterService
               .catalog()
               .adapters.filter(
                 (adapter) =>
-                  adapter.provider ===
-                    profiles.find((profile) => profile.id === selected.providerProfileId)
-                      ?.providerType &&
+                  adapter.provider === selectedProfile.providerType &&
                   adapter.model === selected.remoteModelId &&
                   (capability === 'image'
                     ? adapter.capability.endsWith('TO_IMAGE')
@@ -1268,22 +1383,38 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             }
             const parameters = agentParams.parameters;
             if (capability === 'image') {
+              const mediaSelection = resolveMediaSelectionForRequest(
+                'image',
+                adapter.key,
+                selected.providerProfileId,
+                selected.modelId,
+              );
               const job = imageGenerationService.prepare({
                 shotId: agentParams.shotId,
                 adapterKey: adapter.key,
                 parameters,
-                providerProfileId: selected.providerProfileId,
-                modelId: selected.modelId,
+                providerProfileId: mediaSelection.profile.id,
+                modelId: mediaSelection.model.id,
+                conversationId: agentParams.conversationId,
+                originalPrompt: agentParams.prompt,
+                costNoticeAcknowledged: true,
               } satisfies ImageGenerationPrepareParams);
               result = { status: 'image_prepared', capability: 'image', job };
             } else {
+              const mediaSelection = resolveMediaSelectionForRequest(
+                'video',
+                adapter.key,
+                selected.providerProfileId,
+                selected.modelId,
+                agentParams.providerRegion,
+              );
               const job = videoGenerationService.prepare({
                 shotId: agentParams.shotId,
                 adapterKey: adapter.key,
                 parameters,
-                providerRegion: agentParams.providerRegion ?? 'global',
-                providerProfileId: selected.providerProfileId,
-                modelId: selected.remoteModelId,
+                providerRegion: mediaSelection.providerRegion,
+                providerProfileId: mediaSelection.profile.id,
+                modelId: mediaSelection.model.id,
                 conversationId: agentParams.conversationId,
                 originalPrompt: agentParams.prompt,
                 costNoticeAcknowledged: true,
@@ -1659,11 +1790,21 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'generation.draft.save':
           result = adapterService.saveDraft(params as unknown as GenerationDraftSaveParams);
           break;
-        case 'image.generate.prepare':
-          result = imageGenerationService.prepare(
-            params as unknown as ImageGenerationPrepareParams,
+        case 'image.generate.prepare': {
+          const imageParams = params as unknown as ImageGenerationPrepareParams;
+          const selection = resolveMediaSelectionForRequest(
+            'image',
+            imageParams.adapterKey,
+            imageParams.providerProfileId,
+            imageParams.modelId,
           );
+          result = imageGenerationService.prepare({
+            ...imageParams,
+            providerProfileId: selection.profile.id,
+            modelId: selection.model.id,
+          });
           break;
+        }
         case 'image.generate.complete':
           result = await imageGenerationService.complete({
             ...(params as unknown as ImageGenerationCompleteParams),
@@ -1689,13 +1830,25 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'image.generate.get':
           result = imageGenerationService.get(requireString(params, 'jobId'));
           break;
-        case 'video.generate.prepare':
+        case 'video.generate.prepare': {
+          const videoParams = params as unknown as VideoGenerationPrepareParams;
+          const selection = resolveMediaSelectionForRequest(
+            'video',
+            requireString(params, 'adapterKey'),
+            videoParams.providerProfileId,
+            videoParams.modelId,
+            videoParams.providerRegion,
+          );
           result = videoGenerationService.prepare({
-            ...(params as unknown as VideoGenerationPrepareParams),
+            ...videoParams,
             adapterKey: requireString(params, 'adapterKey'),
+            providerRegion: selection.providerRegion,
+            providerProfileId: selection.profile.id,
+            modelId: selection.model.id,
             assetKind: optionalVideoAssetKind(params, 'assetKind'),
           });
           break;
+        }
         case 'video.generate.attachTask':
           result = videoGenerationService.attachTask({
             jobId: requireString(params, 'jobId'),

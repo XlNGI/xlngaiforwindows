@@ -133,6 +133,7 @@ describe('ChatPanel attempt metadata', () => {
         onSendMessage={vi.fn()}
       />,
     );
+    expect(screen.getByRole('dialog', { name: '选择图片生成模型' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /测试图片模型/ }));
     expect(onSelect).toHaveBeenCalledWith('profile', 'model');
     expect(screen.getByText(/需要补充参数 schema/)).toBeInTheDocument();

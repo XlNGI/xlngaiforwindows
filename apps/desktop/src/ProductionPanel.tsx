@@ -198,6 +198,11 @@ function mediaSrcForAbsolutePath(absolutePath: string): string | undefined {
   }
 }
 
+function mediaSrcForAsset(assetId: string, absolutePath: string): string | undefined {
+  if (!('__TAURI_INTERNALS__' in window)) return `/worker-media/${encodeURIComponent(assetId)}`;
+  return mediaSrcForAbsolutePath(absolutePath);
+}
+
 export function ProductionPanel({
   expanded = false,
   capability,
@@ -508,9 +513,12 @@ export function ProductionPanel({
     }
     let active = true;
     setPreview((current) => (current?.assetId === selectedAssetId ? current : undefined));
-    void callWorker('asset.preview', { assetId: selectedAssetId })
-      .then((nextPreview) => {
-        if (active) setPreview(nextPreview);
+    void callWorker('asset.mediaSource', { assetId: selectedAssetId })
+      .then((source) => {
+        const dataUrl = mediaSrcForAsset(selectedAssetId, source.path);
+        if (active && dataUrl) {
+          setPreview({ assetId: selectedAssetId, dataUrl, contentType: source.contentType });
+        }
       })
       .catch((reason) => {
         if (active) setGenerationStatus(errorMessage(reason, '素材预览读取失败。'));
@@ -745,7 +753,23 @@ export function ProductionPanel({
       if (completed.status === 'succeeded' && savedAsset) {
         const nextAssets = await callWorker('asset.list', {});
         publishAssets(nextAssets, savedAsset.id);
-        if (completed.preview) setPreview(completed.preview);
+        if (completed.preview) {
+          setPreview(completed.preview);
+        } else {
+          await callWorker('asset.mediaSource', { assetId: savedAsset.id })
+            .then((source) => {
+              const dataUrl = mediaSrcForAsset(savedAsset.id, source.path);
+              if (dataUrl) {
+                setPreview({
+                  assetId: savedAsset.id,
+                  jobId: completed.id,
+                  dataUrl,
+                  contentType: source.contentType,
+                });
+              }
+            })
+            .catch(() => undefined);
+        }
       }
       setGenerationStatus(
         completed.status === 'succeeded'
