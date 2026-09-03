@@ -1168,6 +1168,7 @@ P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续�
 | 2026-08-28 | P3 | 完成 | 定义无凭据双向 envelope；Worker/Rust 单 writer、ID correlation、sequence/重复/跳号、2 MiB、背压、取消终态与 session 防串流；Rust 复用 Credential Manager、WinHTTP、SSE、超时和错误分类；Pi streamFunction 映射 text/thinking/tool/usage/terminal；固定 fixture、mock Provider、畸形/超大/乱序/重复/跨 session/脱敏与 Legacy 回归通过；JS/TS 466 项、Rust 65 项、typecheck、ESLint、Prettier、rustfmt、frozen install、production audit、许可证、SBOM、sidecar health、Tauri Release/NSIS 全绿 | 未使用真实外部 Provider 做人工调用；未启动正式 Pi Runtime、未接 UI、未实现 P4 plan-only、动态业务工具授权、完整性 follow-up；P4 未开始 | Codex |
 | 2026-08-28 | P4 | 完成 | plan-only 首轮仅暴露 `task.plan.submit`；Worker 冻结 Seedance、章节 scope、4 交付物及依赖图；按 ready 状态动态授权既有有界工具；事务化记录实体归属、deliverable 成功与下游解锁；`task.package.complete`、2 轮缺项 follow-up 和第三轮持久化失败门禁完成；Legacy 关键词意图保留但结构化计划路径不读取；遗漏、重复、依赖、提前完成、非法/不匹配平台、越权实体和重复完成回归通过；JS/TS 476 项、Rust 65 项、typecheck、ESLint、Prettier、rustfmt、build、frozen install、production audit、许可证、SBOM、sidecar health、Tauri Release/NSIS 全绿 | 未启动正式 Pi Runtime；未把 Pi 接真实业务工具执行链；未接 UI Runtime；未实现 Pi event 正式持久化；P5 未开始 | Codex |
 | 2026-09-03 | P5/P6 增量同步 | Pi 核心 Worker 工具编排、`conversation.runtime.start`、Desktop runtime owner/状态观察、取消/断线/重试/恢复基础 UX 已完成；媒体 Provider/model 显式选择、Worker 校验和任务快照边界已完成；当前仓库 Worker 294、Desktop 174 测试及 typecheck/format check 通过，提交 `c80f619` 已同步 `main` | Pi 仍默认受 short-drama feature flag 限制；独立 `conversation.runtime.subscribe`、所有项目会话统一 Pi、真实 Provider/Windows 端到端、性能预算和 P7 发布门禁未完成 | Codex |
+| 2026-09-03 | 全系统编排 P0 | 完成 | 与上层总方案同步冻结通用 Tool Registry、R0-R3、参数哈希一次性授权、Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐视频语句、区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；证据见 `code-traces/2026-09-03-agent-orchestration-p0-baseline.md` | 本文历史 P0-P4 不变；所有会话统一 Pi 属于上层 P1；生产策略接线、`submission_unknown`、项目级轮询和真实 Provider/Windows 验收仍未完成 | Codex |
 
 ## 19. P0 已确认项
 
@@ -1184,6 +1185,10 @@ P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续�
 | 计划策略 | 第一轮 `task.plan.submit` | 先冻结交付物再授权写工具 |
 | 写工具执行 | sequential | 避免 CAS 和依赖竞态 |
 | 自动修复 | 最多 2 轮 | 防止提前完成，同时控制成本 |
+| 工具风险 | R0-R3；Worker policy 只可提高限制 | R0 只读，R1 明确指令下本地可逆，R2 每次确认，R3 强确认或受保护 UI |
+| 确认授权 | 绑定 task、tool call、operation、arguments hash 和 project session 的一次性短期授权 | 参数变化、过期、重复使用和跨 session 均必须拒绝 |
+| Tool Result | 单结果 64 KiB，摘要 2,048 字符，集合 100 项 | 禁止凭据、授权句柄、绝对路径、Provider 原文和内联 Base64/Data URL |
+| 媒体状态 | Worker 权威状态机显式包含 `submission_unknown` | 提交结果不确定时不自动重试付费请求 |
 | Tool Call 上限 | 16 | 复用当前 Agent task 配额 |
 | 上线方式 | feature flag + opt-in | 可按会话回退 Legacy |
 | Pi Harness/Server/SQLite | 首期不使用 | 避开未完成 API 和第二事实源 |

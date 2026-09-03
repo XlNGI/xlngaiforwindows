@@ -157,7 +157,7 @@ export function inferUnifiedAgentCapability(prompt: string): UnifiedAgentCapabil
     return 'image';
   if (/(改写|重写|润色|总结|提取|分析|识别|描述|转写|翻译|提示词)/u.test(value)) return 'document';
   if (
-    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|生成(?:一段|一个|该|这个)?视频|制作(?:一段|一个|该|这个)?视频|创建(?:一段|一个|该|这个)?视频|输出视频|做成视频)/u.test(
+    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|(?:生成|制作|创建)[^。！？\n]{0,80}(?:的)?视频(?:[。！？!?]|$)|输出视频|做成视频)/u.test(
       value,
     )
   )

@@ -351,7 +351,9 @@ fn resolve_media_selection(
     };
     if let Some(requested_region) = provider_region.filter(|value| !value.is_empty()) {
         if requested_region != region {
-            return Err("Selected provider profile does not match the requested region".to_string());
+            return Err(
+                "Selected provider profile does not match the requested region".to_string(),
+            );
         }
     }
     let adapter_model = if provider_type == "unicompapi" {

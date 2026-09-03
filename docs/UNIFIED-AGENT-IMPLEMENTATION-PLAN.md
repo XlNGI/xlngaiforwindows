@@ -102,10 +102,21 @@
 
 ### 4.4 验证基线
 
-- [x] Desktop 测试通过：174 tests。
-- [x] Worker 测试通过：294 tests。
+- [x] Desktop 测试通过：175 tests。
+- [x] Worker 测试通过：295 tests。
+- [x] Contracts、Context、LLM、Generation Adapters、Persistence 合计 64 tests；全仓 JS/TS 共 534 tests。
+- [x] Tauri Rust 测试通过：71 tests。
 - [x] Contracts、Desktop、Worker TypeScript 检查通过。
-- [x] ESLint、Prettier、`git diff --check` 通过。
+- [x] ESLint、Prettier、rustfmt、`git diff --check` 通过。
+- [x] Windows sidecar smoke 与 NSIS Release 构建通过；大小、启动耗时和 SHA-256 见 [Agent 编排 P0 基线](./code-traces/2026-09-03-agent-orchestration-p0-baseline.md)。
+
+### 4.5 全系统 Agent 编排 P0 合同基线
+
+- [x] 冻结版本化 `AgentToolRegistryV1`、R0-R3 默认策略和只读并行/写入串行执行通道。
+- [x] 冻结绑定 `taskId + toolCallId + operation + argumentsHash + projectSessionId` 的确认与一次性授权合同。
+- [x] 冻结 64 KiB Tool Result 业务上限，以及凭据、授权、绝对路径、Provider 原文和内联媒体红线。
+- [x] 冻结媒体草稿、Provider/区域/模型/Adapter Schema 快照、`submission_unknown` 状态和 Provider 规范化结果合同。
+- [x] 视频生成语句双端路由、媒体区域快照和 Provider 提交异常已建立通过型回归；页面卸载停止当前页面调度器的已知缺陷已建立特征测试，实际迁移留在 P5。
 
 ## 5. 待完成阶段
 
@@ -358,3 +369,4 @@ adapter.schema.audit.list
 - [x] Preserved runtime image parameters separately from redacted SQLite job snapshots; local reference Data URLs are now available for the immediate Provider submission without persisting image bytes in project data.
 - [x] Desktop restores the project session automatically when the Worker sidecar restarts, preventing stale UI state from producing `No project is open.` during Agent/media submissions.
 - [x] Media model selection boundary verified: `agent.run` returns `needs_model_selection` when an image/video request has no explicit Provider/model, and direct image/video preparation rejects missing or partial selections; Worker never falls back to Agent or persisted media defaults (Worker 294 tests, Desktop 174 tests, Worker typecheck).
+- [x] P0 orchestration baseline completed: the exact “帮我生成龙在天空翱翔的视频” request now routes consistently on Desktop and Worker; video task snapshots include the selected Provider region; thrown Provider submissions terminalize the local job; versioned risk/confirmation/Tool Result/media contracts and Windows build evidence are recorded (Worker 295 tests, Desktop 175 tests, full JS/TS 534 tests, Rust 71 tests).

@@ -3,7 +3,7 @@
 版本：1.0  
 日期：2026-09-02  
 最近同步：2026-09-03  
-状态：实施中（P0 基线部分完成；媒体模型选择核心已完成；Pi P5/P6 核心接线已完成，统一收口与生产验收待推进）  
+状态：实施中（P0 已完成；媒体模型选择核心已完成；下一阶段为 P1 统一会话 Runtime）  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM、Generation Adapters
 
 > **方案结论** 会话是面向整个应用的统一人工智能助手，不再按“普通聊天、通用模式、专用模式”划分运行方式。用户在会话中选择一个支持工具调用的推理模型，之后由 Pi Agent 理解自然语言、规划步骤、选择受控业务工具并连续执行；Worker 始终负责权限、确认、状态机、幂等、事务和审计，Tauri Native 始终负责凭据与 Provider 网络边界。图片、视频、小说、文档、素材和项目操作均逐步接入同一个 Agent 工具面。
@@ -394,11 +394,13 @@ apps/desktop/src/runtime/
 ### P0：合同冻结与回归基线
 
 - [x] 将本文决策同步到 `UNIFIED-AGENT-IMPLEMENTATION-PLAN.md` 和 `PI-CONVERSATION-RUNTIME-INTEGRATION-PLAN.md`，明确“仅 short-drama”只是当前灰度限制，不是最终产品边界。
-- [ ] 建立当前截图语句、媒体区域、页面外轮询和提交异常的失败回归测试。
-- [ ] 冻结工具风险矩阵、确认协议、统一状态机和 Provider 规范化合同。
-- [ ] 记录现有全仓测试、启动时间、sidecar 大小和安装包基线。
+- [x] 建立当前截图语句、媒体区域、页面外轮询和提交异常的失败回归测试。
+- [x] 冻结工具风险矩阵、确认协议、统一状态机和 Provider 规范化合同。
+- [x] 记录现有全仓测试、启动时间、sidecar 大小和安装包基线。
 
 完成门禁：测试能够稳定复现已知缺陷；架构评审确认没有第二事实源、凭据泄漏或素材库规则变化。
+
+P0 证据：[Agent 编排 P0 合同与回归基线](./code-traces/2026-09-03-agent-orchestration-p0-baseline.md)。页面卸载测试当前用于稳定刻画 `ProductionPanel` 持有调度器的已知缺陷；调度器迁移与页面外持续运行仍按顺序在 P5 完成，P0 不提前引入第二个后台 Runtime。
 
 ### P1：统一会话 Pi Runtime
 
@@ -618,12 +620,11 @@ correlationId
 
 ## 18. 下一步
 
-当前处于 **P0 收尾、P3 媒体选择核心已完成、Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
+当前处于 **P0 已完成、P3 媒体选择核心已完成、Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
 
-1. 补齐 P0 剩余的失败回归、工具风险/确认协议和质量性能安装包基线记录；
-2. 进入 P1，移除 Pi 仅 short-drama 的实现限制，让所有项目会话使用同一 Agent Runtime，并保留 Legacy 回退开关；
-3. 进入 P2/P4，统一 Tool Registry、风险授权、付费提交和 `submission_unknown` 状态机；
-4. 将视频轮询和媒体提交收口到项目级后台运行时，再进行 P7 的真实 Provider、Windows、迁移和发布验收。
+1. 进入 P1，移除 Pi 仅 short-drama 的实现限制，让所有项目会话使用同一 Agent Runtime，并保留 Legacy 回退开关；
+2. 进入 P2/P4，将 P0 冻结的 Tool Registry、风险授权、付费提交和 `submission_unknown` 合同接入生产路径；
+3. 将视频轮询和媒体提交收口到项目级后台运行时，再进行 P7 的真实 Provider、Windows、迁移和发布验收。
 
 > **冻结原则** Agent 可以用自然语言发起整个系统的操作，但模型永远不是权限、状态和数据事实源；付费与高风险动作必须确认，Provider 凭据永不进入 Agent 边界，成功媒体必须先完成本地落盘再进入素材库。
 
@@ -632,3 +633,4 @@ correlationId
 | 日期 | 状态 | 证据 | 未完成边界 |
 |---|---|---|---|
 | 2026-09-03 | 计划状态与实现同步 | 提交 `c80f619` 已同步 `main`；媒体模型显式选择、Worker 二次校验、任务快照和 Base64 防护已完成；Worker 294、Desktop 174 测试及 typecheck/format check 通过 | Pi 尚未覆盖所有会话；媒体提交/轮询尚未完全迁移到项目级后台运行时；真实 Provider、Windows 断网/重启/性能和发布门禁未完成 |
+| 2026-09-03 | P0 完成 | 冻结 `AgentToolRegistryV1`、R0-R3、一次性确认授权、64 KiB Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐精确视频语句、Provider 区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；详见 P0 基线证据 | P1 尚未统一所有会话；P2/P4 尚未接入通用策略与 `submission_unknown` 实现；P5 尚未迁移页面调度器；真实 Provider 与 Windows 安装/升级/卸载仍待 P7 |

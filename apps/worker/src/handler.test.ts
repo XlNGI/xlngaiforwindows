@@ -25,6 +25,7 @@ describe('inferUnifiedAgentCapability', () => {
     expect(inferUnifiedAgentCapability('改写为 AI 视频生成提示词')).toBe('document');
     expect(inferUnifiedAgentCapability('分析这个视频附件')).toBe('document');
     expect(inferUnifiedAgentCapability('制作一个视频')).toBe('video');
+    expect(inferUnifiedAgentCapability('帮我生成龙在天空翱翔的视频')).toBe('video');
     expect(inferUnifiedAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferUnifiedAgentCapability('生成角色三视图提示词')).toBe('document');
   });

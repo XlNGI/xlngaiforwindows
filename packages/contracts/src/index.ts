@@ -827,6 +827,202 @@ export interface DocumentPublicationInfo {
   publishedAt: string;
 }
 
+export const AGENT_TOOL_RISK_LEVELS = ['R0', 'R1', 'R2', 'R3'] as const;
+export type AgentToolRiskLevel = (typeof AGENT_TOOL_RISK_LEVELS)[number];
+export type AgentToolConfirmationPolicy =
+  'none' | 'explicit-user-intent' | 'always' | 'protected-ui';
+export type AgentToolExecutionLane = 'parallel-readonly' | 'serial';
+
+export interface AgentToolRiskPolicy {
+  riskLevel: AgentToolRiskLevel;
+  description: string;
+  confirmationPolicy: AgentToolConfirmationPolicy;
+}
+
+/** Frozen P0 defaults. Worker policy may only make a registered tool more restrictive. */
+export const AGENT_TOOL_RISK_POLICIES = {
+  R0: {
+    riskLevel: 'R0',
+    description: 'Read-only operation without external side effects.',
+    confirmationPolicy: 'none',
+  },
+  R1: {
+    riskLevel: 'R1',
+    description: 'Locally reversible write requested explicitly by the user.',
+    confirmationPolicy: 'explicit-user-intent',
+  },
+  R2: {
+    riskLevel: 'R2',
+    description: 'Paid external call or important state change.',
+    confirmationPolicy: 'always',
+  },
+  R3: {
+    riskLevel: 'R3',
+    description: 'Irreversible, destructive, or security-sensitive operation.',
+    confirmationPolicy: 'protected-ui',
+  },
+} as const satisfies Record<AgentToolRiskLevel, AgentToolRiskPolicy>;
+
+export interface AgentToolRegistryEntryV1 {
+  version: 1;
+  name: string;
+  riskLevel: AgentToolRiskLevel;
+  confirmationPolicy: AgentToolConfirmationPolicy;
+  executionLane: AgentToolExecutionLane;
+  inputSchema: Record<string, unknown>;
+  resultSchema: Record<string, unknown>;
+}
+
+/** Task-scoped registry snapshot. It is policy output, not model-provided authority. */
+export interface AgentToolRegistryV1 {
+  version: 1;
+  taskId: string;
+  projectSessionId: string;
+  tools: AgentToolRegistryEntryV1[];
+  createdAt: string;
+}
+
+export interface AgentConfirmationRequestV1 {
+  version: 1;
+  confirmationId: string;
+  taskId: string;
+  toolCallId: string;
+  operation: string;
+  argumentsHash: string;
+  projectSessionId: string;
+  riskLevel: Extract<AgentToolRiskLevel, 'R2' | 'R3'>;
+  summary: string;
+  affectedEntities: Array<{ type: string; id: string; label?: string }>;
+  costNotice?: string;
+  draftVersion?: number;
+  expiresAt: string;
+}
+
+/** Opaque, short-lived grant. The handle must never enter Provider messages or durable snapshots. */
+export interface AgentToolAuthorizationGrantV1 {
+  version: 1;
+  authorizationHandle: string;
+  confirmationId: string;
+  taskId: string;
+  toolCallId: string;
+  operation: string;
+  argumentsHash: string;
+  projectSessionId: string;
+  singleUse: true;
+  expiresAt: string;
+}
+
+export const AGENT_TOOL_RESULT_LIMITS = {
+  maxJsonBytes: 64 * 1024,
+  maxSummaryCharacters: 2_048,
+  maxCollectionItems: 100,
+} as const;
+
+/** Keys that must not occur anywhere in a model-visible Tool Result. */
+export const AGENT_TOOL_RESULT_FORBIDDEN_FIELDS = [
+  'authorization',
+  'authorizationHandle',
+  'apiKey',
+  'token',
+  'secret',
+  'credential',
+  'headers',
+  'absolutePath',
+  'localPath',
+  'sqliteHandle',
+  'providerRawResponse',
+  'base64',
+  'dataUrl',
+] as const;
+
+export type MediaGenerationTaskState =
+  | 'draft'
+  | 'awaiting_confirmation'
+  | 'submitting'
+  | 'polling'
+  | 'submission_unknown'
+  | 'downloading'
+  | 'validating'
+  | 'committing'
+  | 'succeeded'
+  | 'failed'
+  | 'timed_out'
+  | 'cancelled';
+
+export const MEDIA_GENERATION_TERMINAL_STATES = [
+  'succeeded',
+  'failed',
+  'timed_out',
+  'cancelled',
+] as const satisfies readonly MediaGenerationTaskState[];
+
+/** Allowed forward transitions for the Worker-owned media state machine. */
+export const MEDIA_GENERATION_ALLOWED_TRANSITIONS = {
+  draft: ['awaiting_confirmation', 'cancelled'],
+  awaiting_confirmation: ['submitting', 'failed', 'cancelled'],
+  submitting: ['polling', 'submission_unknown', 'downloading', 'validating', 'failed', 'cancelled'],
+  polling: ['downloading', 'validating', 'failed', 'timed_out', 'cancelled'],
+  submission_unknown: ['polling', 'downloading', 'validating', 'failed', 'cancelled'],
+  downloading: ['validating', 'failed', 'cancelled'],
+  validating: ['committing', 'failed'],
+  committing: ['succeeded', 'failed'],
+  succeeded: [],
+  failed: [],
+  timed_out: [],
+  cancelled: [],
+} as const satisfies Readonly<
+  Record<MediaGenerationTaskState, readonly MediaGenerationTaskState[]>
+>;
+
+export type MediaInputReferenceV1 =
+  | { type: 'asset'; assetId: string }
+  | { type: 'controlled_temporary_file'; handle: string; contentType: string };
+
+export interface MediaProviderSelectionSnapshotV1 {
+  providerProfileId: string;
+  providerType: string;
+  providerRegion: VideoProviderRegion;
+  modelId: string;
+  remoteModelId: string;
+  adapterKey: string;
+  adapterSchemaVersion: number;
+}
+
+/** Durable media draft. Parameters contain references only, never media bytes or secrets. */
+export interface MediaGenerationDraftV1 {
+  version: 1;
+  draftId: string;
+  draftVersion: number;
+  projectId: string;
+  projectSessionId: string;
+  conversationId: string;
+  capability: 'image' | 'video';
+  state: Extract<MediaGenerationTaskState, 'draft' | 'awaiting_confirmation'>;
+  provider: MediaProviderSelectionSnapshotV1;
+  parameters: AdapterParameters;
+  inputs: MediaInputReferenceV1[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type NormalizedMediaOutput =
+  | { type: 'remote_url'; url: string }
+  | { type: 'authenticated_content'; providerTaskId: string }
+  | { type: 'native_temporary_file'; handle: string };
+
+export type NormalizedMediaTaskState =
+  | { state: 'queued' | 'running'; progress?: number; retryAfterMs?: number }
+  | { state: 'succeeded'; output: NormalizedMediaOutput }
+  | { state: 'failed'; code?: string; message: string; retryable: boolean }
+  | { state: 'cancelled' };
+
+export interface MediaTaskAcceptedV1 {
+  version: 1;
+  accepted: true;
+  taskId: string;
+  state: Extract<MediaGenerationTaskState, 'submitting' | 'polling'>;
+}
+
 export type AgentTaskType =
   | 'document-create'
   | 'document-update'

@@ -31,6 +31,7 @@ describe('inferAgentCapability', () => {
 
   it('reserves media capabilities for explicit generation actions', () => {
     expect(inferAgentCapability('生成一个视频')).toBe('video');
+    expect(inferAgentCapability('帮我生成龙在天空翱翔的视频')).toBe('video');
     expect(inferAgentCapability('生成一张角色图')).toBe('image');
     expect(inferAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferAgentCapability('生成角色三视图提示词')).toBe('document');

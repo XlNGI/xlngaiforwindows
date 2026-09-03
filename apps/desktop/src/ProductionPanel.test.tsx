@@ -1118,6 +1118,44 @@ describe('ProductionPanel', () => {
     ).not.toHaveLength(0);
   });
 
+  it('terminalizes a prepared video job when Provider submission throws', async () => {
+    vi.mocked(submitVideoProviderTask).mockRejectedValueOnce(new Error('network disconnected'));
+    mockWorker((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
+      if (method === 'video.generate.fail') {
+        return Promise.resolve({
+          ...videoJob('failed'),
+          error: (params as { message: string }).message,
+        });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    fireEvent.change(await screen.findByLabelText('首帧 URL'), {
+      target: { value: 'https://example.invalid/start.png' },
+    });
+    fireEvent.change(screen.getByLabelText('尾帧 URL'), {
+      target: { value: 'https://example.invalid/end.png' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('video.generate.fail', {
+        jobId: 'video-job',
+        failureKind: 'transport',
+        message: 'network disconnected',
+      }),
+    );
+    expect(await screen.findByText('network disconnected')).toBeInTheDocument();
+    expect(screen.queryByText('视频任务已提交，正在本地查询。')).not.toBeInTheDocument();
+  });
+
   it('stores dropped asset references in the draft and resolves them for submission', async () => {
     vi.mocked(submitVideoProviderTask).mockResolvedValue({
       status: 200,

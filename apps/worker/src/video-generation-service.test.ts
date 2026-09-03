@@ -84,6 +84,7 @@ describe('VideoGenerationService', () => {
         capability: 'video',
         adapterKey: 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2',
         schemaVersion: 1,
+        providerRegion: 'cn',
         parameters: { images: ['local-image://omitted', 'local-image://omitted'] },
       });
     });
@@ -163,6 +164,23 @@ describe('VideoGenerationService', () => {
           .prepare('SELECT provider_task_id, status FROM generation_jobs WHERE id = ?')
           .get(job.id),
       ).toMatchObject({ provider_task_id: 'provider-task-1', status: 'polling' });
+    });
+  });
+
+  it('freezes the selected Provider profile, region, and model in the task snapshot', async () => {
+    const { project, service } = await setup();
+    const job = prepare(service);
+
+    project.access(false, (database) => {
+      const row = database
+        .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id = ?')
+        .get(job.id) as { task_snapshot_json: string };
+      expect(JSON.parse(row.task_snapshot_json)).toMatchObject({
+        capability: 'video',
+        providerProfileId: '11111111-1111-4111-8111-111111111111',
+        providerRegion: 'global',
+        modelId: 'viduq3-pro',
+      });
     });
   });
 

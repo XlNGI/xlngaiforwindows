@@ -143,6 +143,7 @@ export class VideoGenerationService {
           schemaVersion: adapter.schemaVersion,
           schemaSource: 'official-adapter',
           providerProfileId,
+          providerRegion,
           modelId,
           conversationId: params.conversationId,
           originalPrompt: params.originalPrompt,

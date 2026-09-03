@@ -121,7 +121,7 @@ describe('VideoPollingScheduler', () => {
     expect(onTerminal).toHaveBeenCalledWith(timedOut);
   });
 
-  it('isolates an in-flight result after disposal', async () => {
+  it('characterizes the P0 defect: panel disposal stops an in-flight page-owned poll', async () => {
     let resolvePoll: (value: { status: number; body: unknown }) => void = () => undefined;
     const pendingPoll = new Promise<{ status: number; body: unknown }>((resolve) => {
       resolvePoll = resolve;

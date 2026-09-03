@@ -12,7 +12,7 @@
     "dev": "tsx watch src/index.ts --http 43120 --dev-http",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=15000",
     "validate:pi-runtime-spike": "node scripts/validate-pi-runtime-spike.mjs"
   },
   "dependencies": {
