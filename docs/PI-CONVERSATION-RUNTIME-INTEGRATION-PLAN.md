@@ -2,7 +2,8 @@
 
 版本：0.6  
 日期：2026-08-28  
-状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成已完成，仍有接线与生产审计边界  
+最近同步：2026-09-03  
+状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成和 P6 基础 Desktop/Runtime 接线已完成，仍有统一会话扩展与生产审计边界  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档规划如何选择性引入 `@earendil-works/pi-agent-core` 的低层 Agent 循环，改造当前会话中的模型工具选择、多工具连续执行和多交付物完整性治理。本文档本身不授权直接修改代码；用户已于 2026-08-28 分别授权执行 P1、P2、P3、P4，各阶段仍必须按顺序实施并在完成后记录验证证据。
@@ -1154,6 +1155,8 @@ git diff --check
 - [ ] P6 Desktop、恢复与可靠性
 - [ ] P7 灰度、文档与生产门禁
 
+P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续保持未完成，原因是独立 runtime IPC、所有会话统一接入、真实 Windows 多窗口/断网/慢首 Token 和性能预算等退出门禁尚未全部通过。
+
 ### 18.3 实施与验证记录
 
 | 日期 | 阶段 | 状态 | 实现/验证证据 | 未验证边界 | 执行人 |
@@ -1164,14 +1167,16 @@ git diff --check
 | 2026-08-28 | P2 | 完成 | 定义 Pi 无关 Runtime/Router、默认关闭的 Pi feature flag、版本化 Task Plan/Deliverable 合同与稳定错误码；Schema v31 持久化 plan/deliverable、项目归属和状态机；从冻结短剧 task snapshot 注入并校验 selected chapter scope；迁移失败回滚、幂等、未知/权威字段、跨项目、循环依赖、状态与默认 Legacy 路径通过；JS/TS 456 项、Rust 61 项、typecheck、ESLint、Prettier、frozen install、production audit、许可证、SBOM、正式 sidecar、Tauri Release/NSIS 全绿 | 未启动 Pi Runtime；未连接真实 Provider；未实现 Worker↔Rust 双向 Bridge、生产工具动态授权、完整性 follow-up 或 UI；P3 未开始 | Codex |
 | 2026-08-28 | P3 | 完成 | 定义无凭据双向 envelope；Worker/Rust 单 writer、ID correlation、sequence/重复/跳号、2 MiB、背压、取消终态与 session 防串流；Rust 复用 Credential Manager、WinHTTP、SSE、超时和错误分类；Pi streamFunction 映射 text/thinking/tool/usage/terminal；固定 fixture、mock Provider、畸形/超大/乱序/重复/跨 session/脱敏与 Legacy 回归通过；JS/TS 466 项、Rust 65 项、typecheck、ESLint、Prettier、rustfmt、frozen install、production audit、许可证、SBOM、sidecar health、Tauri Release/NSIS 全绿 | 未使用真实外部 Provider 做人工调用；未启动正式 Pi Runtime、未接 UI、未实现 P4 plan-only、动态业务工具授权、完整性 follow-up；P4 未开始 | Codex |
 | 2026-08-28 | P4 | 完成 | plan-only 首轮仅暴露 `task.plan.submit`；Worker 冻结 Seedance、章节 scope、4 交付物及依赖图；按 ready 状态动态授权既有有界工具；事务化记录实体归属、deliverable 成功与下游解锁；`task.package.complete`、2 轮缺项 follow-up 和第三轮持久化失败门禁完成；Legacy 关键词意图保留但结构化计划路径不读取；遗漏、重复、依赖、提前完成、非法/不匹配平台、越权实体和重复完成回归通过；JS/TS 476 项、Rust 65 项、typecheck、ESLint、Prettier、rustfmt、build、frozen install、production audit、许可证、SBOM、sidecar health、Tauri Release/NSIS 全绿 | 未启动正式 Pi Runtime；未把 Pi 接真实业务工具执行链；未接 UI Runtime；未实现 Pi event 正式持久化；P5 未开始 | Codex |
+| 2026-09-03 | P5/P6 增量同步 | Pi 核心 Worker 工具编排、`conversation.runtime.start`、Desktop runtime owner/状态观察、取消/断线/重试/恢复基础 UX 已完成；媒体 Provider/model 显式选择、Worker 校验和任务快照边界已完成；当前仓库 Worker 294、Desktop 174 测试及 typecheck/format check 通过，提交 `c80f619` 已同步 `main` | Pi 仍默认受 short-drama feature flag 限制；独立 `conversation.runtime.subscribe`、所有项目会话统一 Pi、真实 Provider/Windows 端到端、性能预算和 P7 发布门禁未完成 | Codex |
 
 ## 19. P0 已确认项
 
-以下推荐默认值已随用户授权执行 P1 确认；后续如需修改，必须显式更新本文：
+以下推荐默认值已随用户授权执行 P1 确认；后续如需修改，必须显式更新本文。需要特别区分：当前实现的灰度范围不等于最终产品边界。
 
 | 决策 | 确认值 | 影响 |
 |---|---|---|
-| 首期业务范围 | 仅 short-drama | 控制回归面，直接解决多意图需求 |
+| 当前 Pi 灰度范围 | short-drama opt-in；document/novel-writing 继续 Legacy | 控制回归面；这是过渡性实现限制，不是最终产品范围 |
+| 最终产品范围 | 所有项目会话进入统一 Agent Runtime | 用户不区分通用/专用模式，由 Agent 通过受控工具完成系统业务 |
 | Pi 版本 | 精确固定 0.84.3 | 可复现；升级需单独评审 |
 | Runtime owner | Worker | 不受 React 窗口生命周期影响 |
 | Provider owner | Tauri Rust | 凭据不进入 Node |

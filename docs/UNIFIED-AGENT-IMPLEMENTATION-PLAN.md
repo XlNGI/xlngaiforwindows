@@ -2,7 +2,8 @@
 
 版本：1.0  
 日期：2026-08-31  
-状态：实施中  
+最近同步：2026-09-03  
+状态：实施中（媒体模型选择与任务快照核心已完成；统一 Runtime、后台任务收口和发布验收待完成）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Generation Adapters、Provider Native Bridge
 
 ## 1. 文档目的
@@ -101,8 +102,8 @@
 
 ### 4.4 验证基线
 
-- [x] Desktop 测试通过：167 tests。
-- [x] Worker 测试通过：287 tests。
+- [x] Desktop 测试通过：174 tests。
+- [x] Worker 测试通过：294 tests。
 - [x] Contracts、Desktop、Worker TypeScript 检查通过。
 - [x] ESLint、Prettier、`git diff --check` 通过。
 
@@ -307,15 +308,15 @@ adapter.schema.audit.list
 7. 统一状态 UI、错误处理和旧入口降级。
 8. 全量测试、迁移验证和发布验收。
 
-## 10. 当前下一步
+## 10. 当前状态与下一步
 
-阶段 A 的查询、提议、确认、审计和回滚已经完成，阶段 B 的项目级会话模型偏好基础能力也已接通。下一步按顺序推进：
+阶段 A 的查询、提议、确认、审计和回滚、阶段 B 的项目级会话模型偏好基础能力，以及阶段 C 的图片/视频任务快照和生命周期事件已经接通。当前还需要：
 
-1. 将 schema 维护操作纳入受控 Agent tool loop，并补齐高风险变更的对话确认体验。
-2. 为图片/视频任务冻结模型、适配器、schema 和参数快照。
-3. 将模型偏好来源和确认记录绑定到任务快照，并在 Worker 重启后按快照恢复。
-4. 收口统一任务状态、错误提示和媒体结果入口。
-## 11. Latest implementation status (2026-09-01)
+1. 为已创建任务补齐模型偏好来源和用户确认记录的完整 provenance；
+2. 收口统一任务状态、错误提示和媒体结果入口，并将媒体提交/轮询逐步迁移到项目级后台运行时；
+3. 将所有项目会话统一接入 Pi Runtime，保留开发期 Legacy 回退开关；
+4. 完成真实 Provider、Windows 重启/断网、多窗口、性能和发布门禁验收。
+## 11. Latest implementation status (2026-09-03)
 
 - [x] Added `adapter.schema.propose`, `adapter.schema.confirm`, `adapter.schema.rollback`, and `adapter.schema.audit.list` contracts and IPC routes.
 - [x] Added descriptor validation, required-field checks, HTTPS endpoint checks, and malformed-schema protection.

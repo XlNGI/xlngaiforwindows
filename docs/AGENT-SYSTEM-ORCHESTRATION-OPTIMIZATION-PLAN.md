@@ -2,7 +2,8 @@
 
 版本：1.0  
 日期：2026-09-02  
-状态：已确认，待实施  
+最近同步：2026-09-03  
+状态：实施中（P0 基线部分完成；媒体模型选择核心已完成；Pi P5/P6 核心接线已完成，统一收口与生产验收待推进）  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM、Generation Adapters
 
 > **方案结论** 会话是面向整个应用的统一人工智能助手，不再按“普通聊天、通用模式、专用模式”划分运行方式。用户在会话中选择一个支持工具调用的推理模型，之后由 Pi Agent 理解自然语言、规划步骤、选择受控业务工具并连续执行；Worker 始终负责权限、确认、状态机、幂等、事务和审计，Tauri Native 始终负责凭据与 Provider 网络边界。图片、视频、小说、文档、素材和项目操作均逐步接入同一个 Agent 工具面。
@@ -72,6 +73,15 @@
 6. 视频轮询器依赖 `ProductionPanel` 生命周期；停留在素材库或文档页面时，新任务不会立即开始轮询。
 7. 聊天视频提交异常未统一收口，可能留下没有 Provider task ID 的 `pending` 任务。
 8. Desktop、Worker、Native 分别承担部分媒体编排，造成重复判断、参数漂移和错误恢复语义不一致。
+
+### 3.3 已完成实现基线（2026-09-03）
+
+- Agent 会话模型与图片/视频媒体模型已分离；媒体请求不会使用 Agent LLM 或持久化偏好静默选模。
+- `agent.run` 在图片/视频缺少明确 Provider/model 时返回 `needs_model_selection`；Desktop 展示兼容候选，用户选择后才继续。
+- Worker 对 Provider profile、模型、Adapter、能力、区域和 Schema 做二次校验，并将规范化选择写入任务快照。
+- 图片/视频任务已具备参数校验、失败终止、素材落盘、视频轮询恢复、生命周期事件和本地优先素材库处理。
+- Pi Runtime 已完成 Worker 侧核心工具编排与基础 Desktop owner/订阅接线，但仍受短剧 feature flag 限制，尚未成为所有会话的默认 Runtime。
+- 最新验证基线：Worker 294 项测试、Desktop 174 项测试、全仓 TypeScript typecheck、Prettier 和 `git diff --check` 通过。
 
 ## 4. 目标架构
 
@@ -383,7 +393,7 @@ apps/desktop/src/runtime/
 
 ### P0：合同冻结与回归基线
 
-- [ ] 将本文决策同步到 `UNIFIED-AGENT-IMPLEMENTATION-PLAN.md` 和 `PI-CONVERSATION-RUNTIME-INTEGRATION-PLAN.md`，显式废止“Pi 首期仅 short-drama”的产品边界。
+- [x] 将本文决策同步到 `UNIFIED-AGENT-IMPLEMENTATION-PLAN.md` 和 `PI-CONVERSATION-RUNTIME-INTEGRATION-PLAN.md`，明确“仅 short-drama”只是当前灰度限制，不是最终产品边界。
 - [ ] 建立当前截图语句、媒体区域、页面外轮询和提交异常的失败回归测试。
 - [ ] 冻结工具风险矩阵、确认协议、统一状态机和 Provider 规范化合同。
 - [ ] 记录现有全仓测试、启动时间、sidecar 大小和安装包基线。
@@ -414,9 +424,11 @@ apps/desktop/src/runtime/
 
 - [ ] 实现媒体候选解析服务，按输入能力、附件、Adapter Schema、Provider 状态和项目权限列出可用图片/视频模型。
 - [ ] 增加 `media.image.prepare`、`media.video.prepare` 和 `media.task.get`。
-- [ ] 用户明确选择 Provider/媒体模型后，由 Worker 校验 provider type、region、base URL 类别和 remote model，并冻结到草稿/任务快照；不得静默替换。
-- [ ] 通过 Agent 追问缺失参数，不重复要求用户选择会话 Agent 模型。
-- [ ] 支持素材 ID 输入和附件转受控临时引用，不把 Base64 放入任务快照或 Tool Result。
+- [x] 用户明确选择 Provider/媒体模型后，由 Worker 校验 provider type、region、base URL 类别和 remote model，并冻结到草稿/任务快照；不得静默替换。
+- [x] 通过 Agent 追问缺失参数，不重复要求用户选择会话 Agent 模型。
+- [x] 支持素材 ID 输入和附件转受控临时引用，不把 Base64 放入任务快照或 Tool Result。
+
+当前实现通过 `agent.run` 与既有 `image.generate.prepare`/`video.generate.prepare` 兼容入口完成媒体选择核心；独立 `media.*` IPC 和统一媒体编排服务仍属于后续 P3/P4 收口工作。
 
 完成门禁：“帮我生成龙在天空翱翔的视频”可由已选会话模型调用视频 prepare 工具，展示兼容的媒体 Provider/模型供用户选择，并返回费用确认草稿；未选择媒体模型时不得提交 Provider。
 
@@ -606,12 +618,17 @@ correlationId
 
 ## 18. 下一步
 
-当前下一任务是 **P0：合同冻结与回归基线**。在开始功能代码改造前，应先：
+当前处于 **P0 收尾、P3 媒体选择核心已完成、Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
 
-1. 将本文已确认决策同步到现有统一 Agent 与 Pi Runtime 实施文档；
-2. 为本次发现的四条关键失败链路增加会失败的回归测试；
-3. 定义统一 Tool Registry、风险分级、确认授权、媒体草稿和状态机 Contracts；
-4. 记录当前质量、性能和安装包基线；
-5. 完成 P0 评审后，再进入 P1 的统一会话 Pi Runtime 改造。
+1. 补齐 P0 剩余的失败回归、工具风险/确认协议和质量性能安装包基线记录；
+2. 进入 P1，移除 Pi 仅 short-drama 的实现限制，让所有项目会话使用同一 Agent Runtime，并保留 Legacy 回退开关；
+3. 进入 P2/P4，统一 Tool Registry、风险授权、付费提交和 `submission_unknown` 状态机；
+4. 将视频轮询和媒体提交收口到项目级后台运行时，再进行 P7 的真实 Provider、Windows、迁移和发布验收。
 
 > **冻结原则** Agent 可以用自然语言发起整个系统的操作，但模型永远不是权限、状态和数据事实源；付费与高风险动作必须确认，Provider 凭据永不进入 Agent 边界，成功媒体必须先完成本地落盘再进入素材库。
+
+## 19. 状态同步记录
+
+| 日期 | 状态 | 证据 | 未完成边界 |
+|---|---|---|---|
+| 2026-09-03 | 计划状态与实现同步 | 提交 `c80f619` 已同步 `main`；媒体模型显式选择、Worker 二次校验、任务快照和 Base64 防护已完成；Worker 294、Desktop 174 测试及 typecheck/format check 通过 | Pi 尚未覆盖所有会话；媒体提交/轮询尚未完全迁移到项目级后台运行时；真实 Provider、Windows 断网/重启/性能和发布门禁未完成 |
