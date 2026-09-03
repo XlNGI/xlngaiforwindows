@@ -4,6 +4,7 @@ import {
   AGENT_TOOL_RESULT_LIMITS,
   AGENT_TOOL_RISK_LEVELS,
   AGENT_TOOL_RISK_POLICIES,
+  inferUnifiedAgentCapabilityHint,
   IPC_PROTOCOL_VERSION,
   MEDIA_GENERATION_ALLOWED_TRANSITIONS,
   MEDIA_GENERATION_TERMINAL_STATES,
@@ -38,6 +39,20 @@ describe('IPC protocol', () => {
 
     expect(cacheRequest.params).toEqual({});
     expect(diagnosticRequest.params.destinationRoot).toBe('D:\\Support');
+  });
+});
+
+describe('unified Agent capability hint', () => {
+  it.each([
+    ['普通问答', 'text'],
+    ['搜索最近发布的模型资料', 'research'],
+    ['帮我生成龙在天空翱翔的视频', 'video'],
+    ['直接生成一张角色三视图', 'image'],
+    ['生成角色三视图提示词', 'document'],
+    ['分析附件中的视频并总结', 'document'],
+    ['续写小说下一章', 'document'],
+  ] as const)('classifies %s as a non-authoritative %s hint', (prompt, capability) => {
+    expect(inferUnifiedAgentCapabilityHint(prompt)).toBe(capability);
   });
 });
 

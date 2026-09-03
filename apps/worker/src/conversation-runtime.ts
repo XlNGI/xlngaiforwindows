@@ -18,7 +18,7 @@ export interface ConversationRuntimeStartResult {
   taskId: string;
 }
 
-/** Pi-independent runtime boundary. Concrete Pi execution is intentionally deferred past P2. */
+/** Shared runtime boundary for the Pi owner and the development fallback. */
 export interface ConversationRuntime {
   readonly kind: ConversationRuntimeKind;
   start(request: ConversationRuntimeStartRequest): Promise<ConversationRuntimeStartResult>;
@@ -29,10 +29,7 @@ export interface ConversationRuntimeRouterOptions {
   piRuntime?: ConversationRuntime;
 }
 
-/**
- * Routes only short-drama tasks to an explicitly enabled Pi runtime. All other
- * modes and the default configuration remain on the existing Legacy runtime.
- */
+/** Routes every conversation workflow to Pi unless the development fallback is enabled. */
 export class ConversationRuntimeRouter {
   private readonly piEnabled: boolean;
   private readonly piRuntime?: ConversationRuntime;
@@ -47,12 +44,13 @@ export class ConversationRuntimeRouter {
     if (options.piRuntime && options.piRuntime.kind !== 'pi') {
       throw new Error('The configured Pi runtime must use the pi runtime kind.');
     }
-    this.piEnabled = options.piEnabled ?? false;
+    this.piEnabled = options.piEnabled ?? true;
     this.piRuntime = options.piRuntime;
   }
 
   select(mode: ConversationTaskMode): ConversationRuntime {
-    if (this.piEnabled && mode === 'short-drama' && this.piRuntime) return this.piRuntime;
+    void mode;
+    if (this.piEnabled && this.piRuntime) return this.piRuntime;
     return this.legacyRuntime;
   }
 
@@ -61,10 +59,10 @@ export class ConversationRuntimeRouter {
   }
 }
 
-/** Feature flag is opt-in; absent, malformed, and false-like values are disabled. */
+/** Pi is the default runtime; an explicit false value retains the development fallback. */
 export function resolvePiConversationRuntimeEnabled(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
   const value = environment.AI_VIDEO_PI_CONVERSATION_RUNTIME?.trim().toLowerCase();
-  return value === '1' || value === 'true';
+  return value !== '0' && value !== 'false';
 }

@@ -4,9 +4,11 @@ import type {
   ConversationRuntimeStartResult,
 } from './conversation-runtime.js';
 import type {
+  AgentToolConfirmationRequest,
   LlmGenerationCompleteParams,
   LlmGenerationIdentity,
   LlmGenerationRuntimeRequest,
+  LlmToolDefinition,
   LlmToolCall,
   LlmToolContinuation,
   NormalizedLlmUsage,
@@ -17,6 +19,10 @@ import { createPiStreamFunction, NativeProviderBridge } from './native-provider-
 import { DomainToolGateway, type PiToolIdentity } from './domain-tool-gateway.js';
 import type { GenerationService } from './generation-service.js';
 import { TaskPlanService } from './task-plan-service.js';
+import {
+  AgentProviderToolGateway,
+  type AgentProviderToolExecutor,
+} from './agent-provider-tool-gateway.js';
 
 export interface PiConversationRuntimeOptions {
   generation: Pick<
@@ -28,6 +34,7 @@ export interface PiConversationRuntimeOptions {
   bridge?: NativeProviderBridge;
   streamFn?: StreamFn;
   createGateway: (identity: PiToolIdentity) => DomainToolGateway;
+  providerTools?: AgentProviderToolExecutor;
   maxTurns?: number;
   onEvent?: (event: PiRuntimeEvent) => void;
 }
@@ -47,7 +54,14 @@ type ActiveRun = {
   cancelled: boolean;
 };
 
+type PendingConfirmation = {
+  request: AgentToolConfirmationRequest;
+  resolve: (approved: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 const MAX_FROZEN_CONTEXT_CHARACTERS = 400_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /**
  * Worker-owned Pi runtime. Pi owns only the in-memory loop; project data,
@@ -56,6 +70,7 @@ const MAX_FROZEN_CONTEXT_CHARACTERS = 400_000;
 export class PiConversationRuntime implements ConversationRuntime {
   readonly kind = 'pi' as const;
   private readonly active = new Map<string, ActiveRun>();
+  private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
   private readonly maxTurns: number;
 
   constructor(private readonly options: PiConversationRuntimeOptions) {
@@ -74,30 +89,34 @@ export class PiConversationRuntime implements ConversationRuntime {
     ) {
       throw new Error('Pi runtime identity does not match the requested project session.');
     }
-    if (request.mode !== 'short-drama') {
-      throw new Error('Pi runtime is currently enabled only for short-drama tasks.');
-    }
     const existing = this.active.get(identity.generationId);
     if (existing) return Promise.resolve({ runtime: 'pi', taskId: existing.taskId });
 
     const runtime = this.options.generation.runtime(identity);
     const model = modelFromRuntime(runtime);
-    const gateway = this.options.createGateway({
+    const gatewayIdentity = {
       taskId: request.taskId,
       generationId: identity.generationId,
       attemptId: identity.attemptId,
       projectId: request.projectId,
       projectSessionId: request.projectSessionId,
       conversationId: request.conversationId,
-    });
-    const planning = this.options.plans.planOnlyRound(request.taskId, prompt);
-    const planningGrants = planning.tools;
-    this.options.generation.configureAgentTools(
-      identity,
-      planningGrants.map((grant) => grant.tool),
-    );
+    };
+    const plannedWorkflow = request.mode === 'short-drama';
+    const gateway = plannedWorkflow ? this.options.createGateway(gatewayIdentity) : undefined;
+    const planning = plannedWorkflow
+      ? this.options.plans.planOnlyRound(request.taskId, prompt)
+      : undefined;
+    const planningGrants = planning?.tools ?? [];
+    const providerGateway = !plannedWorkflow
+      ? this.createProviderGateway(identity, runtime.tools ?? [])
+      : undefined;
+    const initialDefinitions = plannedWorkflow
+      ? planningGrants.map((grant) => grant.tool)
+      : providerGateway!.currentDefinitions();
+    this.options.generation.configureAgentTools(identity, initialDefinitions);
 
-    let planningRound = true;
+    let planningRound = plannedWorkflow;
     let turnCount = 0;
     let aggregate = '';
     let lastResponseId: string | undefined;
@@ -106,16 +125,26 @@ export class PiConversationRuntime implements ConversationRuntime {
     const agent = new Agent({
       streamFn,
       initialState: {
-        systemPrompt: withFrozenContext(planning.systemInstruction, runtime.context),
+        systemPrompt: withFrozenContext(
+          planning?.systemInstruction ?? unifiedAgentInstruction(runtime.systemInstruction),
+          runtime.context,
+        ),
         model,
         thinkingLevel: 'off',
-        tools: gateway.tools(planningGrants),
+        tools: plannedWorkflow ? gateway!.tools(planningGrants) : providerGateway!.tools(),
       },
-      toolExecution: 'parallel',
+      toolExecution: plannedWorkflow ? 'parallel' : 'sequential',
       // eslint-disable-next-line @typescript-eslint/require-await
-      beforeToolCall: async ({ toolCall }) => {
+      beforeToolCall: async ({ assistantMessage, toolCall }) => {
         if (planningRound && toolCall.name !== 'task.plan.submit') {
           return { block: true, reason: 'Only task.plan.submit is available during planning.' };
+        }
+        if (providerGateway) {
+          providerGateway.captureProviderCall(
+            toolCall.id,
+            assistantMessage.responseId,
+            usageFromPi(assistantMessage),
+          );
         }
         return undefined;
       },
@@ -134,20 +163,28 @@ export class PiConversationRuntime implements ConversationRuntime {
             this.options.generation.observe({ ...identity, content: aggregate });
           }
         }
-        const plan = this.options.plans.getByTask(request.taskId);
+        const plan = plannedWorkflow ? this.options.plans.getByTask(request.taskId) : undefined;
         if (plan?.status === 'active') planningRound = false;
-        const grants = planningRound
-          ? planningGrants
-          : this.options.plans.availableToolGrants(request.taskId);
-        const definitions = grants.map((grant) => grant.tool);
+        const grants = plannedWorkflow
+          ? planningRound
+            ? planningGrants
+            : this.options.plans.availableToolGrants(request.taskId)
+          : [];
+        const definitions = plannedWorkflow
+          ? grants.map((grant) => grant.tool)
+          : providerGateway!.currentDefinitions();
         const continuation = buildContinuation(
           runtimeProtocol(this.options.generation.runtime(identity)),
           message,
           toolResults,
         );
         this.options.generation.configureAgentTools(identity, definitions, continuation);
+        if (providerGateway && toolResults.length > 0) providerGateway.startProviderStep();
         return {
-          context: { ...context, tools: gateway.tools(grants) },
+          context: {
+            ...context,
+            tools: plannedWorkflow ? gateway!.tools(grants) : providerGateway!.tools(),
+          },
         };
       },
       // eslint-disable-next-line @typescript-eslint/require-await
@@ -162,6 +199,8 @@ export class PiConversationRuntime implements ConversationRuntime {
       },
     });
 
+    if (providerGateway) providerGateway.startProviderStep();
+
     const completion = this.run(
       agent,
       identity,
@@ -169,6 +208,8 @@ export class PiConversationRuntime implements ConversationRuntime {
       prompt,
       () => ({ aggregate, lastResponseId, lastUsage }),
       () => this.active.get(identity.generationId)?.cancelled === true,
+      plannedWorkflow,
+      providerGateway,
     );
     this.active.set(identity.generationId, {
       identity,
@@ -178,7 +219,10 @@ export class PiConversationRuntime implements ConversationRuntime {
       cancelled: false,
     });
     this.options.onEvent?.({ type: 'started', taskId: request.taskId });
-    void completion.finally(() => this.active.delete(identity.generationId));
+    void completion.finally(() => {
+      this.active.delete(identity.generationId);
+      this.resolvePendingConfirmation(identity.generationId, false);
+    });
     return Promise.resolve({ runtime: 'pi', taskId: request.taskId });
   }
 
@@ -186,6 +230,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     const active = this.active.get(generationId);
     if (!active) return false;
     active.cancelled = true;
+    this.resolvePendingConfirmation(generationId, false);
     // GenerationService transitions native generations synchronously before
     // returning its Promise. Mark SQLite cancelled before aborting Pi so the
     // aborted assistant message cannot win the race and persist as a failure.
@@ -203,6 +248,62 @@ export class PiConversationRuntime implements ConversationRuntime {
     return this.active.has(generationId);
   }
 
+  get(generationId: string): { active: boolean; confirmation?: AgentToolConfirmationRequest } {
+    return {
+      active: this.active.has(generationId),
+      confirmation: this.pendingConfirmations.get(generationId)?.request,
+    };
+  }
+
+  confirm(generationId: string, confirmationToken: string, approved: boolean): boolean {
+    const pending = this.pendingConfirmations.get(generationId);
+    if (!pending || pending.request.confirmationToken !== confirmationToken) return false;
+    clearTimeout(pending.timeout);
+    this.pendingConfirmations.delete(generationId);
+    pending.resolve(approved);
+    return true;
+  }
+
+  private createProviderGateway(
+    identity: LlmGenerationIdentity,
+    tools: LlmToolDefinition[],
+  ): AgentProviderToolGateway {
+    if (!this.options.providerTools) {
+      throw new Error('Pi runtime requires the Worker Agent tool executor for this workflow.');
+    }
+    return new AgentProviderToolGateway(this.options.providerTools, identity, tools, (request) =>
+      this.requestConfirmation(identity.generationId, request),
+    );
+  }
+
+  private requestConfirmation(
+    generationId: string,
+    request: AgentToolConfirmationRequest,
+  ): Promise<boolean> {
+    if (this.pendingConfirmations.has(generationId)) {
+      return Promise.reject(new Error('Pi runtime already has a pending confirmation.'));
+    }
+    return new Promise<boolean>((resolve, reject) => {
+      const expiresIn = Math.min(
+        MAX_TIMER_DELAY_MS,
+        Math.max(0, Date.parse(request.expiresAt) - Date.now()),
+      );
+      const timeout = setTimeout(() => {
+        this.pendingConfirmations.delete(generationId);
+        reject(new Error('Agent confirmation expired before the user responded.'));
+      }, expiresIn);
+      this.pendingConfirmations.set(generationId, { request, resolve, timeout });
+    });
+  }
+
+  private resolvePendingConfirmation(generationId: string, approved: boolean): void {
+    const pending = this.pendingConfirmations.get(generationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingConfirmations.delete(generationId);
+    pending.resolve(approved);
+  }
+
   private createNativeStream(identity: LlmGenerationIdentity): StreamFn {
     if (!this.options.bridge) throw new Error('Pi runtime requires a NativeProviderBridge.');
     return createPiStreamFunction(this.options.bridge, () => {
@@ -218,6 +319,8 @@ export class PiConversationRuntime implements ConversationRuntime {
     prompt: string,
     snapshot: () => { aggregate: string; lastResponseId?: string; lastUsage?: NormalizedLlmUsage },
     isCancelled: () => boolean,
+    plannedWorkflow: boolean,
+    providerGateway?: AgentProviderToolGateway,
   ): Promise<void> {
     let latest = '';
     agent.subscribe((event) => {
@@ -234,8 +337,9 @@ export class PiConversationRuntime implements ConversationRuntime {
       if (isCancelled()) return;
       const state = agent.state;
       const final = snapshot();
-      const plan = this.options.plans.getByTask(taskId);
+      const plan = plannedWorkflow ? this.options.plans.getByTask(taskId) : undefined;
       if (state.errorMessage) {
+        providerGateway?.terminate('failed');
         this.options.generation.failNative({
           ...identity,
           content: final.aggregate || latest,
@@ -252,11 +356,17 @@ export class PiConversationRuntime implements ConversationRuntime {
         finishReason: plan?.status === 'succeeded' ? 'task_package_complete' : 'stop',
         usage: final.lastUsage,
       };
+      providerGateway?.completeProviderStep(
+        final.lastResponseId,
+        completed.finishReason,
+        final.lastUsage,
+      );
       this.options.generation.complete(completed);
       if (plan?.status === 'succeeded') this.options.onEvent?.({ type: 'waiting_review', taskId });
     } catch (error) {
       if (isCancelled()) return;
       const message = error instanceof Error ? error.message : String(error);
+      providerGateway?.terminate('failed');
       this.options.generation.failNative({
         ...identity,
         content: latest,
@@ -266,6 +376,10 @@ export class PiConversationRuntime implements ConversationRuntime {
       this.options.onEvent?.({ type: 'failed', taskId, message });
     }
   }
+}
+
+function unifiedAgentInstruction(base: string): string {
+  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
 }
 
 function withFrozenContext(instruction: string, context: string): string {

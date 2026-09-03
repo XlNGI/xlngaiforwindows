@@ -95,27 +95,28 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmModelId=""
         agentModelSelection={{
           prompt: '生成一张角色图',
-          capability: 'image',
+          capability: 'text',
+          reason: 'agent_tools_required',
           models: [
             {
               providerProfileId: 'profile',
               providerName: '测试供应商',
               modelId: 'model',
-              remoteModelId: 'image-model',
-              modelName: '测试图片模型',
+              remoteModelId: 'agent-model',
+              modelName: '测试 Agent 模型',
               capabilities: {
-                text: false,
+                text: true,
                 vision: false,
-                streaming: false,
+                streaming: true,
                 reasoning: false,
-                tools: false,
+                tools: true,
                 structuredOutput: false,
                 embeddings: false,
-                imageGeneration: true,
+                imageGeneration: false,
                 videoGeneration: false,
               },
               source: 'manual',
-              schemaReady: false,
+              schemaReady: true,
             },
           ],
         }}
@@ -133,10 +134,10 @@ describe('ChatPanel attempt metadata', () => {
         onSendMessage={vi.fn()}
       />,
     );
-    expect(screen.getByRole('dialog', { name: '选择图片生成模型' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /测试图片模型/ }));
+    expect(screen.getByRole('dialog', { name: '选择Agent模型' })).toBeInTheDocument();
+    expect(screen.getByText(/当前会话模型不支持 Agent 工具调用/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /测试 Agent 模型/ }));
     expect(onSelect).toHaveBeenCalledWith('profile', 'model');
-    expect(screen.getByText(/需要补充参数 schema/)).toBeInTheDocument();
   });
 
   it('renders an in-session confirmation card and reports the user decision', () => {

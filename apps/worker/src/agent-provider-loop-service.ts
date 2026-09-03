@@ -760,6 +760,7 @@ export class AgentProviderLoopService {
           'tool_calls',
           JSON.stringify({ version: 1, callIds: [call.id], schema: true }),
         );
+        this.createStep(database, project.id, params, task.id, step.ordinal + 1, now, []);
         const summary = JSON.stringify(output);
         return {
           continuation: createToolContinuation(
@@ -1726,7 +1727,7 @@ export class AgentProviderLoopService {
         database
           .prepare(
             `UPDATE agent_tasks SET phase = 'model_running', updated_at = ?, row_version = row_version + 1
-             WHERE id = ? AND status = 'running'`,
+             WHERE id = ? AND status = 'running' AND phase <> 'waiting_confirmation'`,
           )
           .run(new Date().toISOString(), task.id);
       })(),
@@ -1736,17 +1737,35 @@ export class AgentProviderLoopService {
   completeProviderStep(params: AgentProviderStepCompleteParams): void {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
-        this.requireTask(database, project.id, params.generationId);
+        const task = this.requireTask(database, project.id, params.generationId);
         const step = this.requireOpenStep(database, params.attemptId);
+        const now = new Date().toISOString();
         this.completeStep(
           database,
           step,
           params.providerResponseId,
           0,
           params.usage,
-          new Date().toISOString(),
+          now,
           params.finishReason,
         );
+        const completed = database
+          .prepare(
+            `UPDATE agent_tasks SET status = 'completed', outcome = 'read-only',
+             completed_at = ?, updated_at = ?, row_version = row_version + 1
+             WHERE id = ? AND status = 'running' AND phase = 'model_running'`,
+          )
+          .run(now, now, task.id);
+        if (completed.changes === 1) {
+          this.appendEvent(
+            database,
+            project.id,
+            task.id,
+            'agent.task.completed',
+            'Agent completed without a pending review or confirmation.',
+            now,
+          );
+        }
       })(),
     );
   }

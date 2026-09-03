@@ -7,6 +7,7 @@ import type {
   LlmGenerationInfo,
   LlmGenerationPrepareResult,
   LlmNativeStreamEvent,
+  ConversationTaskMode,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 
@@ -21,6 +22,7 @@ type InvocationBoundaryOutcome = 'continue' | 'terminal' | 'missing';
 type AgentCapablePrepared = LlmGenerationPrepareResult & {
   agentTaskId?: string;
   runtimeOwner?: 'desktop' | 'native-agent' | 'pi';
+  runtimeMode?: ConversationTaskMode;
 };
 
 export interface LlmStreamCallbacks {
@@ -347,19 +349,41 @@ export function streamPreparedLlmGeneration(
     }
     try {
       if (piRuntime) {
+        const runtimeMode = (prepared as AgentCapablePrepared).runtimeMode ?? 'document';
         await callWorker('conversation.runtime.start', {
           ...identity,
           taskId: (prepared as AgentCapablePrepared).agentTaskId!,
-          mode: 'short-drama',
+          mode: runtimeMode,
           prompt: prepared.generation.userMessage.content,
         });
         const deadline = Date.now() + PI_POLL_TIMEOUT_MS;
+        const handledConfirmations = new Set<string>();
         while (true) {
           if (Date.now() >= deadline) {
             await cancelOwnedRuntime();
             throw new Error('Pi runtime did not reach a terminal state before the timeout.');
           }
           await new Promise((resolve) => setTimeout(resolve, PI_POLL_INTERVAL_MS));
+          const runtimeState = await callWorker('conversation.runtime.get', {
+            generationId: identity.generationId,
+          });
+          if (
+            runtimeState.confirmation &&
+            !handledConfirmations.has(runtimeState.confirmation.confirmationToken)
+          ) {
+            handledConfirmations.add(runtimeState.confirmation.confirmationToken);
+            const approved = callbacks.onConfirmation
+              ? await callbacks.onConfirmation(runtimeState.confirmation)
+              : false;
+            const confirmed = await callWorker('conversation.runtime.confirm', {
+              generationId: identity.generationId,
+              confirmationToken: runtimeState.confirmation.confirmationToken,
+              approved,
+            });
+            if (!confirmed.accepted) {
+              throw new Error('Pi Agent confirmation was no longer pending.');
+            }
+          }
           const current = await callWorker('llm.generation.get', {
             generationId: identity.generationId,
           });

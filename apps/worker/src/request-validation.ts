@@ -90,6 +90,9 @@ const sessionMethods = new Set<WorkerMethod>([
   'adapter.schema.confirm',
   'adapter.schema.rollback',
   'adapter.schema.audit.list',
+  'conversation.runtime.start',
+  'conversation.runtime.get',
+  'conversation.runtime.confirm',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
@@ -1081,8 +1084,18 @@ export function validateSessionRequestParams(
     case 'conversation.runtime.start':
       validateIdentity(params, ['taskId', 'mode', 'prompt']);
       requireId(params, 'taskId');
-      requireEnum(params, 'mode', new Set(['short-drama']));
+      requireEnum(params, 'mode', new Set(['document', 'novel-writing', 'short-drama']));
       requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      break;
+    case 'conversation.runtime.get':
+      rejectUnknown(params, ['generationId']);
+      requireId(params, 'generationId');
+      break;
+    case 'conversation.runtime.confirm':
+      rejectUnknown(params, ['generationId', 'confirmationToken', 'approved']);
+      requireId(params, 'generationId');
+      requireString(params, 'confirmationToken', MAX_ID_LENGTH);
+      requireBoolean(params, 'approved');
       break;
     case 'agent.generation.cancel':
       rejectUnknown(params, ['generationId']);

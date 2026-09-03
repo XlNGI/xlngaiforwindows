@@ -6,8 +6,10 @@ import type {
   ConversationTaskPlanInfo,
   ConversationTaskToolGrant,
   LlmGenerationRuntimeRequest,
+  LlmToolDefinition,
 } from '@ai-video/contracts';
 import { PiConversationRuntime } from './pi-conversation-runtime.js';
+import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js';
 import type { DomainToolGateway, PiToolIdentity } from './domain-tool-gateway.js';
 
 const identity = {
@@ -41,6 +43,25 @@ function grant(name: string, deliverableKind?: string): ConversationTaskToolGran
       parameters: { type: 'object', additionalProperties: false, properties: {} },
     },
   } as ConversationTaskToolGrant;
+}
+
+function providerDefinition(name: string, authorizationHandle: string): LlmToolDefinition {
+  return {
+    name: name as LlmToolDefinition['name'],
+    description: name,
+    parameters: { type: 'object', additionalProperties: true, properties: {} },
+    authorizationHandle,
+  };
+}
+
+function fakeProviderExecutor() {
+  return {
+    executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>(),
+    confirmTool: vi.fn<AgentProviderToolExecutor['confirmTool']>(),
+    startProviderStep: vi.fn<AgentProviderToolExecutor['startProviderStep']>(),
+    completeProviderStep: vi.fn<AgentProviderToolExecutor['completeProviderStep']>(),
+    terminateGeneration: vi.fn<AgentProviderToolExecutor['terminateGeneration']>(() => 1),
+  } satisfies AgentProviderToolExecutor;
 }
 
 class FakePlanService {
@@ -179,7 +200,306 @@ describe('PiConversationRuntime', () => {
     expect(systemPrompt).toContain('selected chapter context');
   });
 
-  it('rejects non-short-drama starts and mismatched project sessions', async () => {
+  it('answers ordinary questions through Pi without entering short-drama planning', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([fauxAssistantMessage('The project currently has one active draft.')]);
+    const plans = new FakePlanService();
+    const planOnlyRound = vi.spyOn(plans, 'planOnlyRound');
+    const providerTools = fakeProviderExecutor();
+    const generation = {
+      runtime: vi.fn(() => ({ ...runtimeRequest, tools: [] })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    let systemPrompt = '';
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: (model, context, options) => {
+        systemPrompt = context.systemPrompt ?? '';
+        return faux.streamSimple(model, context, options);
+      },
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: 'What is in this project?',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(planOnlyRound).not.toHaveBeenCalled();
+    expect(providerTools.startProviderStep).toHaveBeenCalledOnce();
+    expect(providerTools.completeProviderStep).toHaveBeenCalledOnce();
+    expect(providerTools.executeTools).not.toHaveBeenCalled();
+    expect(generation.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'The project currently has one active draft.' }),
+    );
+    expect(systemPrompt).toContain('unified project Agent');
+  });
+
+  it('executes a document tool and refreshes Worker authorizations for the next Pi turn', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall('document.create_draft', { title: 'Draft' }, { id: 'document-call' })],
+        { stopReason: 'toolUse', responseId: 'response-document' },
+      ),
+      fauxAssistantMessage('The reviewable draft was created.'),
+    ]);
+    const plans = new FakePlanService();
+    const providerTools = fakeProviderExecutor();
+    vi.mocked(providerTools.executeTools).mockResolvedValue({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-document',
+        outputs: [{ callId: 'document-call', output: '{"status":"draft_created"}' }],
+      },
+      tools: [],
+    });
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [providerDefinition('document.create_draft', 'document-authorization')],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: 'Create a draft.',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(providerTools.executeTools).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...identity,
+        calls: [
+          expect.objectContaining({
+            id: 'document-call',
+            name: 'document.create_draft',
+            authorizationHandle: 'document-authorization',
+          }),
+        ],
+      }),
+    );
+    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(2);
+    expect(generation.configureAgentTools).toHaveBeenCalledWith(
+      identity,
+      [],
+      expect.objectContaining({ protocol: 'openai-responses' }),
+    );
+    expect(generation.complete).toHaveBeenCalledOnce();
+  });
+
+  it('refreshes research tools across multiple Pi turns', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall('research.search', { query: 'source' }, { id: 'search-call' })],
+        { stopReason: 'toolUse', responseId: 'response-search' },
+      ),
+      fauxAssistantMessage(
+        [fauxToolCall('research.fetch', { sourceHandle: 'source-1' }, { id: 'fetch-call' })],
+        { stopReason: 'toolUse', responseId: 'response-fetch' },
+      ),
+      fauxAssistantMessage('Research complete.'),
+    ]);
+    const plans = new FakePlanService();
+    const providerTools = fakeProviderExecutor();
+    vi.mocked(providerTools.executeTools).mockImplementation((params) =>
+      Promise.resolve({
+        continuation: {
+          protocol: 'openai-responses',
+          previousResponseId: params.providerResponseId,
+          outputs: params.calls.map((call) => ({ callId: call.id, output: '{"status":"ok"}' })),
+        },
+        tools:
+          params.calls[0]?.name === 'research.search'
+            ? [providerDefinition('research.fetch', 'fetch-authorization')]
+            : [],
+      }),
+    );
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [providerDefinition('research.search', 'search-authorization')],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: 'Research this topic.',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(providerTools.executeTools).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(providerTools.executeTools).mock.calls[1]![0].calls[0]).toMatchObject({
+      id: 'fetch-call',
+      name: 'research.fetch',
+      authorizationHandle: 'fetch-authorization',
+    });
+    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(3);
+    expect(generation.complete).toHaveBeenCalledOnce();
+  });
+
+  it('exposes a pending Worker confirmation and resumes Pi only with the matching token', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('document.archive', {}, { id: 'archive-call' })], {
+        stopReason: 'toolUse',
+        responseId: 'response-archive',
+      }),
+      fauxAssistantMessage('The archive request was approved.'),
+    ]);
+    const plans = new FakePlanService();
+    const providerTools = fakeProviderExecutor();
+    const confirmation = {
+      confirmationToken: 'confirmation-token',
+      action: 'document.archive' as const,
+      documentId: 'document',
+      documentTitle: 'Draft',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    };
+    vi.mocked(providerTools.executeTools).mockResolvedValue({ confirmation });
+    vi.mocked(providerTools.confirmTool).mockReturnValue({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-archive',
+        outputs: [{ callId: 'archive-call', output: '{"status":"archived"}' }],
+      },
+      tools: [],
+    });
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [providerDefinition('document.archive', 'archive-authorization')],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: 'Archive the draft.',
+    });
+    await vi.waitFor(() =>
+      expect(runtime.get(identity.generationId).confirmation).toEqual(confirmation),
+    );
+
+    expect(runtime.confirm(identity.generationId, 'wrong-token', true)).toBe(false);
+    expect(runtime.confirm(identity.generationId, confirmation.confirmationToken, true)).toBe(true);
+    await runtime.wait(identity.generationId);
+
+    expect(runtime.get(identity.generationId)).toEqual({ active: false, confirmation: undefined });
+    expect(providerTools.confirmTool).toHaveBeenCalledWith({
+      ...identity,
+      confirmationToken: confirmation.confirmationToken,
+      approved: true,
+    });
+    expect(generation.complete).toHaveBeenCalledOnce();
+  });
+
+  it('uses the unified Pi path for novel writing without invoking the short-drama planner', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([fauxAssistantMessage('Chapter analysis complete.')]);
+    const plans = new FakePlanService();
+    const planOnlyRound = vi.spyOn(plans, 'planOnlyRound');
+    const providerTools = fakeProviderExecutor();
+    const generation = {
+      runtime: vi.fn(() => ({ ...runtimeRequest, tools: [] })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'novel-writing',
+      identity,
+      prompt: 'Analyze this chapter.',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(planOnlyRound).not.toHaveBeenCalled();
+    expect(generation.complete).toHaveBeenCalledOnce();
+  });
+
+  it('rejects mismatched project sessions', async () => {
     const plans = new FakePlanService();
     const generation = { runtime: () => runtimeRequest };
     const runtime = new PiConversationRuntime({
@@ -190,17 +510,6 @@ describe('PiConversationRuntime', () => {
       },
       createGateway: () => fakeGateway(plans),
     });
-    await expect(
-      runtime.start({
-        taskId: 'task',
-        projectId: 'project',
-        projectSessionId: 'session',
-        conversationId: 'conversation',
-        mode: 'document',
-        identity,
-        prompt: 'x',
-      }),
-    ).rejects.toThrow('short-drama');
     await expect(
       runtime.start({
         taskId: 'task',

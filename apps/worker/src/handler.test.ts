@@ -226,6 +226,28 @@ describe('worker handler', () => {
     });
   });
 
+  it('strictly validates Pi runtime observation and confirmation requests', async () => {
+    const unknown = await handleRequest({
+      id: 'runtime-get-unknown',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'conversation.runtime.get',
+      params: { generationId: 'generation', unexpected: true },
+    } as unknown as WorkerRequest);
+    const invalidDecision = await handleRequest({
+      id: 'runtime-confirm-invalid',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'conversation.runtime.confirm',
+      params: {
+        generationId: 'generation',
+        confirmationToken: 'token',
+        approved: 'true',
+      },
+    } as unknown as WorkerRequest);
+
+    expect(unknown).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    expect(invalidDecision).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+  });
+
   it('validates novel import payloads at the IPC boundary', async () => {
     const response = await handleRequest({
       id: 'novel-import-invalid',
@@ -310,7 +332,7 @@ describe('worker handler', () => {
     });
   });
 
-  it('accepts image/video parameter payloads at the unified Agent boundary', async () => {
+  it('does not intercept a media hint before the conversation Agent model is selected', async () => {
     const response = await handleRequest({
       id: 'agent-run-parameters',
       protocolVersion: IPC_PROTOCOL_VERSION,
@@ -328,7 +350,7 @@ describe('worker handler', () => {
     if (response.ok) {
       expect(response.result).toMatchObject({
         status: 'needs_model_selection',
-        capability: 'image',
+        capability: 'text',
       });
       expect(response.result).not.toMatchObject({ status: 'image_prepared' });
     }

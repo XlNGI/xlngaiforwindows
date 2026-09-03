@@ -406,11 +406,13 @@ describe('streamPreparedLlmGeneration', () => {
       ...prepared,
       agentTaskId: 'agent-task',
       runtimeOwner: 'pi',
+      runtimeMode: 'document',
     };
     let polls = 0;
     // eslint-disable-next-line @typescript-eslint/require-await
     vi.mocked(callWorker).mockImplementation(async (method) => {
       if (method === 'conversation.runtime.start') return { runtime: 'pi', taskId: 'agent-task' };
+      if (method === 'conversation.runtime.get') return { active: true };
       if (method === 'llm.generation.get') {
         polls += 1;
         return { ...prepared.generation, status: polls > 1 ? 'complete' : 'streaming' };
@@ -426,9 +428,58 @@ describe('streamPreparedLlmGeneration', () => {
     expect(native.invoke).not.toHaveBeenCalled();
     expect(callWorker).toHaveBeenCalledWith(
       'conversation.runtime.start',
-      expect.objectContaining({ taskId: 'agent-task', mode: 'short-drama' }),
+      expect.objectContaining({ taskId: 'agent-task', mode: 'document' }),
     );
     expect(states.at(-1)?.status).toBe('complete');
+  });
+
+  it('returns Pi confirmations through Worker RPC and preserves the prepared runtime mode', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'pi',
+      runtimeMode: 'novel-writing',
+    };
+    const confirmation = {
+      confirmationToken: 'pi-confirmation',
+      action: 'document.archive' as const,
+      documentId: 'document',
+      documentTitle: 'Draft',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    };
+    let confirmationPending = true;
+    // eslint-disable-next-line @typescript-eslint/require-await
+    vi.mocked(callWorker).mockImplementation(async (method) => {
+      if (method === 'conversation.runtime.start') return { runtime: 'pi', taskId: 'agent-task' };
+      if (method === 'conversation.runtime.get') {
+        return confirmationPending ? { active: true, confirmation } : { active: true };
+      }
+      if (method === 'conversation.runtime.confirm') {
+        confirmationPending = false;
+        return { accepted: true };
+      }
+      if (method === 'llm.generation.get') return state('complete', 'Archived.');
+      return prepared.generation;
+    });
+    const onConfirmation = vi.fn(() => Promise.resolve(true));
+
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState() {},
+      onConfirmation,
+    });
+    await run.completion;
+
+    expect(callWorker).toHaveBeenCalledWith(
+      'conversation.runtime.start',
+      expect.objectContaining({ taskId: 'agent-task', mode: 'novel-writing' }),
+    );
+    expect(onConfirmation).toHaveBeenCalledWith(confirmation);
+    expect(callWorker).toHaveBeenCalledWith('conversation.runtime.confirm', {
+      generationId: 'generation',
+      confirmationToken: 'pi-confirmation',
+      approved: true,
+    });
   });
 
   it('fails and cancels the Worker-owned Pi runtime when observation disconnects', async () => {
@@ -440,6 +491,7 @@ describe('streamPreparedLlmGeneration', () => {
     // eslint-disable-next-line @typescript-eslint/require-await
     vi.mocked(callWorker).mockImplementation(async (method) => {
       if (method === 'conversation.runtime.start') return { runtime: 'pi', taskId: 'agent-task' };
+      if (method === 'conversation.runtime.get') return { active: true };
       if (method === 'llm.generation.get') throw new Error('Worker response channel closed');
       if (method === 'agent.generation.cancel') return state('cancelled', '');
       if (method === 'llm.generation.fail') {

@@ -94,6 +94,7 @@ import {
   type WorkerMethod,
   type WorkerRequest,
   type WorkerResponse,
+  inferUnifiedAgentCapabilityHint,
 } from '@ai-video/contracts';
 import { LlmProviderError, OpenAIResponsesProvider } from '@ai-video/llm';
 import {
@@ -144,32 +145,7 @@ import { createRepositories } from '@ai-video/persistence';
 const WORKER_VERSION = '0.1.0';
 
 export function inferUnifiedAgentCapability(prompt: string): UnifiedAgentCapability {
-  const value = prompt.normalize('NFC');
-  if (/(搜索|查找|联网|最新资料|网页|研究)/u.test(value)) return 'research';
-  // A direct request to render an image must win over the generic document
-  // keywords. Requests such as “生成角色三视图提示词” remain document work,
-  // while “直接生成角色三视图” is an image-generation task.
-  if (
-    /(?:生成|制作|创建|绘制|画出|画一张)/u.test(value) &&
-    /(图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)/u.test(value) &&
-    !/(提示词|prompt|文档)/iu.test(value)
-  )
-    return 'image';
-  if (/(改写|重写|润色|总结|提取|分析|识别|描述|转写|翻译|提示词)/u.test(value)) return 'document';
-  if (
-    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|(?:生成|制作|创建)[^。！？\n]{0,80}(?:的)?视频(?:[。！？!?]|$)|输出视频|做成视频)/u.test(
-      value,
-    )
-  )
-    return 'video';
-  if (
-    /(文生图|图生图|参考生图|生成(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|制作(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|创建(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|生图)/u.test(
-      value,
-    )
-  )
-    return 'image';
-  if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
-  return 'text';
+  return inferUnifiedAgentCapabilityHint(prompt);
 }
 
 /** Resolve the Provider route from the user-selected profile, never from a
@@ -527,6 +503,8 @@ const methods = new Set<WorkerMethod>([
   'adapter.schema.rollback',
   'adapter.schema.audit.list',
   'conversation.runtime.start',
+  'conversation.runtime.get',
+  'conversation.runtime.confirm',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
@@ -646,6 +624,7 @@ export function configurePiConversationRuntime(bridge: NativeProviderBridge): vo
         changeSetService,
         identity,
       ),
+    providerTools: agentProviderLoopService,
   });
 }
 const adapterService = new AdapterService(projectService);
@@ -1232,7 +1211,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         }
         case 'agent.run': {
           const agentParams = params as unknown as UnifiedAgentRunParams;
-          const capability =
+          const capabilityHint =
             agentParams.capability && agentParams.capability !== 'auto'
               ? agentParams.capability
               : inferUnifiedAgentCapability(agentParams.prompt);
@@ -1246,15 +1225,24 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             profile.enabled && profile.connectionStatus === 'ready'
               ? appSettingsService
                   .listModels(profile.id)
-                  .filter((model) =>
-                    modelMatchesUnifiedAgentRequest(
-                      capability,
-                      model,
-                      profile.providerType,
-                      adapterCatalog,
-                      hasImageAttachment,
-                    ),
-                  )
+                  .filter((model) => {
+                    if (
+                      !modelMatchesUnifiedAgentRequest(
+                        'text',
+                        model,
+                        profile.providerType,
+                        adapterCatalog,
+                        hasImageAttachment,
+                      )
+                    )
+                      return false;
+                    try {
+                      assertAgentToolLoopSelection(profile, model);
+                      return true;
+                    } catch {
+                      return false;
+                    }
+                  })
                   .map((model) => ({
                     providerProfileId: profile.id,
                     providerName: profile.name,
@@ -1263,21 +1251,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                     modelName: model.displayName,
                     capabilities: model.capabilities,
                     source: model.source,
-                    schemaReady:
-                      capability !== 'image' && capability !== 'video'
-                        ? true
-                        : adapterService
-                            .catalog()
-                            .adapters.some(
-                              (adapter) =>
-                                adapter.provider === profile.providerType &&
-                                adapter.model === model.remoteModelId &&
-                                appSettingsService.getAdapterSchemaRecord(adapter.key)?.status !==
-                                  'needs_confirmation' &&
-                                (capability === 'image'
-                                  ? adapter.capability.endsWith('TO_IMAGE')
-                                  : adapter.capability.endsWith('TO_VIDEO')),
-                            ),
+                    schemaReady: true,
                   }))
               : [],
           );
@@ -1285,20 +1259,11 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           let storedPreference: ReturnType<
             ContentService['getConversationModelPreference']
           > | null = null;
-          // Media Provider/model selection is an explicit user decision. The
-          // Worker may validate a remembered selection when Desktop sends it
-          // explicitly, but must not select a media model from persistence.
-          if (
-            !agentParams.providerProfileId &&
-            !agentParams.modelId &&
-            capability !== 'auto' &&
-            capability !== 'image' &&
-            capability !== 'video'
-          ) {
+          if (!agentParams.providerProfileId && !agentParams.modelId) {
             try {
               storedPreference = contentService.getConversationModelPreference({
                 conversationId: agentParams.conversationId,
-                capability,
+                capability: 'text',
               });
             } catch {
               // Catalog/model-selection validation remains useful before a project is open.
@@ -1311,7 +1276,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           if (!requestedProviderProfileId || !requestedModelId) {
             result = {
               status: 'needs_model_selection',
-              capability,
+              capability: 'text',
               reason: storedPreference ? 'model_unavailable' : 'missing_model',
               models: candidates,
             };
@@ -1324,108 +1289,33 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               candidate.modelId === requestedModelId,
           );
           if (!selected) {
+            const requestedProfile = profiles.find(
+              (profile) => profile.id === requestedProviderProfileId,
+            );
+            const requestedModel = requestedProfile
+              ? appSettingsService
+                  .listModels(requestedProfile.id)
+                  .find((model) => model.id === requestedModelId)
+              : undefined;
+            let reason: 'model_unavailable' | 'capability_mismatch' | 'agent_tools_required' =
+              'model_unavailable';
+            if (requestedProfile && requestedModel) {
+              try {
+                assertAgentToolLoopSelection(requestedProfile, requestedModel);
+                reason =
+                  hasImageAttachment && requestedModel.capabilities.vision !== true
+                    ? 'capability_mismatch'
+                    : 'model_unavailable';
+              } catch {
+                reason = 'agent_tools_required';
+              }
+            }
             result = {
               status: 'needs_model_selection',
-              capability,
-              reason: candidates.some(
-                (candidate) =>
-                  candidate.providerProfileId === requestedProviderProfileId &&
-                  candidate.modelId === requestedModelId,
-              )
-                ? 'capability_mismatch'
-                : 'model_unavailable',
+              capability: 'text',
+              reason,
               models: candidates,
             };
-            break;
-          }
-
-          if (capability === 'image' || capability === 'video') {
-            const selectedProfile = profiles.find(
-              (profile) => profile.id === selected.providerProfileId,
-            );
-            if (!selectedProfile) {
-              throw new ProviderProfileValidationError('Provider profile was not found.');
-            }
-            const adapters = adapterService
-              .catalog()
-              .adapters.filter(
-                (adapter) =>
-                  adapter.provider === selectedProfile.providerType &&
-                  adapter.model === selected.remoteModelId &&
-                  (capability === 'image'
-                    ? adapter.capability.endsWith('TO_IMAGE')
-                    : adapter.capability.endsWith('TO_VIDEO')),
-              );
-            if (!agentParams.adapterKey || !agentParams.parameters) {
-              result = {
-                status: 'needs_parameters',
-                capability,
-                providerProfileId: selected.providerProfileId,
-                modelId: selected.modelId,
-                conversationId: agentParams.conversationId,
-                originalPrompt: agentParams.prompt,
-                costNoticeAcknowledged: true,
-                modelName: selected.modelName,
-                adapters,
-                missingRequired: adapters.flatMap((adapter) => adapter.parameterSchema.required),
-                affectsCost: true,
-              };
-              break;
-            }
-            const adapter = adapters.find((item) => item.key === agentParams.adapterKey);
-            if (!adapter)
-              throw new Error('The selected generation adapter is not available for this model.');
-            const schemaRecord = appSettingsService.getAdapterSchemaRecord(adapter.key);
-            if (schemaRecord?.status === 'needs_confirmation') {
-              throw new AdapterSchemaValidationError(
-                'This adapter schema is awaiting confirmation and cannot be submitted yet.',
-              );
-            }
-            const parameters = agentParams.parameters;
-            if (capability === 'image') {
-              const mediaSelection = resolveMediaSelectionForRequest(
-                'image',
-                adapter.key,
-                selected.providerProfileId,
-                selected.modelId,
-              );
-              const job = imageGenerationService.prepare({
-                shotId: agentParams.shotId,
-                adapterKey: adapter.key,
-                parameters,
-                providerProfileId: mediaSelection.profile.id,
-                modelId: mediaSelection.model.id,
-                conversationId: agentParams.conversationId,
-                originalPrompt: agentParams.prompt,
-                costNoticeAcknowledged: true,
-              } satisfies ImageGenerationPrepareParams);
-              result = { status: 'image_prepared', capability: 'image', job };
-            } else {
-              const mediaSelection = resolveMediaSelectionForRequest(
-                'video',
-                adapter.key,
-                selected.providerProfileId,
-                selected.modelId,
-                agentParams.providerRegion,
-              );
-              const job = videoGenerationService.prepare({
-                shotId: agentParams.shotId,
-                adapterKey: adapter.key,
-                parameters,
-                providerRegion: mediaSelection.providerRegion,
-                providerProfileId: mediaSelection.profile.id,
-                modelId: mediaSelection.model.id,
-                conversationId: agentParams.conversationId,
-                originalPrompt: agentParams.prompt,
-                costNoticeAcknowledged: true,
-                assetKind:
-                  agentParams.assetKind === 'generated-video' ||
-                  agentParams.assetKind === 'shot-video'
-                    ? agentParams.assetKind
-                    : undefined,
-              } satisfies VideoGenerationPrepareParams);
-              result = { status: 'video_prepared', capability: 'video', job };
-            }
             break;
           }
 
@@ -1454,10 +1344,11 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           generationService.configureAgentTools(prepared.stream, agent.tools);
           result = {
             status: 'started',
-            capability,
+            capability: capabilityHint,
             ...prepared,
             agentTaskId: agent.taskId,
-            runtimeOwner: 'native-agent',
+            runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+            runtimeMode: 'document',
           };
           break;
         }
@@ -1513,7 +1404,12 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                 orchestration.taskId,
               );
               generationService.configureAgentTools(prepared.stream, agent.tools);
-              result = { ...prepared, agentTaskId: agent.taskId, runtimeOwner: 'native-agent' };
+              result = {
+                ...prepared,
+                agentTaskId: agent.taskId,
+                runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+                runtimeMode: 'novel-writing',
+              };
             } catch (error) {
               agentOrchestrationService.failTaskBeforeGeneration(
                 orchestration.taskId,
@@ -1546,10 +1442,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = {
             ...prepared,
             agentTaskId: agent.taskId,
-            runtimeOwner:
-              agentParams.agentMode === 'short-drama' && resolvePiConversationRuntimeEnabled()
-                ? 'pi'
-                : 'native-agent',
+            runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+            runtimeMode: agentParams.agentMode,
           };
           break;
         }
@@ -1571,6 +1465,22 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             },
             prompt: runtimeParams.prompt,
           });
+          break;
+        }
+        case 'conversation.runtime.get': {
+          if (!piConversationRuntime) throw new Error('Pi conversation runtime is not configured.');
+          result = piConversationRuntime.get(requireString(params, 'generationId'));
+          break;
+        }
+        case 'conversation.runtime.confirm': {
+          if (!piConversationRuntime) throw new Error('Pi conversation runtime is not configured.');
+          result = {
+            accepted: piConversationRuntime.confirm(
+              requireString(params, 'generationId'),
+              requireString(params, 'confirmationToken'),
+              params.approved === true,
+            ),
+          };
           break;
         }
         case 'agent.generation.executeTools': {

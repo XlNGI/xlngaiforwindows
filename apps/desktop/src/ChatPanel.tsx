@@ -517,6 +517,9 @@ export function ChatPanel({
                 : 'Agent'}
             模型
           </strong>
+          {agentModelSelection.reason === 'agent_tools_required' && (
+            <small>当前会话模型不支持 Agent 工具调用，请明确选择一个支持工具的 Agent 模型。</small>
+          )}
           {agentModelSelection.models.length === 0 && (
             <small>当前没有满足该能力的可用模型，请先在供应商设置中启用模型。</small>
           )}

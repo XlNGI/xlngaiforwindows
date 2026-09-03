@@ -3,7 +3,7 @@
 版本：0.6  
 日期：2026-08-28  
 最近同步：2026-09-03  
-状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成和 P6 基础 Desktop/Runtime 接线已完成，仍有统一会话扩展与生产审计边界  
+状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成、P6 基础 Desktop/Runtime 接线与全系统编排 P1 统一会话扩展已完成，仍有生产审计与发布边界  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档规划如何选择性引入 `@earendil-works/pi-agent-core` 的低层 Agent 循环，改造当前会话中的模型工具选择、多工具连续执行和多交付物完整性治理。本文档本身不授权直接修改代码；用户已于 2026-08-28 分别授权执行 P1、P2、P3、P4，各阶段仍必须按顺序实施并在完成后记录验证证据。
@@ -1169,6 +1169,7 @@ P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续�
 | 2026-08-28 | P4 | 完成 | plan-only 首轮仅暴露 `task.plan.submit`；Worker 冻结 Seedance、章节 scope、4 交付物及依赖图；按 ready 状态动态授权既有有界工具；事务化记录实体归属、deliverable 成功与下游解锁；`task.package.complete`、2 轮缺项 follow-up 和第三轮持久化失败门禁完成；Legacy 关键词意图保留但结构化计划路径不读取；遗漏、重复、依赖、提前完成、非法/不匹配平台、越权实体和重复完成回归通过；JS/TS 476 项、Rust 65 项、typecheck、ESLint、Prettier、rustfmt、build、frozen install、production audit、许可证、SBOM、sidecar health、Tauri Release/NSIS 全绿 | 未启动正式 Pi Runtime；未把 Pi 接真实业务工具执行链；未接 UI Runtime；未实现 Pi event 正式持久化；P5 未开始 | Codex |
 | 2026-09-03 | P5/P6 增量同步 | Pi 核心 Worker 工具编排、`conversation.runtime.start`、Desktop runtime owner/状态观察、取消/断线/重试/恢复基础 UX 已完成；媒体 Provider/model 显式选择、Worker 校验和任务快照边界已完成；当前仓库 Worker 294、Desktop 174 测试及 typecheck/format check 通过，提交 `c80f619` 已同步 `main` | Pi 仍默认受 short-drama feature flag 限制；独立 `conversation.runtime.subscribe`、所有项目会话统一 Pi、真实 Provider/Windows 端到端、性能预算和 P7 发布门禁未完成 | Codex |
 | 2026-09-03 | 全系统编排 P0 | 完成 | 与上层总方案同步冻结通用 Tool Registry、R0-R3、参数哈希一次性授权、Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐视频语句、区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；证据见 `code-traces/2026-09-03-agent-orchestration-p0-baseline.md` | 本文历史 P0-P4 不变；所有会话统一 Pi 属于上层 P1；生产策略接线、`submission_unknown`、项目级轮询和真实 Provider/Windows 验收仍未完成 | Codex |
+| 2026-09-03 | 全系统编排 P1 | 完成 | document、novel-writing、short-drama 和普通 `agent.run` 默认统一进入 Worker-owned Pi；新增 Pi→现有 Worker 工具循环适配器、动态授权刷新、确认查询/提交 RPC 和统一 system instruction；短剧 plan-first/完整性门禁保持不变；共享 capability 提示器不再前置截断媒体请求；JS/TS 554 项、Rust 71 项、typecheck/lint/format、Pi spike、sidecar smoke 与 NSIS build 通过；证据见 `code-traces/2026-09-03-agent-orchestration-p1-unified-runtime.md` | 独立 runtime subscribe、Pi event 正式持久化、P2 通用策略接线、项目级媒体轮询、真实 Provider/Windows 长稳与 P7 发布验收仍未完成 | Codex |
 
 ## 19. P0 已确认项
 
@@ -1176,7 +1177,7 @@ P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续�
 
 | 决策 | 确认值 | 影响 |
 |---|---|---|
-| 当前 Pi 灰度范围 | short-drama opt-in；document/novel-writing 继续 Legacy | 控制回归面；这是过渡性实现限制，不是最终产品范围 |
+| 当前 Pi 灰度范围 | 所有项目会话默认进入 Pi；`AI_VIDEO_PI_CONVERSATION_RUNTIME=false/0` 时回退 `native-agent` | 默认路径统一；Legacy 仅作为开发期应急回退，不再扩展业务能力 |
 | 最终产品范围 | 所有项目会话进入统一 Agent Runtime | 用户不区分通用/专用模式，由 Agent 通过受控工具完成系统业务 |
 | Pi 版本 | 精确固定 0.84.3 | 可复现；升级需单独评审 |
 | Runtime owner | Worker | 不受 React 窗口生命周期影响 |
@@ -1190,5 +1191,5 @@ P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续�
 | Tool Result | 单结果 64 KiB，摘要 2,048 字符，集合 100 项 | 禁止凭据、授权句柄、绝对路径、Provider 原文和内联 Base64/Data URL |
 | 媒体状态 | Worker 权威状态机显式包含 `submission_unknown` | 提交结果不确定时不自动重试付费请求 |
 | Tool Call 上限 | 16 | 复用当前 Agent task 配额 |
-| 上线方式 | feature flag + opt-in | 可按会话回退 Legacy |
+| 上线方式 | Pi 默认开启 + 显式环境开关回退 | 开发期可整体回退 Legacy；不向用户暴露通用/专用模式 |
 | Pi Harness/Server/SQLite | 首期不使用 | 避开未完成 API 和第二事实源 |

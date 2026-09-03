@@ -40,33 +40,36 @@ describe('inferAgentCapability', () => {
 
 describe('resolveAgentRunModelSelection', () => {
   const agentModel = { providerProfileId: 'agent-profile', modelId: 'agent-model' };
-  const mediaModel = { providerProfileId: 'media-profile', modelId: 'media-model' };
+  const rememberedAgentModel = {
+    providerProfileId: 'remembered-profile',
+    modelId: 'remembered-model',
+  };
 
-  it('does not use the selected Agent model for media generation', () => {
-    expect(
-      resolveAgentRunModelSelection('video', undefined, undefined, agentModel),
-    ).toBeUndefined();
-    expect(
-      resolveAgentRunModelSelection('image', undefined, undefined, agentModel),
-    ).toBeUndefined();
-  });
-
-  it('uses an explicitly selected or remembered media model', () => {
-    expect(resolveAgentRunModelSelection('video', mediaModel, undefined, agentModel)).toEqual(
-      mediaModel,
+  it('uses the selected conversation Agent model for every capability hint', () => {
+    expect(resolveAgentRunModelSelection('video', undefined, undefined, agentModel)).toEqual(
+      agentModel,
     );
-    expect(resolveAgentRunModelSelection('image', undefined, mediaModel, agentModel)).toEqual(
-      mediaModel,
+    expect(resolveAgentRunModelSelection('image', undefined, undefined, agentModel)).toEqual(
+      agentModel,
     );
   });
 
-  it('uses the selected Agent model for non-media work', () => {
+  it('prefers an explicit Agent selection and otherwise restores the conversation preference', () => {
+    expect(
+      resolveAgentRunModelSelection('video', rememberedAgentModel, undefined, agentModel),
+    ).toEqual(rememberedAgentModel);
+    expect(resolveAgentRunModelSelection('image', undefined, rememberedAgentModel)).toEqual(
+      rememberedAgentModel,
+    );
+  });
+
+  it('does not let an older remembered preference replace the active Agent model', () => {
     expect(resolveAgentRunModelSelection('text', undefined, undefined, agentModel)).toEqual(
       agentModel,
     );
-    expect(resolveAgentRunModelSelection('text', undefined, mediaModel, agentModel)).toEqual(
-      agentModel,
-    );
+    expect(
+      resolveAgentRunModelSelection('text', undefined, rememberedAgentModel, agentModel),
+    ).toEqual(agentModel);
   });
 });
 
@@ -942,6 +945,10 @@ describe('App', () => {
 
     render(<App />);
     await screen.findByDisplayValue('Project conversation');
+    fireEvent.change(screen.getByLabelText('LLM 供应商连接'), {
+      target: { value: profile.id },
+    });
+    fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: model.id } });
     fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: 'Draft a project brief' },
     });

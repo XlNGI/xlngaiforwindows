@@ -202,6 +202,14 @@ describe('AgentProviderLoopService', () => {
     });
     expect(proposed).toBe(true);
     expect(result.continuation?.outputs[0]?.output).toContain('requiresUserConfirmation');
+    // Pi may use one final Provider turn to explain the pending schema review.
+    // That turn must not erase the external confirmation state.
+    loop.startProviderStep(prepared.stream);
+    loop.completeProviderStep({
+      ...prepared.stream,
+      providerResponseId: 'resp_schema_explained',
+      finishReason: 'stop',
+    });
     expect(
       project.access(false, (database) =>
         database.prepare('SELECT status, phase FROM agent_tasks WHERE id = ?').get(agent.taskId),

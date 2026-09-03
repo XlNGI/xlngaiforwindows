@@ -1789,6 +1789,37 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
 export type UnifiedAgentCapability =
   'text' | 'image' | 'video' | 'document' | 'novel' | 'short-drama' | 'research' | 'asset' | 'auto';
 
+/**
+ * A deterministic UI/offline hint only. The selected LLM remains responsible
+ * for semantic intent and tool selection, and Worker policy remains
+ * authoritative for every operation.
+ */
+export function inferUnifiedAgentCapabilityHint(prompt: string): UnifiedAgentCapability {
+  const value = prompt.normalize('NFC');
+  if (/(搜索|查找|联网|最新资料|网页|研究)/u.test(value)) return 'research';
+  if (
+    /(?:生成|制作|创建|绘制|画出|画一张)/u.test(value) &&
+    /(图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)/u.test(value) &&
+    !/(提示词|prompt|文档)/iu.test(value)
+  )
+    return 'image';
+  if (/(改写|重写|润色|总结|提取|分析|识别|描述|转写|翻译|提示词)/u.test(value)) return 'document';
+  if (
+    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|(?:生成|制作|创建)[^。！？\n]{0,80}(?:的)?视频(?:[。！？!?]|$)|输出视频|做成视频)/u.test(
+      value,
+    )
+  )
+    return 'video';
+  if (
+    /(文生图|图生图|参考生图|生成(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|制作(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|创建(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|生图)/u.test(
+      value,
+    )
+  )
+    return 'image';
+  if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
+  return 'text';
+}
+
 export interface UnifiedAgentModelCandidate {
   providerProfileId: string;
   providerName: string;
@@ -1824,13 +1855,15 @@ export interface UnifiedAgentModelSelectionRequest {
   prompt: string;
   capability: UnifiedAgentCapability;
   models: UnifiedAgentModelCandidate[];
+  reason?: 'missing_model' | 'model_unavailable' | 'capability_mismatch' | 'agent_tools_required';
 }
 
 export type UnifiedAgentRunResult =
   | {
       status: 'needs_model_selection';
       capability: UnifiedAgentCapability;
-      reason: 'missing_model' | 'model_unavailable' | 'capability_mismatch';
+      reason:
+        'missing_model' | 'model_unavailable' | 'capability_mismatch' | 'agent_tools_required';
       models: UnifiedAgentModelCandidate[];
     }
   | {
@@ -1970,6 +2003,8 @@ export type AgentGenerationPrepareResult =
       agentTaskId: string;
       /** Native-owned runs keep executing when a Desktop view unsubscribes. */
       runtimeOwner?: 'desktop' | 'native-agent' | 'pi';
+      /** Worker-selected internal workflow; never a user-visible Agent mode. */
+      runtimeMode?: ConversationTaskMode;
     })
   | { pendingIntent: AgentPendingIntentInfo };
 
@@ -2004,6 +2039,25 @@ export interface ConversationRuntimeStartParams extends LlmGenerationIdentity {
 export interface ConversationRuntimeStartResult {
   runtime: 'pi';
   taskId: string;
+}
+
+export interface ConversationRuntimeGetParams {
+  generationId: string;
+}
+
+export interface ConversationRuntimeGetResult {
+  active: boolean;
+  confirmation?: AgentToolConfirmationRequest;
+}
+
+export interface ConversationRuntimeConfirmParams {
+  generationId: string;
+  confirmationToken: string;
+  approved: boolean;
+}
+
+export interface ConversationRuntimeConfirmResult {
+  accepted: boolean;
 }
 
 export interface NovelPendingIntentListParams {
@@ -2877,6 +2931,14 @@ export interface WorkerMethodMap {
   'conversation.runtime.start': {
     params: ConversationRuntimeStartParams;
     result: ConversationRuntimeStartResult;
+  };
+  'conversation.runtime.get': {
+    params: ConversationRuntimeGetParams;
+    result: ConversationRuntimeGetResult;
+  };
+  'conversation.runtime.confirm': {
+    params: ConversationRuntimeConfirmParams;
+    result: ConversationRuntimeConfirmResult;
   };
   'agent.generation.executeTools': {
     params: AgentGenerationExecuteToolsParams;

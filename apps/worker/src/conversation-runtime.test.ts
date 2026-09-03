@@ -25,33 +25,46 @@ function runtime(kind: 'legacy' | 'pi') {
 }
 
 describe('ConversationRuntimeRouter', () => {
-  it('keeps every mode on Legacy when the Pi feature flag is omitted', async () => {
+  it('routes every mode to Pi by default', async () => {
     const legacy = runtime('legacy');
     const pi = runtime('pi');
     const router = new ConversationRuntimeRouter(legacy, { piRuntime: pi });
 
-    await expect(router.start(request)).resolves.toEqual({ runtime: 'legacy', taskId: 'task' });
-    expect(legacy.start).toHaveBeenCalledOnce();
-    expect(pi.start).not.toHaveBeenCalled();
+    await expect(router.start(request)).resolves.toEqual({ runtime: 'pi', taskId: 'task' });
+    expect(legacy.start).not.toHaveBeenCalled();
+    expect(pi.start).toHaveBeenCalledOnce();
   });
 
-  it('routes only short-drama to Pi when explicitly enabled', () => {
+  it('uses the same Pi runtime for document, novel, and short-drama workflows', () => {
     const legacy = runtime('legacy');
     const pi = runtime('pi');
     const router = new ConversationRuntimeRouter(legacy, { piEnabled: true, piRuntime: pi });
 
     expect(router.select('short-drama')).toBe(pi);
-    expect(router.select('document')).toBe(legacy);
-    expect(router.select('novel-writing')).toBe(legacy);
+    expect(router.select('document')).toBe(pi);
+    expect(router.select('novel-writing')).toBe(pi);
   });
 
-  it('defaults the environment feature flag to disabled', () => {
-    expect(resolvePiConversationRuntimeEnabled({})).toBe(false);
+  it('defaults Pi on and retains an explicit development fallback', () => {
+    expect(resolvePiConversationRuntimeEnabled({})).toBe(true);
+    expect(resolvePiConversationRuntimeEnabled({ AI_VIDEO_PI_CONVERSATION_RUNTIME: '0' })).toBe(
+      false,
+    );
     expect(resolvePiConversationRuntimeEnabled({ AI_VIDEO_PI_CONVERSATION_RUNTIME: 'false' })).toBe(
       false,
     );
     expect(resolvePiConversationRuntimeEnabled({ AI_VIDEO_PI_CONVERSATION_RUNTIME: 'true' })).toBe(
       true,
     );
+  });
+
+  it('uses Legacy for every mode when the development fallback is explicit', () => {
+    const legacy = runtime('legacy');
+    const pi = runtime('pi');
+    const router = new ConversationRuntimeRouter(legacy, { piEnabled: false, piRuntime: pi });
+
+    expect(router.select('short-drama')).toBe(legacy);
+    expect(router.select('document')).toBe(legacy);
+    expect(router.select('novel-writing')).toBe(legacy);
   });
 });

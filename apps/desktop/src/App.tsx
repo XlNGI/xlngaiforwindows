@@ -54,6 +54,7 @@ import type {
   UnifiedAgentCapability,
   LlmInputAttachment,
 } from '@ai-video/contracts';
+import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { submitProviderRequest, submitVideoProviderTask } from './provider-client';
 import { useProjectMaintenance } from './use-project-maintenance';
@@ -129,19 +130,15 @@ export interface ConversationModelSelection {
   modelId: string;
 }
 
-/**
- * Agent and media models are separate user choices. A selected Agent model may
- * be used for text/tool-loop work, but it must never become an implicit image
- * or video Provider model.
- */
+/** `agent.run` always selects the conversation LLM; media selection uses its own later contract. */
 export function resolveAgentRunModelSelection(
   capability: UnifiedAgentCapability,
   explicitSelection?: ConversationModelSelection,
   rememberedSelection?: ConversationModelSelection,
   agentSelection?: ConversationModelSelection,
 ): ConversationModelSelection | undefined {
+  void capability;
   if (explicitSelection) return explicitSelection;
-  if (capability === 'image' || capability === 'video') return rememberedSelection;
   return agentSelection ?? rememberedSelection;
 }
 
@@ -400,32 +397,7 @@ export function mergeGenerationMessage(
 }
 
 export function inferAgentCapability(prompt: string): UnifiedAgentCapability {
-  const value = prompt.normalize('NFC');
-  if (/(搜索|查找|联网|最新资料|网页|研究)/u.test(value)) return 'research';
-  // Direct rendering requests should not be mistaken for prompt/document work.
-  // Keep “生成角色三视图提示词” as document work, but route
-  // “直接生成角色三视图” to the image model selection flow.
-  if (
-    /(?:生成|制作|创建|绘制|画出|画一张)/u.test(value) &&
-    /(图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)/u.test(value) &&
-    !/(提示词|prompt|文档)/iu.test(value)
-  )
-    return 'image';
-  if (/(改写|重写|润色|总结|提取|分析|识别|描述|转写|翻译|提示词)/u.test(value)) return 'document';
-  if (
-    /(文生视频|图生视频|参考生视频|首尾帧(?:生|生成)?视频|(?:生成|制作|创建)[^。！？\n]{0,80}(?:的)?视频(?:[。！？!?]|$)|输出视频|做成视频)/u.test(
-      value,
-    )
-  )
-    return 'video';
-  if (
-    /(文生图|图生图|参考生图|生成(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|制作(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|创建(?:一张|一个|一组|该|这个)?(?:图片|图像|海报|角色图|头像|插画|配图|三视图|立绘)|生图)/u.test(
-      value,
-    )
-  )
-    return 'image';
-  if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
-  return 'text';
+  return inferUnifiedAgentCapabilityHint(prompt);
 }
 
 /**
@@ -791,25 +763,19 @@ export function App() {
             model.enabled &&
             !model.unavailableAt &&
             model.capabilities.text &&
-            model.capabilities.streaming,
+            model.capabilities.streaming &&
+            model.capabilities.tools,
         );
       const currentProfile = profiles.find((profile) => profile.id === selectedLlmProfileId);
       const currentModel = models.find(
         (model) =>
           model.id === selectedLlmModelId && model.providerProfileId === currentProfile?.id,
       );
-      const nextProfile =
-        currentProfile && currentModel
-          ? currentProfile
-          : profiles.find((profile) =>
-              models.some((model) => model.providerProfileId === profile.id),
-            );
-      const nextModel =
-        currentModel ?? models.find((model) => model.providerProfileId === nextProfile?.id);
       setLlmProfiles(profiles);
       setLlmModels(models);
-      setSelectedLlmProfileId(nextProfile?.id ?? '');
-      setSelectedLlmModelId(nextModel?.id ?? '');
+      // Never replace a missing or non-tool historical selection silently.
+      setSelectedLlmProfileId(currentModel ? (currentProfile?.id ?? '') : '');
+      setSelectedLlmModelId(currentModel?.id ?? '');
     } catch {
       setLlmProfiles([]);
       setLlmModels([]);
@@ -1638,9 +1604,7 @@ export function App() {
           }
           agentPrompt = composeImageGenerationPrompt(promptForAgent, promptDocument);
         }
-        const remembered = conversation
-          ? agentModelPreferences[conversation.id]?.[capability]
-          : undefined;
+        const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
         const runModel = resolveAgentRunModelSelection(
           capability,
           modelSelection
@@ -1680,7 +1644,7 @@ export function App() {
         ) {
           void callWorker('conversation.modelPreference.set', {
             conversationId: conversation.id,
-            capability,
+            capability: 'text',
             providerProfileId,
             modelId,
           }).catch(() => undefined);
@@ -1692,6 +1656,7 @@ export function App() {
             prompt: agentPrompt || '请分析我提供的附件。',
             capability: unified.capability,
             models: unified.models,
+            reason: unified.reason,
           });
           return;
         }
@@ -2578,16 +2543,14 @@ export function App() {
       agentModelSelection={agentModelSelection}
       onSelectAgentModel={(providerProfileId, modelId) => {
         const pending = agentModelSelection;
-        if (!pending || (pending.capability !== 'image' && pending.capability !== 'video')) {
-          setSelectedLlmProfileId(providerProfileId);
-          setSelectedLlmModelId(modelId);
-        }
+        setSelectedLlmProfileId(providerProfileId);
+        setSelectedLlmModelId(modelId);
         if (pending) {
           setAgentModelPreferences((current) => ({
             ...current,
             [conversation?.id ?? '']: {
               ...current[conversation?.id ?? ''],
-              [pending.capability]: { providerProfileId, modelId },
+              text: { providerProfileId, modelId },
             },
           }));
           void sendMessage(pending.prompt, { providerProfileId, modelId });
