@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type {
   ConversationDeliverableKind,
   ConversationTaskToolGrant,
@@ -12,6 +12,7 @@ import { ProjectService } from './project-service.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { createRepositories } from '@ai-video/persistence';
 import type { AgentToolCallRecord } from '@ai-video/domain';
+import { hashAgentToolArguments, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 
 export interface PiToolIdentity {
   taskId: string;
@@ -47,6 +48,7 @@ export class DomainToolGateway {
   ) {}
 
   tools(grants: ConversationTaskToolGrant[]): AgentTool[] {
+    grants.forEach((grant) => unifiedAgentToolRegistry.require(grant.tool.name));
     return grants.map((grant) => this.tool(grant));
   }
 
@@ -58,12 +60,7 @@ export class DomainToolGateway {
       description: definition.description,
       // Pi accepts the same JSON Schema dialect used by the Worker contracts.
       parameters: definition.parameters,
-      executionMode:
-        definition.name === 'task.plan.submit' || definition.name === 'task.package.complete'
-          ? 'sequential'
-          : grant.deliverableKind
-            ? 'sequential'
-            : 'parallel',
+      executionMode: unifiedAgentToolRegistry.executionMode(definition.name),
       execute: async (toolCallId, args) => this.execute(toolCallId, grant, args as ToolArguments),
     } as AgentTool;
   }
@@ -109,8 +106,9 @@ export class DomainToolGateway {
       case 'task.package.complete': {
         const completed = this.plans.completePackage(this.identity.taskId);
         if (completed.complete) {
+          const output = unifiedAgentToolRegistry.serializeResult(completed);
           return {
-            content: [{ type: 'text', text: JSON.stringify(completed) }],
+            content: [{ type: 'text', text: output }],
             details: completed as unknown as Record<string, unknown>,
             terminate: true,
           };
@@ -135,7 +133,6 @@ export class DomainToolGateway {
     toolName: string,
     args: ToolArguments,
   ): AgentToolCallRecord {
-    const normalized = JSON.stringify(normalizeArguments(args));
     const idempotencyKey = `pi:${this.identity.generationId ?? this.identity.taskId}:${toolCallId}`;
     const existing = this.projects.access(false, (database) =>
       createRepositories(database).agentToolCalls.getByIdempotencyKey(
@@ -155,7 +152,7 @@ export class DomainToolGateway {
       taskId: this.identity.taskId,
       projectId: this.identity.projectId,
       toolName,
-      normalizedArgumentsHash: createHash('sha256').update(normalized).digest('hex'),
+      normalizedArgumentsHash: hashAgentToolArguments(args),
       argumentsSummaryJson: JSON.stringify({ keys: Object.keys(args).sort(), runtime: 'pi' }),
       status: 'received',
       idempotencyKey,
@@ -286,7 +283,7 @@ export class DomainToolGateway {
       entityId: entity.entityId,
     });
     return {
-      content: [{ type: 'text', text: JSON.stringify(completed) }],
+      content: [{ type: 'text', text: unifiedAgentToolRegistry.serializeResult(completed) }],
       details: completed,
     };
   }
@@ -300,17 +297,10 @@ export class DomainToolGateway {
 function resultText(
   value: Record<string, unknown>,
 ): AgentToolResult<DomainToolResultV1 | Record<string, unknown>> {
-  return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
-}
-
-function normalizeArguments(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeArguments);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => [key, normalizeArguments(item)]),
-  );
+  return {
+    content: [{ type: 'text', text: unifiedAgentToolRegistry.serializeResult(value) }],
+    details: value,
+  };
 }
 
 function requiredString(value: unknown, name: string, maximum: number): string {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LlmProvider } from '@ai-video/llm';
+import { AGENT_TOOL_RESULT_LIMITS } from '@ai-video/contracts';
 import { AgentProviderLoopService } from './agent-provider-loop-service.js';
 import { ChangeSetService } from './change-set-service.js';
 import { ContentService } from './content-service.js';
@@ -14,6 +15,7 @@ import { ResearchService } from './research-service.js';
 import { NovelContextService } from './novel-context-service.js';
 import { NovelService } from './novel-service.js';
 import { getAdapter } from '@ai-video/generation-adapters';
+import { AgentSystemToolService } from './agent-system-tool-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -59,6 +61,28 @@ async function setup(
   const workflow = new DocumentWorkflowService(project);
   const loop = new AgentProviderLoopService(project, workflow, research);
   return { conversation, generations, loop, project, workflow };
+}
+
+function createSystemLoop(project: ProjectService, workflow: DocumentWorkflowService) {
+  return new AgentProviderLoopService(
+    project,
+    workflow,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new AgentSystemToolService(
+      project,
+      new ContentService(project),
+      {
+        listAssets: () => [],
+        updateAssetAlias: () => {
+          throw new Error('Asset was not found.');
+        },
+      },
+      { listProfiles: () => [], listModels: () => [] },
+    ),
+  );
 }
 
 describe('AgentProviderLoopService', () => {
@@ -996,6 +1020,7 @@ describe('AgentProviderLoopService', () => {
         count: 0,
       });
     });
+    expect(policyRejectionCodes(project, agent.taskId)).toEqual(['AGENT_TOOL_UNAUTHORIZED']);
   });
 
   it('reads only the Worker-authorized document without persisting its body as evidence', async () => {
@@ -1037,6 +1062,46 @@ describe('AgentProviderLoopService', () => {
       expect(row.result_summary_json).not.toContain('Internal body');
       expect(row.continuation_manifest_json).not.toContain('Internal body');
     });
+  });
+
+  it('truncates a large document result below 64 KiB without breaking UTF-8', async () => {
+    const { conversation, generations, loop, workflow } = await setup();
+    const contentMarkdown = `# Large\n\n${'"界\\'.repeat(30_000)}`;
+    const document = workflow.saveDraft({ title: 'Large', contentMarkdown });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Read the selected document.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Read the selected document.', undefined, {
+      operation: 'document.read',
+      documentId: document.id,
+    });
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'large-read-response',
+      calls: [
+        {
+          id: 'large-read-call',
+          name: 'document.read',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: '{}',
+        },
+      ],
+    });
+    const output = result.continuation!.outputs[0]!.output;
+    const parsed = JSON.parse(output) as {
+      contentMarkdown: string;
+      truncated: boolean;
+      originalTextBytes: number;
+    };
+    expect(Buffer.byteLength(output, 'utf8')).toBeLessThanOrEqual(
+      AGENT_TOOL_RESULT_LIMITS.maxJsonBytes,
+    );
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.originalTextBytes).toBe(Buffer.byteLength(contentMarkdown, 'utf8'));
+    expect(parsed.contentMarkdown).not.toContain('\uFFFD');
   });
 
   it('updates only the frozen document target and base version', async () => {
@@ -1125,12 +1190,15 @@ describe('AgentProviderLoopService', () => {
         confirmationToken: pending.confirmation!.confirmationToken,
         approved: true,
       }),
-    ).toThrow('invalid, expired, or already consumed');
+    ).toThrow('AGENT_TOOL_CONFIRMATION_REPLAYED');
     project.access(false, (database) => {
       expect(database.prepare('SELECT status FROM agent_tool_calls').get()).toEqual({
         status: 'succeeded',
       });
     });
+    expect(policyRejectionCodes(project, agent.taskId)).toEqual([
+      'AGENT_TOOL_CONFIRMATION_REPLAYED',
+    ]);
   });
 
   it('rejects expired and revoked step-local handles before any side effect', async () => {
@@ -1176,13 +1244,17 @@ describe('AgentProviderLoopService', () => {
           },
         ],
       }),
-    ).rejects.toThrow('not authorized');
+    ).rejects.toThrow('AGENT_TOOL_AUTHORIZATION_REPLAYED');
     expect(second.tools[0]?.authorizationHandle).not.toBe(first.tools[0]?.authorizationHandle);
     project.access(false, (database) => {
       expect(database.prepare('SELECT COUNT(*) AS count FROM documents').get()).toEqual({
         count: 0,
       });
     });
+    expect(policyRejectionCodes(project, second.taskId)).toEqual([
+      'AGENT_TOOL_AUTHORIZATION_EXPIRED',
+      'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+    ]);
   });
 
   it('blocks a late tool callback after cancellation and revokes its execution envelope', async () => {
@@ -1409,9 +1481,11 @@ describe('AgentProviderLoopService', () => {
         },
       ],
     });
-    expect(result.continuation?.outputs[0]?.output).toContain(
-      'references unknown character "不存在的人物"',
-    );
+    const rejected = JSON.parse(result.continuation!.outputs[0]!.output) as {
+      error: { code: string; message: string };
+    };
+    expect(rejected.error.code).toBe('AGENT_TOOL_ARGUMENTS_INVALID');
+    expect(rejected.error.message).toContain('references unknown character "不存在的人物"');
     expect(new ChangeSetService(project).list({ includeTerminal: false })).toHaveLength(0);
   });
 
@@ -1673,6 +1747,236 @@ describe('AgentProviderLoopService', () => {
     expect(workflow.getDocument(parsed.documentId).kind).toBe('character');
   });
 
+  it('exposes bounded system queries and only grants an explicitly requested reversible write', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prompt = '请把当前会话重命名为项目讨论';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'document.list',
+      'project.get_context',
+      'conversation.search',
+      'asset.search',
+      'settings.get',
+      'conversation.rename',
+      'research.search',
+      'research.fetch',
+    ]);
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('asset.update_alias');
+
+    loop.startProviderStep(prepared.stream);
+    const rename = agent.tools.find((tool) => tool.name === 'conversation.rename')!;
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'system-rename-response',
+      calls: [
+        {
+          id: 'system-rename-call',
+          name: 'conversation.rename',
+          authorizationHandle: rename.authorizationHandle,
+          argumentsJson: JSON.stringify({ title: '项目讨论' }),
+        },
+      ],
+    });
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'succeeded',
+      conversation: { id: conversation.id, title: '项目讨论' },
+    });
+  });
+
+  it('rejects and audits unknown tools, old authorization handles, and cross-project entities', async () => {
+    const first = await setup();
+    const prepared = first.generations.prepare({
+      conversationId: first.conversation.id,
+      prompt: 'Create a draft.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = first.loop.prepare(prepared.stream, 'Create a draft.');
+    await expect(
+      first.loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'unknown-response',
+        calls: [
+          {
+            id: 'unknown-call',
+            name: 'unregistered.tool',
+            authorizationHandle: agent.tools[0]!.authorizationHandle,
+            argumentsJson: '{}',
+          },
+        ],
+      }),
+    ).rejects.toThrow('AGENT_TOOL_UNKNOWN');
+
+    first.loop.startProviderStep(prepared.stream);
+    await first.loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'create-response',
+      calls: [
+        {
+          id: 'create-call',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({ title: 'Draft', contentMarkdown: '# Draft' }),
+        },
+      ],
+    });
+    await expect(
+      first.loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'replay-response',
+        calls: [
+          {
+            id: 'replay-call',
+            name: 'document.create_draft',
+            authorizationHandle: agent.tools[0]!.authorizationHandle,
+            argumentsJson: JSON.stringify({ title: 'Replay', contentMarkdown: '# Replay' }),
+          },
+        ],
+      }),
+    ).rejects.toThrow('AGENT_TOOL_AUTHORIZATION_REPLAYED');
+
+    const second = await setup();
+    const systemLoop = createSystemLoop(second.project, second.workflow);
+    const aliasPrompt = '把素材 asset-from-other-project 的别名改为封面';
+    const systemPrepared = second.generations.prepare({
+      conversationId: second.conversation.id,
+      prompt: aliasPrompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const systemAgent = systemLoop.prepare(systemPrepared.stream, aliasPrompt);
+    const aliasTool = systemAgent.tools.find((tool) => tool.name === 'asset.update_alias')!;
+    systemLoop.startProviderStep(systemPrepared.stream);
+    await expect(
+      systemLoop.executeTools({
+        ...systemPrepared.stream,
+        providerResponseId: 'cross-project-response',
+        calls: [
+          {
+            id: 'cross-project-call',
+            name: 'asset.update_alias',
+            authorizationHandle: aliasTool.authorizationHandle,
+            argumentsJson: JSON.stringify({ assetId: 'asset-from-other-project', alias: '封面' }),
+          },
+        ],
+      }),
+    ).rejects.toThrow('AGENT_TOOL_PROJECT_SCOPE');
+
+    expect(policyRejectionCodes(first.project, agent.taskId)).toEqual([
+      'AGENT_TOOL_UNKNOWN',
+      'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+    ]);
+    expect(policyRejectionCodes(second.project, systemAgent.taskId)).toEqual([
+      'AGENT_TOOL_PROJECT_SCOPE',
+    ]);
+  });
+
+  it('rejects and audits tampered and expired confirmation grants', async () => {
+    const tampered = await setup();
+    const tamperedDocument = tampered.workflow.saveDraft({
+      title: 'Tampered',
+      contentMarkdown: '# Draft',
+    });
+    const tamperedPrepared = tampered.generations.prepare({
+      conversationId: tampered.conversation.id,
+      prompt: 'Archive this document.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const tamperedAgent = tampered.loop.prepare(
+      tamperedPrepared.stream,
+      'Archive this document.',
+      undefined,
+      { operation: 'document.archive', documentId: tamperedDocument.id },
+    );
+    tampered.loop.startProviderStep(tamperedPrepared.stream);
+    const tamperedPending = await tampered.loop.executeTools({
+      ...tamperedPrepared.stream,
+      providerResponseId: 'tampered-pending',
+      calls: [
+        {
+          id: 'tampered-call',
+          name: 'document.archive',
+          authorizationHandle: tamperedAgent.tools[0]!.authorizationHandle,
+          argumentsJson: '{}',
+        },
+      ],
+    });
+    tampered.project.access(true, (database) => {
+      database
+        .prepare("UPDATE agent_task_confirmations SET normalized_arguments_hash = 'tampered'")
+        .run();
+    });
+    expect(() =>
+      tampered.loop.confirmTool({
+        ...tamperedPrepared.stream,
+        confirmationToken: tamperedPending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).toThrow('AGENT_TOOL_ARGUMENTS_TAMPERED');
+    expect(policyRejectionCodes(tampered.project, tamperedAgent.taskId)).toEqual([
+      'AGENT_TOOL_ARGUMENTS_TAMPERED',
+    ]);
+
+    const expired = await setup();
+    const expiredDocument = expired.workflow.saveDraft({
+      title: 'Expired',
+      contentMarkdown: '# Draft',
+    });
+    const expiredPrepared = expired.generations.prepare({
+      conversationId: expired.conversation.id,
+      prompt: 'Archive this document.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const expiredAgent = expired.loop.prepare(
+      expiredPrepared.stream,
+      'Archive this document.',
+      undefined,
+      { operation: 'document.archive', documentId: expiredDocument.id },
+    );
+    expired.loop.startProviderStep(expiredPrepared.stream);
+    const expiredPending = await expired.loop.executeTools({
+      ...expiredPrepared.stream,
+      providerResponseId: 'expired-pending',
+      calls: [
+        {
+          id: 'expired-call',
+          name: 'document.archive',
+          authorizationHandle: expiredAgent.tools[0]!.authorizationHandle,
+          argumentsJson: '{}',
+        },
+      ],
+    });
+    expired.project.access(true, (database) => {
+      database
+        .prepare("UPDATE agent_task_confirmations SET expires_at = '2000-01-01T00:00:00.000Z'")
+        .run();
+    });
+    expect(() =>
+      expired.loop.confirmTool({
+        ...expiredPrepared.stream,
+        confirmationToken: expiredPending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).toThrow('AGENT_TOOL_CONFIRMATION_EXPIRED');
+    expect(policyRejectionCodes(expired.project, expiredAgent.taskId)).toEqual([
+      'AGENT_TOOL_CONFIRMATION_EXPIRED',
+    ]);
+    expect(
+      expired.project.access(false, (database) =>
+        database.prepare('SELECT status FROM agent_task_confirmations').get(),
+      ),
+    ).toEqual({ status: 'expired' });
+  });
+
   it('cleans up interrupted Agent runtime records after Worker recovery', async () => {
     const { conversation, generations, loop, project } = await setup();
     const prepared = generations.prepare({
@@ -1698,4 +2002,17 @@ describe('AgentProviderLoopService', () => {
 
 function requestUrl(input: string | URL | Request): string {
   return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}
+
+function policyRejectionCodes(project: ProjectService, taskId: string): string[] {
+  return project.access(false, (database) =>
+    (
+      database
+        .prepare(
+          `SELECT payload_json FROM agent_task_events
+           WHERE task_id = ? AND event_type = 'agent.policy.rejected' ORDER BY sequence`,
+        )
+        .all(taskId) as Array<{ payload_json: string }>
+    ).map((row) => (JSON.parse(row.payload_json) as { code: string }).code),
+  );
 }

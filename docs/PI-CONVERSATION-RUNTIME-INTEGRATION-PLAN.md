@@ -3,7 +3,7 @@
 版本：0.6  
 日期：2026-08-28  
 最近同步：2026-09-03  
-状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成、P6 基础 Desktop/Runtime 接线与全系统编排 P1 统一会话扩展已完成，仍有生产审计与发布边界  
+状态：P0、P1、P2、P3、P4 完成；P5 核心 Worker 集成、P6 基础 Desktop/Runtime 接线与全系统编排 P1/P2 已完成，仍有独立媒体工具、后台任务与发布边界  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档规划如何选择性引入 `@earendil-works/pi-agent-core` 的低层 Agent 循环，改造当前会话中的模型工具选择、多工具连续执行和多交付物完整性治理。本文档本身不授权直接修改代码；用户已于 2026-08-28 分别授权执行 P1、P2、P3、P4，各阶段仍必须按顺序实施并在完成后记录验证证据。
@@ -1170,6 +1170,7 @@ P5/P6 的核心代码已经接入并有自动化验证，但阶段清单继续�
 | 2026-09-03 | P5/P6 增量同步 | Pi 核心 Worker 工具编排、`conversation.runtime.start`、Desktop runtime owner/状态观察、取消/断线/重试/恢复基础 UX 已完成；媒体 Provider/model 显式选择、Worker 校验和任务快照边界已完成；当前仓库 Worker 294、Desktop 174 测试及 typecheck/format check 通过，提交 `c80f619` 已同步 `main` | Pi 仍默认受 short-drama feature flag 限制；独立 `conversation.runtime.subscribe`、所有项目会话统一 Pi、真实 Provider/Windows 端到端、性能预算和 P7 发布门禁未完成 | Codex |
 | 2026-09-03 | 全系统编排 P0 | 完成 | 与上层总方案同步冻结通用 Tool Registry、R0-R3、参数哈希一次性授权、Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐视频语句、区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；证据见 `code-traces/2026-09-03-agent-orchestration-p0-baseline.md` | 本文历史 P0-P4 不变；所有会话统一 Pi 属于上层 P1；生产策略接线、`submission_unknown`、项目级轮询和真实 Provider/Windows 验收仍未完成 | Codex |
 | 2026-09-03 | 全系统编排 P1 | 完成 | document、novel-writing、short-drama 和普通 `agent.run` 默认统一进入 Worker-owned Pi；新增 Pi→现有 Worker 工具循环适配器、动态授权刷新、确认查询/提交 RPC 和统一 system instruction；短剧 plan-first/完整性门禁保持不变；共享 capability 提示器不再前置截断媒体请求；JS/TS 554 项、Rust 71 项、typecheck/lint/format、Pi spike、sidecar smoke 与 NSIS build 通过；证据见 `code-traces/2026-09-03-agent-orchestration-p1-unified-runtime.md` | 独立 runtime subscribe、Pi event 正式持久化、P2 通用策略接线、项目级媒体轮询、真实 Provider/Windows 长稳与 P7 发布验收仍未完成 | Codex |
+| 2026-09-03 | 全系统编排 P2 | 完成 | 统一 Registry 接管文档、小说、研究、Schema、计划及首批项目/会话/素材/设置工具；R0-R3、项目/step 动态授权、参数哈希一次性确认、稳定策略错误、拒绝审计与 64 KiB Tool Result 红线接入 Worker/Pi 生产路径；JS/TS 575 项、Rust 71 项、typecheck/lint/format、Pi spike、sidecar、Tauri Release 与 NSIS build 通过；证据见 `code-traces/2026-09-03-agent-orchestration-p2-tool-policy.md` | 独立媒体准备/提交工具、`submission_unknown`、项目级媒体轮询、真实 Provider/Windows 长稳与 P7 发布验收仍未完成 | Codex |
 
 ## 19. P0 已确认项
 

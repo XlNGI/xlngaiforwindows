@@ -3,7 +3,7 @@
 版本：1.0  
 日期：2026-09-02  
 最近同步：2026-09-03  
-状态：实施中（P0、P1 已完成；媒体模型选择核心已完成；下一阶段为 P2 通用工具注册表与策略引擎）  
+状态：实施中（P0、P1、P2 已完成；媒体模型选择核心已完成；下一阶段为 P3 媒体准备与用户选择模型适配）  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM、Generation Adapters
 
 > **方案结论** 会话是面向整个应用的统一人工智能助手，不再按“普通聊天、通用模式、专用模式”划分运行方式。用户在会话中选择一个支持工具调用的推理模型，之后由 Pi Agent 理解自然语言、规划步骤、选择受控业务工具并连续执行；Worker 始终负责权限、确认、状态机、幂等、事务和审计，Tauri Native 始终负责凭据与 Provider 网络边界。图片、视频、小说、文档、素材和项目操作均逐步接入同一个 Agent 工具面。
@@ -416,13 +416,15 @@ P1 证据：[Agent 编排 P1 统一会话 Pi Runtime](./code-traces/2026-09-03-a
 
 ### P2：通用工具注册表与策略引擎
 
-- [ ] 将文档、研究、Schema、计划工具纳入统一 `AgentToolRegistry`。
-- [ ] 实现 R0-R3 风险元数据、动态授权、串并行策略和统一错误合同。
-- [ ] 实现一次性确认授权，绑定项目 session、工具调用和参数哈希。
-- [ ] 建立 Tool Result 大小、敏感字段和错误信息红线。
-- [ ] 增加项目、会话、素材和设置的首批查询/可逆写工具。
+- [x] 将文档、研究、Schema、计划工具纳入统一 `AgentToolRegistry`。
+- [x] 实现 R0-R3 风险元数据、动态授权、串并行策略和统一错误合同。
+- [x] 实现一次性确认授权，绑定项目 session、工具调用和参数哈希。
+- [x] 建立 Tool Result 大小、敏感字段和错误信息红线。
+- [x] 增加项目、会话、素材和设置的首批查询/可逆写工具。
 
 完成门禁：未知工具、越权实体、跨项目 ID、重复授权、篡改参数和过期确认均被 Worker 拒绝并留有审计记录。
+
+P2 证据：[Agent 编排 P2 通用工具注册表与策略引擎](./code-traces/2026-09-03-agent-orchestration-p2-tool-policy.md)。普通 Provider 回调在 P2 保持保守串行，Registry 已统一声明只读并行/写入串行策略，Worker 对有界只读批次和写工具单独串行执行进行强制校验；通用并行调度的性能验收继续归入 P7。
 
 ### P3：媒体准备与用户选择模型适配
 
@@ -622,10 +624,10 @@ correlationId
 
 ## 18. 下一步
 
-当前处于 **P0、P1 已完成，P3 媒体选择核心已完成，Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
+当前处于 **P0、P1、P2 已完成，P3 媒体选择核心已完成，Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
 
-1. 进入 P2，将 P0 冻结的 Tool Registry、风险授权、一次性确认和 Tool Result 红线接入统一生产路径；
-2. 按顺序完成 P3/P4 的独立媒体工具与付费提交状态机，包括 `submission_unknown`；
+1. 完成 P3 剩余的媒体候选解析与 `media.image.prepare`、`media.video.prepare`、`media.task.get`，继续由用户明确选择图片/视频 Provider 和媒体模型；
+2. 完成 P4 的付费提交状态机和 `submission_unknown`，每次真实 Provider 提交分别确认；
 3. 将视频轮询和媒体提交收口到项目级后台运行时，再进行 P6/P7 的全系统工具覆盖与发布验收。
 
 > **冻结原则** Agent 可以用自然语言发起整个系统的操作，但模型永远不是权限、状态和数据事实源；付费与高风险动作必须确认，Provider 凭据永不进入 Agent 边界，成功媒体必须先完成本地落盘再进入素材库。
@@ -637,3 +639,4 @@ correlationId
 | 2026-09-03 | 计划状态与实现同步 | 提交 `c80f619` 已同步 `main`；媒体模型显式选择、Worker 二次校验、任务快照和 Base64 防护已完成；Worker 294、Desktop 174 测试及 typecheck/format check 通过 | Pi 尚未覆盖所有会话；媒体提交/轮询尚未完全迁移到项目级后台运行时；真实 Provider、Windows 断网/重启/性能和发布门禁未完成 |
 | 2026-09-03 | P0 完成 | 冻结 `AgentToolRegistryV1`、R0-R3、一次性确认授权、64 KiB Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐精确视频语句、Provider 区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；详见 P0 基线证据 | P1 尚未统一所有会话；P2/P4 尚未接入通用策略与 `submission_unknown` 实现；P5 尚未迁移页面调度器；真实 Provider 与 Windows 安装/升级/卸载仍待 P7 |
 | 2026-09-03 | P1 完成 | 所有普通问答、文档、研究、小说和短剧会话默认进入 Worker-owned Pi Runtime；新增 Pi→Worker 工具网关、动态授权刷新和确认回传；Agent 模型强制 `text+streaming+tools` 且不静默替换；共享 capability 提示器不再主导业务路由；JS/TS 554 项、Rust 71 项、typecheck/lint/format、Pi spike、sidecar smoke 与 NSIS build 通过；详见 P1 证据 | P2 通用 Registry/策略接线、P3/P4 独立媒体工具与付费提交、P5 项目级后台轮询、真实 Provider 和 Windows 安装/升级/卸载仍未完成 |
+| 2026-09-03 | P2 完成 | 文档、小说、研究、Schema、计划及首批项目/会话/素材/设置工具纳入统一 Registry；R0-R3、动态授权、一次性确认、项目隔离、统一错误、拒绝审计和 64 KiB Tool Result 红线接入生产路径；JS/TS 575 项、Rust 71 项、typecheck/lint/format、Pi spike、sidecar、Tauri Release 与 NSIS build 通过；详见 P2 证据 | P3 独立媒体准备工具、P4 付费提交与 `submission_unknown`、P5 项目级后台轮询、真实 Provider 和 Windows 安装/升级/卸载仍未完成 |

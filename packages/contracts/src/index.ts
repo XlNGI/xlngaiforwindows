@@ -882,6 +882,30 @@ export interface AgentToolRegistryV1 {
   createdAt: string;
 }
 
+export type AgentToolPolicyErrorCode =
+  | 'AGENT_TOOL_UNKNOWN'
+  | 'AGENT_TOOL_UNAUTHORIZED'
+  | 'AGENT_TOOL_PROJECT_SCOPE'
+  | 'AGENT_TOOL_AUTHORIZATION_EXPIRED'
+  | 'AGENT_TOOL_AUTHORIZATION_REPLAYED'
+  | 'AGENT_TOOL_ARGUMENTS_TAMPERED'
+  | 'AGENT_TOOL_CONFIRMATION_EXPIRED'
+  | 'AGENT_TOOL_CONFIRMATION_REPLAYED'
+  | 'AGENT_TOOL_ARGUMENTS_INVALID'
+  | 'AGENT_TOOL_RESULT_INVALID'
+  | 'AGENT_TOOL_RESULT_TOO_LARGE'
+  | 'AGENT_TOOL_RESULT_FORBIDDEN';
+
+export interface AgentToolPolicyErrorV1 {
+  version: 1;
+  status: 'rejected';
+  error: {
+    code: AgentToolPolicyErrorCode;
+    message: string;
+    retryable: boolean;
+  };
+}
+
 export interface AgentConfirmationRequestV1 {
   version: 1;
   confirmationId: string;

@@ -3,7 +3,7 @@
 版本：1.0  
 日期：2026-08-31  
 最近同步：2026-09-03  
-状态：实施中（统一会话 Pi Runtime、媒体模型选择与任务快照核心已完成；通用策略、后台任务收口和发布验收待完成）  
+状态：实施中（统一会话 Pi Runtime、通用工具策略、媒体模型选择与任务快照核心已完成；独立媒体工具、后台任务收口和发布验收待完成）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Generation Adapters、Provider Native Bridge
 
 ## 1. 文档目的
@@ -325,7 +325,7 @@ adapter.schema.audit.list
 
 1. 为已创建任务补齐模型偏好来源和用户确认记录的完整 provenance；
 2. 收口统一任务状态、错误提示和媒体结果入口，并将媒体提交/轮询逐步迁移到项目级后台运行时；
-3. 将 P0 冻结的通用 Tool Registry、R0-R3 策略、一次性确认和 Tool Result 红线接入生产工具路径；
+3. 完成独立媒体准备/提交工具、`submission_unknown` 和项目级后台任务运行时；
 4. 完成真实 Provider、Windows 重启/断网、多窗口、性能和发布门禁验收。
 ## 11. Latest implementation status (2026-09-03)
 
@@ -371,3 +371,4 @@ adapter.schema.audit.list
 - [x] Media model selection boundary verified: `agent.run` returns `needs_model_selection` when an image/video request has no explicit Provider/model, and direct image/video preparation rejects missing or partial selections; Worker never falls back to Agent or persisted media defaults (Worker 294 tests, Desktop 174 tests, Worker typecheck).
 - [x] P0 orchestration baseline completed: the exact “帮我生成龙在天空翱翔的视频” request now routes consistently on Desktop and Worker; video task snapshots include the selected Provider region; thrown Provider submissions terminalize the local job; versioned risk/confirmation/Tool Result/media contracts and Windows build evidence are recorded (Worker 295 tests, Desktop 175 tests, full JS/TS 534 tests, Rust 71 tests).
 - [x] P1 unified conversation runtime completed: ordinary Q&A, document, research, novel-writing, and short-drama workflows now default to the same Worker-owned Pi runtime; Pi calls only Worker-authorized tools, confirmations return through runtime RPC, unsupported Agent models are never silently replaced, and media intent reaches Pi without reusing the Agent LLM as the image/video model (Worker 307 tests, Desktop 176 tests, full JS/TS 554 tests, Rust 71 tests).
+- [x] P2 tool policy engine completed: document, novel, research, Schema, plan, project, conversation, asset, and redacted settings tools now use one Worker-owned Registry with R0-R3 policy, scoped authorization, one-time confirmation, stable policy errors, rejection audit, and 64 KiB Tool Result enforcement (Worker 328 tests, Desktop 176 tests, full JS/TS 575 tests, Rust 71 tests).

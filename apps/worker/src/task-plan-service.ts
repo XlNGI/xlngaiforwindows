@@ -9,9 +9,9 @@ import type {
   ConversationTaskPlanStatus,
   ConversationTaskPlanV1,
   ConversationTaskPlanErrorCode,
+  ConversationTaskToolName,
   ConversationTargetPlatform,
   DomainToolResultV1,
-  LlmToolDefinition,
 } from '@ai-video/contracts';
 import type {
   AgentTaskDeliverableRecord,
@@ -25,7 +25,7 @@ import {
   ConversationTaskPlanValidationError,
   validateConversationTaskPlanV1,
 } from './request-validation.js';
-import { conversationTaskToolDefinition } from './agent-provider-loop-service.js';
+import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 
 export class TaskPlanServiceError extends Error {
   constructor(
@@ -50,63 +50,6 @@ interface FrozenShortDramaSnapshot {
   selectedChapterIds: string[];
   targetPlatform: ConversationTargetPlatform;
 }
-
-const PLAN_TOOL: LlmToolDefinition & { name: 'task.plan.submit' } = {
-  name: 'task.plan.submit',
-  description:
-    'Submit the complete structured multi-deliverable plan for this task. This is the only tool available during the planning round.',
-  parameters: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['version', 'mode', 'action', 'targetPlatform', 'deliverables', 'constraints'],
-    properties: {
-      version: { const: 1 },
-      mode: { const: 'short-drama' },
-      action: { enum: ['generate', 'revise', 'analyze'] },
-      targetPlatform: { enum: ['seedance', 'generic-video', 'generic-image'] },
-      deliverables: {
-        type: 'array',
-        minItems: 1,
-        maxItems: 8,
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['kind', 'required', 'dependsOn'],
-          properties: {
-            kind: {
-              enum: [
-                'episode-outline',
-                'character-prompts',
-                'scene-prompts',
-                'scene-shot-structure',
-                'shot-prompts',
-                'production-notes',
-              ],
-            },
-            required: { type: 'boolean' },
-            dependsOn: {
-              type: 'array',
-              maxItems: 7,
-              items: { type: 'string' },
-            },
-          },
-        },
-      },
-      constraints: {
-        type: 'array',
-        maxItems: 20,
-        items: { type: 'string', minLength: 1, maxLength: 500 },
-      },
-    },
-  },
-};
-
-const PACKAGE_COMPLETE_TOOL: LlmToolDefinition & { name: 'task.package.complete' } = {
-  name: 'task.package.complete',
-  description:
-    'Request task completion only after every required deliverable has succeeded. This tool never creates or publishes content.',
-  parameters: { type: 'object', additionalProperties: false, properties: {} },
-};
 
 const deliverableTools: Record<
   ConversationDeliverableKind,
@@ -159,7 +102,7 @@ export class TaskPlanService {
           targetPlatform: snapshot.targetPlatform,
           selectedChapterCount: snapshot.selectedChapterIds.length,
         }),
-        tools: [{ tool: structuredClone(PLAN_TOOL) }],
+        tools: [{ tool: conversationTaskToolDefinition('task.plan.submit') }],
       };
     });
   }
@@ -187,7 +130,7 @@ export class TaskPlanService {
       }
       if (plan.status !== 'active') return [];
       if (plan.action === 'analyze') {
-        return [{ tool: structuredClone(PACKAGE_COMPLETE_TOOL) }];
+        return [{ tool: conversationTaskToolDefinition('task.package.complete') }];
       }
       const usedToolNames = new Set<string>();
       const grants = repositories.agentTaskDeliverables
@@ -207,7 +150,7 @@ export class TaskPlanService {
             },
           ];
         });
-      grants.push({ tool: structuredClone(PACKAGE_COMPLETE_TOOL) });
+      grants.push({ tool: conversationTaskToolDefinition('task.package.complete') });
       return grants;
     });
   }
@@ -902,6 +845,12 @@ export class TaskPlanService {
       updatedAt: plan.updatedAt,
     };
   }
+}
+
+function conversationTaskToolDefinition(
+  name: ConversationTaskToolName,
+): ConversationTaskToolGrant['tool'] {
+  return { ...unifiedAgentToolRegistry.definition(name), name };
 }
 
 const planTransitions: Record<AgentTaskPlanStatus, ReadonlySet<AgentTaskPlanStatus>> = {

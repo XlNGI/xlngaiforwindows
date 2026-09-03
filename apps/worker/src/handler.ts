@@ -139,6 +139,7 @@ import { DomainToolGateway } from './domain-tool-gateway.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
+import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { getAdapter, setAdapterOverrides } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 
@@ -658,6 +659,12 @@ const generationService = new GenerationService(
     generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
   },
 );
+const agentSystemToolService = new AgentSystemToolService(
+  projectService,
+  contentService,
+  imageGenerationService,
+  appSettingsService,
+);
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
   documentWorkflowService,
@@ -709,6 +716,7 @@ const agentProviderLoopService = new AgentProviderLoopService(
     listAudits: (adapterKey, limit) =>
       appSettingsService.listAdapterSchemaAudits(adapterKey, limit),
   } satisfies AgentSchemaManager,
+  agentSystemToolService,
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {

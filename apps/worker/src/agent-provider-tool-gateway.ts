@@ -10,6 +10,7 @@ import type {
   AgentToolConfirmationRequest,
 } from '@ai-video/contracts';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 
 export interface AgentProviderToolExecutor {
   executeTools(
@@ -44,6 +45,7 @@ export class AgentProviderToolGateway {
     private readonly requestConfirmation: ConfirmationRequester,
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
+    this.definitions.forEach((definition) => unifiedAgentToolRegistry.require(definition.name));
   }
 
   tools(): AgentTool[] {
@@ -93,8 +95,7 @@ export class AgentProviderToolGateway {
       label: definition.name,
       description: definition.description,
       parameters: definition.parameters,
-      // Existing authorizations are step-scoped and single-use for mutations.
-      executionMode: 'sequential',
+      executionMode: unifiedAgentToolRegistry.executionMode(definition.name),
       execute: async (toolCallId, args) => this.execute(toolCallId, definition, args),
     } as AgentTool;
   }
@@ -136,6 +137,7 @@ export class AgentProviderToolGateway {
     )?.output;
     if (output === undefined)
       throw new Error('Worker tool continuation omitted the Pi tool result.');
+    unifiedAgentToolRegistry.assertResultText(output);
     return {
       content: [{ type: 'text', text: output }],
       details: { status: 'completed', toolName: definition.name },
