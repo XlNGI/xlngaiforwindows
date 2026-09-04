@@ -2101,6 +2101,35 @@ button {
   cursor: pointer;
 }
 
+.media-model-selection-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.media-model-selection-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.media-model-selection-heading small {
+  color: var(--text-muted);
+}
+
+.media-model-selection .agent-parameter-card {
+  margin: 0;
+}
+
+.media-model-change {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  text-align: left;
+  cursor: pointer;
+}
+
 .agent-parameter-card {
   display: grid;
   gap: 10px;

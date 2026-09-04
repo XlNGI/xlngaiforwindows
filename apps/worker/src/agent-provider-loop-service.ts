@@ -6,6 +6,7 @@ import type {
   AgentGenerationExecuteToolsResult,
   AgentGenerationConfirmToolParams,
   AgentGenerationConfirmToolResult,
+  AgentGenerationSelectMediaParams,
   AgentDocumentIntent,
   AgentDocumentOperation,
   AgentResearchMode,
@@ -20,6 +21,7 @@ import type {
   AdapterDescriptor,
   UnifiedAgentAdapterSchemaProposeResult,
   UnifiedAgentAdapterSchemaAuditInfo,
+  MediaGenerationKind,
 } from '@ai-video/contracts';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -36,8 +38,15 @@ import {
   hashAgentToolArguments,
   unifiedAgentToolRegistry,
 } from './agent-tool-registry.js';
-import type { SystemAgentToolOperation } from './agent-tool-definitions.js';
+import type {
+  MediaPrepareToolOperation,
+  SystemAgentToolOperation,
+} from './agent-tool-definitions.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
+import {
+  MediaPreparationService,
+  type MediaSelectionContext,
+} from './media-preparation-service.js';
 
 const TOOL_SCHEMA_VERSION = 'agent-tools.v2';
 const POLICY_VERSION = 'agent-policy.v2';
@@ -53,7 +62,11 @@ type ResearchOperation = 'research.search' | 'research.fetch';
 type SchemaOperation =
   'adapter.schema.get' | 'adapter.schema.propose' | 'adapter.schema.audit.list';
 type AgentToolOperation =
-  AgentDocumentOperation | ResearchOperation | SchemaOperation | SystemAgentToolOperation;
+  | AgentDocumentOperation
+  | ResearchOperation
+  | SchemaOperation
+  | SystemAgentToolOperation
+  | MediaPrepareToolOperation;
 
 export interface AgentSchemaResolver {
   get(adapterKey: string): AdapterDescriptor | null;
@@ -129,6 +142,27 @@ interface AgentTaskRow {
   tool_call_count: number;
 }
 
+interface MediaSelectionRow {
+  id: string;
+  taskId: string;
+  projectSessionId: string;
+  conversationId: string;
+  generationStatus: string;
+  kind: MediaGenerationKind;
+  status: 'pending' | 'consumed' | 'rejected' | 'expired';
+  expiresAt: string;
+  tokenHash: string;
+  contextJson: string;
+  providerStepId: string;
+  providerStepOrdinal: number;
+  providerResponseId: string;
+  providerCallId: string;
+  toolCallId: string;
+  toolName: MediaPrepareToolOperation;
+  argumentsJson: string;
+  protocol: 'openai-responses' | 'openai-chat-completions';
+}
+
 type ResearchToolArguments =
   | {
       operation: 'research.search';
@@ -168,6 +202,7 @@ export class AgentProviderLoopService {
     private readonly schemaResolver?: AgentSchemaResolver,
     private readonly schemaManager?: AgentSchemaManager,
     private readonly systemTools?: AgentSystemToolService,
+    private readonly media?: MediaPreparationService,
   ) {}
 
   cancelGeneration(generationId: string): boolean {
@@ -250,6 +285,7 @@ export class AgentProviderLoopService {
               previousAuthorization,
               mode,
               this.systemTools !== undefined,
+              this.media !== undefined,
             ),
           );
           return {
@@ -312,6 +348,7 @@ export class AgentProviderLoopService {
               authorization,
               researchMode,
               this.systemTools !== undefined,
+              this.media !== undefined,
             ),
           );
           return { taskId: task.id, tools: this.toolsForStep(preparedStep.authorizationHandles) };
@@ -394,6 +431,7 @@ export class AgentProviderLoopService {
             authorization,
             researchMode,
             this.systemTools !== undefined,
+            this.media !== undefined,
           ),
         );
         return {
@@ -417,10 +455,28 @@ export class AgentProviderLoopService {
     }
   }
 
+  selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult {
+    try {
+      return this.resolveMediaSelection(params);
+    } catch (error) {
+      if (error instanceof AgentToolPolicyError) this.auditPolicyRejection(params, error);
+      throw error;
+    }
+  }
+
   private async executeAuthorizedTools(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
     params.calls.forEach((call) => unifiedAgentToolRegistry.require(call.name));
+    if (params.calls.every((call) => isMediaPrepareOperation(call.name))) {
+      return this.executeMediaPrepare(params);
+    }
+    if (params.calls.some((call) => isMediaPrepareOperation(call.name))) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Media preparation must run as a single, separate Provider tool call.',
+      );
+    }
     if (params.calls.every((call) => isSystemOperation(call.name))) {
       return this.executeSystemTools(params);
     }
@@ -443,6 +499,396 @@ export class AgentProviderLoopService {
       throw new Error('Research and document mutation tools must run in separate Provider steps.');
     }
     return this.executeDocumentTool(params);
+  }
+
+  private executeMediaPrepare(
+    params: AgentGenerationExecuteToolsParams,
+  ): AgentGenerationExecuteToolsResult {
+    const media = this.media;
+    if (!media) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Media preparation is not configured for this runtime.',
+      );
+    }
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        if (!params.providerResponseId.trim()) throw new Error('Provider response ID is required.');
+        if (params.calls.length !== 1) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_UNAUTHORIZED',
+            'Exactly one media preparation call is allowed per Provider step.',
+          );
+        }
+        const activeGeneration = this.requireActiveGeneration(database, project.id, params);
+        const task = this.requireTask(database, project.id, params.generationId);
+        const step = this.requireOpenStep(database, params.attemptId);
+        const call = params.calls[0]!;
+        if (!isMediaPrepareOperation(call.name)) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_UNKNOWN',
+            `Tool ${call.name} is not media prepare.`,
+          );
+        }
+        const authorization = this.requireAuthorization(database, task, step, call, params);
+        let rawArguments: unknown;
+        try {
+          rawArguments = JSON.parse(call.argumentsJson);
+        } catch {
+          return toolErrorContinuation(
+            activeGeneration.protocol,
+            params,
+            call,
+            new Error('Media prepare arguments are not valid JSON.'),
+          );
+        }
+        const kind: MediaGenerationKind = call.name === 'media.image.prepare' ? 'image' : 'video';
+        const context = media.selectionContext(kind, rawArguments, params);
+        const now = new Date().toISOString();
+        const argumentsHash = hashAgentToolArguments(context.arguments);
+        this.reserveExecution(database, authorization, task.id, now, 'model_running');
+        const toolCallId = randomUUID();
+        database
+          .prepare(
+            `INSERT INTO agent_tool_calls
+             (id, project_id, task_id, generation_id, attempt_id, authorization_id,
+              provider_step_id, provider_call_id, tool_ordinal, tool_name,
+              normalized_arguments_hash, arguments_summary_json, status, created_at,
+              started_at, version, redaction_state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'executing', ?, ?, 0, 'native')`,
+          )
+          .run(
+            toolCallId,
+            project.id,
+            task.id,
+            params.generationId,
+            params.attemptId,
+            authorization.id,
+            step.id,
+            call.id,
+            call.name,
+            argumentsHash,
+            JSON.stringify({
+              operation: call.name,
+              inputAssetCount: context.arguments.inputAssetIds.length,
+              inputAttachmentCount: context.inputAttachmentCount,
+              parameterKeys: Object.keys(context.arguments.parameters).sort(),
+            }),
+            now,
+            now,
+          );
+        this.completeStep(
+          database,
+          step,
+          params.providerResponseId,
+          1,
+          params.usage,
+          now,
+          'tool_calls',
+          JSON.stringify({ version: 1, callIds: [call.id], mediaSelection: true }),
+        );
+
+        if (context.candidates.length === 0) {
+          const output = unifiedAgentToolRegistry.serializeResult({
+            version: 1,
+            status: 'unavailable',
+            kind,
+            reason:
+              'No enabled, connected media model has a confirmed compatible Adapter Schema for the requested inputs.',
+          });
+          database
+            .prepare(
+              `UPDATE agent_tool_calls SET status = 'succeeded', result_summary_json = ?,
+               completed_at = ?, version = version + 1 WHERE id = ? AND status = 'executing'`,
+            )
+            .run(output, now, toolCallId);
+          const primaryAuthorization = firstPrimaryAuthorization(database, task.id);
+          const nextStep = this.createStep(
+            database,
+            project.id,
+            params,
+            task.id,
+            step.ordinal + 1,
+            now,
+            authorizationSpecsForTask(
+              database,
+              task.id,
+              primaryAuthorization,
+              researchModeFromSnapshot(task.request_snapshot_json),
+              this.systemTools !== undefined,
+              true,
+            ),
+          );
+          return {
+            continuation: createToolContinuation(
+              activeGeneration.protocol,
+              params.providerResponseId,
+              [call],
+              [{ callId: call.id, output }],
+            ),
+            tools: this.toolsForStep(nextStep.authorizationHandles),
+          };
+        }
+
+        const selectionToken = randomBytes(32).toString('base64url');
+        const expiresAt = new Date(Date.now() + AUTHORIZATION_TTL_MS).toISOString();
+        const request = media.selectionRequest(context, selectionToken, expiresAt);
+        const contextJson = JSON.stringify(context);
+        const requestJson = JSON.stringify({ ...request, selectionToken: undefined });
+        if (Buffer.byteLength(contextJson, 'utf8') > 65_536) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_RESULT_TOO_LARGE',
+            'The frozen media selection context exceeds 64 KiB.',
+          );
+        }
+        if (Buffer.byteLength(requestJson, 'utf8') > 262_144) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_RESULT_TOO_LARGE',
+            'The media selection request exceeds 256 KiB.',
+          );
+        }
+        database
+          .prepare(
+            `INSERT INTO agent_media_selections
+             (id, project_id, task_id, generation_id, attempt_id, provider_step_id,
+              original_tool_call_id, kind, normalized_arguments_hash, arguments_json,
+              request_json, token_hash, status, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            project.id,
+            task.id,
+            params.generationId,
+            params.attemptId,
+            step.id,
+            toolCallId,
+            kind,
+            argumentsHash,
+            contextJson,
+            requestJson,
+            hash(selectionToken),
+            expiresAt,
+            now,
+          );
+        this.appendEvent(
+          database,
+          project.id,
+          task.id,
+          'agent.media.selection.requested',
+          `Waiting for the user to select a ${kind} Provider and model.`,
+          now,
+        );
+        return { mediaSelection: request };
+      })(),
+    );
+  }
+
+  private resolveMediaSelection(
+    params: AgentGenerationSelectMediaParams,
+  ): AgentGenerationExecuteToolsResult {
+    const media = this.media;
+    if (!media) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Media preparation is not configured for this runtime.',
+      );
+    }
+    const pending = this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const row = database
+          .prepare(
+            `SELECT selections.id, selections.task_id AS taskId, selections.kind,
+                    selections.status, selections.expires_at AS expiresAt,
+                    selections.token_hash AS tokenHash, selections.arguments_json AS contextJson,
+                    selections.provider_step_id AS providerStepId,
+                    generations.project_session_id AS projectSessionId,
+                    generations.conversation_id AS conversationId,
+                    generations.status AS generationStatus,
+                    steps.ordinal AS providerStepOrdinal,
+                    steps.provider_response_id AS providerResponseId,
+                    calls.provider_call_id AS providerCallId, calls.id AS toolCallId,
+                    calls.tool_name AS toolName, selections.arguments_json AS argumentsJson,
+                    attempts.protocol
+             FROM agent_media_selections selections
+             INNER JOIN agent_tool_calls calls ON calls.id = selections.original_tool_call_id
+             INNER JOIN llm_provider_steps steps ON steps.id = selections.provider_step_id
+             INNER JOIN llm_generation_attempts attempts
+               ON attempts.id = selections.attempt_id AND attempts.generation_id = selections.generation_id
+             INNER JOIN llm_generations generations ON generations.id = selections.generation_id
+             WHERE selections.generation_id = ? AND selections.attempt_id = ?
+               AND selections.project_id = ? AND selections.token_hash = ?`,
+          )
+          .get(params.generationId, params.attemptId, project.id, hash(params.selectionToken)) as
+          MediaSelectionRow | undefined;
+        if (!row) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+            'The media selection is missing, belongs to another task, or has already been replaced.',
+          );
+        }
+        if (
+          params.projectId !== project.id ||
+          params.projectSessionId !== this.projects.currentSessionId() ||
+          params.projectSessionId !== row.projectSessionId ||
+          params.conversationId !== row.conversationId
+        ) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_PROJECT_SCOPE',
+            'The media selection does not belong to the current project session.',
+          );
+        }
+        if (row.generationStatus !== 'prepared' && row.generationStatus !== 'streaming') {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+            'The media selection generation is no longer active.',
+          );
+        }
+        if (row.status !== 'pending') {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+            'The media selection has already been resolved.',
+          );
+        }
+        const now = new Date().toISOString();
+        if (row.expiresAt <= now) {
+          // Commit the terminal expiry before surfacing the policy error. Throwing
+          // inside the surrounding transaction would roll this state change back.
+          database
+            .prepare(
+              "UPDATE agent_media_selections SET status = 'expired', resolved_at = ? WHERE id = ? AND status = 'pending'",
+            )
+            .run(now, row.id);
+          return { ...row, expired: true };
+        }
+        if (!row.providerResponseId) throw new Error('Media Provider step has no continuation ID.');
+        return row;
+      })(),
+    );
+
+    if ('expired' in pending && pending.expired) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_AUTHORIZATION_EXPIRED',
+        'The media selection expired before the user responded.',
+      );
+    }
+
+    const context = JSON.parse(pending.contextJson) as MediaSelectionContext;
+    let outputValue: Record<string, unknown>;
+    let selectionStatus: 'consumed' | 'rejected';
+    let toolStatus: 'succeeded' | 'failed';
+    if (!params.selection) {
+      outputValue = {
+        version: 1,
+        status: 'cancelled',
+        kind: pending.kind,
+        summary: 'The user cancelled media model selection. No Provider request was submitted.',
+      };
+      selectionStatus = 'rejected';
+      toolStatus = 'succeeded';
+    } else {
+      try {
+        const draft = media.prepareSelected(context, params.selection, params);
+        outputValue = { version: 1, status: 'prepared', draft };
+        selectionStatus = 'consumed';
+        toolStatus = 'succeeded';
+      } catch (error) {
+        const policyError =
+          error instanceof AgentToolPolicyError
+            ? error
+            : new AgentToolPolicyError(
+                'AGENT_TOOL_ARGUMENTS_INVALID',
+                error instanceof Error ? error.message : 'Media draft preparation failed.',
+                true,
+              );
+        outputValue = { ...policyError.result() };
+        selectionStatus = 'rejected';
+        toolStatus = 'failed';
+      }
+    }
+    const output = unifiedAgentToolRegistry.serializeResult(outputValue);
+
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const task = this.requireTask(database, project.id, params.generationId);
+        const now = new Date().toISOString();
+        const updated = database
+          .prepare(
+            `UPDATE agent_media_selections SET status = ?, selection_summary_json = ?, resolved_at = ?
+             WHERE id = ? AND status = 'pending' AND token_hash = ?`,
+          )
+          .run(selectionStatus, output, now, pending.id, hash(params.selectionToken));
+        if (updated.changes !== 1) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+            'The media selection was already resolved.',
+          );
+        }
+        database
+          .prepare(
+            `UPDATE agent_tool_calls SET status = ?, result_summary_json = ?, completed_at = ?,
+             error_code = ?, error_message = ?, version = version + 1
+             WHERE id = ? AND status = 'executing'`,
+          )
+          .run(
+            toolStatus,
+            output,
+            now,
+            toolStatus === 'failed' ? 'MEDIA_SELECTION_INVALID' : null,
+            toolStatus === 'failed' ? 'The selected media draft could not be prepared.' : null,
+            pending.toolCallId,
+          );
+        database
+          .prepare(
+            `UPDATE agent_tasks SET phase = 'model_running', updated_at = ?, row_version = row_version + 1
+             WHERE id = ? AND status = 'running'`,
+          )
+          .run(now, task.id);
+        this.appendEvent(
+          database,
+          project.id,
+          task.id,
+          selectionStatus === 'consumed'
+            ? 'agent.media.selection.resolved'
+            : 'agent.media.selection.rejected',
+          selectionStatus === 'consumed'
+            ? 'Media Provider and model selection was validated and frozen to a local draft.'
+            : 'Media Provider and model selection was cancelled or rejected.',
+          now,
+        );
+        const primaryAuthorization = firstPrimaryAuthorization(database, task.id);
+        const nextStep = this.createStep(
+          database,
+          project.id,
+          params,
+          task.id,
+          pending.providerStepOrdinal + 1,
+          now,
+          authorizationSpecsForTask(
+            database,
+            task.id,
+            primaryAuthorization,
+            researchModeFromSnapshot(task.request_snapshot_json),
+            this.systemTools !== undefined,
+            true,
+          ),
+        );
+        const call: LlmToolCall = {
+          id: pending.providerCallId,
+          name: pending.toolName,
+          argumentsJson: JSON.stringify(context.arguments),
+        };
+        return {
+          continuation: createToolContinuation(
+            pending.protocol,
+            pending.providerResponseId,
+            [call],
+            [{ callId: pending.providerCallId, output }],
+          ),
+          tools: this.toolsForStep(nextStep.authorizationHandles),
+        };
+      })(),
+    );
   }
 
   private executeSystemTools(
@@ -610,6 +1056,7 @@ export class AgentProviderLoopService {
             primaryAuthorization,
             researchModeFromSnapshot(task.request_snapshot_json),
             true,
+            this.media !== undefined,
           ),
         );
         return {
@@ -1526,6 +1973,7 @@ export class AgentProviderLoopService {
             primaryAuthorization,
             staged.researchMode,
             this.systemTools !== undefined,
+            this.media !== undefined,
           ),
         );
         const tools = this.toolsForStep(nextStep.authorizationHandles);
@@ -1782,6 +2230,7 @@ export class AgentProviderLoopService {
                 },
                 researchModeFromSnapshot(task.request_snapshot_json),
                 true,
+                this.media !== undefined,
               )
             : {
                 operation: confirmation.operation,
@@ -1914,6 +2363,12 @@ export class AgentProviderLoopService {
                WHERE task_id = ? AND status = 'pending'`,
             )
             .run(task.id);
+          database
+            .prepare(
+              `UPDATE agent_media_selections SET status = 'expired', resolved_at = ?
+               WHERE task_id = ? AND status = 'pending'`,
+            )
+            .run(now, task.id);
           this.appendEvent(
             database,
             project.id,
@@ -2853,10 +3308,17 @@ function authorizationSpecsForTask(
   primary: AuthorizationSpec,
   researchMode: AgentResearchMode,
   includeSystemTools = false,
+  includeMediaTools = false,
 ): AuthorizationSpec[] {
   const authorizations = [
     primary,
     ...(includeSystemTools ? systemAuthorizationSpecsForTask(database, taskId) : []),
+    ...(includeMediaTools
+      ? [
+          { operation: 'media.image.prepare' as const },
+          { operation: 'media.video.prepare' as const },
+        ]
+      : []),
   ];
   // Schema inspection is a standalone, explicitly selected Agent task. Keep
   // it out of ordinary document/research steps so the model cannot mix a
@@ -2935,7 +3397,9 @@ function firstPrimaryAuthorization(database: Database.Database, taskId: string):
     .all(taskId) as AuthorizationSpec[];
   const row = rows.find(
     (candidate) =>
-      !isResearchOperation(candidate.operation) && !isSystemOperation(candidate.operation),
+      !isResearchOperation(candidate.operation) &&
+      !isSystemOperation(candidate.operation) &&
+      !isMediaPrepareOperation(candidate.operation),
   );
   if (!row) throw new Error('Agent task primary authorization was not found.');
   return row;
@@ -2959,6 +3423,7 @@ function systemAuthorizationSpecsForTask(
     'conversation.search',
     'asset.search',
     'settings.get',
+    'media.task.get',
   ];
   if (
     /(?:重命名|改名|标题.{0,8}(?:改|设|换)|rename|change\s+(?:the\s+)?(?:conversation|chat)\s+title)/iu.test(
@@ -3010,6 +3475,10 @@ function isSchemaOperation(value: string): value is SchemaOperation {
   );
 }
 
+function isMediaPrepareOperation(value: string): value is MediaPrepareToolOperation {
+  return value === 'media.image.prepare' || value === 'media.video.prepare';
+}
+
 function isSystemOperation(value: string): value is SystemAgentToolOperation {
   return (
     value === 'project.get_context' ||
@@ -3017,7 +3486,8 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
     value === 'conversation.rename' ||
     value === 'asset.search' ||
     value === 'asset.update_alias' ||
-    value === 'settings.get'
+    value === 'settings.get' ||
+    value === 'media.task.get'
   );
 }
 

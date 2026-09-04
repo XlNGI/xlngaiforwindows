@@ -93,9 +93,11 @@ const sessionMethods = new Set<WorkerMethod>([
   'conversation.runtime.start',
   'conversation.runtime.get',
   'conversation.runtime.confirm',
+  'conversation.runtime.selectMedia',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
+  'agent.generation.selectMedia',
   'agent.providerStep.complete',
   'agent.providerStep.start',
   'image.generate.prepare',
@@ -1097,6 +1099,12 @@ export function validateSessionRequestParams(
       requireString(params, 'confirmationToken', MAX_ID_LENGTH);
       requireBoolean(params, 'approved');
       break;
+    case 'conversation.runtime.selectMedia':
+      rejectUnknown(params, ['generationId', 'selectionToken', 'selection']);
+      requireId(params, 'generationId');
+      requireString(params, 'selectionToken', MAX_ID_LENGTH);
+      validateMediaSelection(params.selection);
+      break;
     case 'agent.generation.cancel':
       rejectUnknown(params, ['generationId']);
       requireId(params, 'generationId');
@@ -1111,6 +1119,11 @@ export function validateSessionRequestParams(
       validateIdentity(params, ['confirmationToken', 'approved']);
       requireString(params, 'confirmationToken', MAX_ID_LENGTH);
       requireBoolean(params, 'approved');
+      break;
+    case 'agent.generation.selectMedia':
+      validateIdentity(params, ['selectionToken', 'selection']);
+      requireString(params, 'selectionToken', MAX_ID_LENGTH);
+      validateMediaSelection(params.selection);
       break;
     case 'agent.providerStep.complete':
       validateIdentity(params, ['providerResponseId', 'finishReason', 'usage']);
@@ -1143,6 +1156,56 @@ function validateNovelWritingIntent(input: unknown): void {
   optionalId(intent, 'volumeId');
   optionalString(intent, 'chapterTitle', MAX_TITLE_LENGTH);
   optionalString(intent, 'displayLabel', 80);
+}
+
+function validateMediaSelection(input: unknown): void {
+  if (input === undefined) return;
+  const selection = requireObject(input, 'selection');
+  rejectUnknown(selection, [
+    'providerProfileId',
+    'modelId',
+    'adapterKey',
+    'parameters',
+    'assetKind',
+  ]);
+  requireId(selection, 'providerProfileId');
+  requireId(selection, 'modelId');
+  requireString(selection, 'adapterKey', 200);
+  optionalEnum(
+    selection,
+    'assetKind',
+    new Set([
+      'character',
+      'scene',
+      'first-frame',
+      'last-frame',
+      'generated-image',
+      'generated-video',
+      'shot-video',
+    ]),
+  );
+  const parameters = requireObject(selection.parameters, 'selection.parameters');
+  if (Object.keys(parameters).length > 40) {
+    throw new RequestValidationError('selection.parameters may contain at most 40 fields.');
+  }
+  for (const [key, value] of Object.entries(parameters)) {
+    if (!key || key.length > 100) {
+      throw new RequestValidationError('selection.parameters contains an invalid field name.');
+    }
+    const values = Array.isArray(value) ? value : [value];
+    if (Array.isArray(value) && value.length > 20) {
+      throw new RequestValidationError(`selection.parameters.${key} has too many values.`);
+    }
+    for (const item of values) {
+      if (typeof item === 'string') {
+        if (item.length > 2 * 1024 * 1024) {
+          throw new RequestValidationError(`selection.parameters.${key} is too large.`);
+        }
+      } else if (typeof item !== 'number' && typeof item !== 'boolean') {
+        throw new RequestValidationError(`selection.parameters.${key} has an invalid value.`);
+      }
+    }
+  }
 }
 
 function validateIdentity(params: Record<string, unknown>, additional: string[] = []): void {

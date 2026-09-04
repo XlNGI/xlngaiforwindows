@@ -2,6 +2,7 @@ import type {
   AssetInfo,
   AssetListParams,
   ConversationInfo,
+  MediaTaskSummary,
   ProviderModelInfo,
   ProviderProfileInfo,
 } from '@ai-video/contracts';
@@ -20,6 +21,10 @@ export interface AgentSettingsToolService {
   listModels(profileId: string): ProviderModelInfo[];
 }
 
+export interface AgentMediaTaskService {
+  getTask(taskId: string): MediaTaskSummary;
+}
+
 export interface AgentSystemToolIdentity {
   projectId: string;
   projectSessionId: string;
@@ -33,6 +38,7 @@ export class AgentSystemToolService {
     private readonly content: ContentService,
     private readonly assets: AgentAssetToolService,
     private readonly settings: AgentSettingsToolService,
+    private readonly mediaTasks?: AgentMediaTaskService,
   ) {}
 
   execute(
@@ -56,6 +62,8 @@ export class AgentSystemToolService {
         return this.updateAssetAlias(args);
       case 'settings.get':
         return this.settingsSummary(args);
+      case 'media.task.get':
+        return this.mediaTask(args);
     }
   }
 
@@ -225,6 +233,21 @@ export class AgentSystemToolService {
         },
       })),
       truncated: matchingModels.length > models.length,
+    };
+  }
+
+  private mediaTask(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['taskId']);
+    if (!this.mediaTasks) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Media task inspection is not configured for this runtime.',
+      );
+    }
+    return {
+      version: 1,
+      status: 'succeeded',
+      task: this.mediaTasks.getTask(requiredString(args.taskId, 'taskId', 200)),
     };
   }
 }

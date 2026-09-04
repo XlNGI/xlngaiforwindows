@@ -8,6 +8,9 @@ import type {
   LlmToolDefinition,
   NormalizedLlmUsage,
   AgentToolConfirmationRequest,
+  AgentGenerationSelectMediaParams,
+  MediaModelSelectionDecision,
+  MediaModelSelectionRequest,
 } from '@ai-video/contracts';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
@@ -17,6 +20,7 @@ export interface AgentProviderToolExecutor {
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult>;
   confirmTool(params: AgentGenerationConfirmToolParams): AgentGenerationConfirmToolResult;
+  selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult;
   startProviderStep(identity: LlmGenerationIdentity): void;
   completeProviderStep(params: AgentProviderStepCompleteParams): void;
   terminateGeneration(generationId: string, reason: 'cancelled' | 'failed'): number;
@@ -28,6 +32,9 @@ type ProviderCallContext = {
 };
 
 type ConfirmationRequester = (request: AgentToolConfirmationRequest) => Promise<boolean>;
+type MediaSelectionRequester = (
+  request: MediaModelSelectionRequest,
+) => Promise<MediaModelSelectionDecision | undefined>;
 
 /**
  * Adapts Pi's single-tool callback to the existing Worker authorization,
@@ -43,6 +50,7 @@ export class AgentProviderToolGateway {
     private readonly identity: LlmGenerationIdentity,
     initialDefinitions: LlmToolDefinition[],
     private readonly requestConfirmation: ConfirmationRequester,
+    private readonly requestMediaSelection: MediaSelectionRequester,
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
     this.definitions.forEach((definition) => unifiedAgentToolRegistry.require(definition.name));
@@ -126,6 +134,14 @@ export class AgentProviderToolGateway {
         ...this.identity,
         confirmationToken: execution.confirmation.confirmationToken,
         approved,
+      });
+    }
+    if (execution.mediaSelection) {
+      const selection = await this.requestMediaSelection(execution.mediaSelection);
+      execution = this.executor.selectMedia({
+        ...this.identity,
+        selectionToken: execution.mediaSelection.selectionToken,
+        selection,
       });
     }
     if (!execution.continuation) {

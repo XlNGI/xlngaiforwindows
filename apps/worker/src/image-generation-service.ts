@@ -104,6 +104,8 @@ export class ImageGenerationService {
           conversationId: params.conversationId,
           originalPrompt: params.originalPrompt,
           costNoticeAcknowledged: params.costNoticeAcknowledged === true,
+          mediaModelSelection: params.mediaModelSelection,
+          inputs: params.mediaInputReferences,
           parameters: redactParameters(params.parameters),
           createdAt: now,
         }),

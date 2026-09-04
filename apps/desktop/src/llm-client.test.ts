@@ -67,6 +67,24 @@ const prepared: LlmGenerationPrepareResult = {
   },
 };
 
+const mediaSelection = {
+  selectionToken: 'media-selection-token',
+  kind: 'video' as const,
+  prompt: 'A dragon flying in the sky',
+  inputAssetIds: [],
+  inputAttachmentCount: 0,
+  proposedParameters: {},
+  candidates: [],
+  expiresAt: '2099-01-01T00:00:00.000Z',
+};
+
+const mediaDecision = {
+  providerProfileId: 'media-profile',
+  modelId: 'media-model',
+  adapterKey: 'media-adapter',
+  parameters: { prompt: mediaSelection.prompt },
+};
+
 function state(status: LlmGenerationInfo['status'], content: string): LlmGenerationInfo {
   return {
     ...prepared.generation,
@@ -284,6 +302,79 @@ describe('streamPreparedLlmGeneration', () => {
     expect(states.at(-1)).toMatchObject({ status: 'complete' });
   });
 
+  it('resumes a Native-owned Agent tool loop after explicit media model selection', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+    };
+    native.invoke
+      .mockImplementationOnce((_command, args) => {
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        setTimeout(() => {
+          channel.onmessage?.({ type: 'started' });
+          channel.onmessage?.({
+            type: 'toolCalls',
+            providerResponseId: 'response-media',
+            calls: [
+              {
+                id: 'media-call',
+                name: 'media.video.prepare',
+                argumentsJson: JSON.stringify({ prompt: mediaSelection.prompt }),
+                authorizationHandle: 'media-authorization',
+              },
+            ],
+          });
+        }, 0);
+        return Promise.resolve();
+      })
+      .mockImplementationOnce((_command, args) => {
+        const channel = (args as { onEvent: { onmessage?: (event: LlmNativeStreamEvent) => void } })
+          .onEvent;
+        setTimeout(() => {
+          channel.onmessage?.({ type: 'started' });
+          channel.onmessage?.({ type: 'delta', delta: 'Draft ready.' });
+          channel.onmessage?.({ type: 'complete', providerResponseId: 'response-final' });
+        }, 0);
+        return Promise.resolve();
+      });
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'agent.generation.executeTools') return Promise.resolve({ mediaSelection });
+      if (method === 'agent.generation.selectMedia') {
+        return Promise.resolve({
+          continuation: {
+            protocol: 'openai-responses',
+            previousResponseId: 'response-media',
+            outputs: [{ callId: 'media-call', output: '{"status":"prepared"}' }],
+          },
+        });
+      }
+      if (method === 'agent.providerStep.start' || method === 'agent.providerStep.complete') {
+        return Promise.resolve({});
+      }
+      if (method === 'llm.generation.complete') {
+        const input = params as LlmGenerationCompleteParams;
+        return Promise.resolve(state('complete', input.content));
+      }
+      throw new Error(`Unexpected Worker method ${method}`);
+    });
+    const onMediaSelection = vi.fn(() => Promise.resolve(mediaDecision));
+
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState() {},
+      onMediaSelection,
+    });
+    await run.completion;
+
+    expect(onMediaSelection).toHaveBeenCalledWith(mediaSelection);
+    expect(callWorker).toHaveBeenCalledWith('agent.generation.selectMedia', {
+      ...prepared.stream,
+      selectionToken: mediaSelection.selectionToken,
+      selection: mediaDecision,
+    });
+  });
+
   it('fails closed after sixteen provider invocations to prevent a tool-call storm', async () => {
     const agentPrepared: AgentGenerationPrepareResult = {
       ...prepared,
@@ -479,6 +570,43 @@ describe('streamPreparedLlmGeneration', () => {
       generationId: 'generation',
       confirmationToken: 'pi-confirmation',
       approved: true,
+    });
+  });
+
+  it('returns Pi media selection through its dedicated Worker RPC', async () => {
+    const agentPrepared: AgentGenerationPrepareResult = {
+      ...prepared,
+      agentTaskId: 'agent-task',
+      runtimeOwner: 'pi',
+    };
+    let selectionPending = true;
+    // eslint-disable-next-line @typescript-eslint/require-await
+    vi.mocked(callWorker).mockImplementation(async (method) => {
+      if (method === 'conversation.runtime.start') return { runtime: 'pi', taskId: 'agent-task' };
+      if (method === 'conversation.runtime.get') {
+        return selectionPending ? { active: true, mediaSelection } : { active: true };
+      }
+      if (method === 'conversation.runtime.selectMedia') {
+        selectionPending = false;
+        return { accepted: true };
+      }
+      if (method === 'llm.generation.get') return state('complete', 'Draft ready.');
+      return prepared.generation;
+    });
+    const onMediaSelection = vi.fn(() => Promise.resolve(mediaDecision));
+
+    const run = streamPreparedLlmGeneration(agentPrepared, {
+      onDelta() {},
+      onState() {},
+      onMediaSelection,
+    });
+    await run.completion;
+
+    expect(onMediaSelection).toHaveBeenCalledWith(mediaSelection);
+    expect(callWorker).toHaveBeenCalledWith('conversation.runtime.selectMedia', {
+      generationId: 'generation',
+      selectionToken: mediaSelection.selectionToken,
+      selection: mediaDecision,
     });
   });
 

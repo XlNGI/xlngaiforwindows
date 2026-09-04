@@ -58,6 +58,7 @@ function fakeProviderExecutor() {
   return {
     executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>(),
     confirmTool: vi.fn<AgentProviderToolExecutor['confirmTool']>(),
+    selectMedia: vi.fn<AgentProviderToolExecutor['selectMedia']>(),
     startProviderStep: vi.fn<AgentProviderToolExecutor['startProviderStep']>(),
     completeProviderStep: vi.fn<AgentProviderToolExecutor['completeProviderStep']>(),
     terminateGeneration: vi.fn<AgentProviderToolExecutor['terminateGeneration']>(() => 1),
@@ -457,6 +458,95 @@ describe('PiConversationRuntime', () => {
       ...identity,
       confirmationToken: confirmation.confirmationToken,
       approved: true,
+    });
+    expect(generation.complete).toHaveBeenCalledOnce();
+  });
+
+  it('exposes a pending media selection and resumes the same Pi task with the matching token', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall(
+            'media.video.prepare',
+            { prompt: 'A dragon flying in the sky' },
+            { id: 'video-call' },
+          ),
+        ],
+        { stopReason: 'toolUse', responseId: 'response-video' },
+      ),
+      fauxAssistantMessage('The local video draft is ready for cost confirmation.'),
+    ]);
+    const plans = new FakePlanService();
+    const providerTools = fakeProviderExecutor();
+    const mediaSelection = {
+      selectionToken: 'media-selection-token',
+      kind: 'video' as const,
+      prompt: 'A dragon flying in the sky',
+      inputAssetIds: [],
+      inputAttachmentCount: 0,
+      proposedParameters: {},
+      candidates: [],
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    };
+    const decision = {
+      providerProfileId: 'media-profile',
+      modelId: 'media-model',
+      adapterKey: 'media-adapter',
+      parameters: { prompt: mediaSelection.prompt },
+    };
+    vi.mocked(providerTools.executeTools).mockResolvedValue({ mediaSelection });
+    vi.mocked(providerTools.selectMedia).mockReturnValue({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-video',
+        outputs: [{ callId: 'video-call', output: '{"status":"prepared"}' }],
+      },
+      tools: [],
+    });
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [providerDefinition('media.video.prepare', 'media-authorization')],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: '帮我生成龙在天空翱翔的视频',
+    });
+    await vi.waitFor(() =>
+      expect(runtime.get(identity.generationId).mediaSelection).toEqual(mediaSelection),
+    );
+
+    expect(runtime.selectMedia(identity.generationId, 'wrong-token', decision)).toBe(false);
+    expect(
+      runtime.selectMedia(identity.generationId, mediaSelection.selectionToken, decision),
+    ).toBe(true);
+    await runtime.wait(identity.generationId);
+
+    expect(providerTools.selectMedia).toHaveBeenCalledWith({
+      ...identity,
+      selectionToken: mediaSelection.selectionToken,
+      selection: decision,
     });
     expect(generation.complete).toHaveBeenCalledOnce();
   });

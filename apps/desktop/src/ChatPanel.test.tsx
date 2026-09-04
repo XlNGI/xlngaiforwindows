@@ -4,6 +4,7 @@ import type {
   AgentToolConfirmationRequest,
   ChatMessageInfo,
   ConversationInfo,
+  MediaModelSelectionRequest,
 } from '@ai-video/contracts';
 import { ChatPanel } from './ChatPanel';
 
@@ -138,6 +139,110 @@ describe('ChatPanel attempt metadata', () => {
     expect(screen.getByText(/当前会话模型不支持 Agent 工具调用/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /测试 Agent 模型/ }));
     expect(onSelect).toHaveBeenCalledWith('profile', 'model');
+  });
+
+  it('keeps media model selection separate and submits validated parameters', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-09-04T00:00:00.000Z',
+      updatedAt: '2026-09-04T00:00:00.000Z',
+    };
+    const request: MediaModelSelectionRequest = {
+      selectionToken: 'selection-token',
+      kind: 'video',
+      prompt: '龙在天空翱翔',
+      inputAssetIds: [],
+      inputAttachmentCount: 0,
+      proposedParameters: { duration: 5 },
+      expiresAt: '2026-09-04T01:00:00.000Z',
+      candidates: [
+        {
+          providerProfileId: 'media-profile',
+          providerName: '媒体供应商',
+          providerType: 'unicompapi',
+          providerRegion: 'global',
+          modelId: 'media-model',
+          remoteModelId: 'video-v1',
+          modelName: '视频模型 V1',
+          costNotice: { required: true, summary: '提交可能产生费用' },
+          adapters: [
+            {
+              key: 'video-adapter',
+              capability: 'TEXT_TO_VIDEO',
+              capabilityLabel: '文生视频',
+              provider: 'unicompapi',
+              providerLabel: 'UniCompAPI',
+              model: 'video-v1',
+              modelLabel: '视频模型 V1',
+              apiVersion: 'v1',
+              schemaVersion: 1,
+              endpoint: '/videos',
+              documentationUrl: 'https://example.com/video',
+              credentialProvider: 'unicompapi',
+              parameterSchema: {
+                $schema: 'https://json-schema.org/draft/2020-12/schema',
+                type: 'object',
+                additionalProperties: false,
+                required: ['prompt', 'duration'],
+                properties: {
+                  prompt: { type: 'string', title: '提示词' },
+                  duration: { type: 'integer', title: '时长' },
+                },
+              },
+              uiSchema: { fields: [] },
+            },
+          ],
+        },
+      ],
+    };
+    const onSelectMedia = vi.fn();
+    const onSelectAgent = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId="agent-profile"
+        selectedLlmModelId="agent-model"
+        mediaModelSelection={request}
+        onSelectMediaModel={onSelectMedia}
+        onSelectAgentModel={onSelectAgent}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /视频模型 V1/ }));
+    expect(screen.getByDisplayValue('龙在天空翱翔')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('5')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '提交生成' }));
+    expect(onSelectMedia).toHaveBeenCalledWith({
+      providerProfileId: 'media-profile',
+      modelId: 'media-model',
+      adapterKey: 'video-adapter',
+      parameters: { prompt: '龙在天空翱翔', duration: 5 },
+    });
+    expect(onSelectAgent).not.toHaveBeenCalled();
   });
 
   it('renders an in-session confirmation card and reports the user decision', () => {

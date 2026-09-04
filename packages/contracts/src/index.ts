@@ -2072,6 +2072,7 @@ export interface ConversationRuntimeGetParams {
 export interface ConversationRuntimeGetResult {
   active: boolean;
   confirmation?: AgentToolConfirmationRequest;
+  mediaSelection?: MediaModelSelectionRequest;
 }
 
 export interface ConversationRuntimeConfirmParams {
@@ -2081,6 +2082,16 @@ export interface ConversationRuntimeConfirmParams {
 }
 
 export interface ConversationRuntimeConfirmResult {
+  accepted: boolean;
+}
+
+export interface ConversationRuntimeSelectMediaParams {
+  generationId: string;
+  selectionToken: string;
+  selection?: MediaModelSelectionDecision;
+}
+
+export interface ConversationRuntimeSelectMediaResult {
   accepted: boolean;
 }
 
@@ -2164,8 +2175,86 @@ export interface AgentGenerationExecuteToolsParams extends LlmGenerationIdentity
 export interface AgentGenerationExecuteToolsResult {
   continuation?: LlmToolContinuation;
   confirmation?: AgentToolConfirmationRequest;
+  mediaSelection?: MediaModelSelectionRequest;
   /** Tools authorized for the next Provider step, including read-only research. */
   tools?: LlmToolDefinition[];
+}
+
+export type MediaGenerationKind = 'image' | 'video';
+export type MediaProviderType = 'unicompapi' | 'vidu';
+export type MediaProviderBaseUrlCategory =
+  'official-unicompapi' | 'official-vidu-global' | 'official-vidu-cn';
+
+export interface MediaModelSelectionSnapshot {
+  providerProfileId: string;
+  providerType: MediaProviderType;
+  providerBaseUrlCategory: MediaProviderBaseUrlCategory;
+  providerRegion: VideoProviderRegion;
+  modelId: string;
+  remoteModelId: string;
+  adapterKey: string;
+  adapterSchemaVersion: number;
+  adapterSchemaSource: 'official-adapter' | 'manual';
+}
+
+export interface MediaModelCandidate {
+  providerProfileId: string;
+  providerName: string;
+  providerType: MediaProviderType;
+  providerRegion: VideoProviderRegion;
+  modelId: string;
+  remoteModelId: string;
+  modelName: string;
+  adapters: AdapterDescriptor[];
+  costNotice: { required: true; summary: string };
+}
+
+/** Worker-created UI request. It is never included in a Provider Tool Result. */
+export interface MediaModelSelectionRequest {
+  selectionToken: string;
+  kind: MediaGenerationKind;
+  prompt: string;
+  inputAssetIds: string[];
+  inputAttachmentCount: number;
+  proposedParameters: AdapterParameters;
+  candidates: MediaModelCandidate[];
+  expiresAt: string;
+}
+
+export interface MediaModelSelectionDecision {
+  providerProfileId: string;
+  modelId: string;
+  adapterKey: string;
+  parameters: AdapterParameters;
+  assetKind?: ImageAssetKind | VideoAssetKind;
+}
+
+export interface AgentGenerationSelectMediaParams extends LlmGenerationIdentity {
+  selectionToken: string;
+  selection?: MediaModelSelectionDecision;
+}
+
+export interface MediaGenerationDraft {
+  draftId: string;
+  kind: MediaGenerationKind;
+  status: 'draft';
+  prompt: string;
+  inputAssetIds: string[];
+  mediaModelSelection: MediaModelSelectionSnapshot;
+  normalizedParameters: AdapterParameters;
+  missingParameters: string[];
+  costNotice: { required: true; summary: string };
+}
+
+export interface MediaTaskSummary {
+  taskId: string;
+  kind: MediaGenerationKind;
+  state: MediaGenerationTaskState;
+  adapterKey: string;
+  resultAssetIds: string[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentToolConfirmationRequest {
@@ -2507,6 +2596,10 @@ export interface ImageGenerationPrepareParams {
   conversationId?: string;
   originalPrompt?: string;
   costNoticeAcknowledged?: boolean;
+  /** Worker-validated immutable selection. IPC callers cannot provide this field. */
+  mediaModelSelection?: MediaModelSelectionSnapshot;
+  /** Worker-created input references. IPC callers cannot provide this field. */
+  mediaInputReferences?: MediaInputReferenceV1[];
 }
 
 export interface ImageGenerationCompleteParams {
@@ -2605,6 +2698,10 @@ export interface VideoGenerationPrepareParams {
   conversationId?: string;
   originalPrompt?: string;
   costNoticeAcknowledged?: boolean;
+  /** Worker-validated immutable selection. IPC callers cannot provide this field. */
+  mediaModelSelection?: MediaModelSelectionSnapshot;
+  /** Worker-created input references. IPC callers cannot provide this field. */
+  mediaInputReferences?: MediaInputReferenceV1[];
 }
 
 export interface VideoGenerationAttachTaskParams {
@@ -2964,6 +3061,10 @@ export interface WorkerMethodMap {
     params: ConversationRuntimeConfirmParams;
     result: ConversationRuntimeConfirmResult;
   };
+  'conversation.runtime.selectMedia': {
+    params: ConversationRuntimeSelectMediaParams;
+    result: ConversationRuntimeSelectMediaResult;
+  };
   'agent.generation.executeTools': {
     params: AgentGenerationExecuteToolsParams;
     result: AgentGenerationExecuteToolsResult;
@@ -2972,6 +3073,10 @@ export interface WorkerMethodMap {
   'agent.generation.confirmTool': {
     params: AgentGenerationConfirmToolParams;
     result: AgentGenerationConfirmToolResult;
+  };
+  'agent.generation.selectMedia': {
+    params: AgentGenerationSelectMediaParams;
+    result: AgentGenerationExecuteToolsResult;
   };
   'agent.providerStep.complete': {
     params: AgentProviderStepCompleteParams;

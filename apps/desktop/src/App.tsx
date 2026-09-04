@@ -53,6 +53,8 @@ import type {
   AdapterDescriptor,
   UnifiedAgentCapability,
   LlmInputAttachment,
+  MediaModelSelectionDecision,
+  MediaModelSelectionRequest,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -566,6 +568,7 @@ export function App() {
   const [chatMessage, setChatMessage] = useState('');
   const [agentModelSelection, setAgentModelSelection] =
     useState<UnifiedAgentModelSelectionRequest>();
+  const [agentMediaSelection, setAgentMediaSelection] = useState<MediaModelSelectionRequest>();
   const [agentModelPreferences, setAgentModelPreferences] = useState<
     Record<
       string,
@@ -601,6 +604,10 @@ export function App() {
   const [agentConfirmation, setAgentConfirmation] =
     useState<import('@ai-video/contracts').AgentToolConfirmationRequest>();
   const confirmationResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const mediaSelectionResolverRef = useRef<
+    ((selection: MediaModelSelectionDecision | undefined) => void) | undefined
+  >(undefined);
+  const activeMediaInputsRef = useRef<string[]>([]);
   const retryRequestsRef = useRef(new Set<string>());
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
@@ -843,6 +850,9 @@ export function App() {
   };
 
   const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
+    confirmationResolverRef.current?.(false);
+    mediaSelectionResolverRef.current?.(undefined);
+    activeMediaInputsRef.current = collectReferenceImageInputs(chatAttachments);
     setChatAttachments([]);
     const agentTaskId =
       'agentTaskId' in prepared && typeof prepared.agentTaskId === 'string'
@@ -919,17 +929,32 @@ export function App() {
           mergeGenerationMessage(current, run.identity.conversationId, next),
         );
         if (!isGenerationActive(next)) {
+          confirmationResolverRef.current?.(false);
+          mediaSelectionResolverRef.current?.(undefined);
+          activeMediaInputsRef.current = [];
           setChatMessage(next.error ?? '生成完成');
           refreshAgentDocuments();
         }
       },
       onConfirmation(request) {
+        confirmationResolverRef.current?.(false);
         setAgentConfirmation(request);
         return new Promise<boolean>((resolve) => {
           confirmationResolverRef.current = (approved) => {
             confirmationResolverRef.current = undefined;
             setAgentConfirmation(undefined);
             resolve(approved);
+          };
+        });
+      },
+      onMediaSelection(request) {
+        mediaSelectionResolverRef.current?.(undefined);
+        setAgentMediaSelection(request);
+        return new Promise<MediaModelSelectionDecision | undefined>((resolve) => {
+          mediaSelectionResolverRef.current = (selection) => {
+            mediaSelectionResolverRef.current = undefined;
+            setAgentMediaSelection(undefined);
+            resolve(selection);
           };
         });
       },
@@ -944,12 +969,18 @@ export function App() {
       .finally(() => {
         stopAgentTaskEventPolling();
         if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
+          confirmationResolverRef.current?.(false);
+          mediaSelectionResolverRef.current?.(undefined);
+          activeMediaInputsRef.current = [];
           nativeLlmRun.current = undefined;
         }
       });
   };
 
   const cancelNativeLlmRun = async () => {
+    confirmationResolverRef.current?.(false);
+    mediaSelectionResolverRef.current?.(undefined);
+    activeMediaInputsRef.current = [];
     const run = nativeLlmRun.current;
     if (!run) {
       stopAgentTaskEventPolling();
@@ -1138,6 +1169,7 @@ export function App() {
     () => () => {
       void nativeLlmRun.current?.cancel();
       confirmationResolverRef.current?.(false);
+      mediaSelectionResolverRef.current?.(undefined);
     },
     [],
   );
@@ -1925,6 +1957,7 @@ export function App() {
     if (!current || !isGenerationActive(current)) return;
     const agentTaskId = agentTask?.task.id;
     confirmationResolverRef.current?.(false);
+    mediaSelectionResolverRef.current?.(undefined);
     generationPollVersion.current += 1;
     if (current.executionMode === 'native') {
       await cancelNativeLlmRun();
@@ -2541,6 +2574,8 @@ export function App() {
       agentTask={agentTask}
       confirmation={agentConfirmation}
       agentModelSelection={agentModelSelection}
+      mediaModelSelection={agentMediaSelection}
+      mediaReferenceImageInputs={activeMediaInputsRef.current}
       onSelectAgentModel={(providerProfileId, modelId) => {
         const pending = agentModelSelection;
         setSelectedLlmProfileId(providerProfileId);
@@ -2557,6 +2592,8 @@ export function App() {
         }
       }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
+      onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
+      onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
       onConfirmSchemaProposal={(adapterKey, version) => {
         void confirmSchemaProposal(adapterKey, version);
       }}

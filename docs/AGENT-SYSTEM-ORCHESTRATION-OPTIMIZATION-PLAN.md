@@ -2,8 +2,8 @@
 
 版本：1.0  
 日期：2026-09-02  
-最近同步：2026-09-03  
-状态：实施中（P0、P1、P2 已完成；媒体模型选择核心已完成；下一阶段为 P3 媒体准备与用户选择模型适配）  
+最近同步：2026-09-04  
+状态：实施中（P0、P1、P2、P3 媒体准备与用户选择模型适配已完成；下一阶段为 P4 付费提交与统一状态机）  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM、Generation Adapters
 
 > **方案结论** 会话是面向整个应用的统一人工智能助手，不再按“普通聊天、通用模式、专用模式”划分运行方式。用户在会话中选择一个支持工具调用的推理模型，之后由 Pi Agent 理解自然语言、规划步骤、选择受控业务工具并连续执行；Worker 始终负责权限、确认、状态机、幂等、事务和审计，Tauri Native 始终负责凭据与 Provider 网络边界。图片、视频、小说、文档、素材和项目操作均逐步接入同一个 Agent 工具面。
@@ -81,7 +81,7 @@
 - Worker 对 Provider profile、模型、Adapter、能力、区域和 Schema 做二次校验，并将规范化选择写入任务快照。
 - 图片/视频任务已具备参数校验、失败终止、素材落盘、视频轮询恢复、生命周期事件和本地优先素材库处理。
 - Pi Runtime 已完成 Worker 侧核心工具编排与基础 Desktop owner/订阅接线，但仍受短剧 feature flag 限制，尚未成为所有会话的默认 Runtime。
-- 最新验证基线：Worker 294 项测试、Desktop 174 项测试、全仓 TypeScript typecheck、Prettier 和 `git diff --check` 通过。
+- 最新验证基线：Worker 341 项测试、Desktop 179 项测试、Persistence 26 项测试、全仓 TypeScript typecheck、Prettier 和 `git diff --check` 通过。
 
 ## 4. 目标架构
 
@@ -428,13 +428,13 @@ P2 证据：[Agent 编排 P2 通用工具注册表与策略引擎](./code-traces
 
 ### P3：媒体准备与用户选择模型适配
 
-- [ ] 实现媒体候选解析服务，按输入能力、附件、Adapter Schema、Provider 状态和项目权限列出可用图片/视频模型。
-- [ ] 增加 `media.image.prepare`、`media.video.prepare` 和 `media.task.get`。
+- [x] 实现媒体候选解析服务，按输入能力、附件、Adapter Schema、Provider 状态和项目权限列出可用图片/视频模型。
+- [x] 增加 `media.image.prepare`、`media.video.prepare` 和 `media.task.get`，通过统一 Agent Registry 与 Worker RPC 接入会话工具循环。
 - [x] 用户明确选择 Provider/媒体模型后，由 Worker 校验 provider type、region、base URL 类别和 remote model，并冻结到草稿/任务快照；不得静默替换。
 - [x] 通过 Agent 追问缺失参数，不重复要求用户选择会话 Agent 模型。
 - [x] 支持素材 ID 输入和附件转受控临时引用，不把 Base64 放入任务快照或 Tool Result。
 
-当前实现通过 `agent.run` 与既有 `image.generate.prepare`/`video.generate.prepare` 兼容入口完成媒体选择核心；独立 `media.*` IPC 和统一媒体编排服务仍属于后续 P3/P4 收口工作。
+当前实现通过统一 Agent Registry、`agent.run` 和 Worker RPC 完成媒体准备与任务查询；既有 `image.generate.prepare`/`video.generate.prepare` 保持兼容。独立付费提交 IPC、统一媒体编排服务和项目级后台运行时仍属于 P4/P5。
 
 完成门禁：“帮我生成龙在天空翱翔的视频”可由已选会话模型调用视频 prepare 工具，展示兼容的媒体 Provider/模型供用户选择，并返回费用确认草稿；未选择媒体模型时不得提交 Provider。
 
@@ -624,11 +624,11 @@ correlationId
 
 ## 18. 下一步
 
-当前处于 **P0、P1、P2 已完成，P3 媒体选择核心已完成，Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
+当前处于 **P0、P1、P2、P3 媒体准备与用户选择模型适配已完成，Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
 
-1. 完成 P3 剩余的媒体候选解析与 `media.image.prepare`、`media.video.prepare`、`media.task.get`，继续由用户明确选择图片/视频 Provider 和媒体模型；
-2. 完成 P4 的付费提交状态机和 `submission_unknown`，每次真实 Provider 提交分别确认；
-3. 将视频轮询和媒体提交收口到项目级后台运行时，再进行 P6/P7 的全系统工具覆盖与发布验收。
+1. 完成 P4 的付费提交状态机和 `submission_unknown`，每次真实 Provider 提交分别确认；
+2. 将视频轮询和媒体提交收口到项目级后台运行时，确保页面关闭、重启和网络异常可恢复；
+3. 再进行 P6/P7 的全系统工具覆盖、真实 Provider 和 Windows 发布验收。
 
 > **冻结原则** Agent 可以用自然语言发起整个系统的操作，但模型永远不是权限、状态和数据事实源；付费与高风险动作必须确认，Provider 凭据永不进入 Agent 边界，成功媒体必须先完成本地落盘再进入素材库。
 
@@ -636,6 +636,7 @@ correlationId
 
 | 日期 | 状态 | 证据 | 未完成边界 |
 |---|---|---|---|
+| 2026-09-04 | P3 媒体准备与用户选择模型适配完成 | [P3 媒体准备验证证据](./code-traces/2026-09-04-agent-orchestration-p3-media-preparation.md)；Worker 341 项、Desktop 179 项、Persistence 26 项测试通过；全仓 typecheck、format:check、`git diff --check` 通过 | P4 付费提交、`submission_unknown`、项目级后台轮询、真实 Provider 和 Windows 长稳/发布验收仍未完成 |
 | 2026-09-03 | 计划状态与实现同步 | 提交 `c80f619` 已同步 `main`；媒体模型显式选择、Worker 二次校验、任务快照和 Base64 防护已完成；Worker 294、Desktop 174 测试及 typecheck/format check 通过 | Pi 尚未覆盖所有会话；媒体提交/轮询尚未完全迁移到项目级后台运行时；真实 Provider、Windows 断网/重启/性能和发布门禁未完成 |
 | 2026-09-03 | P0 完成 | 冻结 `AgentToolRegistryV1`、R0-R3、一次性确认授权、64 KiB Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐精确视频语句、Provider 区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；详见 P0 基线证据 | P1 尚未统一所有会话；P2/P4 尚未接入通用策略与 `submission_unknown` 实现；P5 尚未迁移页面调度器；真实 Provider 与 Windows 安装/升级/卸载仍待 P7 |
 | 2026-09-03 | P1 完成 | 所有普通问答、文档、研究、小说和短剧会话默认进入 Worker-owned Pi Runtime；新增 Pi→Worker 工具网关、动态授权刷新和确认回传；Agent 模型强制 `text+streaming+tools` 且不静默替换；共享 capability 提示器不再主导业务路由；JS/TS 554 项、Rust 71 项、typecheck/lint/format、Pi spike、sidecar smoke 与 NSIS build 通过；详见 P1 证据 | P2 通用 Registry/策略接线、P3/P4 独立媒体工具与付费提交、P5 项目级后台轮询、真实 Provider 和 Windows 安装/升级/卸载仍未完成 |

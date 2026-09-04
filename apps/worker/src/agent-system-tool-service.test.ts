@@ -86,12 +86,23 @@ async function setup() {
     listProfiles: () => [profile],
     listModels: () => [model],
   };
+  const mediaTasks = {
+    getTask: (taskId: string) => ({
+      taskId,
+      kind: 'video' as const,
+      state: 'polling' as const,
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:test:v1',
+      resultAssetIds: [],
+      createdAt: '2026-09-03T00:00:00.000Z',
+      updatedAt: '2026-09-03T00:00:01.000Z',
+    }),
+  };
   return {
     project,
     content,
     assets,
     settings,
-    service: new AgentSystemToolService(project, content, assets, settings),
+    service: new AgentSystemToolService(project, content, assets, settings, mediaTasks),
     identity: {
       projectId: opened.id,
       projectSessionId: project.currentSessionId()!,
@@ -122,6 +133,19 @@ describe('AgentSystemToolService', () => {
     });
     expect(JSON.stringify(assets)).not.toMatch(/relativePath|contentHash|sourceUrl|token=secret/u);
     expect(JSON.stringify(settings)).not.toMatch(/baseUrl|remoteModelId|private\.example/u);
+  });
+
+  it('returns only the normalized media task summary', async () => {
+    const { service, identity } = await setup();
+    const result = service.execute('media.task.get', { taskId: 'media-task' }, identity);
+
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      task: { taskId: 'media-task', kind: 'video', state: 'polling', resultAssetIds: [] },
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /rootPath|relativePath|providerBody|providerResponse/iu,
+    );
   });
 
   it('renames only the current conversation and rejects a model-provided conversation ID', async () => {

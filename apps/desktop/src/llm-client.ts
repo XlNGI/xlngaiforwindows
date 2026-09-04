@@ -8,6 +8,8 @@ import type {
   LlmGenerationPrepareResult,
   LlmNativeStreamEvent,
   ConversationTaskMode,
+  MediaModelSelectionDecision,
+  MediaModelSelectionRequest,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 
@@ -29,6 +31,9 @@ export interface LlmStreamCallbacks {
   onDelta(content: string): void;
   onState(state: LlmGenerationInfo): void;
   onConfirmation?(request: AgentToolConfirmationRequest): Promise<boolean>;
+  onMediaSelection?(
+    request: MediaModelSelectionRequest,
+  ): Promise<MediaModelSelectionDecision | undefined>;
 }
 
 export interface LlmStreamRun {
@@ -233,8 +238,18 @@ export function streamPreparedLlmGeneration(
             })
           ).continuation;
         }
+        if (!continuation && execution.mediaSelection && callbacks.onMediaSelection) {
+          const selection = await callbacks.onMediaSelection(execution.mediaSelection);
+          continuation = (
+            await callWorker('agent.generation.selectMedia', {
+              ...identity,
+              selectionToken: execution.mediaSelection.selectionToken,
+              selection,
+            })
+          ).continuation;
+        }
         if (!continuation) {
-          await fail('This document action requires explicit user confirmation.', false);
+          await fail('This Agent action requires user input that was not completed.', false);
           return 'terminal';
         }
         return 'continue';
@@ -358,6 +373,7 @@ export function streamPreparedLlmGeneration(
         });
         const deadline = Date.now() + PI_POLL_TIMEOUT_MS;
         const handledConfirmations = new Set<string>();
+        const handledMediaSelections = new Set<string>();
         while (true) {
           if (Date.now() >= deadline) {
             await cancelOwnedRuntime();
@@ -382,6 +398,23 @@ export function streamPreparedLlmGeneration(
             });
             if (!confirmed.accepted) {
               throw new Error('Pi Agent confirmation was no longer pending.');
+            }
+          }
+          if (
+            runtimeState.mediaSelection &&
+            !handledMediaSelections.has(runtimeState.mediaSelection.selectionToken)
+          ) {
+            handledMediaSelections.add(runtimeState.mediaSelection.selectionToken);
+            const selection = callbacks.onMediaSelection
+              ? await callbacks.onMediaSelection(runtimeState.mediaSelection)
+              : undefined;
+            const selected = await callWorker('conversation.runtime.selectMedia', {
+              generationId: identity.generationId,
+              selectionToken: runtimeState.mediaSelection.selectionToken,
+              selection,
+            });
+            if (!selected.accepted) {
+              throw new Error('Pi Agent media selection was no longer pending.');
             }
           }
           const current = await callWorker('llm.generation.get', {

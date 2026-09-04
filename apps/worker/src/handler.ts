@@ -21,6 +21,7 @@ import {
   type UnifiedAgentAdapterSchemaAuditListParams,
   type AgentGenerationExecuteToolsParams,
   type AgentGenerationConfirmToolParams,
+  type AgentGenerationSelectMediaParams,
   type AgentProviderStepCompleteParams,
   type AgentProviderStepStartParams,
   type AgentTaskGetParams,
@@ -110,6 +111,7 @@ import { GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
+import { MediaPreparationService, resolveMediaProviderRoute } from './media-preparation-service.js';
 import { MaintenanceService } from './maintenance-service.js';
 import { SampleProjectService } from './sample-project-service.js';
 import {
@@ -178,6 +180,7 @@ function resolveMediaSelectionForRequest(
   model: ReturnType<AppSettingsService['listModels']>[number];
   adapter: AdapterDescriptor;
   providerRegion: VideoProviderRegion;
+  mediaModelSelection: import('@ai-video/contracts').MediaModelSelectionSnapshot;
 } {
   if (!providerProfileId || !modelId) {
     throw new ProviderProfileValidationError(
@@ -191,10 +194,8 @@ function resolveMediaSelectionForRequest(
       'Select an enabled provider connection that passed its connectivity test.',
     );
   }
-  const supportedProfile =
-    (profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
-    (profile.providerType === 'unicompapi' && profile.protocol === 'openai-chat-completions');
-  if (!supportedProfile) {
+  const route = resolveMediaProviderRoute(profile);
+  if (!route) {
     throw new ProviderProfileValidationError(
       'The selected provider does not support media generation.',
     );
@@ -241,13 +242,29 @@ function resolveMediaSelectionForRequest(
       'This adapter schema is awaiting confirmation and cannot be submitted yet.',
     );
   }
-  const providerRegion = resolveMediaProviderRegion(profile);
+  const providerRegion = route.providerRegion;
   if (requestedRegion !== undefined && requestedRegion !== providerRegion) {
     throw new ProviderProfileValidationError(
       'The selected provider profile does not match the requested region.',
     );
   }
-  return { profile, model, adapter, providerRegion };
+  return {
+    profile,
+    model,
+    adapter,
+    providerRegion,
+    mediaModelSelection: {
+      providerProfileId: profile.id,
+      providerType: route.providerType,
+      providerBaseUrlCategory: route.baseUrlCategory,
+      providerRegion,
+      modelId: model.id,
+      remoteModelId: model.remoteModelId,
+      adapterKey: adapter.key,
+      adapterSchemaVersion: adapter.schemaVersion,
+      adapterSchemaSource: schemaRecord?.source === 'manual' ? 'manual' : 'official-adapter',
+    },
+  };
 }
 
 /**
@@ -506,9 +523,11 @@ const methods = new Set<WorkerMethod>([
   'conversation.runtime.start',
   'conversation.runtime.get',
   'conversation.runtime.confirm',
+  'conversation.runtime.selectMedia',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
+  'agent.generation.selectMedia',
   'agent.providerStep.complete',
   'agent.providerStep.start',
   'task.log.list',
@@ -659,11 +678,20 @@ const generationService = new GenerationService(
     generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
   },
 );
+const mediaPreparationService = new MediaPreparationService(
+  projectService,
+  appSettingsService,
+  adapterService,
+  imageGenerationService,
+  videoGenerationService,
+  (identity) => generationService.runtime(identity).attachments ?? [],
+);
 const agentSystemToolService = new AgentSystemToolService(
   projectService,
   contentService,
   imageGenerationService,
   appSettingsService,
+  mediaPreparationService,
 );
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
@@ -717,6 +745,7 @@ const agentProviderLoopService = new AgentProviderLoopService(
       appSettingsService.listAdapterSchemaAudits(adapterKey, limit),
   } satisfies AgentSchemaManager,
   agentSystemToolService,
+  mediaPreparationService,
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
@@ -1491,6 +1520,19 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           };
           break;
         }
+        case 'conversation.runtime.selectMedia': {
+          if (!piConversationRuntime) throw new Error('Pi conversation runtime is not configured.');
+          const mediaParams =
+            params as unknown as import('@ai-video/contracts').ConversationRuntimeSelectMediaParams;
+          result = {
+            accepted: piConversationRuntime.selectMedia(
+              requireString(params, 'generationId'),
+              requireString(params, 'selectionToken'),
+              mediaParams.selection,
+            ),
+          };
+          break;
+        }
         case 'agent.generation.executeTools': {
           const executionParams = params as unknown as AgentGenerationExecuteToolsParams;
           const execution = await agentProviderLoopService.executeTools(executionParams);
@@ -1523,6 +1565,17 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             confirmation.continuation,
           );
           result = confirmation;
+          break;
+        }
+        case 'agent.generation.selectMedia': {
+          const selectionParams = params as unknown as AgentGenerationSelectMediaParams;
+          const execution = agentProviderLoopService.selectMedia(selectionParams);
+          generationService.configureAgentTools(
+            selectionParams,
+            execution.tools ?? [],
+            execution.continuation,
+          );
+          result = execution;
           break;
         }
         case 'agent.providerStep.complete':
@@ -1720,6 +1773,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             ...imageParams,
             providerProfileId: selection.profile.id,
             modelId: selection.model.id,
+            mediaModelSelection: selection.mediaModelSelection,
           });
           break;
         }
@@ -1763,6 +1817,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             providerRegion: selection.providerRegion,
             providerProfileId: selection.profile.id,
             modelId: selection.model.id,
+            mediaModelSelection: selection.mediaModelSelection,
             assetKind: optionalVideoAssetKind(params, 'assetKind'),
           });
           break;

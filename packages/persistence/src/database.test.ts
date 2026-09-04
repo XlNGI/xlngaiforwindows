@@ -39,8 +39,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(35);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 35 });
+    expect(migrateDatabase(database)).toBe(36);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 36 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -66,6 +66,11 @@ describe('project database', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('agent_tasks'),
     ).toMatchObject({ name: 'agent_tasks' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('agent_media_selections'),
+    ).toMatchObject({ name: 'agent_media_selections' });
     const taskTable = database
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'")
       .get() as { sql: string } | undefined;
@@ -158,10 +163,126 @@ describe('project database', () => {
     database.close();
   });
 
+  it('binds media selections to the executing media tool call and keeps terminal status immutable', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Media selection', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO conversations (id, project_id, scope_type, title, created_at, updated_at)
+         VALUES (?, ?, 'project', ?, ?, ?)`,
+      )
+      .run('conversation', 'project', 'Media selection', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO chat_messages (id, conversation_id, role, content, status, created_at)
+         VALUES (?, ?, 'user', 'Generate', 'complete', 'now'),
+                (?, ?, 'assistant', '', 'streaming', 'now')`,
+      )
+      .run('user', 'conversation', 'assistant', 'conversation');
+    database
+      .prepare(
+        `INSERT INTO context_snapshots (id, project_id, purpose, content_json, created_at)
+         VALUES ('snapshot', 'project', 'llm-generation', '{}', 'now')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO llm_generations
+         (id, project_id, project_session_id, conversation_id, context_snapshot_id,
+          user_message_id, assistant_message_id, status, execution_mode, created_at, updated_at)
+         VALUES ('generation', 'project', 'session', 'conversation', 'snapshot',
+                 'user', 'assistant', 'streaming', 'native', 'now', 'now')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO llm_generation_attempts
+         (id, generation_id, conversation_id, user_message_id, assistant_message_id,
+          context_snapshot_id, provider_name_snapshot, model_name_snapshot, protocol, status,
+          started_at)
+         VALUES ('attempt', 'generation', 'conversation', 'user', 'assistant', 'snapshot',
+                 'Agent Provider', 'Agent Model', 'openai-responses', 'streaming', 'now')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO agent_tasks
+         (id, project_id, project_session_id, conversation_id, user_message_id, task_type,
+          scope_type, title, request_snapshot_json, request_hash, context_snapshot_id, status,
+          created_at, started_at, updated_at, phase)
+         VALUES ('task', 'project', 'session', 'conversation', 'user', 'document-query',
+                 'project', 'Media draft', '{}', 'request-hash', 'snapshot', 'running',
+                 'now', 'now', 'now', 'model_running')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO agent_task_generations (task_id, generation_id, ordinal, purpose, created_at)
+         VALUES ('task', 'generation', 0, 'agent-primary', 'now')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO llm_provider_steps
+         (id, project_id, generation_id, attempt_id, ordinal, protocol, provider_response_id,
+          status, tool_call_count, request_hash, started_at, completed_at)
+         VALUES ('step', 'project', 'generation', 'attempt', 0, 'openai-responses', 'response',
+                 'complete', 1, 'request-hash', 'now', 'now')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO agent_tool_authorizations
+         (id, project_id, task_id, generation_id, attempt_id, provider_step_id,
+          project_session_id, allowed_operation, policy_version, tool_schema_version,
+          authorization_handle_hash, status, max_call_uses, used_call_count, expires_at, created_at)
+         VALUES ('authorization', 'project', 'task', 'generation', 'attempt', 'step',
+                 'session', 'media.image.prepare', 'v1', 'v1', ?, 'issued', 1, 1, 'later', 'now')`,
+      )
+      .run('a'.repeat(64));
+    database
+      .prepare(
+        `INSERT INTO agent_tool_calls
+         (id, project_id, task_id, generation_id, attempt_id, authorization_id, provider_step_id,
+          provider_call_id, tool_ordinal, tool_name, normalized_arguments_hash,
+          arguments_summary_json, status, created_at, started_at, redaction_state)
+         VALUES ('call', 'project', 'task', 'generation', 'attempt', 'authorization', 'step',
+                 'provider-call', 0, 'media.image.prepare', ?, '{}', 'executing',
+                 'now', 'now', 'native')`,
+      )
+      .run('b'.repeat(64));
+    const insertSelection = database.prepare(
+      `INSERT INTO agent_media_selections
+       (id, project_id, task_id, generation_id, attempt_id, provider_step_id,
+        original_tool_call_id, kind, normalized_arguments_hash, arguments_json, request_json,
+        token_hash, status, expires_at, created_at)
+       VALUES (?, 'project', 'task', 'generation', 'attempt', 'step', 'call', ?, ?, '{}', '{}',
+               ?, 'pending', 'later', 'now')`,
+    );
+
+    expect(() =>
+      insertSelection.run('wrong-kind', 'video', 'c'.repeat(64), 'd'.repeat(64)),
+    ).toThrow('media selection does not match its tool call');
+    insertSelection.run('selection', 'image', 'c'.repeat(64), 'e'.repeat(64));
+    database
+      .prepare("UPDATE agent_media_selections SET status = 'consumed' WHERE id = 'selection'")
+      .run();
+    expect(() =>
+      database
+        .prepare("UPDATE agent_media_selections SET status = 'pending' WHERE id = 'selection'")
+        .run(),
+    ).toThrow('invalid agent media selection transition');
+    database.close();
+  });
+
   it('backfills current saved novel drafts when upgrading from v29', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
     database.exec(`
+      DROP TABLE IF EXISTS agent_media_selections;
       DROP TRIGGER IF EXISTS generation_job_events_delete_immutable;
       DROP TRIGGER IF EXISTS generation_job_events_update_immutable;
       DROP TRIGGER IF EXISTS generation_job_event_project_match;
@@ -214,7 +335,7 @@ describe('project database', () => {
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
     const chunks = database
       .prepare(
         `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
@@ -454,7 +575,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -481,7 +602,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -543,7 +664,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -591,7 +712,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
     expect(
       database
         .prepare(
@@ -664,8 +785,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(35);
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(36);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -820,7 +941,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(35);
+    expect(migrateDatabase(database)).toBe(36);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -858,7 +979,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 35 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 36 });
     database.close();
   });
 

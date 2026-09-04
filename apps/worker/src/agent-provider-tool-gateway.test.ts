@@ -36,12 +36,14 @@ function definition(
 function executor(
   executeResult: AgentGenerationExecuteToolsResult,
   confirmResult: AgentGenerationExecuteToolsResult = executeResult,
+  mediaResult: AgentGenerationExecuteToolsResult = executeResult,
 ) {
   return {
     executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>(() =>
       Promise.resolve(executeResult),
     ),
     confirmTool: vi.fn<AgentProviderToolExecutor['confirmTool']>(() => confirmResult),
+    selectMedia: vi.fn<AgentProviderToolExecutor['selectMedia']>(() => mediaResult),
     startProviderStep: vi.fn<AgentProviderToolExecutor['startProviderStep']>(),
     completeProviderStep: vi.fn<AgentProviderToolExecutor['completeProviderStep']>(),
     terminateGeneration: vi.fn<AgentProviderToolExecutor['terminateGeneration']>(() => 1),
@@ -59,7 +61,13 @@ describe('AgentProviderToolGateway', () => {
       },
       tools: [nextDefinition],
     });
-    const gateway = new AgentProviderToolGateway(worker, identity, [definition()], vi.fn());
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition()],
+      vi.fn(),
+      vi.fn(),
+    );
 
     gateway.captureProviderCall('call-1', 'response-1', {
       inputTokens: 8,
@@ -110,7 +118,7 @@ describe('AgentProviderToolGateway', () => {
         },
       );
       const ask = vi.fn(() => Promise.resolve(approved));
-      const gateway = new AgentProviderToolGateway(worker, identity, [definition()], ask);
+      const gateway = new AgentProviderToolGateway(worker, identity, [definition()], ask, vi.fn());
 
       gateway.captureProviderCall('call-2', 'response-2');
       await expect(gateway.tools()[0]!.execute('call-2', {})).resolves.toMatchObject({
@@ -125,9 +133,64 @@ describe('AgentProviderToolGateway', () => {
     },
   );
 
+  it('returns an explicit media model selection to Worker without changing the Agent model', async () => {
+    const request = {
+      selectionToken: 'media-selection-token',
+      kind: 'video' as const,
+      prompt: 'Dragon flying in the sky',
+      inputAssetIds: [],
+      inputAttachmentCount: 0,
+      proposedParameters: {},
+      candidates: [],
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    };
+    const selection = {
+      providerProfileId: 'media-profile',
+      modelId: 'media-model',
+      adapterKey: 'video-adapter',
+      parameters: { prompt: request.prompt },
+    };
+    const worker = executor(
+      { mediaSelection: request },
+      { mediaSelection: request },
+      {
+        continuation: {
+          protocol: 'openai-responses',
+          previousResponseId: 'response-media',
+          outputs: [{ callId: 'call-media', output: '{"status":"prepared"}' }],
+        },
+        tools: [],
+      },
+    );
+    const askMedia = vi.fn(() => Promise.resolve(selection));
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition('media.video.prepare')],
+      vi.fn(),
+      askMedia,
+    );
+
+    gateway.captureProviderCall('call-media', 'response-media');
+    await gateway.tools()[0]!.execute('call-media', { prompt: request.prompt });
+
+    expect(askMedia).toHaveBeenCalledWith(request);
+    expect(worker.selectMedia).toHaveBeenCalledWith({
+      ...identity,
+      selectionToken: request.selectionToken,
+      selection,
+    });
+  });
+
   it('rejects calls without Provider response context before reaching Worker', async () => {
     const worker = executor({});
-    const gateway = new AgentProviderToolGateway(worker, identity, [definition()], vi.fn());
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition()],
+      vi.fn(),
+      vi.fn(),
+    );
 
     await expect(gateway.tools()[0]!.execute('missing', {})).rejects.toThrow(
       'missing its Provider response context',
@@ -137,7 +200,7 @@ describe('AgentProviderToolGateway', () => {
 
   it('forwards provider-step and terminal lifecycle operations', () => {
     const worker = executor({});
-    const gateway = new AgentProviderToolGateway(worker, identity, [], vi.fn());
+    const gateway = new AgentProviderToolGateway(worker, identity, [], vi.fn(), vi.fn());
 
     gateway.startProviderStep();
     gateway.completeProviderStep('response-final', 'stop', { totalTokens: 9 });

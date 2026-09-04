@@ -11,7 +11,10 @@ export type SystemAgentToolOperation =
   | 'conversation.rename'
   | 'asset.search'
   | 'asset.update_alias'
-  | 'settings.get';
+  | 'settings.get'
+  | 'media.task.get';
+
+export type MediaPrepareToolOperation = 'media.image.prepare' | 'media.video.prepare';
 
 export const SCHEMA_AGENT_TOOLS: LlmToolDefinition[] = [
   {
@@ -365,6 +368,87 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   },
 ];
 
+const MEDIA_PARAMETER_VALUE_SCHEMA = {
+  oneOf: [
+    { type: 'string', maxLength: 10_000 },
+    { type: 'number' },
+    { type: 'boolean' },
+    {
+      type: 'array',
+      maxItems: 20,
+      items: { type: 'string', maxLength: 4_096 },
+    },
+  ],
+};
+
+export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
+  {
+    name: 'media.image.prepare',
+    description:
+      'Prepare an image generation draft. Use this only when the user asks to create or edit an image. The Worker pauses for the user to choose a compatible image Provider/model; this tool never submits a paid Provider request.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string', minLength: 1, maxLength: 5_000 },
+        inputAssetIds: {
+          type: 'array',
+          maxItems: 7,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+        },
+        parameters: {
+          type: 'object',
+          maxProperties: 40,
+          additionalProperties: MEDIA_PARAMETER_VALUE_SCHEMA,
+        },
+        shotId: { type: 'string', minLength: 1, maxLength: 200 },
+        assetKind: {
+          enum: ['character', 'scene', 'first-frame', 'last-frame', 'generated-image'],
+        },
+      },
+    },
+  },
+  {
+    name: 'media.video.prepare',
+    description:
+      'Prepare a video generation draft. Use this when the user asks to generate a video, including requests such as generating a dragon flying in the sky. The Worker pauses for the user to choose a compatible video Provider/model; this tool never submits a paid Provider request.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string', minLength: 1, maxLength: 5_000 },
+        inputAssetIds: {
+          type: 'array',
+          maxItems: 7,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+        },
+        parameters: {
+          type: 'object',
+          maxProperties: 40,
+          additionalProperties: MEDIA_PARAMETER_VALUE_SCHEMA,
+        },
+        shotId: { type: 'string', minLength: 1, maxLength: 200 },
+        assetKind: { enum: ['generated-video', 'shot-video'] },
+      },
+    },
+  },
+  {
+    name: 'media.task.get',
+    description:
+      'Get the normalized status and result asset IDs of one current-project image or video generation task. This is read-only and never returns local paths or Provider payloads.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['taskId'],
+      properties: { taskId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+];
+
 export const ALL_AGENT_TOOL_DEFINITIONS = [
   ...DOCUMENT_AGENT_TOOLS,
   ...RESEARCH_AGENT_TOOLS,
@@ -372,6 +456,7 @@ export const ALL_AGENT_TOOL_DEFINITIONS = [
   PLAN_AGENT_TOOL,
   PACKAGE_COMPLETE_AGENT_TOOL,
   ...SYSTEM_AGENT_TOOLS,
+  ...MEDIA_AGENT_TOOLS,
 ];
 
 export type RegisteredAgentToolPolicy = {
@@ -405,6 +490,9 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'asset.search': readPolicy(),
   'asset.update_alias': writePolicy(),
   'settings.get': readPolicy(),
+  'media.image.prepare': writePolicy(),
+  'media.video.prepare': writePolicy(),
+  'media.task.get': readPolicy(),
 } satisfies Record<string, RegisteredAgentToolPolicy>;
 
 function readPolicy(): RegisteredAgentToolPolicy {

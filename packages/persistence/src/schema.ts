@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 35;
+export const CURRENT_SCHEMA_VERSION = 36;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -2199,5 +2199,75 @@ CREATE TRIGGER generation_job_events_delete_immutable
 BEFORE DELETE ON generation_job_events
 BEGIN
   SELECT RAISE(ABORT, 'generation job events are immutable');
+END;
+`;
+
+/** Durable binding for one paused Agent media-model selection. */
+export const MIGRATION_V36 = `
+CREATE TABLE agent_media_selections (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE RESTRICT,
+  generation_id TEXT NOT NULL REFERENCES llm_generations(id) ON DELETE RESTRICT,
+  attempt_id TEXT NOT NULL,
+  provider_step_id TEXT NOT NULL REFERENCES llm_provider_steps(id) ON DELETE RESTRICT,
+  original_tool_call_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+  normalized_arguments_hash TEXT NOT NULL CHECK (length(normalized_arguments_hash) = 64),
+  arguments_json TEXT NOT NULL CHECK (
+    json_valid(arguments_json) AND json_type(arguments_json) = 'object' AND length(arguments_json) <= 65536
+  ),
+  request_json TEXT NOT NULL CHECK (
+    json_valid(request_json) AND json_type(request_json) = 'object' AND length(request_json) <= 262144
+  ),
+  token_hash TEXT NOT NULL CHECK (length(token_hash) = 64),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'consumed', 'rejected', 'expired')),
+  selection_summary_json TEXT CHECK (
+    selection_summary_json IS NULL OR (
+      json_valid(selection_summary_json) AND json_type(selection_summary_json) = 'object'
+      AND length(selection_summary_json) <= 65536
+    )
+  ),
+  expires_at TEXT NOT NULL,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(id, project_id),
+  UNIQUE(token_hash),
+  FOREIGN KEY(attempt_id, generation_id)
+    REFERENCES llm_generation_attempts(id, generation_id) ON DELETE RESTRICT,
+  FOREIGN KEY(provider_step_id, project_id)
+    REFERENCES llm_provider_steps(id, project_id) ON DELETE RESTRICT,
+  FOREIGN KEY(original_tool_call_id, project_id)
+    REFERENCES agent_tool_calls(id, project_id) ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX idx_agent_media_selection_pending_task
+  ON agent_media_selections(task_id) WHERE status = 'pending';
+CREATE INDEX idx_agent_media_selection_generation
+  ON agent_media_selections(generation_id, status, expires_at);
+
+CREATE TRIGGER agent_media_selection_status_transition
+BEFORE UPDATE OF status ON agent_media_selections
+WHEN (OLD.status IN ('consumed', 'rejected', 'expired') AND NEW.status <> OLD.status)
+  OR (OLD.status = 'pending' AND NEW.status NOT IN ('pending', 'consumed', 'rejected', 'expired'))
+BEGIN
+  SELECT RAISE(ABORT, 'invalid agent media selection transition');
+END;
+
+CREATE TRIGGER agent_media_selection_binding
+BEFORE INSERT ON agent_media_selections
+WHEN NOT EXISTS (
+  SELECT 1 FROM agent_tool_calls calls
+  WHERE calls.id = NEW.original_tool_call_id
+    AND calls.project_id = NEW.project_id
+    AND calls.task_id = NEW.task_id
+    AND calls.generation_id = NEW.generation_id
+    AND calls.attempt_id = NEW.attempt_id
+    AND calls.provider_step_id = NEW.provider_step_id
+    AND calls.tool_name = 'media.' || NEW.kind || '.prepare'
+    AND calls.status = 'executing'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'media selection does not match its tool call');
 END;
 `;

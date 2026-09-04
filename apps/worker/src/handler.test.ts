@@ -243,9 +243,52 @@ describe('worker handler', () => {
         approved: 'true',
       },
     } as unknown as WorkerRequest);
+    const invalidMediaSelection = await handleRequest({
+      id: 'runtime-media-invalid',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'conversation.runtime.selectMedia',
+      params: {
+        generationId: 'generation',
+        selectionToken: 'token',
+        selection: {
+          providerProfileId: 'profile',
+          modelId: 'model',
+          adapterKey: 'adapter',
+          parameters: { prompt: { forged: true } },
+        },
+      },
+    } as unknown as WorkerRequest);
+    const tamperedMediaSelection = await handleRequest({
+      id: 'agent-media-tampered',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.generation.selectMedia',
+      params: {
+        generationId: 'generation',
+        attemptId: 'attempt',
+        projectId: 'project',
+        projectSessionId: 'session',
+        conversationId: 'conversation',
+        selectionToken: 'token',
+        selection: {
+          providerProfileId: 'profile',
+          modelId: 'model',
+          adapterKey: 'adapter',
+          parameters: {},
+          providerBaseUrl: 'https://attacker.example',
+        },
+      },
+    } as unknown as WorkerRequest);
 
     expect(unknown).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
     expect(invalidDecision).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    expect(invalidMediaSelection).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' },
+    });
+    expect(tamperedMediaSelection).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' },
+    });
   });
 
   it('validates novel import payloads at the IPC boundary', async () => {

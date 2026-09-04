@@ -31,6 +31,9 @@ import type {
   AdapterDescriptor,
   AdapterParameters,
   AdapterParameterProperty,
+  MediaModelCandidate,
+  MediaModelSelectionDecision,
+  MediaModelSelectionRequest,
   UnifiedAgentModelSelectionRequest,
 } from '@ai-video/contracts';
 
@@ -106,6 +109,10 @@ interface ChatPanelProps {
   onRemoveAttachment?: (id: string) => void;
   agentModelSelection?: UnifiedAgentModelSelectionRequest;
   onSelectAgentModel?: (providerProfileId: string, modelId: string) => void;
+  mediaModelSelection?: MediaModelSelectionRequest;
+  mediaReferenceImageInputs?: string[];
+  onSelectMediaModel?: (selection: MediaModelSelectionDecision) => void;
+  onCancelMediaModelSelection?: () => void;
   agentParameterRequest?: {
     prompt: string;
     capability: 'image' | 'video';
@@ -115,6 +122,7 @@ interface ChatPanelProps {
     adapters: AdapterDescriptor[];
     affectsCost: boolean;
     referenceImageInputs?: string[];
+    proposedParameters?: AdapterParameters;
   };
   onSubmitAgentParameters?: (adapterKey: string, parameters: AdapterParameters) => void;
   onCreateDocumentDraft?: () => void;
@@ -180,6 +188,10 @@ export function ChatPanel({
   onRemoveAttachment,
   agentModelSelection,
   onSelectAgentModel,
+  mediaModelSelection,
+  mediaReferenceImageInputs,
+  onSelectMediaModel,
+  onCancelMediaModelSelection,
   agentParameterRequest,
   onSubmitAgentParameters,
   onCreateDocumentDraft,
@@ -539,6 +551,14 @@ export function ChatPanel({
             ))}
           </div>
         </div>
+      )}
+      {mediaModelSelection && (
+        <MediaModelSelectionCard
+          request={mediaModelSelection}
+          referenceImageInputs={mediaReferenceImageInputs}
+          onSelect={onSelectMediaModel}
+          onCancel={onCancelMediaModelSelection}
+        />
       )}
       {agentParameterRequest && (
         <AgentParameterCard request={agentParameterRequest} onSubmit={onSubmitAgentParameters} />
@@ -908,6 +928,99 @@ function formatLatency(startAt: string, endAt: string | undefined): string {
     : `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 2 : 1)} s`;
 }
 
+function MediaModelSelectionCard({
+  request,
+  referenceImageInputs,
+  onSelect,
+  onCancel,
+}: {
+  request: MediaModelSelectionRequest;
+  referenceImageInputs?: string[];
+  onSelect?: (selection: MediaModelSelectionDecision) => void;
+  onCancel?: () => void;
+}) {
+  const [candidateKey, setCandidateKey] = useState('');
+  const candidate = request.candidates.find(
+    (item) => `${item.providerProfileId}:${item.modelId}` === candidateKey,
+  );
+
+  useEffect(() => {
+    setCandidateKey('');
+  }, [request.selectionToken]);
+
+  return (
+    <div
+      className="agent-model-selection media-model-selection"
+      role="dialog"
+      aria-label={`选择${request.kind === 'image' ? '图片' : '视频'}生成模型`}
+    >
+      <div className="media-model-selection-heading">
+        <div>
+          <strong>选择{request.kind === 'image' ? '图片' : '视频'}生成模型</strong>
+          <small>此选择仅用于当前媒体草稿，不会更改会话 Agent 模型。</small>
+        </div>
+        {onCancel && (
+          <button className="button subtle" type="button" onClick={onCancel}>
+            取消
+          </button>
+        )}
+      </div>
+      {request.candidates.length === 0 ? (
+        <small>当前没有兼容且已就绪的媒体模型，请检查供应商和模型配置。</small>
+      ) : !candidate ? (
+        <div className="agent-model-options">
+          {request.candidates.map((item) => (
+            <button
+              type="button"
+              key={`${item.providerProfileId}:${item.modelId}`}
+              onClick={() => setCandidateKey(`${item.providerProfileId}:${item.modelId}`)}
+            >
+              <span>{item.modelName}</span>
+              <small>
+                {item.providerName} · {formatMediaProviderRegion(item)}
+              </small>
+              <small>{item.costNotice.summary}</small>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <>
+          <button className="media-model-change" type="button" onClick={() => setCandidateKey('')}>
+            已选择 {candidate.providerName} · {candidate.modelName}，重新选择
+          </button>
+          <AgentParameterCard
+            request={{
+              prompt: request.prompt,
+              capability: request.kind,
+              providerProfileId: candidate.providerProfileId,
+              modelId: candidate.modelId,
+              modelName: candidate.modelName,
+              adapters: candidate.adapters,
+              affectsCost: candidate.costNotice.required,
+              referenceImageInputs,
+              proposedParameters: request.proposedParameters,
+            }}
+            onSubmit={(adapterKey, parameters) =>
+              onSelect?.({
+                providerProfileId: candidate.providerProfileId,
+                modelId: candidate.modelId,
+                adapterKey,
+                parameters,
+              })
+            }
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function formatMediaProviderRegion(candidate: MediaModelCandidate): string {
+  if (candidate.providerRegion === 'cn') return '中国区';
+  if (candidate.providerRegion === 'global') return '全球区';
+  return candidate.providerRegion;
+}
+
 function AgentParameterCard({
   request,
   onSubmit,
@@ -925,6 +1038,11 @@ function AgentParameterCard({
       if (property.default !== undefined) values[key] = property.default;
       else if (key === 'prompt' && property.type === 'string') values[key] = request.prompt;
     }
+    for (const [key, value] of Object.entries(request.proposedParameters ?? {})) {
+      if (Object.prototype.hasOwnProperty.call(adapter.parameterSchema.properties, key)) {
+        values[key] = value;
+      }
+    }
     if (
       request.referenceImageInputs &&
       request.referenceImageInputs.length > 0 &&
@@ -933,7 +1051,7 @@ function AgentParameterCard({
       values.images = request.referenceImageInputs;
     }
     return values;
-  }, [adapter, request.referenceImageInputs, request.prompt]);
+  }, [adapter, request.proposedParameters, request.referenceImageInputs, request.prompt]);
   const [parameters, setParameters] = useState<AdapterParameters>(initialValues);
   const [error, setError] = useState('');
 

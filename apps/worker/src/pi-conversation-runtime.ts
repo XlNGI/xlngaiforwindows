@@ -12,6 +12,8 @@ import type {
   LlmToolCall,
   LlmToolContinuation,
   NormalizedLlmUsage,
+  MediaModelSelectionDecision,
+  MediaModelSelectionRequest,
 } from '@ai-video/contracts';
 import { Agent, type AgentContext, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works/pi-ai';
@@ -60,6 +62,12 @@ type PendingConfirmation = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+type PendingMediaSelection = {
+  request: MediaModelSelectionRequest;
+  resolve: (selection: MediaModelSelectionDecision | undefined) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 const MAX_FROZEN_CONTEXT_CHARACTERS = 400_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -71,6 +79,7 @@ export class PiConversationRuntime implements ConversationRuntime {
   readonly kind = 'pi' as const;
   private readonly active = new Map<string, ActiveRun>();
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
+  private readonly pendingMediaSelections = new Map<string, PendingMediaSelection>();
   private readonly maxTurns: number;
 
   constructor(private readonly options: PiConversationRuntimeOptions) {
@@ -222,6 +231,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     void completion.finally(() => {
       this.active.delete(identity.generationId);
       this.resolvePendingConfirmation(identity.generationId, false);
+      this.resolvePendingMediaSelection(identity.generationId, undefined);
     });
     return Promise.resolve({ runtime: 'pi', taskId: request.taskId });
   }
@@ -231,6 +241,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (!active) return false;
     active.cancelled = true;
     this.resolvePendingConfirmation(generationId, false);
+    this.resolvePendingMediaSelection(generationId, undefined);
     // GenerationService transitions native generations synchronously before
     // returning its Promise. Mark SQLite cancelled before aborting Pi so the
     // aborted assistant message cannot win the race and persist as a failure.
@@ -248,10 +259,15 @@ export class PiConversationRuntime implements ConversationRuntime {
     return this.active.has(generationId);
   }
 
-  get(generationId: string): { active: boolean; confirmation?: AgentToolConfirmationRequest } {
+  get(generationId: string): {
+    active: boolean;
+    confirmation?: AgentToolConfirmationRequest;
+    mediaSelection?: MediaModelSelectionRequest;
+  } {
     return {
       active: this.active.has(generationId),
       confirmation: this.pendingConfirmations.get(generationId)?.request,
+      mediaSelection: this.pendingMediaSelections.get(generationId)?.request,
     };
   }
 
@@ -264,6 +280,19 @@ export class PiConversationRuntime implements ConversationRuntime {
     return true;
   }
 
+  selectMedia(
+    generationId: string,
+    selectionToken: string,
+    selection: MediaModelSelectionDecision | undefined,
+  ): boolean {
+    const pending = this.pendingMediaSelections.get(generationId);
+    if (!pending || pending.request.selectionToken !== selectionToken) return false;
+    clearTimeout(pending.timeout);
+    this.pendingMediaSelections.delete(generationId);
+    pending.resolve(selection);
+    return true;
+  }
+
   private createProviderGateway(
     identity: LlmGenerationIdentity,
     tools: LlmToolDefinition[],
@@ -271,8 +300,12 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (!this.options.providerTools) {
       throw new Error('Pi runtime requires the Worker Agent tool executor for this workflow.');
     }
-    return new AgentProviderToolGateway(this.options.providerTools, identity, tools, (request) =>
-      this.requestConfirmation(identity.generationId, request),
+    return new AgentProviderToolGateway(
+      this.options.providerTools,
+      identity,
+      tools,
+      (request) => this.requestConfirmation(identity.generationId, request),
+      (request) => this.requestMediaSelection(identity.generationId, request),
     );
   }
 
@@ -302,6 +335,37 @@ export class PiConversationRuntime implements ConversationRuntime {
     clearTimeout(pending.timeout);
     this.pendingConfirmations.delete(generationId);
     pending.resolve(approved);
+  }
+
+  private requestMediaSelection(
+    generationId: string,
+    request: MediaModelSelectionRequest,
+  ): Promise<MediaModelSelectionDecision | undefined> {
+    if (this.pendingMediaSelections.has(generationId)) {
+      return Promise.reject(new Error('Pi runtime already has a pending media selection.'));
+    }
+    return new Promise<MediaModelSelectionDecision | undefined>((resolve, reject) => {
+      const expiresIn = Math.min(
+        MAX_TIMER_DELAY_MS,
+        Math.max(0, Date.parse(request.expiresAt) - Date.now()),
+      );
+      const timeout = setTimeout(() => {
+        this.pendingMediaSelections.delete(generationId);
+        reject(new Error('Media model selection expired before the user responded.'));
+      }, expiresIn);
+      this.pendingMediaSelections.set(generationId, { request, resolve, timeout });
+    });
+  }
+
+  private resolvePendingMediaSelection(
+    generationId: string,
+    selection: MediaModelSelectionDecision | undefined,
+  ): void {
+    const pending = this.pendingMediaSelections.get(generationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingMediaSelections.delete(generationId);
+    pending.resolve(selection);
   }
 
   private createNativeStream(identity: LlmGenerationIdentity): StreamFn {
@@ -379,7 +443,7 @@ export class PiConversationRuntime implements ConversationRuntime {
 }
 
 function unifiedAgentInstruction(base: string): string {
-  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
+  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. For an explicit image or video generation request, call media.image.prepare or media.video.prepare; do not merely write a prompt or claim the application cannot generate media. The user, never the Agent or Worker, chooses the concrete media Provider/model from compatible candidates. A media prepare result creates only a local draft and never means that a paid Provider request was submitted. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
 }
 
 function withFrozenContext(instruction: string, context: string): string {

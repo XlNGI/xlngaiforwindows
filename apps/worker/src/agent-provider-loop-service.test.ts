@@ -16,12 +16,19 @@ import { NovelContextService } from './novel-context-service.js';
 import { NovelService } from './novel-service.js';
 import { getAdapter } from '@ai-video/generation-adapters';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
+import { AdapterService } from './adapter-service.js';
+import { AppSettingsService } from './app-settings-service.js';
+import { ImageGenerationService } from './image-generation-service.js';
+import { MediaPreparationService } from './media-preparation-service.js';
+import { VideoGenerationService } from './video-generation-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
+const settingsServices: AppSettingsService[] = [];
 
 afterEach(async () => {
   for (const project of projects.splice(0)) project.close();
+  for (const settings of settingsServices.splice(0)) settings.close();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
 
@@ -63,6 +70,60 @@ async function setup(
   return { conversation, generations, loop, project, workflow };
 }
 
+async function setupMedia(ready = true) {
+  const base = await setup();
+  const directory = await mkdtemp(join(tmpdir(), 'agent-provider-media-settings-'));
+  directories.push(directory);
+  const settings = new AppSettingsService({ appDataDirectory: directory });
+  settingsServices.push(settings);
+  const profile = settings.createProfile({
+    name: 'UniCompAPI Media',
+    category: 'multi',
+    providerType: 'unicompapi',
+    accessType: 'official',
+    protocol: 'openai-chat-completions',
+    baseUrl: 'https://unicompapi.com/v1',
+  });
+  if (ready) {
+    settings.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'doubao-seedance-2-0-260128' }],
+    });
+    for (const model of settings.listModels(profile.id)) {
+      settings.updateModel({
+        profileId: profile.id,
+        modelId: model.id,
+        displayName: model.displayName,
+        capabilities: model.capabilities,
+        enabled: true,
+      });
+    }
+  }
+  const media = new MediaPreparationService(
+    base.project,
+    settings,
+    new AdapterService(base.project),
+    new ImageGenerationService(base.project),
+    new VideoGenerationService(base.project),
+    (identity) => base.generations.runtime(identity).attachments ?? [],
+  );
+  return {
+    ...base,
+    profile,
+    loop: new AgentProviderLoopService(
+      base.project,
+      base.workflow,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      media,
+    ),
+  };
+}
+
 function createSystemLoop(project: ProjectService, workflow: DocumentWorkflowService) {
   return new AgentProviderLoopService(
     project,
@@ -86,6 +147,260 @@ function createSystemLoop(project: ProjectService, workflow: DocumentWorkflowSer
 }
 
 describe('AgentProviderLoopService', () => {
+  it('pauses a natural-language video request for media selection and resumes with a local draft', async () => {
+    const { conversation, generations, loop, project } = await setupMedia();
+    const prompt = '帮我生成龙在天空翱翔的视频';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'agent-profile',
+      modelId: 'agent-model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    const videoTool = agent.tools.find((tool) => tool.name === 'media.video.prepare');
+    expect(videoTool).toBeDefined();
+    loop.startProviderStep(prepared.stream);
+
+    const paused = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'media-response',
+      calls: [
+        {
+          id: 'media-call',
+          name: 'media.video.prepare',
+          authorizationHandle: videoTool!.authorizationHandle,
+          argumentsJson: JSON.stringify({ prompt: '一条龙在天空翱翔，电影感镜头' }),
+        },
+      ],
+    });
+
+    expect(paused.continuation).toBeUndefined();
+    expect(paused.mediaSelection?.candidates.length).toBeGreaterThan(0);
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+    const pending = project.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            'SELECT status, request_json, selection_summary_json FROM agent_media_selections',
+          )
+          .get() as {
+          status: string;
+          request_json: string;
+          selection_summary_json: string | null;
+        },
+    );
+    expect(pending).toMatchObject({ status: 'pending', selection_summary_json: null });
+    expect(pending.request_json).not.toContain(paused.mediaSelection!.selectionToken);
+
+    const candidate = paused.mediaSelection!.candidates[0]!;
+    const adapter = candidate.adapters[0]!;
+    expect(() =>
+      loop.selectMedia({
+        ...prepared.stream,
+        projectId: 'another-project',
+        selectionToken: paused.mediaSelection!.selectionToken,
+        selection: {
+          providerProfileId: candidate.providerProfileId,
+          modelId: candidate.modelId,
+          adapterKey: adapter.key,
+          parameters: {},
+        },
+      }),
+    ).toThrow('current project session');
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+    const resumed = loop.selectMedia({
+      ...prepared.stream,
+      selectionToken: paused.mediaSelection!.selectionToken,
+      selection: {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: adapter.key,
+        parameters: {},
+      },
+    });
+    const output = resumed.continuation!.outputs[0]!.output;
+
+    expect(JSON.parse(output)).toMatchObject({
+      status: 'prepared',
+      draft: {
+        kind: 'video',
+        status: 'draft',
+        mediaModelSelection: {
+          providerProfileId: candidate.providerProfileId,
+          modelId: candidate.modelId,
+          remoteModelId: candidate.remoteModelId,
+          adapterKey: adapter.key,
+        },
+      },
+    });
+    expect(output).not.toMatch(/data:image|base64|[A-Z]:\\|credential|api[_-]?key/iu);
+    expect(
+      project.access(false, (database) =>
+        database
+          .prepare('SELECT status, provider_task_id, task_snapshot_json FROM generation_jobs')
+          .get(),
+      ),
+    ).toMatchObject({ status: 'pending', provider_task_id: null });
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT status FROM agent_media_selections').get(),
+      ),
+    ).toEqual({ status: 'consumed' });
+    expect(() =>
+      loop.selectMedia({
+        ...prepared.stream,
+        selectionToken: paused.mediaSelection!.selectionToken,
+        selection: {
+          providerProfileId: candidate.providerProfileId,
+          modelId: candidate.modelId,
+          adapterKey: adapter.key,
+          parameters: {},
+        },
+      }),
+    ).toThrow('already been resolved');
+  });
+
+  it('rejects a media selection identity from another conversation in the same project', async () => {
+    const { conversation, generations, loop, project } = await setupMedia();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Generate a video',
+      providerProfileId: 'agent-profile',
+      modelId: 'agent-model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Generate a video');
+    const videoTool = agent.tools.find((tool) => tool.name === 'media.video.prepare')!;
+    loop.startProviderStep(prepared.stream);
+    const paused = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'cross-conversation-media-response',
+      calls: [
+        {
+          id: 'cross-conversation-media-call',
+          name: 'media.video.prepare',
+          authorizationHandle: videoTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ prompt: 'A cinematic sky' }),
+        },
+      ],
+    });
+    const anotherConversation = new ContentService(project).createConversation({
+      scopeType: 'project',
+    });
+
+    expect(() =>
+      loop.selectMedia({
+        ...prepared.stream,
+        conversationId: anotherConversation.id,
+        selectionToken: paused.mediaSelection!.selectionToken,
+        selection: undefined,
+      }),
+    ).toThrow('current project session');
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT status FROM agent_media_selections').get(),
+      ),
+    ).toEqual({ status: 'pending' });
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
+  it('expires an unanswered media selection without creating a draft', async () => {
+    const { conversation, generations, loop, project } = await setupMedia();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成一段天空视频',
+      providerProfileId: 'agent-profile',
+      modelId: 'agent-model',
+    });
+    const agent = loop.prepare(prepared.stream, '生成一段天空视频');
+    const videoTool = agent.tools.find((tool) => tool.name === 'media.video.prepare')!;
+    loop.startProviderStep(prepared.stream);
+    const paused = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'expired-media-response',
+      calls: [
+        {
+          id: 'expired-media-call',
+          name: 'media.video.prepare',
+          authorizationHandle: videoTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ prompt: '云层之上的电影镜头' }),
+        },
+      ],
+    });
+    project.access(true, (database) =>
+      database
+        .prepare("UPDATE agent_media_selections SET expires_at = '2000-01-01T00:00:00.000Z'")
+        .run(),
+    );
+
+    expect(() =>
+      loop.selectMedia({
+        ...prepared.stream,
+        selectionToken: paused.mediaSelection!.selectionToken,
+        selection: undefined,
+      }),
+    ).toThrow('expired');
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT status FROM agent_media_selections').get(),
+      ),
+    ).toEqual({ status: 'expired' });
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
+  it('returns media unavailable without creating a job when no compatible model is ready', async () => {
+    const { conversation, generations, loop, project } = await setupMedia(false);
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '帮我生成龙在天空翱翔的视频',
+      providerProfileId: 'agent-profile',
+      modelId: 'agent-model',
+    });
+    const agent = loop.prepare(prepared.stream, '帮我生成龙在天空翱翔的视频');
+    const videoTool = agent.tools.find((tool) => tool.name === 'media.video.prepare')!;
+    loop.startProviderStep(prepared.stream);
+
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'media-unavailable-response',
+      calls: [
+        {
+          id: 'media-unavailable-call',
+          name: 'media.video.prepare',
+          authorizationHandle: videoTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ prompt: '一条龙在天空翱翔' }),
+        },
+      ],
+    });
+
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'unavailable',
+      kind: 'video',
+    });
+    expect(result.mediaSelection).toBeUndefined();
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
   it('queries an adapter schema through a separately authorized read-only tool step', async () => {
     const { conversation, generations, project, workflow } = await setup();
     const descriptor = getAdapter('TEXT_TO_IMAGE:vidu:viduq2:v2');
@@ -1764,6 +2079,7 @@ describe('AgentProviderLoopService', () => {
       'conversation.search',
       'asset.search',
       'settings.get',
+      'media.task.get',
       'conversation.rename',
       'research.search',
       'research.fetch',
