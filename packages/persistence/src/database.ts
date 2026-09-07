@@ -393,7 +393,75 @@ export function migrateDatabase(
         .run(36, now);
     })();
   }
+  if (getSchemaVersion(database) === 36) {
+    database.transaction(() => {
+      applyMigrationV37(database);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(37, now);
+    })();
+  }
   return getSchemaVersion(database);
+}
+
+function applyMigrationV37(database: Database.Database): void {
+  const columns = new Set(
+    (database.prepare("PRAGMA table_info('generation_jobs')").all() as Array<{ name: string }>).map(
+      (row) => row.name,
+    ),
+  );
+  const statements: Array<[string, string]> = [
+    [
+      'media_state',
+      "ALTER TABLE generation_jobs ADD COLUMN media_state TEXT NOT NULL DEFAULT 'draft' CHECK (media_state IN ('draft', 'awaiting_confirmation', 'submitting', 'polling', 'submission_unknown', 'downloading', 'validating', 'committing', 'succeeded', 'failed', 'timed_out', 'cancelled'))",
+    ],
+    [
+      'submission_idempotency_key',
+      'ALTER TABLE generation_jobs ADD COLUMN submission_idempotency_key TEXT',
+    ],
+    [
+      'submission_confirmation_token_hash',
+      'ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_token_hash TEXT',
+    ],
+    [
+      'submission_confirmation_expires_at',
+      'ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_expires_at TEXT',
+    ],
+    [
+      'submission_confirmation_consumed_at',
+      'ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_consumed_at TEXT',
+    ],
+    [
+      'submission_confirmation_project_session_id',
+      'ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_project_session_id TEXT',
+    ],
+    ['submission_attempt_id', 'ALTER TABLE generation_jobs ADD COLUMN submission_attempt_id TEXT'],
+  ];
+  for (const [column, statement] of statements) if (!columns.has(column)) database.exec(statement);
+  database.exec(`
+    UPDATE generation_jobs
+    SET media_state = CASE
+      WHEN status = 'succeeded' THEN 'succeeded'
+      WHEN status = 'failed' THEN 'failed'
+      WHEN status = 'cancelled' THEN 'cancelled'
+      WHEN status = 'timed-out' THEN 'timed_out'
+      WHEN status IN ('polling', 'downloading', 'paused') THEN 'polling'
+      WHEN status IN ('pending', 'running') THEN 'submission_unknown'
+      ELSE COALESCE(media_state, 'draft')
+    END;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_jobs_submission_idempotency
+      ON generation_jobs(project_id, submission_idempotency_key)
+      WHERE submission_idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_generation_jobs_media_state
+      ON generation_jobs(project_id, media_state, updated_at, id);
+    CREATE TRIGGER IF NOT EXISTS generation_jobs_media_terminal_immutable
+    BEFORE UPDATE OF media_state ON generation_jobs
+    WHEN OLD.media_state IN ('succeeded', 'failed', 'timed_out', 'cancelled')
+      AND NEW.media_state <> OLD.media_state
+    BEGIN
+      SELECT RAISE(ABORT, 'terminal media state is immutable');
+    END;
+  `);
 }
 
 export function checkIntegrity(database: Database.Database): IntegrityReport {

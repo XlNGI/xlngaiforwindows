@@ -4,31 +4,24 @@ import type {
   AdapterCatalogResult,
   AdapterDescriptor,
   AssetInfo,
+  ImageGenerationJobInfo,
   ProviderModelInfo,
   ProviderProfileInfo,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
-import {
-  cancelVideoProviderTask,
-  downloadVideoProviderTask,
-  pollVideoProviderTask,
-  submitProviderRequest,
-  submitVideoProviderTask,
-} from './provider-client';
+import { downloadVideoProviderTask, pollVideoProviderTask } from './provider-client';
 import { callWorker } from './worker-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('./provider-client', () => ({
-  submitProviderRequest: vi.fn(),
-  submitVideoProviderTask: vi.fn(),
   pollVideoProviderTask: vi.fn(),
-  cancelVideoProviderTask: vi.fn(),
   downloadVideoProviderTask: vi.fn(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
 }));
+const confirmDialog = vi.fn(() => true);
 const providerProfile: ProviderProfileInfo = {
   id: '11111111-1111-4111-8111-111111111111',
   name: 'Vidu 中国站 A',
@@ -271,6 +264,63 @@ function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobI
   };
 }
 
+function imageJob(
+  status: ImageGenerationJobInfo['status'],
+  options: { withPreview?: boolean } = {},
+): ImageGenerationJobInfo {
+  return {
+    id: 'job',
+    shotId: 'shot',
+    adapterKey: descriptor.key,
+    status,
+    request: { prompt: '电影画面', resolution: '1080p' },
+    results:
+      status === 'succeeded'
+        ? [
+            {
+              id: 'result',
+              jobId: 'job',
+              asset: savedAsset,
+              createdAt: '2026-08-02T00:00:01.000Z',
+            },
+          ]
+        : [],
+    preview:
+      status === 'succeeded' && options.withPreview
+        ? {
+            jobId: 'job',
+            assetId: savedAsset.id,
+            dataUrl: 'data:image/png;base64,generated',
+            contentType: 'image/png',
+          }
+        : undefined,
+    createdAt: '2026-08-02T00:00:00.000Z',
+    updatedAt: '2026-08-02T00:00:01.000Z',
+  };
+}
+
+function pendingSubmission(
+  kind: 'image' | 'video',
+  job: ImageGenerationJobInfo | VideoGenerationJobInfo,
+) {
+  return {
+    kind,
+    job: { ...job, mediaState: 'awaiting_confirmation' as const },
+    confirmation: {
+      confirmationToken: `confirmation-${job.id}`,
+      jobId: job.id,
+      kind,
+      draftVersion: 1,
+      providerName: providerProfile.name,
+      modelName: kind === 'image' ? 'Vidu Q2' : 'Vidu Q3 Pro',
+      adapterKey: job.adapterKey,
+      parameterSummary: [{ key: 'prompt', value: kind === 'image' ? '电影画面' : '镜头运动' }],
+      costNotice: { required: true as const, summary: '本次操作可能产生费用。' },
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    },
+  };
+}
+
 const savedAsset: AssetInfo = {
   id: 'asset-generated',
   projectId: 'project',
@@ -297,6 +347,11 @@ describe('ProductionPanel', () => {
   beforeEach(() => {
     cleanup();
     vi.resetAllMocks();
+    Object.defineProperty(window, 'confirm', {
+      configurable: true,
+      value: confirmDialog,
+    });
+    confirmDialog.mockReturnValue(true);
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
@@ -698,52 +753,19 @@ describe('ProductionPanel', () => {
   it('saves a generated image locally by default and exposes preview, reveal, and library actions', async () => {
     const onAssetsChanged = vi.fn();
     const onOpenAssetLibrary = vi.fn();
-    vi.mocked(submitProviderRequest).mockResolvedValueOnce({
-      status: 200,
-      body: { images: [{ url: 'https://example.test/generated.png' }] },
-    });
-    mockWorker((method, params) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
-      if (method === 'image.generate.prepare') {
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
         return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'running',
-          request: (params as { parameters: Record<string, unknown> }).parameters,
-          results: [],
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:00.000Z',
+          kind: 'image',
+          job: imageJob('succeeded', { withPreview: true }),
         });
-      }
-      if (method === 'image.generate.complete') {
-        return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'succeeded',
-          request: { prompt: '电影画面', resolution: '1080p' },
-          results: [
-            {
-              id: 'result',
-              jobId: 'job',
-              asset: savedAsset,
-              createdAt: '2026-08-02T00:00:01.000Z',
-            },
-          ],
-          preview: {
-            jobId: 'job',
-            assetId: savedAsset.id,
-            dataUrl: 'data:image/png;base64,generated',
-            contentType: 'image/png',
-          },
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:01.000Z',
-        });
-      }
       if (method === 'asset.list') return Promise.resolve([savedAsset]);
       if (method === 'asset.preview') {
         return Promise.resolve({
@@ -775,10 +797,14 @@ describe('ProductionPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith(
-        'image.generate.complete',
-        expect.objectContaining({ jobId: 'job', assetKind: 'generated-image' }),
-      ),
+      expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
+        jobId: 'job',
+        confirmationToken: 'confirmation-job',
+        approved: true,
+      }),
+    );
+    expect(confirmDialog).toHaveBeenCalledWith(
+      `${providerProfile.name} / Vidu Q2\n草稿版本：v1\n参数：\nprompt: 电影画面\n本次操作可能产生费用。`,
     );
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
     expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
@@ -802,52 +828,19 @@ describe('ProductionPanel', () => {
       id: 'asset-prior',
       relativePath: 'assets/images/prior.png',
     };
-    vi.mocked(submitProviderRequest).mockResolvedValueOnce({
-      status: 200,
-      body: { images: [{ url: 'https://example.test/generated.png' }] },
-    });
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
-      if (method === 'image.generate.prepare') {
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
         return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'running',
-          request: (params as { parameters: Record<string, unknown> }).parameters,
-          results: [],
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:00.000Z',
+          kind: 'image',
+          job: imageJob('succeeded', { withPreview: true }),
         });
-      }
-      if (method === 'image.generate.complete') {
-        return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'succeeded',
-          request: { prompt: '电影画面', resolution: '1080p' },
-          results: [
-            {
-              id: 'result',
-              jobId: 'job',
-              asset: savedAsset,
-              createdAt: '2026-08-02T00:00:01.000Z',
-            },
-          ],
-          preview: {
-            jobId: 'job',
-            assetId: savedAsset.id,
-            dataUrl: 'data:image/png;base64,asset',
-            contentType: 'image/png',
-          },
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:01.000Z',
-        });
-      }
       if (method === 'asset.list') return Promise.resolve([priorAsset, savedAsset]);
       if (method === 'asset.preview') {
         const assetId = (params as { assetId: string }).assetId;
@@ -890,46 +883,16 @@ describe('ProductionPanel', () => {
   });
 
   it('always saves generated images to the local asset library', async () => {
-    vi.mocked(submitProviderRequest).mockResolvedValueOnce({
-      status: 200,
-      body: { images: [{ url: 'https://example.test/generated.png' }] },
-    });
-    mockWorker((method, params) => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
-      if (method === 'image.generate.prepare') {
-        return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'running',
-          request: (params as { parameters: Record<string, unknown> }).parameters,
-          results: [],
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:00.000Z',
-        });
-      }
-      if (method === 'image.generate.complete') {
-        return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'succeeded',
-          request: { prompt: '电影画面', resolution: '1080p' },
-          results: [
-            {
-              id: 'result',
-              jobId: 'job',
-              asset: savedAsset,
-              createdAt: '2026-08-02T00:00:01.000Z',
-            },
-          ],
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:01.000Z',
-        });
-      }
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({ kind: 'image', job: imageJob('succeeded') });
       if (method === 'asset.list') return Promise.resolve([savedAsset]);
       if (method === 'asset.preview') {
         return Promise.resolve({
@@ -950,8 +913,8 @@ describe('ProductionPanel', () => {
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
-        'image.generate.complete',
-        expect.objectContaining({ jobId: 'job' }),
+        'media.generation.confirmSubmission',
+        expect.objectContaining({ jobId: 'job', approved: true }),
       ),
     );
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
@@ -963,38 +926,24 @@ describe('ProductionPanel', () => {
     expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
   });
 
-  it('terminalizes a prepared job when the native provider transport fails', async () => {
-    vi.mocked(submitProviderRequest).mockRejectedValueOnce('Provider credential is not configured');
-    mockWorker((method, params) => {
+  it('keeps a prepared image job in submission_unknown when Provider acceptance is ambiguous', async () => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
-      if (method === 'image.generate.prepare') {
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
         return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'running',
-          request: (params as { parameters: Record<string, unknown> }).parameters,
-          results: [],
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:00.000Z',
+          kind: 'image',
+          job: {
+            ...imageJob('running'),
+            mediaState: 'submission_unknown',
+            error: 'Submission status is unknown: connection closed after request write',
+          },
         });
-      }
-      if (method === 'image.generate.fail') {
-        return Promise.resolve({
-          id: 'job',
-          shotId: 'shot',
-          adapterKey: descriptor.key,
-          status: 'failed',
-          request: { prompt: '电影画面', resolution: '1080p' },
-          results: [],
-          error: 'Provider transport failed before completion.',
-          createdAt: '2026-08-02T00:00:00.000Z',
-          updatedAt: '2026-08-02T00:00:01.000Z',
-        });
-      }
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
@@ -1005,17 +954,16 @@ describe('ProductionPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
-    expect(await screen.findByText('Provider credential is not configured')).toBeInTheDocument();
-    expect(callWorker).toHaveBeenCalledWith('image.generate.fail', { jobId: 'job' });
+    expect(
+      await screen.findAllByText(
+        '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。',
+      ),
+    ).not.toHaveLength(0);
+    expect(callWorker).not.toHaveBeenCalledWith('image.generate.fail', expect.anything());
     expect(screen.queryByTitle('取消生成')).not.toBeInTheDocument();
   });
 
   it('submits a video task once and persists its provider task association', async () => {
-    vi.mocked(submitVideoProviderTask).mockResolvedValue({
-      status: 200,
-      taskId: 'provider-task',
-      state: 'created',
-    });
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -1029,7 +977,10 @@ describe('ProductionPanel', () => {
           request: (params as { parameters: VideoGenerationJobInfo['request'] }).parameters,
         });
       }
-      if (method === 'video.generate.attachTask') return Promise.resolve(videoJob('polling'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('video', videoJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({ kind: 'video', job: videoJob('polling') });
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1055,41 +1006,40 @@ describe('ProductionPanel', () => {
         }),
       ),
     );
-    expect(submitVideoProviderTask).toHaveBeenCalledWith(
-      videoDescriptor.key,
-      expect.objectContaining({
-        images: ['https://example.invalid/start.png', 'https://example.invalid/end.png'],
-      }),
-      providerProfile.id,
-      'cn',
-    );
-    expect(submitVideoProviderTask).toHaveBeenCalledTimes(1);
-    expect(callWorker).toHaveBeenCalledWith('video.generate.attachTask', {
+    expect(callWorker).toHaveBeenCalledWith('media.generation.requestSubmission', {
       jobId: 'video-job',
-      providerTaskId: 'provider-task',
     });
+    expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
+      jobId: 'video-job',
+      confirmationToken: 'confirmation-video-job',
+      approved: true,
+    });
+    expect(confirmDialog).toHaveBeenCalledTimes(1);
     expect(await screen.findByText('视频任务已提交，正在本地查询。')).toBeInTheDocument();
   });
 
   it('persists the bounded provider detail when video submission is rejected', async () => {
-    vi.mocked(submitVideoProviderTask).mockResolvedValue({
-      status: 400,
-      errorCode: 'invalid_request',
-      errorMessage: 'input_reference is required',
-    });
-    mockWorker((method, params) => {
+    const message =
+      'Provider 视频任务提交失败，HTTP 400：invalid_request：input_reference is required。';
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
       if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
-      if (method === 'video.generate.fail') {
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('video', videoJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
         return Promise.resolve({
-          ...videoJob('failed'),
-          error: (params as { message: string }).message,
+          kind: 'video',
+          job: {
+            ...videoJob('failed'),
+            providerTaskId: undefined,
+            mediaState: 'failed',
+            error: message,
+          },
         });
-      }
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1102,15 +1052,14 @@ describe('ProductionPanel', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
 
-    const message =
-      'Provider 视频任务提交失败，HTTP 400：invalid_request：input_reference is required。';
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('video.generate.fail', {
+      expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
         jobId: 'video-job',
-        failureKind: 'provider',
-        message,
+        confirmationToken: 'confirmation-video-job',
+        approved: true,
       }),
     );
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.fail', expect.anything());
     expect(
       await screen.findAllByText(
         '当前模型不接受这组参数。请检查必填项；如果界面参数与官方文档不一致，请更新模型 Schema 或更换模型。',
@@ -1118,21 +1067,25 @@ describe('ProductionPanel', () => {
     ).not.toHaveLength(0);
   });
 
-  it('terminalizes a prepared video job when Provider submission throws', async () => {
-    vi.mocked(submitVideoProviderTask).mockRejectedValueOnce(new Error('network disconnected'));
-    mockWorker((method, params) => {
+  it('keeps a prepared video job in submission_unknown when Provider acceptance is ambiguous', async () => {
+    mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
       if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
-      if (method === 'video.generate.fail') {
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('video', videoJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
         return Promise.resolve({
-          ...videoJob('failed'),
-          error: (params as { message: string }).message,
+          kind: 'video',
+          job: {
+            ...videoJob('pending'),
+            mediaState: 'submission_unknown',
+            error: 'Submission status is unknown: network disconnected',
+          },
         });
-      }
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1145,23 +1098,16 @@ describe('ProductionPanel', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
 
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('video.generate.fail', {
-        jobId: 'video-job',
-        failureKind: 'transport',
-        message: 'network disconnected',
-      }),
-    );
-    expect(await screen.findByText('network disconnected')).toBeInTheDocument();
+    expect(
+      await screen.findAllByText(
+        '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。',
+      ),
+    ).not.toHaveLength(0);
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.fail', expect.anything());
     expect(screen.queryByText('视频任务已提交，正在本地查询。')).not.toBeInTheDocument();
   });
 
   it('stores dropped asset references in the draft and resolves them for submission', async () => {
-    vi.mocked(submitVideoProviderTask).mockResolvedValue({
-      status: 200,
-      taskId: 'provider-task',
-      state: 'created',
-    });
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -1186,7 +1132,10 @@ describe('ProductionPanel', () => {
       }
       if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
-      if (method === 'video.generate.attachTask') return Promise.resolve(videoJob('polling'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('video', videoJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({ kind: 'video', job: videoJob('polling') });
       throw new Error(`Unexpected method ${method}`);
     });
     render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
@@ -1215,24 +1164,19 @@ describe('ProductionPanel', () => {
       });
     });
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
-    await waitFor(() =>
-      expect(submitVideoProviderTask).toHaveBeenCalledWith(
-        videoDescriptor.key,
-        expect.objectContaining({
+    await waitFor(() => {
+      const prepareCall = vi
+        .mocked(callWorker)
+        .mock.calls.find(([method]) => method === 'video.generate.prepare');
+      expect(prepareCall?.[1]).toMatchObject({
+        parameters: {
           images: ['data:image/png;base64,asset-start', 'data:image/png;base64,asset-end'],
-        }),
-        providerProfile.id,
-        'cn',
-      ),
-    );
+        },
+      });
+    });
   });
 
   it('selects ordered local start and end frames and submits Data URLs once', async () => {
-    vi.mocked(submitVideoProviderTask).mockResolvedValue({
-      status: 200,
-      taskId: 'provider-task',
-      state: 'created',
-    });
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -1241,7 +1185,10 @@ describe('ProductionPanel', () => {
       if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
       if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
-      if (method === 'video.generate.attachTask') return Promise.resolve(videoJob('polling'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('video', videoJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({ kind: 'video', job: videoJob('polling') });
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1260,18 +1207,19 @@ describe('ProductionPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
 
-    await waitFor(() => expect(submitVideoProviderTask).toHaveBeenCalledTimes(1));
-    expect(submitVideoProviderTask).toHaveBeenCalledWith(
-      videoDescriptor.key,
-      expect.objectContaining({
-        images: [
-          expect.stringMatching(/^data:image\/png;base64,/),
-          expect.stringMatching(/^data:image\/jpeg;base64,/),
-        ],
-      }),
-      providerProfile.id,
-      'cn',
-    );
+    await waitFor(() => {
+      const prepareCall = vi
+        .mocked(callWorker)
+        .mock.calls.find(([method]) => method === 'video.generate.prepare');
+      const images = (prepareCall?.[1] as { parameters?: { images?: unknown[] } } | undefined)
+        ?.parameters?.images;
+      expect(images).toHaveLength(2);
+      expect(images?.[0]).toEqual(expect.stringMatching(/^data:image\/png;base64,/));
+      expect(images?.[1]).toEqual(expect.stringMatching(/^data:image\/jpeg;base64,/));
+    });
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'video.generate.prepare'),
+    ).toHaveLength(1);
   });
 
   it('keeps the existing URL after cancellation or an invalid local file selection', async () => {
@@ -1323,16 +1271,18 @@ describe('ProductionPanel', () => {
   it('resumes without resubmission and keeps local cancellation when remote cancellation fails', async () => {
     const polling = videoJob('polling');
     vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
-    vi.mocked(cancelVideoProviderTask).mockRejectedValue(new Error('offline'));
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'asset.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([polling]);
-      if (method === 'video.generate.cancel') {
-        return Promise.resolve({ ...polling, status: 'cancelled' as const });
-      }
+      if (method === 'media.task.cancel')
+        return Promise.resolve({
+          kind: 'video',
+          job: { ...polling, status: 'cancelled' as const, mediaState: 'cancelled' as const },
+          cancellation: { localCancelled: true as const, provider: 'unknown' as const },
+        });
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1347,17 +1297,19 @@ describe('ProductionPanel', () => {
         'cn',
       ),
     );
-    expect(submitVideoProviderTask).not.toHaveBeenCalled();
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.requestSubmission',
+      expect.anything(),
+    );
 
     fireEvent.click(screen.getByRole('button', { name: '取消任务' }));
 
-    expect(await screen.findByText('视频任务已取消，本地轮询已停止。')).toBeInTheDocument();
-    expect(cancelVideoProviderTask).toHaveBeenCalledWith(
-      videoDescriptor.key,
-      providerProfile.id,
-      'provider-task',
-      'cn',
-    );
+    expect(
+      await screen.findByText(
+        '视频任务已取消，仅停止本地轮询；远端取消结果未知，Provider 任务可能仍会继续。',
+      ),
+    ).toBeInTheDocument();
+    expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: 'video-job' });
   });
 
   it('offers a primary material action when a video task completes', async () => {

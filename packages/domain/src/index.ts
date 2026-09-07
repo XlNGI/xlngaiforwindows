@@ -746,6 +746,25 @@ export interface JobRecord {
   errorJson?: string;
   metadataJson?: string;
   taskSnapshotJson?: string;
+  mediaState?:
+    | 'draft'
+    | 'awaiting_confirmation'
+    | 'submitting'
+    | 'polling'
+    | 'submission_unknown'
+    | 'downloading'
+    | 'validating'
+    | 'committing'
+    | 'succeeded'
+    | 'failed'
+    | 'timed_out'
+    | 'cancelled';
+  submissionIdempotencyKey?: string;
+  submissionConfirmationTokenHash?: string;
+  submissionConfirmationExpiresAt?: string;
+  submissionConfirmationConsumedAt?: string;
+  submissionConfirmationProjectSessionId?: string;
+  submissionAttemptId?: string;
   createdAt: string;
   updatedAt: string;
 }

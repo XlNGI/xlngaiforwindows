@@ -14,6 +14,7 @@ import type {
   NormalizedLlmUsage,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
+  MediaSubmissionConfirmationRequest,
 } from '@ai-video/contracts';
 import { Agent, type AgentContext, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works/pi-ai';
@@ -68,6 +69,12 @@ type PendingMediaSelection = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+type PendingMediaSubmission = {
+  request: MediaSubmissionConfirmationRequest;
+  resolve: (approved: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 const MAX_FROZEN_CONTEXT_CHARACTERS = 400_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -80,6 +87,7 @@ export class PiConversationRuntime implements ConversationRuntime {
   private readonly active = new Map<string, ActiveRun>();
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
   private readonly pendingMediaSelections = new Map<string, PendingMediaSelection>();
+  private readonly pendingMediaSubmissions = new Map<string, PendingMediaSubmission>();
   private readonly maxTurns: number;
 
   constructor(private readonly options: PiConversationRuntimeOptions) {
@@ -232,6 +240,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       this.active.delete(identity.generationId);
       this.resolvePendingConfirmation(identity.generationId, false);
       this.resolvePendingMediaSelection(identity.generationId, undefined);
+      this.resolvePendingMediaSubmission(identity.generationId, false);
     });
     return Promise.resolve({ runtime: 'pi', taskId: request.taskId });
   }
@@ -242,6 +251,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     active.cancelled = true;
     this.resolvePendingConfirmation(generationId, false);
     this.resolvePendingMediaSelection(generationId, undefined);
+    this.resolvePendingMediaSubmission(generationId, false);
     // GenerationService transitions native generations synchronously before
     // returning its Promise. Mark SQLite cancelled before aborting Pi so the
     // aborted assistant message cannot win the race and persist as a failure.
@@ -263,11 +273,13 @@ export class PiConversationRuntime implements ConversationRuntime {
     active: boolean;
     confirmation?: AgentToolConfirmationRequest;
     mediaSelection?: MediaModelSelectionRequest;
+    mediaSubmission?: MediaSubmissionConfirmationRequest;
   } {
     return {
       active: this.active.has(generationId),
       confirmation: this.pendingConfirmations.get(generationId)?.request,
       mediaSelection: this.pendingMediaSelections.get(generationId)?.request,
+      mediaSubmission: this.pendingMediaSubmissions.get(generationId)?.request,
     };
   }
 
@@ -293,6 +305,26 @@ export class PiConversationRuntime implements ConversationRuntime {
     return true;
   }
 
+  confirmMediaSubmission(
+    generationId: string,
+    jobId: string,
+    confirmationToken: string,
+    approved: boolean,
+  ): boolean {
+    const pending = this.pendingMediaSubmissions.get(generationId);
+    if (
+      !pending ||
+      pending.request.jobId !== jobId ||
+      pending.request.confirmationToken !== confirmationToken
+    ) {
+      return false;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingMediaSubmissions.delete(generationId);
+    pending.resolve(approved);
+    return true;
+  }
+
   private createProviderGateway(
     identity: LlmGenerationIdentity,
     tools: LlmToolDefinition[],
@@ -306,6 +338,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       tools,
       (request) => this.requestConfirmation(identity.generationId, request),
       (request) => this.requestMediaSelection(identity.generationId, request),
+      (request) => this.requestMediaSubmission(identity.generationId, request),
     );
   }
 
@@ -366,6 +399,34 @@ export class PiConversationRuntime implements ConversationRuntime {
     clearTimeout(pending.timeout);
     this.pendingMediaSelections.delete(generationId);
     pending.resolve(selection);
+  }
+
+  private requestMediaSubmission(
+    generationId: string,
+    request: MediaSubmissionConfirmationRequest,
+  ): Promise<boolean> {
+    if (this.pendingMediaSubmissions.has(generationId)) {
+      return Promise.reject(new Error('Pi runtime already has a pending media submission.'));
+    }
+    return new Promise<boolean>((resolve, reject) => {
+      const expiresIn = Math.min(
+        MAX_TIMER_DELAY_MS,
+        Math.max(0, Date.parse(request.expiresAt) - Date.now()),
+      );
+      const timeout = setTimeout(() => {
+        this.pendingMediaSubmissions.delete(generationId);
+        reject(new Error('Media submission confirmation expired before the user responded.'));
+      }, expiresIn);
+      this.pendingMediaSubmissions.set(generationId, { request, resolve, timeout });
+    });
+  }
+
+  private resolvePendingMediaSubmission(generationId: string, approved: boolean): void {
+    const pending = this.pendingMediaSubmissions.get(generationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingMediaSubmissions.delete(generationId);
+    pending.resolve(approved);
   }
 
   private createNativeStream(identity: LlmGenerationIdentity): StreamFn {

@@ -135,6 +135,7 @@ export class VideoGenerationService {
         shotId: params.shotId,
         adapterKey: params.adapterKey,
         status: 'pending',
+        mediaState: 'draft',
         requestJson: JSON.stringify(cloneParameters(params.parameters)),
         taskSnapshotJson: JSON.stringify({
           version: 1,
@@ -150,7 +151,7 @@ export class VideoGenerationService {
           costNoticeAcknowledged: params.costNoticeAcknowledged === true,
           mediaModelSelection: params.mediaModelSelection,
           inputs: params.mediaInputReferences,
-          parameters: cloneParameters(params.parameters),
+          parameters: cloneParameters(params.mediaSubmissionParameters ?? params.parameters),
           createdAt: now,
         }),
         metadataJson: JSON.stringify({
@@ -207,6 +208,7 @@ export class VideoGenerationService {
         ...job,
         providerTaskId,
         status: 'polling',
+        mediaState: 'polling',
         metadataJson: JSON.stringify({
           ...metadata,
           providerState: 'submitted',
@@ -383,7 +385,13 @@ export class VideoGenerationService {
         return this.infoFromRepositories(job);
       }
       const now = new Date().toISOString();
-      const cancelled = { ...job, status: 'cancelled', errorJson: undefined, updatedAt: now };
+      const cancelled = {
+        ...job,
+        status: 'cancelled',
+        mediaState: 'cancelled' as const,
+        errorJson: undefined,
+        updatedAt: now,
+      };
       repositories.jobs.save(cancelled);
       repositories.projects.touch(now);
       project.updatedAt = now;
@@ -428,10 +436,11 @@ export class VideoGenerationService {
         .filter((job) => this.isVideoJob(job));
       const interrupted = jobs.filter(
         (job) =>
-          job.status === 'pending' ||
-          job.status === 'running' ||
-          job.status === 'downloading' ||
-          (job.status === 'polling' && !job.providerTaskId),
+          !isManagedMediaSubmissionState(job.mediaState) &&
+          (job.status === 'pending' ||
+            job.status === 'running' ||
+            job.status === 'downloading' ||
+            (job.status === 'polling' && !job.providerTaskId)),
       );
       if (interrupted.length === 0) return 0;
       const now = new Date().toISOString();
@@ -560,6 +569,7 @@ export class VideoGenerationService {
       const failed: JobRecord = {
         ...job,
         status,
+        mediaState: status === 'timed-out' ? 'timed_out' : 'failed',
         errorJson: JSON.stringify({ message: sanitizeError(message) }),
         metadataJson: JSON.stringify({ ...metadata, failureKind } satisfies VideoJobMetadata),
         updatedAt: now,
@@ -597,6 +607,7 @@ export class VideoGenerationService {
       const downloading: JobRecord = {
         ...job,
         status: 'downloading',
+        mediaState: 'downloading',
         metadataJson: JSON.stringify(metadata),
         updatedAt: now,
       };
@@ -721,6 +732,7 @@ export class VideoGenerationService {
       const completed: JobRecord = {
         ...current,
         status: 'succeeded',
+        mediaState: 'succeeded',
         errorJson: undefined,
         metadataJson: JSON.stringify(metadata),
         updatedAt: now,
@@ -830,6 +842,7 @@ export class VideoGenerationService {
       assetKind: metadata.assetKind,
       providerTaskId: job.providerTaskId,
       status: job.status as VideoGenerationJobInfo['status'],
+      mediaState: job.mediaState ?? inferLegacyMediaState(job.status),
       request: JSON.parse(job.requestJson) as AdapterParameters,
       metadata: {
         providerRegion: metadata.providerRegion,
@@ -868,6 +881,15 @@ export class VideoGenerationService {
   }
 }
 
+function isManagedMediaSubmissionState(state: JobRecord['mediaState']): boolean {
+  return (
+    state === 'draft' ||
+    state === 'awaiting_confirmation' ||
+    state === 'submitting' ||
+    state === 'submission_unknown'
+  );
+}
+
 function cleanupVideoTemporaryFiles(projectRoot: string): void {
   const directory = resolveProjectRelativePath(projectRoot, join('assets', 'videos'));
   let names: string[];
@@ -884,6 +906,16 @@ function cleanupVideoTemporaryFiles(projectRoot: string): void {
       });
     }
   }
+}
+
+function inferLegacyMediaState(status: string): NonNullable<JobRecord['mediaState']> {
+  if (status === 'succeeded') return 'succeeded';
+  if (status === 'failed') return 'failed';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'timed-out') return 'timed_out';
+  if (status === 'polling' || status === 'paused') return 'polling';
+  if (status === 'downloading') return 'downloading';
+  return 'draft';
 }
 
 function requireProviderTaskId(value: string): string {

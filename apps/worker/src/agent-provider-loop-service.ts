@@ -6,6 +6,7 @@ import type {
   AgentGenerationExecuteToolsResult,
   AgentGenerationConfirmToolParams,
   AgentGenerationConfirmToolResult,
+  AgentGenerationConfirmMediaSubmissionParams,
   AgentGenerationSelectMediaParams,
   AgentDocumentIntent,
   AgentDocumentOperation,
@@ -22,6 +23,10 @@ import type {
   UnifiedAgentAdapterSchemaProposeResult,
   UnifiedAgentAdapterSchemaAuditInfo,
   MediaGenerationKind,
+  MediaSubmissionConfirmParams,
+  MediaSubmissionRequestParams,
+  MediaSubmissionResult,
+  MediaTaskCancelParams,
 } from '@ai-video/contracts';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -40,6 +45,7 @@ import {
 } from './agent-tool-registry.js';
 import type {
   MediaPrepareToolOperation,
+  MediaSubmissionToolOperation,
   SystemAgentToolOperation,
 } from './agent-tool-definitions.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
@@ -66,7 +72,8 @@ type AgentToolOperation =
   | ResearchOperation
   | SchemaOperation
   | SystemAgentToolOperation
-  | MediaPrepareToolOperation;
+  | MediaPrepareToolOperation
+  | MediaSubmissionToolOperation;
 
 export interface AgentSchemaResolver {
   get(adapterKey: string): AdapterDescriptor | null;
@@ -80,6 +87,12 @@ export interface AgentSchemaManager {
     conversationId: string;
   }): UnifiedAgentAdapterSchemaProposeResult;
   listAudits?(adapterKey: string, limit?: number): UnifiedAgentAdapterSchemaAuditInfo[];
+}
+
+export interface AgentMediaSubmissionExecutor {
+  requestSubmission(params: MediaSubmissionRequestParams): MediaSubmissionResult;
+  confirmSubmission(params: MediaSubmissionConfirmParams): Promise<MediaSubmissionResult>;
+  cancel(params: MediaTaskCancelParams): Promise<MediaSubmissionResult>;
 }
 
 type AuthorizationSpec = {
@@ -203,6 +216,7 @@ export class AgentProviderLoopService {
     private readonly schemaManager?: AgentSchemaManager,
     private readonly systemTools?: AgentSystemToolService,
     private readonly media?: MediaPreparationService,
+    private readonly mediaSubmission?: AgentMediaSubmissionExecutor,
   ) {}
 
   cancelGeneration(generationId: string): boolean {
@@ -477,6 +491,15 @@ export class AgentProviderLoopService {
         'Media preparation must run as a single, separate Provider tool call.',
       );
     }
+    if (params.calls.every((call) => isMediaSubmissionOperation(call.name))) {
+      return this.executeMediaSubmission(params);
+    }
+    if (params.calls.some((call) => isMediaSubmissionOperation(call.name))) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Media submission and cancellation must run as a single, separate Provider tool call.',
+      );
+    }
     if (params.calls.every((call) => isSystemOperation(call.name))) {
       return this.executeSystemTools(params);
     }
@@ -680,6 +703,350 @@ export class AgentProviderLoopService {
           now,
         );
         return { mediaSelection: request };
+      })(),
+    );
+  }
+
+  private async executeMediaSubmission(
+    params: AgentGenerationExecuteToolsParams,
+  ): Promise<AgentGenerationExecuteToolsResult> {
+    if (!this.mediaSubmission) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Media submission is not configured for this runtime.',
+      );
+    }
+    if (params.calls.length !== 1) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_UNAUTHORIZED',
+        'Exactly one media submission call is allowed per Provider step.',
+      );
+    }
+    const staged = this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        if (!params.providerResponseId.trim()) throw new Error('Provider response ID is required.');
+        const activeGeneration = this.requireActiveGeneration(database, project.id, params);
+        const task = this.requireTask(database, project.id, params.generationId);
+        const step = this.requireOpenStep(database, params.attemptId);
+        const call = params.calls[0]!;
+        if (!isMediaSubmissionOperation(call.name)) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_UNKNOWN',
+            `Tool ${call.name} is not media submission.`,
+          );
+        }
+        const authorization = this.requireAuthorization(database, task, step, call, params);
+        const args = parseMediaSubmissionToolArguments(call.argumentsJson);
+        const existing = database
+          .prepare(
+            `SELECT result_summary_json, status FROM agent_tool_calls
+             WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
+          )
+          .get(task.id, params.attemptId, step.id, call.id) as
+          { result_summary_json: string | null; status: string } | undefined;
+        if (existing?.result_summary_json && existing.status === 'succeeded') {
+          return {
+            kind: 'replayed' as const,
+            activeGeneration,
+            task,
+            call,
+            output: existing.result_summary_json,
+          };
+        }
+        const now = new Date().toISOString();
+        const awaitsConfirmation = call.name === 'media.generation.submit';
+        if (!awaitsConfirmation) this.reserveExecution(database, authorization, task.id, now);
+        const toolCallId = randomUUID();
+        const argumentsSummary = JSON.stringify({ operation: call.name, jobId: args.taskId });
+        database
+          .prepare(
+            `INSERT INTO agent_tool_calls
+             (id, project_id, task_id, generation_id, attempt_id, authorization_id,
+              provider_step_id, provider_call_id, tool_ordinal, tool_name,
+              normalized_arguments_hash, arguments_summary_json, status, created_at,
+              started_at, version, redaction_state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, 'native')`,
+          )
+          .run(
+            toolCallId,
+            project.id,
+            task.id,
+            params.generationId,
+            params.attemptId,
+            authorization.id,
+            step.id,
+            call.id,
+            call.name,
+            hashAgentToolArguments(args),
+            argumentsSummary,
+            awaitsConfirmation ? 'awaiting_confirmation' : 'executing',
+            now,
+            now,
+          );
+        this.completeStep(
+          database,
+          step,
+          params.providerResponseId,
+          1,
+          params.usage,
+          now,
+          awaitsConfirmation ? 'awaiting_confirmation' : 'tool_calls',
+          JSON.stringify({
+            version: 1,
+            callIds: [call.id],
+            mediaSubmissionPending: awaitsConfirmation,
+          }),
+        );
+        if (awaitsConfirmation) {
+          database
+            .prepare(
+              "UPDATE agent_tasks SET phase = 'waiting_confirmation', updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'",
+            )
+            .run(now, task.id);
+        }
+        return {
+          kind: 'pending' as const,
+          activeGeneration,
+          task,
+          call,
+          args,
+          toolCallId,
+          authorization,
+          authorizationReserved: !awaitsConfirmation,
+        };
+      })(),
+    );
+    if (staged.kind === 'replayed') {
+      return {
+        continuation: createToolContinuation(
+          staged.activeGeneration.protocol,
+          params.providerResponseId,
+          params.calls,
+          [{ callId: staged.call.id, output: staged.output }],
+        ),
+      };
+    }
+    const submission =
+      staged.call.name === 'media.generation.submit'
+        ? this.mediaSubmission.requestSubmission({ jobId: staged.args.taskId })
+        : await this.mediaSubmission.cancel({ jobId: staged.args.taskId });
+    if (staged.call.name === 'media.task.cancel') {
+      return this.finishMediaSubmission(params, staged, submission);
+    }
+    if (!submission.confirmation) {
+      return this.finishMediaSubmission(params, staged, submission);
+    }
+    return { mediaSubmission: submission.confirmation };
+  }
+
+  async confirmMediaSubmission(
+    params: AgentGenerationConfirmMediaSubmissionParams,
+  ): Promise<AgentGenerationExecuteToolsResult> {
+    if (!this.mediaSubmission)
+      throw new Error('Media submission is not configured for this runtime.');
+    const staged = this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        this.requireActiveGeneration(database, project.id, params);
+        const row = database
+          .prepare(
+            `SELECT calls.id AS toolCallId, calls.provider_call_id AS providerCallId,
+                    calls.tool_name AS toolName, calls.arguments_summary_json AS argumentsSummary,
+                    calls.authorization_id AS authorizationId, calls.authorization_id AS authId,
+                    calls.attempt_id AS attemptId, calls.provider_step_id AS providerStepId,
+                    steps.provider_response_id AS providerResponseId, attempts.protocol,
+                    tasks.id AS taskId
+             FROM agent_tool_calls calls
+             INNER JOIN agent_tasks tasks ON tasks.id = calls.task_id
+             INNER JOIN llm_provider_steps steps ON steps.id = calls.provider_step_id
+             INNER JOIN llm_generation_attempts attempts ON attempts.id = calls.attempt_id
+             WHERE calls.generation_id = ? AND calls.attempt_id = ? AND calls.project_id = ?
+               AND calls.tool_name = 'media.generation.submit' AND calls.status = 'awaiting_confirmation'`,
+          )
+          .all(params.generationId, params.attemptId, project.id) as Array<Record<string, unknown>>;
+        const match = rowForMediaTask(row, params.jobId);
+        if (!match)
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_UNAUTHORIZED',
+            'Media submission confirmation is no longer pending.',
+          );
+        const authorization = database
+          .prepare('SELECT id, row_version FROM agent_tool_authorizations WHERE id = ?')
+          .get(String(match.authId)) as { id: string; row_version: number } | undefined;
+        if (!authorization) throw new Error('Media submission authorization is missing.');
+        const now = new Date().toISOString();
+        this.reserveExecution(database, authorization, String(match.taskId), now);
+        const transitioned = database
+          .prepare(
+            "UPDATE agent_tool_calls SET status = 'executing', version = version + 1 WHERE id = ? AND status = 'awaiting_confirmation'",
+          )
+          .run(String(match.toolCallId));
+        if (transitioned.changes !== 1) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+            'Media submission confirmation was already consumed.',
+          );
+        }
+        return match;
+      })(),
+    );
+    let submission: MediaSubmissionResult;
+    try {
+      submission = await this.mediaSubmission.confirmSubmission({
+        jobId: params.jobId,
+        confirmationToken: params.confirmationToken,
+        approved: params.approved,
+      });
+    } catch (error) {
+      this.failMediaConfirmation(staged, error);
+      throw error;
+    }
+    return this.finishMediaConfirmation(params, staged, submission);
+  }
+
+  private finishMediaSubmission(
+    params: AgentGenerationExecuteToolsParams,
+    staged: {
+      activeGeneration: { protocol: 'openai-responses' | 'openai-chat-completions' };
+      call: LlmToolCall;
+      args: { taskId: string };
+      toolCallId: string;
+      task: AgentTaskRow;
+      authorization: AuthorizationRow;
+      authorizationReserved: boolean;
+    },
+    submission: MediaSubmissionResult,
+  ): AgentGenerationExecuteToolsResult {
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const output = mediaSubmissionOutput(submission);
+        const now = new Date().toISOString();
+        if (!staged.authorizationReserved) {
+          this.reserveExecution(database, staged.authorization, staged.task.id, now);
+          database
+            .prepare(
+              "UPDATE agent_tool_calls SET status = 'executing', version = version + 1 WHERE id = ? AND status = 'awaiting_confirmation'",
+            )
+            .run(staged.toolCallId);
+        }
+        database
+          .prepare(
+            "UPDATE agent_tool_calls SET status = 'succeeded', result_summary_json = ?, completed_at = ?, version = version + 1 WHERE id = ? AND status = 'executing'",
+          )
+          .run(output, now, staged.toolCallId);
+        database
+          .prepare(
+            "UPDATE agent_tasks SET phase = 'model_running', updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'",
+          )
+          .run(now, staged.task.id);
+        const nextStep = this.createStep(
+          database,
+          project.id,
+          params,
+          staged.task.id,
+          nextStepOrdinal(database, params.attemptId),
+          now,
+          authorizationSpecsForTask(
+            database,
+            staged.task.id,
+            firstPrimaryAuthorization(database, staged.task.id),
+            researchModeFromSnapshot(staged.task.request_snapshot_json),
+            this.systemTools !== undefined,
+            this.media !== undefined,
+          ),
+        );
+        return {
+          continuation: createToolContinuation(
+            staged.activeGeneration.protocol,
+            params.providerResponseId,
+            [staged.call],
+            [{ callId: staged.call.id, output }],
+          ),
+          tools: this.toolsForStep(nextStep.authorizationHandles),
+        };
+      })(),
+    );
+  }
+
+  private finishMediaConfirmation(
+    params: AgentGenerationConfirmMediaSubmissionParams,
+    staged: Record<string, unknown>,
+    submission: MediaSubmissionResult,
+  ): AgentGenerationExecuteToolsResult {
+    const callId = String(staged.providerCallId);
+    const call: LlmToolCall = {
+      id: callId,
+      name: String(staged.toolName),
+      argumentsJson: JSON.stringify({ taskId: params.jobId }),
+    };
+    const executorParams = {
+      ...params,
+      providerResponseId: String(staged.providerResponseId),
+      calls: [call],
+    } as AgentGenerationExecuteToolsParams;
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const output = mediaSubmissionOutput(submission);
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            "UPDATE agent_tool_calls SET status = 'succeeded', result_summary_json = ?, completed_at = ?, version = version + 1 WHERE id = ? AND status = 'executing'",
+          )
+          .run(output, now, String(staged.toolCallId));
+        const task = this.requireTask(database, project.id, params.generationId);
+        database
+          .prepare(
+            "UPDATE agent_tasks SET phase = 'model_running', updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'",
+          )
+          .run(now, task.id);
+        const nextStep = this.createStep(
+          database,
+          project.id,
+          executorParams,
+          task.id,
+          nextStepOrdinal(database, params.attemptId),
+          now,
+          authorizationSpecsForTask(
+            database,
+            task.id,
+            firstPrimaryAuthorization(database, task.id),
+            researchModeFromSnapshot(task.request_snapshot_json),
+            this.systemTools !== undefined,
+            this.media !== undefined,
+          ),
+        );
+        return {
+          continuation: createToolContinuation(
+            String(staged.protocol) as 'openai-responses' | 'openai-chat-completions',
+            String(staged.providerResponseId),
+            [call],
+            [{ callId, output }],
+          ),
+          tools: this.toolsForStep(nextStep.authorizationHandles),
+        };
+      })(),
+    );
+  }
+
+  private failMediaConfirmation(staged: Record<string, unknown>, error: unknown): void {
+    this.projects.access(true, (database) =>
+      database.transaction(() => {
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            `UPDATE agent_tool_calls SET status = 'failed', error_code = 'MEDIA_SUBMISSION_FAILED',
+             error_message = ?, completed_at = ?, version = version + 1
+             WHERE id = ? AND status = 'executing'`,
+          )
+          .run(
+            (error instanceof Error ? error.message : 'Media submission failed.').slice(0, 500),
+            now,
+            String(staged.toolCallId),
+          );
+        database
+          .prepare(
+            "UPDATE agent_tasks SET phase = 'model_running', updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'",
+          )
+          .run(now, String(staged.taskId));
       })(),
     );
   }
@@ -3317,6 +3684,8 @@ function authorizationSpecsForTask(
       ? [
           { operation: 'media.image.prepare' as const },
           { operation: 'media.video.prepare' as const },
+          { operation: 'media.generation.submit' as const },
+          { operation: 'media.task.cancel' as const },
         ]
       : []),
   ];
@@ -3324,9 +3693,9 @@ function authorizationSpecsForTask(
   // it out of ordinary document/research steps so the model cannot mix a
   // read-only adapter lookup into a mutation step and grants remain
   // least-privilege.
-  if (researchMode !== 'auto') return authorizations;
+  if (researchMode !== 'auto') return uniqueAuthorizationSpecs(authorizations);
   const budget = researchBudget(database, taskId);
-  if (budget.taskRemaining <= 0) return authorizations;
+  if (budget.taskRemaining <= 0) return uniqueAuthorizationSpecs(authorizations);
   if (budget.searchRemaining > 0) {
     authorizations.push({
       operation: 'research.search',
@@ -3339,7 +3708,16 @@ function authorizationSpecsForTask(
       maxCallUses: Math.min(RESEARCH_STEP_CALL_LIMIT, budget.taskRemaining, budget.fetchRemaining),
     });
   }
-  return authorizations;
+  return uniqueAuthorizationSpecs(authorizations);
+}
+
+function uniqueAuthorizationSpecs(authorizations: AuthorizationSpec[]): AuthorizationSpec[] {
+  const seen = new Set<AgentToolOperation>();
+  return authorizations.filter((authorization) => {
+    if (seen.has(authorization.operation)) return false;
+    seen.add(authorization.operation);
+    return true;
+  });
 }
 
 function researchBudget(
@@ -3477,6 +3855,77 @@ function isSchemaOperation(value: string): value is SchemaOperation {
 
 function isMediaPrepareOperation(value: string): value is MediaPrepareToolOperation {
   return value === 'media.image.prepare' || value === 'media.video.prepare';
+}
+
+function isMediaSubmissionOperation(value: string): value is MediaSubmissionToolOperation {
+  return value === 'media.generation.submit' || value === 'media.task.cancel';
+}
+
+function parseMediaSubmissionToolArguments(value: string): { taskId: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('Media submission arguments are not valid JSON.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Media submission arguments must be an object.');
+  }
+  const record = parsed as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== 'taskId')) {
+    throw new Error('Media submission arguments contain unsupported fields.');
+  }
+  if (typeof record.taskId !== 'string' || !record.taskId.trim() || record.taskId.length > 200) {
+    throw new Error('Media submission taskId is invalid.');
+  }
+  return { taskId: record.taskId.trim() };
+}
+
+function mediaSubmissionOutput(submission: MediaSubmissionResult): string {
+  const job = submission.job;
+  const resultAssetIds = job.results.flatMap((result) => (result.asset ? [result.asset.id] : []));
+  return unifiedAgentToolRegistry.serializeResult({
+    version: 1,
+    status: job.mediaState ?? job.status,
+    taskId: job.id,
+    resultAssetIds,
+    ...(submission.cancellation
+      ? {
+          cancellation: {
+            localCancelled: submission.cancellation.localCancelled,
+            provider: submission.cancellation.provider,
+            ...(submission.cancellation.providerStatus === undefined
+              ? {}
+              : { providerStatus: submission.cancellation.providerStatus }),
+          },
+        }
+      : {}),
+  });
+}
+
+function rowForMediaTask(
+  rows: Array<Record<string, unknown>>,
+  jobId: string,
+): Record<string, unknown> | undefined {
+  return rows.find((row) => {
+    try {
+      if (typeof row.argumentsSummary !== 'string') return false;
+      const summary = JSON.parse(row.argumentsSummary) as Record<string, unknown>;
+      return summary.jobId === jobId;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function nextStepOrdinal(database: Database.Database, attemptId: string): number {
+  return (
+    database
+      .prepare(
+        'SELECT COALESCE(MAX(ordinal), -1) + 1 AS value FROM llm_provider_steps WHERE attempt_id = ?',
+      )
+      .get(attemptId) as { value: number }
+  ).value;
 }
 
 function isSystemOperation(value: string): value is SystemAgentToolOperation {

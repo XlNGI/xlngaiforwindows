@@ -1,6 +1,7 @@
 import type {
   AgentGenerationConfirmToolParams,
   AgentGenerationConfirmToolResult,
+  AgentGenerationConfirmMediaSubmissionParams,
   AgentGenerationExecuteToolsParams,
   AgentGenerationExecuteToolsResult,
   AgentProviderStepCompleteParams,
@@ -11,6 +12,7 @@ import type {
   AgentGenerationSelectMediaParams,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
+  MediaSubmissionConfirmationRequest,
 } from '@ai-video/contracts';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
@@ -20,6 +22,9 @@ export interface AgentProviderToolExecutor {
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult>;
   confirmTool(params: AgentGenerationConfirmToolParams): AgentGenerationConfirmToolResult;
+  confirmMediaSubmission?(
+    params: AgentGenerationConfirmMediaSubmissionParams,
+  ): Promise<AgentGenerationExecuteToolsResult>;
   selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult;
   startProviderStep(identity: LlmGenerationIdentity): void;
   completeProviderStep(params: AgentProviderStepCompleteParams): void;
@@ -35,6 +40,7 @@ type ConfirmationRequester = (request: AgentToolConfirmationRequest) => Promise<
 type MediaSelectionRequester = (
   request: MediaModelSelectionRequest,
 ) => Promise<MediaModelSelectionDecision | undefined>;
+type MediaSubmissionRequester = (request: MediaSubmissionConfirmationRequest) => Promise<boolean>;
 
 /**
  * Adapts Pi's single-tool callback to the existing Worker authorization,
@@ -51,6 +57,8 @@ export class AgentProviderToolGateway {
     initialDefinitions: LlmToolDefinition[],
     private readonly requestConfirmation: ConfirmationRequester,
     private readonly requestMediaSelection: MediaSelectionRequester,
+    private readonly requestMediaSubmission: MediaSubmissionRequester = () =>
+      Promise.resolve(false),
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
     this.definitions.forEach((definition) => unifiedAgentToolRegistry.require(definition.name));
@@ -142,6 +150,19 @@ export class AgentProviderToolGateway {
         ...this.identity,
         selectionToken: execution.mediaSelection.selectionToken,
         selection,
+      });
+    }
+    if (execution.mediaSubmission) {
+      const confirmation = execution.mediaSubmission;
+      const approved = await this.requestMediaSubmission(confirmation);
+      if (!this.executor.confirmMediaSubmission) {
+        throw new Error('Worker media submission confirmation is not configured.');
+      }
+      execution = await this.executor.confirmMediaSubmission({
+        ...this.identity,
+        jobId: confirmation.jobId,
+        confirmationToken: confirmation.confirmationToken,
+        approved,
       });
     }
     if (!execution.continuation) {

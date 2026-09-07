@@ -28,6 +28,7 @@ import type {
   ProductionContextInfo,
   AgentToolConfirmationRequest,
   AgentTaskPendingConfirmationInfo,
+  MediaSubmissionConfirmationRequest,
   AdapterDescriptor,
   AdapterParameters,
   AdapterParameterProperty,
@@ -77,7 +78,9 @@ interface ChatPanelProps {
   onConfirmSchemaProposal?: (adapterKey: string, version: number) => void;
   onRejectSchemaProposal?: (adapterKey: string, version: number) => void;
   confirmation?: AgentToolConfirmationRequest | AgentTaskPendingConfirmationInfo;
+  mediaSubmissionConfirmation?: MediaSubmissionConfirmationRequest;
   onConfirmAgentAction?: (approved: boolean) => void;
+  onConfirmMediaSubmission?: (approved: boolean) => void;
   onOpenTaskLog?: () => void;
   onContinueAgentTask?: () => void;
   onClose?: () => void;
@@ -155,7 +158,9 @@ export function ChatPanel({
   generation,
   agentTask,
   confirmation,
+  mediaSubmissionConfirmation,
   onConfirmAgentAction,
+  onConfirmMediaSubmission,
   onConfirmSchemaProposal,
   onRejectSchemaProposal,
   onOpenTaskLog,
@@ -200,10 +205,12 @@ export function ChatPanel({
   const close = onClose ?? onCollapse;
   const fileInputId = 'chat-attachment-input';
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const displayedConfirmation = confirmation ?? agentTask?.pendingConfirmation;
-  const confirmationIsActionable = Boolean(
-    confirmation && 'confirmationToken' in confirmation && onConfirmAgentAction,
-  );
+  const displayedConfirmation =
+    mediaSubmissionConfirmation ?? confirmation ?? agentTask?.pendingConfirmation;
+  const isMediaSubmission = Boolean(displayedConfirmation && 'jobId' in displayedConfirmation);
+  const confirmationIsActionable = isMediaSubmission
+    ? Boolean(mediaSubmissionConfirmation && onConfirmMediaSubmission)
+    : Boolean(confirmation && 'confirmationToken' in confirmation && onConfirmAgentAction);
   return (
     <section className="chat-panel panel-border" aria-label="项目会话">
       <div className="panel-heading">
@@ -599,23 +606,51 @@ export function ChatPanel({
         <div className="agent-confirmation" role="alert">
           <strong>
             需要确认：
-            {displayedConfirmation.action === 'document.archive' ? '归档' : '恢复归档'}文档
+            {'jobId' in displayedConfirmation
+              ? `提交${displayedConfirmation.kind === 'image' ? '图片' : '视频'}生成任务`
+              : `${displayedConfirmation.action === 'document.archive' ? '归档' : '恢复归档'}文档`}
           </strong>
-          <span>“{displayedConfirmation.documentTitle}”</span>
+          {'jobId' in displayedConfirmation ? (
+            <>
+              <span>
+                {displayedConfirmation.providerName} / {displayedConfirmation.modelName}
+              </span>
+              <small>草稿版本 v{displayedConfirmation.draftVersion}</small>
+              <dl className="agent-confirmation-parameters">
+                {displayedConfirmation.parameterSummary.map(({ key, value }) => (
+                  <div key={key}>
+                    <dt>{key}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <small>{displayedConfirmation.costNotice.summary}</small>
+            </>
+          ) : (
+            <span>“{displayedConfirmation.documentTitle}”</span>
+          )}
           <small>确认有效期至 {new Date(displayedConfirmation.expiresAt).toLocaleString()}</small>
           {confirmationIsActionable ? (
             <div>
               <button
                 type="button"
                 className="button primary"
-                onClick={() => onConfirmAgentAction?.(true)}
+                onClick={() =>
+                  isMediaSubmission
+                    ? onConfirmMediaSubmission?.(true)
+                    : onConfirmAgentAction?.(true)
+                }
               >
                 批准
               </button>
               <button
                 type="button"
                 className="button secondary"
-                onClick={() => onConfirmAgentAction?.(false)}
+                onClick={() =>
+                  isMediaSubmission
+                    ? onConfirmMediaSubmission?.(false)
+                    : onConfirmAgentAction?.(false)
+                }
               >
                 拒绝
               </button>

@@ -1695,6 +1695,8 @@ export const SIDECAR_ENVELOPE_MAX_BYTES = 2 * 1024 * 1024;
 export type HostMethod =
   | 'provider.stream.start'
   | 'provider.stream.cancel'
+  | 'provider.media.submit'
+  | 'provider.media.cancel'
   | 'provider.confirmation.wait'
   | 'provider.confirmation.resolve';
 
@@ -1722,6 +1724,26 @@ export interface NativeProviderStreamCancelParams {
   projectSessionId: string;
 }
 
+export interface NativeProviderMediaSubmitParams {
+  projectSessionId: string;
+  providerProfileId: string;
+  adapterKey: string;
+  providerRegion: VideoProviderRegion;
+  modelId: string;
+  remoteModelId: string;
+  parameters: AdapterParameters;
+  inputs?: MediaInputReferenceV1[];
+  kind: MediaGenerationKind;
+}
+
+export interface NativeProviderMediaCancelParams {
+  projectSessionId: string;
+  providerProfileId: string;
+  adapterKey: string;
+  providerRegion: VideoProviderRegion;
+  providerTaskId: string;
+}
+
 export interface NativeProviderConfirmationWaitParams {
   confirmationToken: string;
   projectSessionId: string;
@@ -1734,6 +1756,8 @@ export interface NativeProviderConfirmationResolveParams extends NativeProviderC
 export type HostMethodParams = {
   'provider.stream.start': NativeProviderStreamStartParams;
   'provider.stream.cancel': NativeProviderStreamCancelParams;
+  'provider.media.submit': NativeProviderMediaSubmitParams;
+  'provider.media.cancel': NativeProviderMediaCancelParams;
   'provider.confirmation.wait': NativeProviderConfirmationWaitParams;
   'provider.confirmation.resolve': NativeProviderConfirmationResolveParams;
 };
@@ -2073,6 +2097,7 @@ export interface ConversationRuntimeGetResult {
   active: boolean;
   confirmation?: AgentToolConfirmationRequest;
   mediaSelection?: MediaModelSelectionRequest;
+  mediaSubmission?: MediaSubmissionConfirmationRequest;
 }
 
 export interface ConversationRuntimeConfirmParams {
@@ -2092,6 +2117,17 @@ export interface ConversationRuntimeSelectMediaParams {
 }
 
 export interface ConversationRuntimeSelectMediaResult {
+  accepted: boolean;
+}
+
+export interface ConversationRuntimeConfirmMediaSubmissionParams {
+  generationId: string;
+  jobId: string;
+  confirmationToken: string;
+  approved: boolean;
+}
+
+export interface ConversationRuntimeConfirmMediaSubmissionResult {
   accepted: boolean;
 }
 
@@ -2176,6 +2212,7 @@ export interface AgentGenerationExecuteToolsResult {
   continuation?: LlmToolContinuation;
   confirmation?: AgentToolConfirmationRequest;
   mediaSelection?: MediaModelSelectionRequest;
+  mediaSubmission?: MediaSubmissionConfirmationRequest;
   /** Tools authorized for the next Provider step, including read-only research. */
   tools?: LlmToolDefinition[];
 }
@@ -2255,6 +2292,52 @@ export interface MediaTaskSummary {
   error?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MediaSubmissionConfirmationRequest {
+  confirmationToken: string;
+  jobId: string;
+  kind: MediaGenerationKind;
+  draftVersion: number;
+  providerName: string;
+  modelName: string;
+  adapterKey: string;
+  parameterSummary: Array<{ key: string; value: string }>;
+  costNotice: { required: true; summary: string };
+  expiresAt: string;
+}
+
+export interface MediaTaskCancellationOutcome {
+  localCancelled: true;
+  provider: 'not_submitted' | 'cancelled' | 'unsupported' | 'rejected' | 'unknown';
+  providerStatus?: number;
+}
+
+export interface MediaSubmissionRequestParams {
+  jobId: string;
+}
+
+export interface MediaSubmissionConfirmParams {
+  jobId: string;
+  confirmationToken: string;
+  approved: boolean;
+}
+
+export interface MediaSubmissionResult {
+  kind: MediaGenerationKind;
+  job: ImageGenerationJobInfo | VideoGenerationJobInfo;
+  confirmation?: MediaSubmissionConfirmationRequest;
+  cancellation?: MediaTaskCancellationOutcome;
+}
+
+export interface AgentGenerationConfirmMediaSubmissionParams extends LlmGenerationIdentity {
+  jobId: string;
+  confirmationToken: string;
+  approved: boolean;
+}
+
+export interface MediaTaskCancelParams {
+  jobId: string;
 }
 
 export interface AgentToolConfirmationRequest {
@@ -2579,6 +2662,7 @@ export interface ImageGenerationJobInfo {
   shotId?: string;
   adapterKey: string;
   status: ImageGenerationJobStatus;
+  mediaState?: MediaGenerationTaskState;
   request: AdapterParameters;
   results: ImageGenerationResultInfo[];
   error?: string;
@@ -2600,6 +2684,8 @@ export interface ImageGenerationPrepareParams {
   mediaModelSelection?: MediaModelSelectionSnapshot;
   /** Worker-created input references. IPC callers cannot provide this field. */
   mediaInputReferences?: MediaInputReferenceV1[];
+  /** Worker-created submission parameters. IPC callers cannot provide this field. */
+  mediaSubmissionParameters?: AdapterParameters;
 }
 
 export interface ImageGenerationCompleteParams {
@@ -2678,6 +2764,7 @@ export interface VideoGenerationJobInfo {
   assetKind: VideoAssetKind;
   providerTaskId?: string;
   status: VideoGenerationJobStatus;
+  mediaState?: MediaGenerationTaskState;
   request: AdapterParameters;
   metadata: VideoGenerationMetadataInfo;
   results: VideoGenerationResultInfo[];
@@ -2702,6 +2789,8 @@ export interface VideoGenerationPrepareParams {
   mediaModelSelection?: MediaModelSelectionSnapshot;
   /** Worker-created input references. IPC callers cannot provide this field. */
   mediaInputReferences?: MediaInputReferenceV1[];
+  /** Worker-created submission parameters. IPC callers cannot provide this field. */
+  mediaSubmissionParameters?: AdapterParameters;
 }
 
 export interface VideoGenerationAttachTaskParams {
@@ -3065,6 +3154,10 @@ export interface WorkerMethodMap {
     params: ConversationRuntimeSelectMediaParams;
     result: ConversationRuntimeSelectMediaResult;
   };
+  'conversation.runtime.confirmMediaSubmission': {
+    params: ConversationRuntimeConfirmMediaSubmissionParams;
+    result: ConversationRuntimeConfirmMediaSubmissionResult;
+  };
   'agent.generation.executeTools': {
     params: AgentGenerationExecuteToolsParams;
     result: AgentGenerationExecuteToolsResult;
@@ -3073,6 +3166,10 @@ export interface WorkerMethodMap {
   'agent.generation.confirmTool': {
     params: AgentGenerationConfirmToolParams;
     result: AgentGenerationConfirmToolResult;
+  };
+  'agent.generation.confirmMediaSubmission': {
+    params: AgentGenerationConfirmMediaSubmissionParams;
+    result: AgentGenerationExecuteToolsResult;
   };
   'agent.generation.selectMedia': {
     params: AgentGenerationSelectMediaParams;
@@ -3199,6 +3296,18 @@ export interface WorkerMethodMap {
   'image.generate.get': {
     params: ImageGenerationGetParams;
     result: ImageGenerationJobInfo;
+  };
+  'media.generation.requestSubmission': {
+    params: MediaSubmissionRequestParams;
+    result: MediaSubmissionResult;
+  };
+  'media.generation.confirmSubmission': {
+    params: MediaSubmissionConfirmParams;
+    result: MediaSubmissionResult;
+  };
+  'media.task.cancel': {
+    params: MediaTaskCancelParams;
+    result: MediaSubmissionResult;
   };
   'video.generate.prepare': {
     params: VideoGenerationPrepareParams;

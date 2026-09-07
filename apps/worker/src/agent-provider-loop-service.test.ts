@@ -1,10 +1,14 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmProvider } from '@ai-video/llm';
 import { AGENT_TOOL_RESULT_LIMITS } from '@ai-video/contracts';
-import { AgentProviderLoopService } from './agent-provider-loop-service.js';
+import {
+  AgentProviderLoopService,
+  type AgentMediaSubmissionExecutor,
+} from './agent-provider-loop-service.js';
 import { ChangeSetService } from './change-set-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
@@ -100,17 +104,22 @@ async function setupMedia(ready = true) {
       });
     }
   }
+  const images = new ImageGenerationService(base.project);
+  const videos = new VideoGenerationService(base.project);
   const media = new MediaPreparationService(
     base.project,
     settings,
     new AdapterService(base.project),
-    new ImageGenerationService(base.project),
-    new VideoGenerationService(base.project),
+    images,
+    videos,
     (identity) => base.generations.runtime(identity).attachments ?? [],
   );
   return {
     ...base,
     profile,
+    images,
+    videos,
+    media,
     loop: new AgentProviderLoopService(
       base.project,
       base.workflow,
@@ -267,6 +276,234 @@ describe('AgentProviderLoopService', () => {
         },
       }),
     ).toThrow('already been resolved');
+  });
+
+  it('continues the same Provider call after one confirmed media submission', async () => {
+    const base = await setupMedia();
+    const requestSubmission = vi.fn<AgentMediaSubmissionExecutor['requestSubmission']>(
+      ({ jobId }) => ({
+        kind: 'video',
+        job: base.videos.get(jobId),
+        confirmation: {
+          confirmationToken: 'media-confirmation-token',
+          jobId,
+          kind: 'video',
+          draftVersion: 1,
+          providerName: 'Selected Provider',
+          modelName: 'Selected Model',
+          adapterKey: 'TEXT_TO_VIDEO:unicompapi:doubao-seedance-2-0-260128:v1',
+          parameterSummary: [{ key: 'prompt', value: 'cinematic dragon' }],
+          costNotice: { required: true, summary: 'Paid request.' },
+          expiresAt: '2999-01-01T00:00:00.000Z',
+        },
+      }),
+    );
+    const confirmSubmission = vi.fn<AgentMediaSubmissionExecutor['confirmSubmission']>(
+      ({ jobId }) =>
+        Promise.resolve({
+          kind: 'video',
+          job: base.videos.attachTask({ jobId, providerTaskId: 'provider-task-private' }),
+        }),
+    );
+    const cancelSubmission = vi.fn<AgentMediaSubmissionExecutor['cancel']>(({ jobId }) =>
+      Promise.resolve({
+        kind: 'video',
+        job: base.videos.cancel(jobId),
+        cancellation: {
+          localCancelled: true,
+          provider: 'unsupported',
+        },
+      }),
+    );
+    const mediaSubmission: AgentMediaSubmissionExecutor = {
+      requestSubmission,
+      confirmSubmission,
+      cancel: cancelSubmission,
+    };
+    const loop = new AgentProviderLoopService(
+      base.project,
+      base.workflow,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      base.media,
+      mediaSubmission,
+    );
+    const prompt = 'Generate a cinematic video of a dragon flying through clouds.';
+    const prepared = base.generations.prepare({
+      conversationId: base.conversation.id,
+      prompt,
+      providerProfileId: 'agent-profile',
+      modelId: 'agent-model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    const prepareTool = agent.tools.find((tool) => tool.name === 'media.video.prepare')!;
+    loop.startProviderStep(prepared.stream);
+    const selectionPending = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'prepare-provider-response',
+      calls: [
+        {
+          id: 'prepare-provider-call',
+          name: 'media.video.prepare',
+          authorizationHandle: prepareTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ prompt }),
+        },
+      ],
+    });
+    const candidate = selectionPending.mediaSelection!.candidates[0]!;
+    const adapter = candidate.adapters[0]!;
+    const selected = loop.selectMedia({
+      ...prepared.stream,
+      selectionToken: selectionPending.mediaSelection!.selectionToken,
+      selection: {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: adapter.key,
+        parameters: {},
+      },
+    });
+    const preparedOutput = JSON.parse(selected.continuation!.outputs[0]!.output) as {
+      draft: { draftId: string };
+    };
+    const submitTool = selected.tools!.find((tool) => tool.name === 'media.generation.submit')!;
+    const storedSubmitAuthorization = base.project.access(false, (database) =>
+      database
+        .prepare(
+          `SELECT authorization_handle_hash AS handleHash FROM agent_tool_authorizations
+           WHERE allowed_operation = 'media.generation.submit'
+             AND provider_step_id = (
+               SELECT id FROM llm_provider_steps WHERE attempt_id = ? ORDER BY ordinal DESC LIMIT 1
+             )`,
+        )
+        .get(prepared.stream.attemptId),
+    ) as { handleHash: string };
+    expect(
+      createHash('sha256')
+        .update(submitTool.authorizationHandle ?? '')
+        .digest('hex'),
+    ).toBe(storedSubmitAuthorization.handleHash);
+    const submissionPending = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'submit-provider-response',
+      calls: [
+        {
+          id: 'submit-provider-call',
+          name: 'media.generation.submit',
+          authorizationHandle: submitTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ taskId: preparedOutput.draft.draftId }),
+        },
+      ],
+    });
+
+    expect(submissionPending.continuation).toBeUndefined();
+    expect(submissionPending.mediaSubmission?.confirmationToken).toBe('media-confirmation-token');
+    expect(requestSubmission).toHaveBeenCalledTimes(1);
+    expect(confirmSubmission).not.toHaveBeenCalled();
+    expect(
+      base.project.access(false, (database) =>
+        database
+          .prepare(
+            `SELECT used_call_count AS usedCallCount FROM agent_tool_authorizations
+             WHERE id = (
+               SELECT authorization_id FROM agent_tool_calls WHERE provider_call_id = 'submit-provider-call'
+             )`,
+          )
+          .get(),
+      ),
+    ).toEqual({ usedCallCount: 0 });
+
+    const confirmed = await loop.confirmMediaSubmission({
+      ...prepared.stream,
+      jobId: preparedOutput.draft.draftId,
+      confirmationToken: 'media-confirmation-token',
+      approved: true,
+    });
+    expect(confirmSubmission).toHaveBeenCalledTimes(1);
+    expect(confirmed.continuation).toMatchObject({
+      protocol: 'openai-responses',
+      previousResponseId: 'submit-provider-response',
+      outputs: [{ callId: 'submit-provider-call' }],
+    });
+    const output = JSON.parse(confirmed.continuation!.outputs[0]!.output) as Record<
+      string,
+      unknown
+    >;
+    expect(output).toEqual({
+      version: 1,
+      status: 'polling',
+      taskId: preparedOutput.draft.draftId,
+      resultAssetIds: [],
+    });
+    expect(JSON.stringify(output)).not.toContain('provider-task-private');
+    expect(
+      base.project.access(false, (database) =>
+        database
+          .prepare(
+            `SELECT authorizations.used_call_count AS usedCallCount, tasks.phase
+             FROM agent_tool_calls calls
+             INNER JOIN agent_tool_authorizations authorizations ON authorizations.id = calls.authorization_id
+             INNER JOIN agent_tasks tasks ON tasks.id = authorizations.task_id
+             WHERE calls.provider_call_id = 'submit-provider-call'`,
+          )
+          .get(),
+      ),
+    ).toEqual({ usedCallCount: 1, phase: 'model_running' });
+    await expect(
+      loop.confirmMediaSubmission({
+        ...prepared.stream,
+        jobId: preparedOutput.draft.draftId,
+        confirmationToken: 'media-confirmation-token',
+        approved: true,
+      }),
+    ).rejects.toThrow('no longer pending');
+    expect(confirmSubmission).toHaveBeenCalledTimes(1);
+
+    const cancelTool = confirmed.tools!.find((tool) => tool.name === 'media.task.cancel')!;
+    const cancelled = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'cancel-provider-response',
+      calls: [
+        {
+          id: 'cancel-provider-call',
+          name: 'media.task.cancel',
+          authorizationHandle: cancelTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ taskId: preparedOutput.draft.draftId }),
+        },
+      ],
+    });
+    expect(cancelled.mediaSubmission).toBeUndefined();
+    expect(cancelled.continuation).toMatchObject({
+      previousResponseId: 'cancel-provider-response',
+      outputs: [{ callId: 'cancel-provider-call' }],
+    });
+    expect(JSON.parse(cancelled.continuation!.outputs[0]!.output)).toEqual({
+      version: 1,
+      status: 'cancelled',
+      taskId: preparedOutput.draft.draftId,
+      resultAssetIds: [],
+      cancellation: {
+        localCancelled: true,
+        provider: 'unsupported',
+      },
+    });
+    expect(cancelSubmission).toHaveBeenCalledTimes(1);
+    expect(requestSubmission).toHaveBeenCalledTimes(1);
+    expect(
+      base.project.access(false, (database) =>
+        database
+          .prepare(
+            `SELECT calls.status, authorizations.used_call_count AS usedCallCount, steps.finish_reason AS finishReason
+             FROM agent_tool_calls calls
+             INNER JOIN agent_tool_authorizations authorizations ON authorizations.id = calls.authorization_id
+             INNER JOIN llm_provider_steps steps ON steps.id = calls.provider_step_id
+             WHERE calls.provider_call_id = 'cancel-provider-call'`,
+          )
+          .get(),
+      ),
+    ).toEqual({ status: 'succeeded', usedCallCount: 1, finishReason: 'tool_calls' });
   });
 
   it('rejects a media selection identity from another conversation in the same project', async () => {

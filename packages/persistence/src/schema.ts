@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 36;
+export const CURRENT_SCHEMA_VERSION = 37;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -2269,5 +2269,45 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT, 'media selection does not match its tool call');
+END;
+`;
+
+/** Durable media submission state, one-time confirmation, and idempotency facts. */
+export const MIGRATION_V37 = `
+ALTER TABLE generation_jobs ADD COLUMN media_state TEXT NOT NULL DEFAULT 'draft'
+  CHECK (media_state IN (
+    'draft', 'awaiting_confirmation', 'submitting', 'polling', 'submission_unknown',
+    'downloading', 'validating', 'committing', 'succeeded', 'failed', 'timed_out', 'cancelled'
+  ));
+ALTER TABLE generation_jobs ADD COLUMN submission_idempotency_key TEXT;
+ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_token_hash TEXT;
+ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_expires_at TEXT;
+ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_consumed_at TEXT;
+ALTER TABLE generation_jobs ADD COLUMN submission_confirmation_project_session_id TEXT;
+ALTER TABLE generation_jobs ADD COLUMN submission_attempt_id TEXT;
+
+UPDATE generation_jobs
+SET media_state = CASE
+  WHEN status = 'succeeded' THEN 'succeeded'
+  WHEN status = 'failed' THEN 'failed'
+  WHEN status = 'cancelled' THEN 'cancelled'
+  WHEN status = 'timed-out' THEN 'timed_out'
+  WHEN status IN ('polling', 'downloading', 'paused') THEN 'polling'
+  WHEN status IN ('pending', 'running') THEN 'submission_unknown'
+  ELSE 'draft'
+END;
+
+CREATE UNIQUE INDEX idx_generation_jobs_submission_idempotency
+  ON generation_jobs(project_id, submission_idempotency_key)
+  WHERE submission_idempotency_key IS NOT NULL;
+CREATE INDEX idx_generation_jobs_media_state
+  ON generation_jobs(project_id, media_state, updated_at, id);
+
+CREATE TRIGGER generation_jobs_media_terminal_immutable
+BEFORE UPDATE OF media_state ON generation_jobs
+WHEN OLD.media_state IN ('succeeded', 'failed', 'timed_out', 'cancelled')
+  AND NEW.media_state <> OLD.media_state
+BEGIN
+  SELECT RAISE(ABORT, 'terminal media state is immutable');
 END;
 `;

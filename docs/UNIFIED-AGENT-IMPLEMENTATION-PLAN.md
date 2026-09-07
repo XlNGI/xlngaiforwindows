@@ -2,8 +2,8 @@
 
 版本：1.0  
 日期：2026-08-31  
-最近同步：2026-09-03  
-状态：实施中（统一会话 Pi Runtime、通用工具策略、媒体模型选择与任务快照核心已完成；独立媒体工具、后台任务收口和发布验收待完成）  
+最近同步：2026-09-07  
+状态：实施中（全系统 Agent 编排 P0-P4 已完成；项目级后台任务、全系统工具覆盖与发布验收待完成；发布 `HOLD`）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Generation Adapters、Provider Native Bridge
 
 ## 1. 文档目的
@@ -23,7 +23,7 @@
 | 未确认 schema | 新模型或未确认参数必须提示用户补充；未确认参数不能直接提交 Provider |
 | Agent 会话模型 | 用户在会话中选择支持 Tool Call 的 LLM；会话期间不因生图或生视频再次替换 |
 | 媒体生成模型 | 生图/生视频的 Provider 和具体模型由用户在任务需要时明确选择；Worker 只筛选、校验和冻结，不得自动替换 |
-| 费用 | 图片/视频任务先提示可能产生费用，不计算不确定的具体金额 |
+| 费用 | 图片/视频先形成本地草稿；每次正式 Provider 提交前展示冻结草稿版本、参数摘要和费用提示，并使用本次一次性确认 |
 | 草稿 | 每次生成创建新的草稿或任务，不覆盖已有草稿；用户自行修改、删除和发布 |
 | Agent 修改 schema | 用户可在会话中要求 Agent 查询、补充、修改模型参数 schema，并可二次增删改查 |
 | 高风险变更 | 删除字段、改变必填性、改变互斥/依赖关系或影响已有任务的结构变更需要用户确认 |
@@ -60,6 +60,9 @@
         |                 创建新的本地任务/草稿
         |                         |
         |                         v
+        |                 展示冻结参数与费用确认
+        |                         |
+        |                         v
         |                 提交 Provider 并记录状态
         |                         |
         |                         v
@@ -86,6 +89,9 @@
 - [x] 图片任务调用 `ImageGenerationService.prepare`。
 - [x] 视频任务调用 `VideoGenerationService.prepare`。
 - [x] IPC 严格拒绝未知字段和非法枚举。
+- [x] 所有项目会话默认进入 Worker-owned Pi Runtime；媒体意图不再在 Agent 前被永久分流。
+- [x] `media.image.prepare`、`media.video.prepare`、`media.generation.submit`、`media.task.get` 和 `media.task.cancel` 已纳入统一 Agent 工具循环。
+- [x] `MediaOrchestrationService` 统一持有 R2 确认、冻结快照二次校验、幂等提交、明确取消结果和 `submission_unknown` 转换。
 
 ### 4.3 Desktop
 
@@ -94,13 +100,15 @@
 - [x] 支持动态参数表单，字段标记必填项。
 - [x] 支持字符串、数字、布尔、枚举和数组参数。
 - [x] 参数提交前进行前端校验，Worker 再次校验。
-- [x] 图片任务通过 Native Provider 通道提交并写回素材库。
-- [x] 视频任务通过 Native Provider 通道提交并绑定轮询任务。
+- [x] 图片任务经 Worker 统一编排后通过 Native Provider 通道提交并写回素材库。
+- [x] 视频任务经 Worker 统一编排后通过 Native Provider 通道提交并原子绑定轮询任务。
 - [x] 会话 Agent LLM 选择与图片/视频媒体模型选择分离。
 - [x] 已明确选择的媒体 Provider/模型按会话和能力记忆，由 Desktop 显式带入后由 Worker 校验；Worker 不从 Agent LLM 或持久化记录自动推导媒体模型。
 - [x] 失败时将图片/视频任务标记为终止，避免悬挂状态。
 
-### 4.4 验证基线
+### 4.4 P0 历史验证基线
+
+> 本节数字记录 2026-09-03 P0 基线，不是当前完成状态；当前证据见 4.6 和 P4 trace。
 
 - [x] Desktop 测试通过：175 tests。
 - [x] Worker 测试通过：295 tests。
@@ -118,7 +126,17 @@
 - [x] 冻结媒体草稿、Provider/区域/模型/Adapter Schema 快照、`submission_unknown` 状态和 Provider 规范化结果合同。
 - [x] 视频生成语句双端路由、媒体区域快照和 Provider 提交异常已建立通过型回归；页面卸载停止当前页面调度器的已知缺陷已建立特征测试，实际迁移留在 P5。
 
-## 5. 待完成阶段
+### 4.6 全系统 Agent 编排 P1-P4 当前基线
+
+- [x] P1 所有项目会话默认进入统一 Pi Runtime，Legacy 只保留显式环境开关回退。
+- [x] P2 通用 Registry/Policy、R0-R3、动态授权、一次性确认和 Tool Result 红线接入生产路径。
+- [x] P3 独立媒体准备/查询工具、用户显式选模、冻结 Provider/模型/Adapter 快照与受控输入完成。
+- [x] P4 独立媒体提交/取消工具、Worker 编排、Schema v37、终态不可回退、`submission_unknown` 与 Desktop 确认展示完成。
+- [x] P4 自动化基线为全仓 614 项 JS/TS 与 72 项 Rust 测试；完整命令与未验证人工边界见 [P4 trace](./code-traces/2026-09-07-agent-orchestration-p4-media-submission.md)。
+
+## 5. 原实施拆分与剩余阶段
+
+> 阶段 A-E 是早期实施拆分，部分条目已由全系统编排 P0-P4 完成；不得只依据本节标题判断当前状态，当前权威进度见 4.6、10 节和总方案。
 
 ### 阶段 A：模型和 schema 能力目录
 
@@ -321,13 +339,16 @@ adapter.schema.audit.list
 
 ## 10. 当前状态与下一步
 
-阶段 A 的查询、提议、确认、审计和回滚、阶段 B 的项目级会话模型偏好基础能力，以及阶段 C 的图片/视频任务快照和生命周期事件已经接通。当前还需要：
+阶段 A 的查询、提议、确认、审计和回滚，阶段 B 的项目级会话模型偏好，阶段 C 的媒体任务快照/生命周期，以及全系统编排 P0-P4 的统一 Runtime、策略、媒体准备、提交和取消均已接通。当前还需要：
 
 1. 为已创建任务补齐模型偏好来源和用户确认记录的完整 provenance；
-2. 收口统一任务状态、错误提示和媒体结果入口，并将媒体提交/轮询逐步迁移到项目级后台运行时；
-3. 完成独立媒体准备/提交工具、`submission_unknown` 和项目级后台任务运行时；
-4. 完成真实 Provider、Windows 重启/断网、多窗口、性能和发布门禁验收。
-## 11. Latest implementation status (2026-09-03)
+2. 将视频轮询迁移到项目级后台运行时，完成页面无关运行、统一订阅、恢复、退避和限流；
+3. 补齐全系统业务工具与受保护 UI 接管合同，消除剩余重复入口；
+4. 完成真实 Provider、Windows 重启/断网、多窗口、性能和发布门禁验收；在此之前发布状态保持 `HOLD`。
+
+素材库实施计划中的 P5 完成仅代表素材库来源联动、缩略图、完整性和备份恢复范围已验收，不代表上述整机后台 Runtime 或发布门禁已经通过。
+
+## 11. Latest implementation status (2026-09-07)
 
 - [x] Added `adapter.schema.propose`, `adapter.schema.confirm`, `adapter.schema.rollback`, and `adapter.schema.audit.list` contracts and IPC routes.
 - [x] Added descriptor validation, required-field checks, HTTPS endpoint checks, and malformed-schema protection.
@@ -372,3 +393,5 @@ adapter.schema.audit.list
 - [x] P0 orchestration baseline completed: the exact “帮我生成龙在天空翱翔的视频” request now routes consistently on Desktop and Worker; video task snapshots include the selected Provider region; thrown Provider submissions terminalize the local job; versioned risk/confirmation/Tool Result/media contracts and Windows build evidence are recorded (Worker 295 tests, Desktop 175 tests, full JS/TS 534 tests, Rust 71 tests).
 - [x] P1 unified conversation runtime completed: ordinary Q&A, document, research, novel-writing, and short-drama workflows now default to the same Worker-owned Pi runtime; Pi calls only Worker-authorized tools, confirmations return through runtime RPC, unsupported Agent models are never silently replaced, and media intent reaches Pi without reusing the Agent LLM as the image/video model (Worker 307 tests, Desktop 176 tests, full JS/TS 554 tests, Rust 71 tests).
 - [x] P2 tool policy engine completed: document, novel, research, Schema, plan, project, conversation, asset, and redacted settings tools now use one Worker-owned Registry with R0-R3 policy, scoped authorization, one-time confirmation, stable policy errors, rejection audit, and 64 KiB Tool Result enforcement (Worker 328 tests, Desktop 176 tests, full JS/TS 575 tests, Rust 71 tests).
+- [x] P3 media preparation completed: `media.image.prepare`, `media.video.prepare`, and `media.task.get` use the unified Registry; users explicitly choose a compatible Provider/model, Worker freezes the validated route and Adapter snapshot, and controlled local inputs never persist inline bytes.
+- [x] P4 paid media submission completed: `media.generation.submit` and `media.task.cancel` share Worker-owned orchestration with one-time confirmation, frozen snapshot revalidation, schema v37 idempotency/state facts, conservative `submission_unknown`, bounded cancellation outcomes, and Desktop confirmation details (Worker 361 tests, Desktop 180 tests, Persistence 27 tests, full JS/TS 614 tests, Rust 72 tests).

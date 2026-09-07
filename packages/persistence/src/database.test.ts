@@ -39,8 +39,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(36);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 36 });
+    expect(migrateDatabase(database)).toBe(37);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 37 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -160,6 +160,91 @@ describe('project database', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('novel_rag_chunks'),
     ).toMatchObject({ name: 'novel_rag_chunks' });
+    database.close();
+  });
+
+  it('upgrades v36 media jobs without retrying ambiguous legacy submissions', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database.exec(`
+      DROP TRIGGER generation_jobs_media_terminal_immutable;
+      DROP INDEX idx_generation_jobs_submission_idempotency;
+      DROP INDEX idx_generation_jobs_media_state;
+      ALTER TABLE generation_jobs DROP COLUMN submission_attempt_id;
+      ALTER TABLE generation_jobs DROP COLUMN submission_confirmation_project_session_id;
+      ALTER TABLE generation_jobs DROP COLUMN submission_confirmation_consumed_at;
+      ALTER TABLE generation_jobs DROP COLUMN submission_confirmation_expires_at;
+      ALTER TABLE generation_jobs DROP COLUMN submission_confirmation_token_hash;
+      ALTER TABLE generation_jobs DROP COLUMN submission_idempotency_key;
+      ALTER TABLE generation_jobs DROP COLUMN media_state;
+      DELETE FROM schema_migrations WHERE version = 37;
+    `);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Legacy media', 'now', 'now');
+    const legacySnapshot = JSON.stringify({
+      version: 1,
+      capability: 'video',
+      adapterKey: 'TEXT_TO_VIDEO:legacy:model:v1',
+    });
+    const insertJob = database.prepare(
+      `INSERT INTO generation_jobs
+       (id, project_id, adapter_key, status, request_json, task_snapshot_json, created_at, updated_at)
+       VALUES (?, 'project', 'TEXT_TO_VIDEO:legacy:model:v1', ?, '{}', ?, 'now', 'now')`,
+    );
+    for (const status of [
+      'succeeded',
+      'failed',
+      'cancelled',
+      'timed-out',
+      'polling',
+      'downloading',
+      'paused',
+      'pending',
+      'running',
+      'legacy-draft',
+    ]) {
+      insertJob.run(`job-${status}`, status, legacySnapshot);
+    }
+
+    expect(migrateDatabase(database)).toBe(37);
+    const states = database
+      .prepare('SELECT id, media_state AS mediaState FROM generation_jobs ORDER BY id')
+      .all();
+    expect(states).toEqual([
+      { id: 'job-cancelled', mediaState: 'cancelled' },
+      { id: 'job-downloading', mediaState: 'polling' },
+      { id: 'job-failed', mediaState: 'failed' },
+      { id: 'job-legacy-draft', mediaState: 'draft' },
+      { id: 'job-paused', mediaState: 'polling' },
+      { id: 'job-pending', mediaState: 'submission_unknown' },
+      { id: 'job-polling', mediaState: 'polling' },
+      { id: 'job-running', mediaState: 'submission_unknown' },
+      { id: 'job-succeeded', mediaState: 'succeeded' },
+      { id: 'job-timed-out', mediaState: 'timed_out' },
+    ]);
+    expect(
+      database
+        .prepare('SELECT task_snapshot_json AS taskSnapshotJson FROM generation_jobs WHERE id = ?')
+        .get('job-running'),
+    ).toEqual({ taskSnapshotJson: legacySnapshot });
+    const submissionIndex: unknown = database
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get('idx_generation_jobs_submission_idempotency');
+    const submissionIndexSql = (submissionIndex as { sql?: unknown } | undefined)?.sql;
+    expect(submissionIndexSql).toBeTypeOf('string');
+    expect(submissionIndexSql).toContain(
+      'ON generation_jobs(project_id, submission_idempotency_key)',
+    );
+    database
+      .prepare('UPDATE generation_jobs SET submission_idempotency_key = ? WHERE id = ?')
+      .run('same-attempt', 'job-running');
+    expect(() =>
+      database
+        .prepare('UPDATE generation_jobs SET submission_idempotency_key = ? WHERE id = ?')
+        .run('same-attempt', 'job-pending'),
+    ).toThrow();
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 37 });
     database.close();
   });
 
@@ -335,7 +420,7 @@ describe('project database', () => {
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
     const chunks = database
       .prepare(
         `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
@@ -575,7 +660,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -602,7 +687,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -664,7 +749,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -712,7 +797,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
     expect(
       database
         .prepare(
@@ -785,8 +870,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(36);
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(37);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -941,7 +1026,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(36);
+    expect(migrateDatabase(database)).toBe(37);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -979,7 +1064,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 36 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 37 });
     database.close();
   });
 

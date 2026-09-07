@@ -2,7 +2,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@ai-video/persistence';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ImageGenerationService } from './image-generation-service.js';
 import { ProjectService } from './project-service.js';
@@ -799,19 +798,19 @@ describe('ImageGenerationService', () => {
     expect(service.listAssets({})).toHaveLength(0);
   });
 
-  it('cancels active jobs before project close', async () => {
+  it('keeps explicit media drafts available across project close', async () => {
     const { service } = await setup();
     const job = service.prepare({
       adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
       parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
     });
 
-    expect(service.cancelAll()).toBe(1);
-    expect(service.get(job.id).status).toBe('cancelled');
+    expect(service.cancelAll()).toBe(0);
+    expect(service.get(job.id)).toMatchObject({ status: 'running', mediaState: 'draft' });
     expect(service.cancelAll()).toBe(0);
   });
 
-  it('recovers active jobs left by an interrupted Worker as failed', async () => {
+  it('keeps an unsubmitted media draft across Worker restart', async () => {
     const { project, service } = await setup();
     const rootPath = project.current()!.rootPath;
     const job = service.prepare({
@@ -821,18 +820,10 @@ describe('ImageGenerationService', () => {
     project.close();
     project.open(rootPath);
 
-    expect(service.recoverInterrupted()).toBe(1);
+    expect(service.recoverInterrupted()).toBe(0);
     expect(service.get(job.id)).toMatchObject({
-      status: 'failed',
-      error: 'Generation was interrupted before completion.',
-    });
-    project.access(false, (database) => {
-      expect(
-        createRepositories(database).generationJobEvents.listByJob(job.id).at(-1),
-      ).toMatchObject({
-        phase: 'fail',
-        status: 'failed',
-      });
+      status: 'running',
+      mediaState: 'draft',
     });
     expect(service.recoverInterrupted()).toBe(0);
   });

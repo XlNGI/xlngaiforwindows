@@ -180,6 +180,65 @@ describe('NativeProviderBridge', () => {
     });
     expect(io.sent.filter((item) => item.method === 'provider.stream.cancel')).toHaveLength(1);
   });
+
+  it('correlates concurrent one-shot responses and ignores a duplicate response', async () => {
+    const io = transport();
+    const ids = ['one-shot-a', 'one-shot-b'];
+    const bridge = new NativeProviderBridge(io.value, () => ids.shift()!);
+    const first = bridge.request('provider.media.cancel', { taskId: 'a' });
+    const second = bridge.request('provider.media.cancel', { taskId: 'b' });
+
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: 'one-shot-b',
+      ok: true,
+      result: { cancelled: true },
+    });
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: 'one-shot-a',
+      ok: true,
+      result: { cancelled: false },
+    });
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: 'one-shot-a',
+      ok: true,
+      result: { cancelled: true },
+    });
+
+    await expect(first).resolves.toEqual({ cancelled: false });
+    await expect(second).resolves.toEqual({ cancelled: true });
+  });
+
+  it('preserves a correlated one-shot host error and rejects malformed responses immediately', async () => {
+    const io = transport();
+    const ids = ['failed-request', 'malformed-request'];
+    const bridge = new NativeProviderBridge(io.value, () => ids.shift()!);
+    const failed = bridge.request('provider.media.submit', {});
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: 'failed-request',
+      ok: false,
+      error: { code: 'INVALID_PARAMETERS', message: 'invalid input', retryable: false },
+    });
+    await expect(failed).rejects.toMatchObject({
+      name: 'NativeProviderRequestError',
+      hostError: { code: 'INVALID_PARAMETERS', retryable: false },
+    });
+
+    const malformed = bridge.request('provider.media.submit', {});
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: 'malformed-request',
+      ok: true,
+      result: {},
+      unexpected: true,
+    });
+    await expect(malformed).rejects.toMatchObject({
+      hostError: { code: 'INVALID_ENVELOPE' },
+    });
+  });
 });
 
 describe('createPiStreamFunction', () => {

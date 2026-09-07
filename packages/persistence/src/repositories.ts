@@ -3270,16 +3270,27 @@ function mapGenerationDraft(row: GenerationDraftRow): GenerationDraftRecord {
 
 class SqliteJobRepository extends ProjectScopedRepository implements JobRepository {
   save(record: JobRecord): void {
+    const mediaState = record.mediaState ?? inferMediaState(record.status, record.providerTaskId);
     this.database
       .prepare(
         `INSERT INTO generation_jobs
          (id, project_id, shot_id, adapter_key, provider_task_id, status,
-          request_json, error_json, metadata_json, task_snapshot_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          request_json, error_json, metadata_json, task_snapshot_json, media_state,
+          submission_idempotency_key, submission_confirmation_token_hash,
+          submission_confirmation_expires_at, submission_confirmation_consumed_at,
+          submission_confirmation_project_session_id, submission_attempt_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            provider_task_id = excluded.provider_task_id, status = excluded.status,
            error_json = excluded.error_json, metadata_json = excluded.metadata_json,
            task_snapshot_json = COALESCE(excluded.task_snapshot_json, generation_jobs.task_snapshot_json),
+           media_state = COALESCE(excluded.media_state, generation_jobs.media_state),
+           submission_idempotency_key = COALESCE(excluded.submission_idempotency_key, generation_jobs.submission_idempotency_key),
+           submission_confirmation_token_hash = excluded.submission_confirmation_token_hash,
+           submission_confirmation_expires_at = excluded.submission_confirmation_expires_at,
+           submission_confirmation_consumed_at = excluded.submission_confirmation_consumed_at,
+           submission_confirmation_project_session_id = excluded.submission_confirmation_project_session_id,
+           submission_attempt_id = excluded.submission_attempt_id,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -3293,6 +3304,13 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
         record.errorJson ?? null,
         record.metadataJson ?? null,
         record.taskSnapshotJson ?? null,
+        mediaState,
+        record.submissionIdempotencyKey ?? null,
+        record.submissionConfirmationTokenHash ?? null,
+        record.submissionConfirmationExpiresAt ?? null,
+        record.submissionConfirmationConsumedAt ?? null,
+        record.submissionConfirmationProjectSessionId ?? null,
+        record.submissionAttemptId ?? null,
         record.createdAt,
         record.updatedAt,
       );
@@ -3310,6 +3328,29 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
         .prepare('SELECT * FROM generation_jobs WHERE project_id = ? ORDER BY created_at')
         .all(projectId) as JobRow[]
     ).map(mapJob);
+  }
+}
+
+function inferMediaState(
+  status: string,
+  providerTaskId: string | undefined,
+): NonNullable<JobRecord['mediaState']> {
+  switch (status) {
+    case 'succeeded':
+      return 'succeeded';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    case 'timed-out':
+      return 'timed_out';
+    case 'polling':
+    case 'paused':
+      return 'polling';
+    case 'downloading':
+      return 'downloading';
+    default:
+      return providerTaskId ? 'polling' : 'draft';
   }
 }
 
@@ -3455,6 +3496,13 @@ interface JobRow {
   error_json: string | null;
   metadata_json: string | null;
   task_snapshot_json: string | null;
+  media_state: JobRecord['mediaState'] | null;
+  submission_idempotency_key: string | null;
+  submission_confirmation_token_hash: string | null;
+  submission_confirmation_expires_at: string | null;
+  submission_confirmation_consumed_at: string | null;
+  submission_confirmation_project_session_id: string | null;
+  submission_attempt_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3471,6 +3519,14 @@ function mapJob(row: JobRow): JobRecord {
     errorJson: row.error_json ?? undefined,
     metadataJson: row.metadata_json ?? undefined,
     taskSnapshotJson: row.task_snapshot_json ?? undefined,
+    mediaState: row.media_state ?? undefined,
+    submissionIdempotencyKey: row.submission_idempotency_key ?? undefined,
+    submissionConfirmationTokenHash: row.submission_confirmation_token_hash ?? undefined,
+    submissionConfirmationExpiresAt: row.submission_confirmation_expires_at ?? undefined,
+    submissionConfirmationConsumedAt: row.submission_confirmation_consumed_at ?? undefined,
+    submissionConfirmationProjectSessionId:
+      row.submission_confirmation_project_session_id ?? undefined,
+    submissionAttemptId: row.submission_attempt_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

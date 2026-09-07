@@ -15,6 +15,7 @@ export type SystemAgentToolOperation =
   | 'media.task.get';
 
 export type MediaPrepareToolOperation = 'media.image.prepare' | 'media.video.prepare';
+export type MediaSubmissionToolOperation = 'media.generation.submit' | 'media.task.cancel';
 
 export const SCHEMA_AGENT_TOOLS: LlmToolDefinition[] = [
   {
@@ -447,6 +448,27 @@ export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: { taskId: { type: 'string', minLength: 1, maxLength: 200 } },
     },
   },
+  {
+    name: 'media.generation.submit',
+    description:
+      'Request submission of a prepared media task. The Worker always pauses for explicit user confirmation before any paid Provider call.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['taskId'],
+      properties: { taskId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
+    name: 'media.task.cancel',
+    description: 'Cancel a current-project media task and stop Provider polling when supported.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['taskId'],
+      properties: { taskId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
 ];
 
 export const ALL_AGENT_TOOL_DEFINITIONS = [
@@ -493,6 +515,8 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'media.image.prepare': writePolicy(),
   'media.video.prepare': writePolicy(),
   'media.task.get': readPolicy(),
+  'media.generation.submit': confirmedPolicy(),
+  'media.task.cancel': writePolicy(),
 } satisfies Record<string, RegisteredAgentToolPolicy>;
 
 function readPolicy(): RegisteredAgentToolPolicy {

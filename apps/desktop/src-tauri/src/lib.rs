@@ -1623,6 +1623,7 @@ impl WorkerProcess {
     ) -> Result<Self, String> {
         let mut command = worker_command()?;
         command.env("AI_VIDEO_APP_DATA_DIR", app_data_dir);
+        command.env("AI_VIDEO_MEDIA_INPUT_ROOT", app_data_dir);
         command.env("AI_VIDEO_RESEARCH_BRIDGE_URL", research_bridge.url());
         command.env("AI_VIDEO_RESEARCH_BRIDGE_TOKEN", research_bridge.token());
         Self::spawn_command(command)
@@ -1805,6 +1806,34 @@ fn dispatch_host_request(
     let method = value["method"].as_str().unwrap_or_default();
     let params = value["params"].clone();
     match method {
+        "provider.media.submit" => {
+            if let Err(error) = validate_provider_media_submit_params(&params) {
+                let _ = send_host_response(
+                    &writer,
+                    &request_id,
+                    Err(host_error("INVALID_PARAMETERS", error, false)),
+                );
+                return;
+            }
+            thread::spawn(move || {
+                let result = provider_media_submit_blocking(&params, &streams);
+                let _ = send_host_response(&writer, &request_id, result);
+            });
+        }
+        "provider.media.cancel" => {
+            if let Err(error) = validate_provider_media_cancel_params(&params) {
+                let _ = send_host_response(
+                    &writer,
+                    &request_id,
+                    Err(host_error("INVALID_PARAMETERS", error, false)),
+                );
+                return;
+            }
+            thread::spawn(move || {
+                let result = provider_media_cancel_blocking(&params, &streams);
+                let _ = send_host_response(&writer, &request_id, result);
+            });
+        }
         "provider.stream.start" => {
             if let Err(error) = validate_provider_stream_params(&params) {
                 let _ = send_host_response(
@@ -1886,6 +1915,267 @@ fn dispatch_host_request(
             );
         }
     }
+}
+
+fn validate_provider_media_submit_params(value: &serde_json::Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or("Media submit params must be an object")?;
+    let allowed = [
+        "projectSessionId",
+        "providerProfileId",
+        "adapterKey",
+        "providerRegion",
+        "modelId",
+        "remoteModelId",
+        "parameters",
+        "inputs",
+        "kind",
+    ];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("Media submit params contain unknown fields".to_string());
+    }
+    for key in [
+        "projectSessionId",
+        "providerProfileId",
+        "adapterKey",
+        "modelId",
+        "remoteModelId",
+        "kind",
+    ] {
+        if value[key].as_str().is_none_or(str::is_empty) {
+            return Err(format!(
+                "Media submit field {key} must be a non-empty string"
+            ));
+        }
+    }
+    if !matches!(
+        value["providerRegion"].as_str(),
+        Some("global" | "cn" | "unicompapi")
+    ) {
+        return Err("Media submit providerRegion is invalid".to_string());
+    }
+    if !value["parameters"].is_object() {
+        return Err("Media submit parameters must be an object".to_string());
+    }
+    if value["kind"].as_str() != Some("image") && value["kind"].as_str() != Some("video") {
+        return Err("Media submit kind is invalid".to_string());
+    }
+    if contains_sensitive_host_data(value) {
+        return Err("Sensitive data cannot cross the Native Provider boundary".to_string());
+    }
+    Ok(())
+}
+
+fn validate_provider_media_cancel_params(value: &serde_json::Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or("Media cancel params must be an object")?;
+    let allowed = [
+        "projectSessionId",
+        "providerProfileId",
+        "adapterKey",
+        "providerRegion",
+        "providerTaskId",
+    ];
+    if !has_exact_keys(object, &allowed) {
+        return Err("Media cancel params contain unknown or missing fields".to_string());
+    }
+    for key in allowed {
+        if value[key].as_str().is_none_or(str::is_empty) {
+            return Err(format!(
+                "Media cancel field {key} must be a non-empty string"
+            ));
+        }
+    }
+    if !matches!(
+        value["providerRegion"].as_str(),
+        Some("global" | "cn" | "unicompapi")
+    ) {
+        return Err("Media cancel providerRegion is invalid".to_string());
+    }
+    if contains_sensitive_host_data(value) {
+        return Err("Sensitive data cannot cross the Native Provider boundary".to_string());
+    }
+    Ok(())
+}
+
+fn provider_media_submit_blocking(
+    params: &serde_json::Value,
+    _streams: &Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let provider_profile_id = params["providerProfileId"].as_str().unwrap_or_default();
+    let adapter_key = params["adapterKey"].as_str().unwrap_or_default();
+    let provider_region = params["providerRegion"].as_str().unwrap_or_default();
+    let mut parameters = params["parameters"].clone();
+    resolve_controlled_media_inputs(&mut parameters, params.get("inputs"))?;
+    let kind = params["kind"].as_str().unwrap_or_default();
+    if kind == "image" {
+        let mut response = provider_submit_blocking(
+            adapter_key,
+            provider_region,
+            provider_profile_id,
+            parameters,
+        )
+        .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
+        externalize_embedded_images(&mut response)
+            .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
+        return serde_json::to_value(response)
+            .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true));
+    }
+    let response = provider_submit_task_blocking(
+        adapter_key,
+        provider_region,
+        provider_profile_id,
+        parameters,
+    )
+    .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
+    serde_json::to_value(response)
+        .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true))
+}
+
+fn resolve_controlled_media_inputs(
+    value: &mut serde_json::Value,
+    inputs: Option<&serde_json::Value>,
+) -> Result<(), serde_json::Value> {
+    let root = std::env::var("AI_VIDEO_MEDIA_INPUT_ROOT")
+        .map(PathBuf::from)
+        .map_err(|_| {
+            host_error(
+                "INVALID_PARAMETERS",
+                "Controlled media input root is unavailable",
+                true,
+            )
+        })?;
+    resolve_controlled_media_inputs_at_root(value, inputs, &root)
+}
+
+fn resolve_controlled_media_inputs_at_root(
+    value: &mut serde_json::Value,
+    inputs: Option<&serde_json::Value>,
+    root: &Path,
+) -> Result<(), serde_json::Value> {
+    let Some(items) = inputs.and_then(serde_json::Value::as_array) else {
+        return if contains_controlled_file_reference(value) {
+            Err(host_error(
+                "INVALID_PARAMETERS",
+                "Controlled media input reference is not registered",
+                false,
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    if !root.is_absolute() {
+        return Err(host_error(
+            "INVALID_PARAMETERS",
+            "Controlled media input root is invalid",
+            true,
+        ));
+    }
+    let root = root.canonicalize().map_err(|_| {
+        host_error(
+            "INVALID_PARAMETERS",
+            "Controlled media input root is unavailable",
+            true,
+        )
+    })?;
+    let mut replacements = std::collections::HashMap::new();
+    for item in items {
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("controlled_temporary_file")
+        {
+            continue;
+        }
+        let handle = item
+            .get("handle")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if handle.contains("..")
+            || !handle.starts_with("cache/media-inputs/")
+            || handle.contains('\\')
+        {
+            return Err(host_error(
+                "INVALID_PARAMETERS",
+                "Controlled media file handle is invalid",
+                false,
+            ));
+        }
+        let path = root.join(handle);
+        let canonical = path.canonicalize().map_err(|_| {
+            host_error(
+                "INVALID_PARAMETERS",
+                "Controlled media input file is unavailable",
+                false,
+            )
+        })?;
+        if !canonical.starts_with(&root) || !canonical.is_file() {
+            return Err(host_error(
+                "INVALID_PARAMETERS",
+                "Controlled media input file is invalid",
+                false,
+            ));
+        }
+        replacements.insert(
+            format!("controlled-file://{handle}"),
+            canonical.to_string_lossy().to_string(),
+        );
+    }
+    fn walk(
+        value: &mut serde_json::Value,
+        replacements: &std::collections::HashMap<String, String>,
+    ) {
+        match value {
+            serde_json::Value::String(text) => {
+                if let Some(path) = replacements.get(text) {
+                    *text = path.clone();
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, replacements);
+                }
+            }
+            serde_json::Value::Object(items) => {
+                for item in items.values_mut() {
+                    walk(item, replacements);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, &replacements);
+    if contains_controlled_file_reference(value) {
+        return Err(host_error(
+            "INVALID_PARAMETERS",
+            "Controlled media input reference is not registered",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn contains_controlled_file_reference(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.starts_with("controlled-file://"),
+        serde_json::Value::Array(items) => items.iter().any(contains_controlled_file_reference),
+        serde_json::Value::Object(items) => items.values().any(contains_controlled_file_reference),
+        _ => false,
+    }
+}
+
+fn provider_media_cancel_blocking(
+    params: &serde_json::Value,
+    _streams: &Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let result = provider_cancel_task_blocking(
+        params["adapterKey"].as_str().unwrap_or_default(),
+        params["providerRegion"].as_str().unwrap_or_default(),
+        params["providerProfileId"].as_str().unwrap_or_default(),
+        params["providerTaskId"].as_str().unwrap_or_default(),
+    )
+    .map_err(|error| host_error("PROVIDER_FAILED", error, true))?;
+    serde_json::to_value(result)
+        .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true))
 }
 
 fn run_host_provider_stream(
@@ -2613,9 +2903,10 @@ mod tests {
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
         ensure_video_adapter, externalize_embedded_images, is_profile_id, provider_cancel_path,
         provider_payload, provider_state, provider_submit_error, provider_target,
-        provider_task_error, provider_task_id, provider_task_path, resolve_media_selection,
-        unicompapi_adapter_model, unicompapi_payload, unicompapi_video_content_path,
-        unicompapi_video_task_path, validate_credential_provider, validate_host_request_envelope,
+        provider_task_error, provider_task_id, provider_task_path,
+        resolve_controlled_media_inputs_at_root, resolve_media_selection, unicompapi_adapter_model,
+        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
+        validate_credential_provider, validate_host_request_envelope,
         validate_provider_stream_params, ProviderHttpResponse, WorkerProcess, WorkerState,
         BASE64_STANDARD, BUNDLED_WORKER_FILENAME, MARKDOWN_IMPORT_LIMIT,
         PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES, UNICOMPAPI_AUTHORIZATION_SCHEME,
@@ -3204,6 +3495,61 @@ mod tests {
         let error = provider_payload(target, json!({ "prompt": oversized }))
             .expect_err("oversized request must be rejected");
         assert!(error.contains("native transport limit"));
+    }
+
+    #[test]
+    fn provider_bridge_resolves_only_registered_controlled_media_files() {
+        let root = std::env::temp_dir().join(format!(
+            "unicomp-controlled-media-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let directory = root.join("cache").join("media-inputs");
+        create_dir_all(&directory).expect("create controlled media fixture directory");
+        let image = directory.join("input.png");
+        write(&image, [137, 80, 78, 71, 13, 10, 26, 10]).expect("write media fixture");
+        let handle = "cache/media-inputs/input.png";
+        let mut parameters = json!({ "images": [format!("controlled-file://{handle}")] });
+        let inputs = json!([{
+            "type": "controlled_temporary_file",
+            "handle": handle,
+            "contentType": "image/png"
+        }]);
+
+        resolve_controlled_media_inputs_at_root(&mut parameters, Some(&inputs), &root)
+            .expect("resolve controlled media fixture");
+        assert_eq!(
+            Path::new(parameters["images"][0].as_str().expect("resolved path"))
+                .canonicalize()
+                .expect("canonical resolved path"),
+            image.canonicalize().expect("canonical fixture path")
+        );
+
+        let mut unregistered = json!({
+            "images": ["controlled-file://cache/media-inputs/other.png"]
+        });
+        assert!(
+            resolve_controlled_media_inputs_at_root(&mut unregistered, Some(&inputs), &root)
+                .is_err()
+        );
+        let traversal_inputs = json!([{
+            "type": "controlled_temporary_file",
+            "handle": "cache/media-inputs/../input.png",
+            "contentType": "image/png"
+        }]);
+        let mut traversal = json!({
+            "images": ["controlled-file://cache/media-inputs/../input.png"]
+        });
+        assert!(resolve_controlled_media_inputs_at_root(
+            &mut traversal,
+            Some(&traversal_inputs),
+            &root
+        )
+        .is_err());
+
+        remove_dir_all(root).expect("remove controlled media fixture directory");
     }
 
     #[test]

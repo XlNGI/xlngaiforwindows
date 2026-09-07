@@ -30,6 +30,8 @@ import type {
   GenerationCapability,
   ImageAssetKind,
   ImagePreviewInfo,
+  MediaSubmissionConfirmationRequest,
+  MediaTaskCancellationOutcome,
   ProviderModelInfo,
   ProviderProfileInfo,
   VideoAssetKind,
@@ -37,13 +39,7 @@ import type {
   VideoGenerationMetadataInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
-import {
-  cancelVideoProviderTask,
-  downloadVideoProviderTask,
-  pollVideoProviderTask,
-  submitProviderRequest,
-  submitVideoProviderTask,
-} from './provider-client';
+import { downloadVideoProviderTask, pollVideoProviderTask } from './provider-client';
 import { VideoPollingScheduler } from './video-polling-scheduler';
 import {
   generationErrorFeedback,
@@ -98,6 +94,31 @@ function errorMessage(reason: unknown, fallback: string): string {
     if (typeof message === 'string' && message.trim()) return message.trim();
   }
   return fallback;
+}
+
+function mediaConfirmationMessage(confirmation: MediaSubmissionConfirmationRequest): string {
+  const parameters = confirmation.parameterSummary
+    .map(({ key, value }) => `${key}: ${value}`)
+    .join('\n');
+  return [
+    `${confirmation.providerName} / ${confirmation.modelName}`,
+    `草稿版本：v${confirmation.draftVersion}`,
+    parameters ? `参数：\n${parameters}` : '参数：无',
+    confirmation.costNotice.summary,
+  ].join('\n');
+}
+
+function cancellationMessage(cancellation?: MediaTaskCancellationOutcome): string {
+  if (!cancellation || ['not_submitted', 'cancelled'].includes(cancellation.provider)) {
+    return '视频任务已取消，本地轮询已停止。';
+  }
+  const reason =
+    cancellation.provider === 'unsupported'
+      ? 'Provider 不支持远端取消'
+      : cancellation.provider === 'rejected'
+        ? 'Provider 未接受远端取消'
+        : '远端取消结果未知';
+  return `视频任务已取消，仅停止本地轮询；${reason}，Provider 任务可能仍会继续。`;
 }
 
 function isVideoAsset(asset: AssetInfo | undefined): boolean {
@@ -168,6 +189,9 @@ function formatVideoCost(cost: VideoGenerationMetadataInfo['cost'] | undefined):
     ? `${credits} · ${cost.currency} ${cost.estimatedAmount}（${cost.unitPrice}/积分）`
     : `${credits} · 未配置每积分单价`;
 }
+
+const SUBMISSION_UNKNOWN_MESSAGE =
+  '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。';
 
 function upsertVideoJob(
   jobs: VideoGenerationJobInfo[],
@@ -710,7 +734,6 @@ export function ProductionPanel({
 
   const generateImage = async () => {
     if (!adapter || !selectedProfile || !selectedModel || !writable) return;
-    let preparedJobId: string | undefined;
     setBusy(true);
     setGenerationStatus('');
     try {
@@ -731,21 +754,21 @@ export function ProductionPanel({
         providerProfileId: selectedProfile.id,
         modelId: selectedModel.remoteModelId,
       });
-      preparedJobId = job.id;
       setGenerationJobId(job.id);
       setGenerationStatus('正在请求 Provider...');
-      const response = await submitProviderRequest(
-        adapter.key,
-        submissionParameters,
-        selectedProfile.id,
-        providerRegion,
-      );
-      const completed = await callWorker('image.generate.complete', {
-        jobId: job.id,
-        providerStatus: response.status,
-        providerBody: response.body,
-        assetKind,
-      });
+      const pending = await callWorker('media.generation.requestSubmission', { jobId: job.id });
+      if (!pending.confirmation) throw new Error('Image submission confirmation is unavailable.');
+      if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+        await callWorker('media.task.cancel', { jobId: job.id });
+        return;
+      }
+      const completed = (
+        await callWorker('media.generation.confirmSubmission', {
+          jobId: job.id,
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        })
+      ).job as import('@ai-video/contracts').ImageGenerationJobInfo;
       if (completed.status === 'succeeded' && completed.preview) {
         setPreview(completed.preview);
       }
@@ -772,22 +795,17 @@ export function ProductionPanel({
         }
       }
       setGenerationStatus(
-        completed.status === 'succeeded'
-          ? '图片已保存到本地素材库。'
-          : completed.status === 'cancelled'
-            ? '已取消图片生成。'
-            : completed.error
-              ? generationErrorFeedback(completed.error).userMessage
-              : '生成失败。',
+        completed.mediaState === 'submission_unknown'
+          ? SUBMISSION_UNKNOWN_MESSAGE
+          : completed.status === 'succeeded'
+            ? '图片已保存到本地素材库。'
+            : completed.status === 'cancelled'
+              ? '已取消图片生成。'
+              : completed.error
+                ? generationErrorFeedback(completed.error).userMessage
+                : '生成失败。',
       );
     } catch (reason) {
-      if (preparedJobId) {
-        try {
-          await callWorker('image.generate.fail', { jobId: preparedJobId });
-        } catch {
-          // Project close/restart recovery owns terminalization when the Worker is unavailable.
-        }
-      }
       setGenerationStatus(errorMessage(reason, '图片生成失败。'));
     } finally {
       setGenerationJobId(undefined);
@@ -804,7 +822,6 @@ export function ProductionPanel({
       !writable
     )
       return;
-    let preparedJobId: string | undefined;
     const submissionProjectId = projectId;
     setBusy(true);
     setGenerationStatus('');
@@ -829,57 +846,46 @@ export function ProductionPanel({
         assetKind: videoAssetKind,
       });
       if (currentProjectIdRef.current !== submissionProjectId) return;
-      preparedJobId = prepared.id;
       setVideoJobs((current) => upsertVideoJob(current, prepared));
       setGenerationStatus('正在提交视频任务...');
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         void Notification.requestPermission().catch(() => undefined);
       }
-      const response = await submitVideoProviderTask(
-        adapter.key,
-        submissionParameters,
-        selectedProfile.id,
-        providerRegion,
-      );
       if (currentProjectIdRef.current !== submissionProjectId) return;
-      if (response.status < 200 || response.status >= 300 || !response.taskId) {
-        const providerDetail = [response.errorCode, response.errorMessage]
-          .filter((value): value is string => Boolean(value?.trim()))
-          .join('：');
-        const failureMessage = `Provider 视频任务提交失败，HTTP ${response.status}${providerDetail ? `：${providerDetail}` : ''}。`;
-        const failed = await callWorker('video.generate.fail', {
-          jobId: prepared.id,
-          failureKind: 'provider',
-          message: failureMessage,
-        });
-        setVideoJobs((current) => upsertVideoJob(current, failed));
+      const pending = await callWorker('media.generation.requestSubmission', {
+        jobId: prepared.id,
+      });
+      if (!pending.confirmation) throw new Error('Video submission confirmation is unavailable.');
+      if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+        const cancelled = await callWorker('media.task.cancel', { jobId: prepared.id });
+        setVideoJobs((current) => upsertVideoJob(current, cancelled.job as VideoGenerationJobInfo));
+        return;
+      }
+      const response = await callWorker('media.generation.confirmSubmission', {
+        jobId: prepared.id,
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      const submitted = response.job as VideoGenerationJobInfo;
+      if (submitted.mediaState === 'submission_unknown') {
+        setVideoJobs((current) => upsertVideoJob(current, submitted));
+        setGenerationStatus(SUBMISSION_UNKNOWN_MESSAGE);
+        return;
+      }
+      if (submitted.status === 'failed' || !submitted.providerTaskId) {
+        setVideoJobs((current) => upsertVideoJob(current, submitted));
         setGenerationStatus(
-          failed.error
-            ? generationErrorFeedback(failed.error, 'provider').userMessage
+          submitted.error
+            ? generationErrorFeedback(submitted.error, 'provider').userMessage
             : '视频任务提交失败。',
         );
         return;
       }
-      const attached = await callWorker('video.generate.attachTask', {
-        jobId: prepared.id,
-        providerTaskId: response.taskId,
-      });
+      const attached = submitted;
       if (currentProjectIdRef.current !== submissionProjectId) return;
       setVideoJobs((current) => upsertVideoJob(current, attached));
       setGenerationStatus('视频任务已提交，正在本地查询。');
     } catch (reason) {
-      if (preparedJobId && currentProjectIdRef.current === submissionProjectId) {
-        try {
-          const failed = await callWorker('video.generate.fail', {
-            jobId: preparedJobId,
-            failureKind: 'transport',
-            message: errorMessage(reason, '视频任务提交传输失败。'),
-          });
-          setVideoJobs((current) => upsertVideoJob(current, failed));
-        } catch {
-          // Restart recovery terminalizes an unsubmitted job when the Worker is unavailable.
-        }
-      }
       if (currentProjectIdRef.current === submissionProjectId) {
         setGenerationStatus(errorMessage(reason, '视频任务提交失败。'));
       }
@@ -910,17 +916,9 @@ export function ProductionPanel({
 
   const cancelVideo = async (job: VideoGenerationJobInfo) => {
     try {
-      const cancelled = await callWorker('video.generate.cancel', { jobId: job.id });
-      setVideoJobs((current) => upsertVideoJob(current, cancelled));
-      if (job.providerTaskId) {
-        void cancelVideoProviderTask(
-          job.adapterKey,
-          job.metadata.providerProfileId,
-          job.providerTaskId,
-          job.metadata.providerRegion,
-        ).catch(() => undefined);
-      }
-      setGenerationStatus('视频任务已取消，本地轮询已停止。');
+      const cancelled = await callWorker('media.task.cancel', { jobId: job.id });
+      setVideoJobs((current) => upsertVideoJob(current, cancelled.job as VideoGenerationJobInfo));
+      setGenerationStatus(cancellationMessage(cancelled.cancellation));
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '取消视频任务失败。'));
     }
@@ -1222,10 +1220,10 @@ export function ProductionPanel({
                             </small>
                             {job.error && (
                               <small className="error-copy">
-                                {
-                                  generationErrorFeedback(job.error, job.metadata.failureKind)
-                                    .userMessage
-                                }
+                                {job.mediaState === 'submission_unknown'
+                                  ? SUBMISSION_UNKNOWN_MESSAGE
+                                  : generationErrorFeedback(job.error, job.metadata.failureKind)
+                                      .userMessage}
                               </small>
                             )}
                           </div>

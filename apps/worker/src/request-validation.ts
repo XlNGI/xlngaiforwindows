@@ -94,13 +94,18 @@ const sessionMethods = new Set<WorkerMethod>([
   'conversation.runtime.get',
   'conversation.runtime.confirm',
   'conversation.runtime.selectMedia',
+  'conversation.runtime.confirmMediaSubmission',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
+  'agent.generation.confirmMediaSubmission',
   'agent.generation.selectMedia',
   'agent.providerStep.complete',
   'agent.providerStep.start',
   'image.generate.prepare',
+  'media.generation.requestSubmission',
+  'media.generation.confirmSubmission',
+  'media.task.cancel',
   'video.generate.prepare',
   'agent.changeSet.create',
   'agent.changeSet.list',
@@ -810,6 +815,17 @@ export function validateSessionRequestParams(
       optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
       optionalBoolean(params, 'costNoticeAcknowledged');
       break;
+    case 'media.generation.requestSubmission':
+    case 'media.task.cancel':
+      rejectUnknown(params, ['jobId']);
+      requireId(params, 'jobId');
+      break;
+    case 'media.generation.confirmSubmission':
+      rejectUnknown(params, ['jobId', 'confirmationToken', 'approved']);
+      requireId(params, 'jobId');
+      requireString(params, 'confirmationToken', 512);
+      requireBoolean(params, 'approved');
+      break;
     case 'video.generate.prepare':
       rejectUnknown(params, [
         'shotId',
@@ -1099,6 +1115,13 @@ export function validateSessionRequestParams(
       requireString(params, 'confirmationToken', MAX_ID_LENGTH);
       requireBoolean(params, 'approved');
       break;
+    case 'conversation.runtime.confirmMediaSubmission':
+      rejectUnknown(params, ['generationId', 'jobId', 'confirmationToken', 'approved']);
+      requireId(params, 'generationId');
+      requireId(params, 'jobId');
+      requireString(params, 'confirmationToken', MAX_ID_LENGTH);
+      requireBoolean(params, 'approved');
+      break;
     case 'conversation.runtime.selectMedia':
       rejectUnknown(params, ['generationId', 'selectionToken', 'selection']);
       requireId(params, 'generationId');
@@ -1117,6 +1140,12 @@ export function validateSessionRequestParams(
       break;
     case 'agent.generation.confirmTool':
       validateIdentity(params, ['confirmationToken', 'approved']);
+      requireString(params, 'confirmationToken', MAX_ID_LENGTH);
+      requireBoolean(params, 'approved');
+      break;
+    case 'agent.generation.confirmMediaSubmission':
+      validateIdentity(params, ['jobId', 'confirmationToken', 'approved']);
+      requireId(params, 'jobId');
       requireString(params, 'confirmationToken', MAX_ID_LENGTH);
       requireBoolean(params, 'approved');
       break;

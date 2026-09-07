@@ -5,6 +5,7 @@ export * from './database.js';
 export * from './migration-v16.js';
 export * from './migration-v18.js';
 export * from './migration-v35.js';
+export * from './migration-v37.js';
 export * from './novel-rag-chunks.js';
 export * from './repositories.js';
 export * from './schema.js';

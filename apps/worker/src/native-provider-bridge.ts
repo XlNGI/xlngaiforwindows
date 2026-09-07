@@ -2,6 +2,7 @@ import {
   SIDECAR_ENVELOPE_MAX_BYTES,
   type HostError,
   type NativeProviderHostEvent,
+  type HostMethod,
   type NativeProviderStreamStartParams,
   type SidecarEnvelope,
 } from '@ai-video/contracts';
@@ -66,6 +67,14 @@ export interface NativeProviderStreamHandle {
   cancel(): void;
 }
 
+export class NativeProviderRequestError extends Error {
+  override readonly name = 'NativeProviderRequestError';
+
+  constructor(readonly hostError: HostError) {
+    super(hostError.message);
+  }
+}
+
 interface PendingStream {
   params: NativeProviderStreamStartParams;
   callbacks: NativeProviderStreamCallbacks;
@@ -80,10 +89,27 @@ const TERMINAL_TYPES = new Set<NativeProviderHostEvent['type']>([
   'failed',
   'cancelled',
 ]);
+const HOST_ERROR_CODES = new Set<HostError['code']>([
+  'INVALID_ENVELOPE',
+  'MESSAGE_TOO_LARGE',
+  'METHOD_NOT_FOUND',
+  'INVALID_PARAMETERS',
+  'PROVIDER_UNAVAILABLE',
+  'PROVIDER_FAILED',
+  'INTERRUPTED',
+  'CANCELLED',
+  'STALE_SESSION',
+  'TIMEOUT',
+  'INTERNAL_ERROR',
+]);
 const SENSITIVE_KEYS = new Set(['secret', 'authorization', 'headers', 'apikey', 'signedurl']);
 
 export class NativeProviderBridge {
   private readonly pending = new Map<string, PendingStream>();
+  private readonly pendingRequests = new Map<
+    string,
+    { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+  >();
   private nextRequestOrdinal = 0;
 
   constructor(
@@ -136,6 +162,37 @@ export class NativeProviderBridge {
     return { requestId, done, cancel };
   }
 
+  /** Send a bounded one-shot request to the Native host and await its correlated response. */
+  request<M extends HostMethod>(method: M, params: unknown, timeoutMs = 120_000): Promise<unknown> {
+    assertNoSensitiveData(params);
+    const requestId = this.createRequestId();
+    if (!requestId || this.pending.has(requestId) || this.pendingRequests.has(requestId)) {
+      return Promise.reject(new Error('Native Provider request ID must be unique.'));
+    }
+    const envelope = { kind: 'host.request', requestId, method, params } as const;
+    assertEnvelopeSize(envelope);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(
+          new NativeProviderRequestError(
+            hostError('TIMEOUT', `Native Provider request timed out after ${timeoutMs} ms.`, true),
+          ),
+        );
+      }, timeoutMs);
+      this.pendingRequests.set(requestId, { resolve, reject, timer });
+      void this.transport.send(envelope).catch((error) => {
+        const pending = this.pendingRequests.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pendingRequests.delete(requestId);
+        pending.reject(
+          new NativeProviderRequestError(hostError('PROVIDER_UNAVAILABLE', error, true)),
+        );
+      });
+    });
+  }
+
   /** Returns true only for a recognized host envelope; legacy Worker responses remain untouched. */
   handleEnvelope(value: unknown): boolean {
     if (!isRecord(value) || (value.kind !== 'host.event' && value.kind !== 'host.response')) {
@@ -151,6 +208,10 @@ export class NativeProviderBridge {
       }
     } catch (error) {
       const requestId = typeof value.requestId === 'string' ? value.requestId : undefined;
+      if (requestId && this.pendingRequests.has(requestId)) {
+        this.failOneShot(requestId, hostError('INVALID_ENVELOPE', error, false));
+        return true;
+      }
       if (!requestId || !this.pending.has(requestId)) throw error;
       this.cancel(requestId);
       this.failLocally(requestId, hostError('INVALID_ENVELOPE', error, false));
@@ -163,6 +224,11 @@ export class NativeProviderBridge {
       this.cancel(requestId);
       this.failLocally(requestId, error);
     }
+    for (const [requestId, pending] of this.pendingRequests) {
+      clearTimeout(pending.timer);
+      this.pendingRequests.delete(requestId);
+      pending.reject(new NativeProviderRequestError(error));
+    }
   }
 
   private handleResponse(value: Record<string, unknown>): void {
@@ -173,6 +239,16 @@ export class NativeProviderBridge {
         : ['kind', 'requestId', 'ok', 'error'],
     );
     const requestId = requireString(value.requestId, 'host.response.requestId');
+    const oneShot = this.pendingRequests.get(requestId);
+    if (oneShot) {
+      clearTimeout(oneShot.timer);
+      this.pendingRequests.delete(requestId);
+      if (value.ok === false)
+        oneShot.reject(new NativeProviderRequestError(parseHostError(value.error)));
+      else if (value.ok === true) oneShot.resolve(value.result);
+      else oneShot.reject(new Error('host.response.ok must be boolean.'));
+      return;
+    }
     const pending = this.pending.get(requestId);
     if (!pending || pending.terminal) return;
     if (value.ok === false) {
@@ -180,6 +256,14 @@ export class NativeProviderBridge {
     } else if (value.ok !== true) {
       throw new Error('host.response.ok must be boolean.');
     }
+  }
+
+  private failOneShot(requestId: string, error: HostError): void {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    pending.reject(new NativeProviderRequestError(error));
   }
 
   private handleEvent(value: Record<string, unknown>): void {
@@ -606,6 +690,7 @@ function parseHostError(value: unknown): HostError {
   if (!isRecord(value)) throw new Error('Host error must be an object.');
   assertExactKeys(value, ['code', 'message', 'retryable']);
   const code = requireString(value.code, 'host.error.code') as HostError['code'];
+  if (!HOST_ERROR_CODES.has(code)) throw new Error('host.error.code is invalid.');
   const message = requireString(value.message, 'host.error.message');
   if (typeof value.retryable !== 'boolean')
     throw new Error('host.error.retryable must be boolean.');

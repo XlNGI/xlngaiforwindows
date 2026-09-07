@@ -550,7 +550,7 @@ describe('VideoGenerationService', () => {
     expect(service.get(job.id)).toMatchObject({ status: 'polling', results: [] });
   });
 
-  it('preserves submitted jobs for restart polling and fails unsubmitted jobs', async () => {
+  it('preserves media drafts and submitted jobs across restart', async () => {
     const { project, service } = await setup();
     const rootPath = project.current()!.rootPath;
     const pending = prepare(service);
@@ -573,12 +573,12 @@ describe('VideoGenerationService', () => {
     writeFileSync(staleTemporary, 'stale');
     writeFileSync(retainedFile, 'keep');
 
-    expect(service.recoverInterrupted()).toBe(2);
+    expect(service.recoverInterrupted()).toBe(1);
     expect(existsSync(staleTemporary)).toBe(false);
     expect(existsSync(retainedFile)).toBe(true);
     expect(service.get(pending.id)).toMatchObject({
-      status: 'failed',
-      metadata: { failureKind: 'interrupted' },
+      status: 'pending',
+      mediaState: 'draft',
     });
     expect(service.get(attached.id)).toMatchObject({
       status: 'polling',
@@ -590,10 +590,7 @@ describe('VideoGenerationService', () => {
     });
     project.access(false, (database) => {
       const events = createRepositories(database).generationJobEvents;
-      expect(events.listByJob(pending.id).at(-1)).toMatchObject({
-        phase: 'fail',
-        status: 'failed',
-      });
+      expect(events.listByJob(pending.id).at(-1)).toMatchObject({ phase: 'prepare' });
       expect(events.listByJob(attached.id).at(-1)).toMatchObject({
         phase: 'submit',
         status: 'polling',

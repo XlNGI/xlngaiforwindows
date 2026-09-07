@@ -10,6 +10,7 @@ import type {
   ConversationTaskMode,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
+  MediaSubmissionConfirmationRequest,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 
@@ -34,6 +35,7 @@ export interface LlmStreamCallbacks {
   onMediaSelection?(
     request: MediaModelSelectionRequest,
   ): Promise<MediaModelSelectionDecision | undefined>;
+  onMediaSubmission?(request: MediaSubmissionConfirmationRequest): Promise<boolean>;
 }
 
 export interface LlmStreamRun {
@@ -248,6 +250,18 @@ export function streamPreparedLlmGeneration(
             })
           ).continuation;
         }
+        if (!continuation && execution.mediaSubmission && callbacks.onMediaSubmission) {
+          const confirmation = execution.mediaSubmission;
+          const approved = await callbacks.onMediaSubmission(confirmation);
+          continuation = (
+            await callWorker('agent.generation.confirmMediaSubmission', {
+              ...identity,
+              jobId: confirmation.jobId,
+              confirmationToken: confirmation.confirmationToken,
+              approved,
+            })
+          ).continuation;
+        }
         if (!continuation) {
           await fail('This Agent action requires user input that was not completed.', false);
           return 'terminal';
@@ -374,6 +388,7 @@ export function streamPreparedLlmGeneration(
         const deadline = Date.now() + PI_POLL_TIMEOUT_MS;
         const handledConfirmations = new Set<string>();
         const handledMediaSelections = new Set<string>();
+        const handledMediaSubmissions = new Set<string>();
         while (true) {
           if (Date.now() >= deadline) {
             await cancelOwnedRuntime();
@@ -415,6 +430,24 @@ export function streamPreparedLlmGeneration(
             });
             if (!selected.accepted) {
               throw new Error('Pi Agent media selection was no longer pending.');
+            }
+          }
+          if (
+            runtimeState.mediaSubmission &&
+            !handledMediaSubmissions.has(runtimeState.mediaSubmission.confirmationToken)
+          ) {
+            handledMediaSubmissions.add(runtimeState.mediaSubmission.confirmationToken);
+            const approved = callbacks.onMediaSubmission
+              ? await callbacks.onMediaSubmission(runtimeState.mediaSubmission)
+              : false;
+            const confirmed = await callWorker('conversation.runtime.confirmMediaSubmission', {
+              generationId: identity.generationId,
+              jobId: runtimeState.mediaSubmission.jobId,
+              confirmationToken: runtimeState.mediaSubmission.confirmationToken,
+              approved,
+            });
+            if (!confirmed.accepted) {
+              throw new Error('Pi Agent media submission confirmation was no longer pending.');
             }
           }
           const current = await callWorker('llm.generation.get', {

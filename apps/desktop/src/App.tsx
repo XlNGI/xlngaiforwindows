@@ -55,10 +55,10 @@ import type {
   LlmInputAttachment,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
+  MediaSubmissionConfirmationRequest,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
-import { submitProviderRequest, submitVideoProviderTask } from './provider-client';
 import { useProjectMaintenance } from './use-project-maintenance';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { useConversationWorkspace } from './use-conversation-workspace';
@@ -106,6 +106,18 @@ interface DetachedPanelRegistration {
   snapshot: DetachedPanelSnapshot;
   snapshotSequence: number;
   actionSequence: number;
+}
+
+function mediaConfirmationMessage(confirmation: MediaSubmissionConfirmationRequest): string {
+  const parameters = confirmation.parameterSummary
+    .map(({ key, value }) => `${key}: ${value}`)
+    .join('\n');
+  return [
+    `${confirmation.providerName} / ${confirmation.modelName}`,
+    `草稿版本：v${confirmation.draftVersion}`,
+    parameters ? `参数：\n${parameters}` : '参数：无',
+    confirmation.costNotice.summary,
+  ].join('\n');
 }
 
 function snapshotEntityId(snapshot: DetachedPanelSnapshot): string | undefined {
@@ -604,6 +616,9 @@ export function App() {
   const [agentConfirmation, setAgentConfirmation] =
     useState<import('@ai-video/contracts').AgentToolConfirmationRequest>();
   const confirmationResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const [mediaSubmissionConfirmation, setMediaSubmissionConfirmation] =
+    useState<import('@ai-video/contracts').MediaSubmissionConfirmationRequest>();
+  const mediaSubmissionResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
   const mediaSelectionResolverRef = useRef<
     ((selection: MediaModelSelectionDecision | undefined) => void) | undefined
   >(undefined);
@@ -851,6 +866,7 @@ export function App() {
 
   const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
     confirmationResolverRef.current?.(false);
+    mediaSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
     activeMediaInputsRef.current = collectReferenceImageInputs(chatAttachments);
     setChatAttachments([]);
@@ -930,6 +946,7 @@ export function App() {
         );
         if (!isGenerationActive(next)) {
           confirmationResolverRef.current?.(false);
+          mediaSubmissionResolverRef.current?.(false);
           mediaSelectionResolverRef.current?.(undefined);
           activeMediaInputsRef.current = [];
           setChatMessage(next.error ?? '生成完成');
@@ -958,6 +975,17 @@ export function App() {
           };
         });
       },
+      onMediaSubmission(request) {
+        mediaSubmissionResolverRef.current?.(false);
+        setMediaSubmissionConfirmation(request);
+        return new Promise<boolean>((resolve) => {
+          mediaSubmissionResolverRef.current = (approved) => {
+            mediaSubmissionResolverRef.current = undefined;
+            setMediaSubmissionConfirmation(undefined);
+            resolve(approved);
+          };
+        });
+      },
     });
     nativeLlmRun.current = run;
     void run.completion
@@ -970,6 +998,7 @@ export function App() {
         stopAgentTaskEventPolling();
         if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
           confirmationResolverRef.current?.(false);
+          mediaSubmissionResolverRef.current?.(false);
           mediaSelectionResolverRef.current?.(undefined);
           activeMediaInputsRef.current = [];
           nativeLlmRun.current = undefined;
@@ -979,6 +1008,7 @@ export function App() {
 
   const cancelNativeLlmRun = async () => {
     confirmationResolverRef.current?.(false);
+    mediaSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
     activeMediaInputsRef.current = [];
     const run = nativeLlmRun.current;
@@ -1169,6 +1199,7 @@ export function App() {
     () => () => {
       void nativeLlmRun.current?.cancel();
       confirmationResolverRef.current?.(false);
+      mediaSubmissionResolverRef.current?.(false);
       mediaSelectionResolverRef.current?.(undefined);
     },
     [],
@@ -1704,25 +1735,22 @@ export function App() {
         }
         if (unified.status === 'image_prepared' || unified.status === 'video_prepared') {
           if (unified.status === 'image_prepared') {
-            let response: Awaited<ReturnType<typeof submitProviderRequest>>;
-            try {
-              response = await submitProviderRequest(
-                unified.job.adapterKey,
-                unified.job.request,
-                providerProfileId!,
-              );
-            } catch (reason) {
-              await callWorker('image.generate.fail', { jobId: unified.job.id }).catch(
-                () => undefined,
-              );
-              throw reason;
-            }
-            const completed = await callWorker('image.generate.complete', {
+            /* paid submission is Worker-owned and requires a fresh confirmation */
+            const pending = await callWorker('media.generation.requestSubmission', {
               jobId: unified.job.id,
-              providerStatus: response.status,
-              providerBody: response.body,
-              assetKind: 'generated-image',
             });
+            if (!pending.confirmation)
+              throw new Error('Image submission confirmation is unavailable.');
+            if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+              await callWorker('media.task.cancel', { jobId: unified.job.id });
+              return;
+            }
+            const submitted = await callWorker('media.generation.confirmSubmission', {
+              jobId: unified.job.id,
+              confirmationToken: pending.confirmation.confirmationToken,
+              approved: true,
+            });
+            const completed = submitted.job;
             if (completed.status === 'succeeded') {
               const nextAssets = await callWorker('asset.list', {});
               updateAssets(nextAssets, completed.results[0]?.asset?.id);
@@ -1733,24 +1761,26 @@ export function App() {
                 : (completed.error ?? '图片生成失败。'),
             );
           } else {
-            const response = await submitVideoProviderTask(
-              unified.job.adapterKey,
-              unified.job.request,
-              providerProfileId!,
-              unified.job.metadata.providerRegion,
-            );
-            if (response.status < 200 || response.status >= 300 || !response.taskId) {
-              const failed = await callWorker('video.generate.fail', {
+            const pending = await callWorker('media.generation.requestSubmission', {
+              jobId: unified.job.id,
+            });
+            if (!pending.confirmation)
+              throw new Error('Video submission confirmation is unavailable.');
+            if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+              await callWorker('media.task.cancel', { jobId: unified.job.id });
+              return;
+            }
+            const response = (
+              await callWorker('media.generation.confirmSubmission', {
                 jobId: unified.job.id,
-                failureKind: 'provider',
-                message: response.errorMessage ?? `Provider HTTP ${response.status}`,
-              });
+                confirmationToken: pending.confirmation.confirmationToken,
+                approved: true,
+              })
+            ).job as import('@ai-video/contracts').VideoGenerationJobInfo;
+            if (response.status === 'failed' || !response.providerTaskId) {
+              const failed = response;
               setChatMessage(failed.error ?? '视频任务提交失败。');
             } else {
-              await callWorker('video.generate.attachTask', {
-                jobId: unified.job.id,
-                providerTaskId: response.taskId,
-              });
               setChatMessage('视频任务已提交，可能产生费用；请在制作面板查看进度。');
             }
           }
@@ -1957,6 +1987,7 @@ export function App() {
     if (!current || !isGenerationActive(current)) return;
     const agentTaskId = agentTask?.task.id;
     confirmationResolverRef.current?.(false);
+    mediaSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
     generationPollVersion.current += 1;
     if (current.executionMode === 'native') {
@@ -2573,6 +2604,7 @@ export function App() {
       generation={generation}
       agentTask={agentTask}
       confirmation={agentConfirmation}
+      mediaSubmissionConfirmation={mediaSubmissionConfirmation}
       agentModelSelection={agentModelSelection}
       mediaModelSelection={agentMediaSelection}
       mediaReferenceImageInputs={activeMediaInputsRef.current}
@@ -2592,6 +2624,7 @@ export function App() {
         }
       }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
+      onConfirmMediaSubmission={(approved) => mediaSubmissionResolverRef.current?.(approved)}
       onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
       onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
       onConfirmSchemaProposal={(adapterKey, version) => {

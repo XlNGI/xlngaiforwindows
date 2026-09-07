@@ -59,6 +59,10 @@ import {
   type VideoGenerationFailureKind,
   type VideoGenerationObserveParams,
   type VideoGenerationPrepareParams,
+  type MediaSubmissionRequestParams,
+  type MediaSubmissionConfirmParams,
+  type MediaTaskCancelParams,
+  type AgentGenerationConfirmMediaSubmissionParams,
   type AssetPreviewParams,
   type AssetMediaSourceParams,
   type AssetOpenParams,
@@ -140,6 +144,7 @@ import { PiConversationRuntime } from './pi-conversation-runtime.js';
 import { DomainToolGateway } from './domain-tool-gateway.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
+import { MediaOrchestrationService } from './media-orchestration-service.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { getAdapter, setAdapterOverrides } from '@ai-video/generation-adapters';
@@ -524,9 +529,11 @@ const methods = new Set<WorkerMethod>([
   'conversation.runtime.get',
   'conversation.runtime.confirm',
   'conversation.runtime.selectMedia',
+  'conversation.runtime.confirmMediaSubmission',
   'agent.generation.executeTools',
   'agent.generation.cancel',
   'agent.generation.confirmTool',
+  'agent.generation.confirmMediaSubmission',
   'agent.generation.selectMedia',
   'agent.providerStep.complete',
   'agent.providerStep.start',
@@ -579,6 +586,9 @@ const methods = new Set<WorkerMethod>([
   'image.generate.cancel',
   'image.generate.get',
   'video.generate.prepare',
+  'media.generation.requestSubmission',
+  'media.generation.confirmSubmission',
+  'media.task.cancel',
   'video.generate.attachTask',
   'video.generate.observe',
   'video.generate.fail',
@@ -632,6 +642,7 @@ const taskPlanService = new TaskPlanService(projectService);
 let piConversationRuntime: PiConversationRuntime | undefined;
 
 export function configurePiConversationRuntime(bridge: NativeProviderBridge): void {
+  nativeProviderBridge = bridge;
   piConversationRuntime = new PiConversationRuntime({
     generation: generationService,
     plans: taskPlanService,
@@ -685,6 +696,19 @@ const mediaPreparationService = new MediaPreparationService(
   imageGenerationService,
   videoGenerationService,
   (identity) => generationService.runtime(identity).attachments ?? [],
+);
+let nativeProviderBridge: NativeProviderBridge | undefined;
+const mediaOrchestrationService = new MediaOrchestrationService(
+  projectService,
+  appSettingsService,
+  imageGenerationService,
+  videoGenerationService,
+  {
+    request: async (...args: Parameters<NativeProviderBridge['request']>) => {
+      if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
+      return nativeProviderBridge.request(...args);
+    },
+  } as unknown as NativeProviderBridge,
 );
 const agentSystemToolService = new AgentSystemToolService(
   projectService,
@@ -746,6 +770,7 @@ const agentProviderLoopService = new AgentProviderLoopService(
   } satisfies AgentSchemaManager,
   agentSystemToolService,
   mediaPreparationService,
+  mediaOrchestrationService,
 );
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
@@ -991,6 +1016,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       agentProviderLoopService,
       partialArtifactService,
       markdownExportService,
+      mediaOrchestrationService,
       imageGenerationService,
       videoGenerationService,
     });
@@ -1533,6 +1559,18 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           };
           break;
         }
+        case 'conversation.runtime.confirmMediaSubmission': {
+          if (!piConversationRuntime) throw new Error('Pi conversation runtime is not configured.');
+          result = {
+            accepted: piConversationRuntime.confirmMediaSubmission(
+              requireString(params, 'generationId'),
+              requireString(params, 'jobId'),
+              requireString(params, 'confirmationToken'),
+              params.approved === true,
+            ),
+          };
+          break;
+        }
         case 'agent.generation.executeTools': {
           const executionParams = params as unknown as AgentGenerationExecuteToolsParams;
           const execution = await agentProviderLoopService.executeTools(executionParams);
@@ -1565,6 +1603,19 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             confirmation.continuation,
           );
           result = confirmation;
+          break;
+        }
+        case 'agent.generation.confirmMediaSubmission': {
+          const confirmationParams =
+            params as unknown as AgentGenerationConfirmMediaSubmissionParams;
+          const execution =
+            await agentProviderLoopService.confirmMediaSubmission(confirmationParams);
+          generationService.configureAgentTools(
+            confirmationParams,
+            execution.tools ?? [],
+            execution.continuation,
+          );
+          result = execution;
           break;
         }
         case 'agent.generation.selectMedia': {
@@ -1769,7 +1820,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             imageParams.providerProfileId,
             imageParams.modelId,
           );
-          result = imageGenerationService.prepare({
+          result = mediaPreparationService.prepareImage({
             ...imageParams,
             providerProfileId: selection.profile.id,
             modelId: selection.model.id,
@@ -1777,6 +1828,21 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           });
           break;
         }
+        case 'media.generation.requestSubmission':
+          result = mediaOrchestrationService.requestSubmission(
+            params as unknown as MediaSubmissionRequestParams,
+          );
+          break;
+        case 'media.generation.confirmSubmission':
+          result = await mediaOrchestrationService.confirmSubmission(
+            params as unknown as MediaSubmissionConfirmParams,
+          );
+          break;
+        case 'media.task.cancel':
+          result = await mediaOrchestrationService.cancel(
+            params as unknown as MediaTaskCancelParams,
+          );
+          break;
         case 'image.generate.complete':
           result = await imageGenerationService.complete({
             ...(params as unknown as ImageGenerationCompleteParams),
@@ -1811,7 +1877,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             videoParams.modelId,
             videoParams.providerRegion,
           );
-          result = videoGenerationService.prepare({
+          result = mediaPreparationService.prepareVideo({
             ...videoParams,
             adapterKey: requireString(params, 'adapterKey'),
             providerRegion: selection.providerRegion,

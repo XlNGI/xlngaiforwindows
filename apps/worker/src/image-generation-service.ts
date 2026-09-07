@@ -92,6 +92,7 @@ export class ImageGenerationService {
         shotId: params.shotId,
         adapterKey: params.adapterKey,
         status: 'running',
+        mediaState: 'draft',
         requestJson: JSON.stringify(redactParameters(params.parameters)),
         taskSnapshotJson: JSON.stringify({
           version: 1,
@@ -106,7 +107,7 @@ export class ImageGenerationService {
           costNoticeAcknowledged: params.costNoticeAcknowledged === true,
           mediaModelSelection: params.mediaModelSelection,
           inputs: params.mediaInputReferences,
-          parameters: redactParameters(params.parameters),
+          parameters: redactParameters(params.mediaSubmissionParameters ?? params.parameters),
           createdAt: now,
         }),
         createdAt: now,
@@ -208,7 +209,12 @@ export class ImageGenerationService {
           ...entry.asset,
           createdAt: now,
         }));
-        const completed: JobRecord = { ...current, status: 'succeeded', updatedAt: now };
+        const completed: JobRecord = {
+          ...current,
+          status: 'succeeded',
+          mediaState: 'succeeded',
+          updatedAt: now,
+        };
         const results = assets.map((asset, index) => ({
           id: randomUUID(),
           jobId: current.id,
@@ -343,7 +349,12 @@ export class ImageGenerationService {
       if (!job || job.projectId !== project.id) throw new Error('Generation job was not found.');
       if (job.status === 'running' || job.status === 'pending') {
         const now = new Date().toISOString();
-        const cancelled = { ...job, status: 'cancelled', updatedAt: now };
+        const cancelled = {
+          ...job,
+          status: 'cancelled',
+          mediaState: 'cancelled' as const,
+          updatedAt: now,
+        };
         repositories.jobs.save(cancelled);
         repositories.projects.touch(now);
         project.updatedAt = now;
@@ -359,6 +370,10 @@ export class ImageGenerationService {
 
   failTransport(jobId: string): ImageGenerationJobInfo {
     return this.fail(jobId, 'Provider transport failed before completion.');
+  }
+
+  failSubmission(jobId: string, message: string): ImageGenerationJobInfo {
+    return this.fail(jobId, message);
   }
 
   cancelAll(): number {
@@ -856,6 +871,7 @@ export class ImageGenerationService {
       const failed = {
         ...job,
         status: 'failed',
+        mediaState: 'failed' as const,
         errorJson: JSON.stringify({ message }),
         updatedAt: now,
       };
@@ -882,7 +898,11 @@ export class ImageGenerationService {
       const repositories = createRepositories(database);
       const active = repositories.jobs
         .listByProject(project.id)
-        .filter((job) => job.status === 'running' || job.status === 'pending');
+        .filter(
+          (job) =>
+            (job.status === 'running' || job.status === 'pending') &&
+            !isManagedMediaSubmissionState(job.mediaState),
+        );
       if (active.length === 0) return 0;
       const now = new Date().toISOString();
       database.transaction(() => {
@@ -890,6 +910,7 @@ export class ImageGenerationService {
           repositories.jobs.save({
             ...job,
             status,
+            mediaState: status,
             errorJson: message ? JSON.stringify({ message }) : undefined,
             updatedAt: now,
           });
@@ -931,6 +952,7 @@ export class ImageGenerationService {
       shotId: job.shotId,
       adapterKey: job.adapterKey,
       status: job.status as ImageGenerationJobInfo['status'],
+      mediaState: job.mediaState ?? inferLegacyMediaState(job.status),
       // Keep local image Data URLs available for the immediate provider
       // submission, while persisted/reloaded jobs continue to use the
       // redacted snapshot stored in SQLite.
@@ -1018,6 +1040,22 @@ function redactParameters(parameters: AdapterParameters): AdapterParameters {
           : value,
     ]),
   );
+}
+
+function isManagedMediaSubmissionState(state: JobRecord['mediaState']): boolean {
+  return (
+    state === 'draft' ||
+    state === 'awaiting_confirmation' ||
+    state === 'submitting' ||
+    state === 'submission_unknown'
+  );
+}
+
+function inferLegacyMediaState(status: string): NonNullable<JobRecord['mediaState']> {
+  if (status === 'succeeded') return 'succeeded';
+  if (status === 'failed') return 'failed';
+  if (status === 'cancelled') return 'cancelled';
+  return 'draft';
 }
 
 function extractImageSources(body: unknown): ImageSource[] {

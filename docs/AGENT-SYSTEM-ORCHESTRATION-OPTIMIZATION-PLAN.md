@@ -2,8 +2,8 @@
 
 版本：1.0  
 日期：2026-09-02  
-最近同步：2026-09-04  
-状态：实施中（P0、P1、P2、P3 媒体准备与用户选择模型适配已完成；下一阶段为 P4 付费提交与统一状态机）  
+最近同步：2026-09-07  
+状态：实施中（P0-P4 已完成；P5-P7 未完成；整机发布状态保持 `HOLD`）  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM、Generation Adapters
 
 > **方案结论** 会话是面向整个应用的统一人工智能助手，不再按“普通聊天、通用模式、专用模式”划分运行方式。用户在会话中选择一个支持工具调用的推理模型，之后由 Pi Agent 理解自然语言、规划步骤、选择受控业务工具并连续执行；Worker 始终负责权限、确认、状态机、幂等、事务和审计，Tauri Native 始终负责凭据与 Provider 网络边界。图片、视频、小说、文档、素材和项目操作均逐步接入同一个 Agent 工具面。
@@ -49,7 +49,9 @@
 
 ## 3. 当前代码基线与已确认缺陷
 
-### 3.1 当前基线
+### 3.1 P0 前历史基线
+
+> 本节记录 2026-09-02 制定方案时的旧实现，仅用于解释迁移起点，不代表当前状态。当前权威状态见 3.3、11 节阶段清单和 19 节状态同步记录。
 
 | 能力 | 当前实现 | 可复用部分 |
 |---|---|---|
@@ -63,7 +65,7 @@
 | 素材入库 | Worker 在媒体结果成功落盘后事务化登记素材 | 保持本地优先和“成功落盘才入库”规则 |
 | 任务审计 | 已有 generation job events、Agent task/tool call 记录 | 扩展统一关联 ID 和跨阶段事件即可 |
 
-### 3.2 本次问题暴露的缺陷
+### 3.2 P0 前识别的缺陷
 
 1. `inferAgentCapability` 与 `inferUnifiedAgentCapability` 要求“生成”和“视频”近邻，无法识别“帮我生成龙在天空翱翔的视频”，请求被送入文本模型。
 2. 媒体请求在 `agent.run` 内先于 Agent tool loop 分流，LLM 没有机会通过工具选择纠正错误路由。
@@ -74,14 +76,17 @@
 7. 聊天视频提交异常未统一收口，可能留下没有 Provider task ID 的 `pending` 任务。
 8. Desktop、Worker、Native 分别承担部分媒体编排，造成重复判断、参数漂移和错误恢复语义不一致。
 
-### 3.3 已完成实现基线（2026-09-03）
+截至 2026-09-07，第 1-5、7、8 项已由 P1-P4 修复并建立回归；第 6 项“页面无关的项目级视频轮询”仍属于 P5，不能因素材库自身 P5 已完成而视为整机发布通过。
 
-- Agent 会话模型与图片/视频媒体模型已分离；媒体请求不会使用 Agent LLM 或持久化偏好静默选模。
-- `agent.run` 在图片/视频缺少明确 Provider/model 时返回 `needs_model_selection`；Desktop 展示兼容候选，用户选择后才继续。
-- Worker 对 Provider profile、模型、Adapter、能力、区域和 Schema 做二次校验，并将规范化选择写入任务快照。
-- 图片/视频任务已具备参数校验、失败终止、素材落盘、视频轮询恢复、生命周期事件和本地优先素材库处理。
-- Pi Runtime 已完成 Worker 侧核心工具编排与基础 Desktop owner/订阅接线，但仍受短剧 feature flag 限制，尚未成为所有会话的默认 Runtime。
-- 最新验证基线：Worker 341 项测试、Desktop 179 项测试、Persistence 26 项测试、全仓 TypeScript typecheck、Prettier 和 `git diff --check` 通过。
+### 3.3 已完成实现基线（2026-09-07）
+
+- P1 已让普通问答、文档、研究、小说、短剧和媒体意图统一进入 Worker-owned Pi Runtime；`AI_VIDEO_PI_CONVERSATION_RUNTIME=false/0` 仅作为开发期 Legacy 回退开关。
+- P2 已用统一 Registry/Policy 接管 R0-R3、动态授权、一次性确认、项目隔离、拒绝审计和 Tool Result 红线。
+- P3 已接入 `media.image.prepare`、`media.video.prepare`、`media.task.get`、显式媒体模型选择、冻结 Provider/模型/Adapter 快照和受控本地输入。
+- P4 已接入 `media.generation.submit`、`media.task.cancel` 和 Worker-owned `MediaOrchestrationService`；确认前不请求 Provider，确认卡展示冻结草稿版本、参数摘要和费用提示。
+- Schema v37 持久化媒体状态、提交幂等键、确认哈希/session 和提交 attempt；`submission_unknown` 禁止自动重试，历史 `pending/running` 保守迁移，终态不可回退。
+- Desktop 制作入口与 Agent 工具均复用 Worker 提交边界；Native 只持有凭据、受控文件和 Provider 网络请求，项目 SQLite 继续是唯一运行时事实源。
+- 最新验证基线：全仓 614 项 JS/TS 与 72 项 Rust 测试通过，typecheck、ESLint、Prettier、rustfmt 和 `git diff --check` 通过；完整构建/打包证据见 P4 trace。
 
 ## 4. 目标架构
 
@@ -440,13 +445,15 @@ P2 证据：[Agent 编排 P2 通用工具注册表与策略引擎](./code-traces
 
 ### P4：付费提交与统一状态机
 
-- [ ] 实现 `media.generation.submit` 和 `media.task.cancel`，提交必须验证 R2 一次性授权。
-- [ ] 将 Desktop 中的 Native submit 调用迁移到 Worker `MediaOrchestrationService`。
-- [ ] 引入 `submitting` 与 `submission_unknown`，所有提交使用本地幂等键。
-- [ ] Provider task ID 与任务状态原子绑定；明确失败立即进入终态。
-- [ ] 兼容现有 image/video job 数据和历史任务快照。
+- [x] 实现 `media.generation.submit` 和 `media.task.cancel`，提交必须验证 R2 一次性授权。
+- [x] 将 Desktop 中的 Native submit 调用迁移到 Worker `MediaOrchestrationService`。
+- [x] 引入 `submitting` 与 `submission_unknown`，所有提交使用本地幂等键。
+- [x] Provider task ID 与任务状态原子绑定；明确失败立即进入终态。
+- [x] 兼容现有 image/video job 数据和历史任务快照。
 
 完成门禁：确认前不产生 Provider 请求；重复确认、重复 IPC 和应用重入不会重复提交或重复扣费；不再产生无 task ID 的长期 `pending` 任务。
+
+P4 证据：[Agent 编排 P4 付费媒体提交与统一状态机](./code-traces/2026-09-07-agent-orchestration-p4-media-submission.md)。请求确认的同会话重放返回同一内存 token，SQLite 仅保存哈希；确认消费、`submitting` 事件和项目更新时间事务化提交，任何不确定网络结果进入 `submission_unknown` 且不可自动重试。
 
 ### P5：项目级后台任务运行时
 
@@ -624,11 +631,11 @@ correlationId
 
 ## 18. 下一步
 
-当前处于 **P0、P1、P2、P3 媒体准备与用户选择模型适配已完成，Pi 集成计划已到 P5 核心/P6 基础接线** 的状态。下一步按以下顺序推进：
+当前处于 **P0-P4 已完成，P5-P7 未完成，整机发布保持 `HOLD`** 的状态。下一步按以下顺序推进：
 
-1. 完成 P4 的付费提交状态机和 `submission_unknown`，每次真实 Provider 提交分别确认；
-2. 将视频轮询和媒体提交收口到项目级后台运行时，确保页面关闭、重启和网络异常可恢复；
-3. 再进行 P6/P7 的全系统工具覆盖、真实 Provider 和 Windows 发布验收。
+1. P5 将视频轮询收口到项目级后台运行时，确保页面关闭、重启和网络异常可恢复；
+2. P6 补齐全系统工具覆盖和生产按钮/Agent 共用 Service 的剩余边界；
+3. P7 完成真实 Provider、Windows 长稳、安装升级、人工验收和发布签收。
 
 > **冻结原则** Agent 可以用自然语言发起整个系统的操作，但模型永远不是权限、状态和数据事实源；付费与高风险动作必须确认，Provider 凭据永不进入 Agent 边界，成功媒体必须先完成本地落盘再进入素材库。
 
@@ -636,6 +643,7 @@ correlationId
 
 | 日期 | 状态 | 证据 | 未完成边界 |
 |---|---|---|---|
+| 2026-09-07 | P4 付费提交与统一状态机完成 | [P4 付费媒体提交验证证据](./code-traces/2026-09-07-agent-orchestration-p4-media-submission.md)；Agent/制作入口共用 Worker 编排，R2 一次性确认、冻结快照二次校验、Schema v37 幂等/状态事实、Native 单次请求、`submission_unknown` 和明确取消结果完成；全仓 614 项 JS/TS、72 项 Rust 及质量门禁通过 | P5 项目级后台轮询、P6 全系统工具覆盖、P7 真实 Provider/Windows 长稳与发布验收未完成；发布保持 `HOLD` |
 | 2026-09-04 | P3 媒体准备与用户选择模型适配完成 | [P3 媒体准备验证证据](./code-traces/2026-09-04-agent-orchestration-p3-media-preparation.md)；Worker 341 项、Desktop 179 项、Persistence 26 项测试通过；全仓 typecheck、format:check、`git diff --check` 通过 | P4 付费提交、`submission_unknown`、项目级后台轮询、真实 Provider 和 Windows 长稳/发布验收仍未完成 |
 | 2026-09-03 | 计划状态与实现同步 | 提交 `c80f619` 已同步 `main`；媒体模型显式选择、Worker 二次校验、任务快照和 Base64 防护已完成；Worker 294、Desktop 174 测试及 typecheck/format check 通过 | Pi 尚未覆盖所有会话；媒体提交/轮询尚未完全迁移到项目级后台运行时；真实 Provider、Windows 断网/重启/性能和发布门禁未完成 |
 | 2026-09-03 | P0 完成 | 冻结 `AgentToolRegistryV1`、R0-R3、一次性确认授权、64 KiB Tool Result 红线、媒体草稿/状态机和 Provider 规范化合同；补齐精确视频语句、Provider 区域快照、页面卸载和提交异常回归；JS/TS 534 项、Rust 71 项、typecheck/lint/format、sidecar smoke 与 NSIS build 通过；详见 P0 基线证据 | P1 尚未统一所有会话；P2/P4 尚未接入通用策略与 `submission_unknown` 实现；P5 尚未迁移页面调度器；真实 Provider 与 Windows 安装/升级/卸载仍待 P7 |

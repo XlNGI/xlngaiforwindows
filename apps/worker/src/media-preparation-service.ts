@@ -3,6 +3,7 @@ import type {
   AdapterParameters,
   ImageAssetKind,
   ImageGenerationJobInfo,
+  ImageGenerationPrepareParams,
   LlmGenerationIdentity,
   LlmInputAttachment,
   MediaGenerationDraft,
@@ -20,10 +21,11 @@ import type {
   ProviderProfileInfo,
   VideoAssetKind,
   VideoGenerationJobInfo,
+  VideoGenerationPrepareParams,
   VideoProviderRegion,
 } from '@ai-video/contracts';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createRepositories } from '@ai-video/persistence';
 import type { AdapterService } from './adapter-service.js';
 import type { AppSettingsService } from './app-settings-service.js';
@@ -36,6 +38,7 @@ import type { VideoGenerationService } from './video-generation-service.js';
 const MAX_MEDIA_CANDIDATES = 50;
 const MAX_MEDIA_PARAMETERS = 40;
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_CONTROLLED_IMAGE_BYTES = 25 * 1024 * 1024;
 
 export interface MediaPrepareArguments {
   prompt: string;
@@ -61,6 +64,7 @@ interface MediaAttachmentSnapshot {
 interface MaterializedMediaInputs {
   references: MediaInputReferenceV1[];
   paths: string[];
+  parameters: AdapterParameters;
 }
 
 type MediaIdentity = LlmGenerationIdentity;
@@ -77,6 +81,34 @@ export class MediaPreparationService {
       identity: MediaIdentity,
     ) => LlmInputAttachment[] = () => [],
   ) {}
+
+  prepareImage(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
+    const materialized = this.materializeInputs([], params.parameters);
+    try {
+      return this.images.prepare({
+        ...params,
+        mediaInputReferences: materialized.references,
+        mediaSubmissionParameters: materialized.parameters,
+      });
+    } catch (error) {
+      cleanupMaterializedPaths(materialized.paths);
+      throw error;
+    }
+  }
+
+  prepareVideo(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
+    const materialized = this.materializeInputs([], params.parameters);
+    try {
+      return this.videos.prepare({
+        ...params,
+        mediaInputReferences: materialized.references,
+        mediaSubmissionParameters: materialized.parameters,
+      });
+    } catch (error) {
+      cleanupMaterializedPaths(materialized.paths);
+      throw error;
+    }
+  }
 
   selectionContext(
     kind: MediaGenerationKind,
@@ -195,6 +227,7 @@ export class MediaPreparationService {
       costNoticeAcknowledged: false,
       mediaModelSelection: snapshot,
       mediaInputReferences: materialized.references,
+      mediaSubmissionParameters: materialized.parameters,
     };
     let job: ImageGenerationJobInfo | VideoGenerationJobInfo;
     try {
@@ -242,13 +275,23 @@ export class MediaPreparationService {
       const adapter = this.adapters
         .catalog()
         .adapters.find((item) => item.key === record.adapterKey);
-      if (!adapter) throw new Error('The media task adapter is no longer available.');
-      const kind: MediaGenerationKind = adapter.capability.endsWith('TO_IMAGE') ? 'image' : 'video';
+      const snapshotKind = readSnapshotKind(record.taskSnapshotJson);
+      const kind: MediaGenerationKind =
+        snapshotKind ??
+        (adapter
+          ? adapter.capability.endsWith('TO_IMAGE')
+            ? 'image'
+            : 'video'
+          : record.adapterKey.includes('TO_VIDEO')
+            ? 'video'
+            : 'image');
       const results = repositories.generationResults.listByJob(record.id);
       return {
         taskId: record.id,
         kind,
-        state: normalizeTaskState(kind, record.status, Boolean(record.providerTaskId)),
+        state:
+          record.mediaState ??
+          normalizeTaskState(kind, record.status, Boolean(record.providerTaskId)),
         adapterKey: record.adapterKey,
         resultAssetIds: results.flatMap((result) => (result.assetId ? [result.assetId] : [])),
         error: readJobError(record.errorJson),
@@ -352,16 +395,47 @@ export class MediaPreparationService {
     const project = this.projects.current();
     if (!project) throw new Error('No project is open.');
     const images = Array.isArray(parameters.images) ? parameters.images : [];
-    const parsedImages = images.flatMap((value) =>
+    const inlineImages = images.flatMap((value) =>
       value.toLowerCase().startsWith('data:image/') ? [parseCanonicalImageDataUrl(value)] : [],
     );
-    const directory = resolveProjectRelativePath(project.rootPath, 'cache/media-inputs');
-    if (parsedImages.length > 0) {
+    const sharedInputRoot = process.env.AI_VIDEO_MEDIA_INPUT_ROOT;
+    const inputRoot = sharedInputRoot?.trim() || project.rootPath;
+    const assetImages = this.projects.access(false, (database, currentProject) => {
+      const repositories = createRepositories(database);
+      return inputAssetIds.map((assetId) => {
+        const asset = repositories.assets.get(assetId);
+        if (
+          !asset ||
+          asset.projectId !== currentProject.id ||
+          asset.deletedAt ||
+          asset.kind.toLowerCase().includes('video')
+        ) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_PROJECT_SCOPE',
+            'Every media input asset must be an active image in the current project.',
+          );
+        }
+        const bytes = readFileSync(
+          resolveProjectRelativePath(currentProject.rootPath, asset.relativePath),
+        );
+        const parsed = parseStoredImage(bytes);
+        if (createHash('sha256').update(bytes).digest('hex') !== asset.contentHash) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_ARGUMENTS_INVALID',
+            'A media input asset failed its content integrity check.',
+          );
+        }
+        return { assetId, ...parsed };
+      });
+    });
+    const totalBytes = [...assetImages, ...inlineImages].reduce(
+      (total, image) => total + image.bytes.byteLength,
+      0,
+    );
+    const directory = resolveProjectRelativePath(inputRoot, 'cache/media-inputs');
+    if (totalBytes > 0) {
       mkdirSync(directory, { recursive: true });
-      assertStorageCapacity(
-        directory,
-        parsedImages.reduce((total, image) => total + image.bytes.byteLength, 0),
-      );
+      assertStorageCapacity(directory, totalBytes);
     }
     const paths: string[] = [];
     const references: MediaInputReferenceV1[] = inputAssetIds.map((assetId) => ({
@@ -369,9 +443,11 @@ export class MediaPreparationService {
       assetId,
     }));
     try {
-      for (const image of parsedImages) {
+      const assetUris = new Map<string, string>();
+      const inlineUris: string[] = [];
+      for (const image of [...assetImages, ...inlineImages]) {
         const handle = `cache/media-inputs/${randomUUID()}.${image.extension}`;
-        const finalPath = resolveProjectRelativePath(project.rootPath, handle);
+        const finalPath = resolveProjectRelativePath(inputRoot, handle);
         const temporaryPath = `${finalPath}.${process.pid}.tmp`;
         try {
           writeFileSync(temporaryPath, image.bytes, { flag: 'wx' });
@@ -386,10 +462,32 @@ export class MediaPreparationService {
           handle,
           contentType: image.contentType,
         });
+        const uri = `controlled-file://${handle}`;
+        if ('assetId' in image) assetUris.set(image.assetId, uri);
+        else inlineUris.push(uri);
       }
-      return { references, paths };
+      let inlineIndex = 0;
+      const transformed = cloneParameters(parameters);
+      for (const [key, value] of Object.entries(transformed)) {
+        if (Array.isArray(value)) {
+          transformed[key] = value.map((item) => {
+            if (typeof item === 'string' && item.startsWith('asset://')) {
+              return assetUris.get(item.slice('asset://'.length)) ?? item;
+            }
+            if (typeof item === 'string' && item.toLowerCase().startsWith('data:image/')) {
+              return inlineUris[inlineIndex++] ?? item;
+            }
+            return item;
+          });
+        } else if (typeof value === 'string' && value.startsWith('asset://')) {
+          transformed[key] = assetUris.get(value.slice('asset://'.length)) ?? value;
+        } else if (typeof value === 'string' && value.toLowerCase().startsWith('data:image/')) {
+          transformed[key] = inlineUris[inlineIndex++] ?? value;
+        }
+      }
+      return { references, paths, parameters: transformed };
     } catch (error) {
-      for (const path of paths) rmSync(path, { force: true });
+      cleanupMaterializedPaths(paths);
       throw error;
     }
   }
@@ -602,6 +700,18 @@ function readJobError(value: string | undefined): string | undefined {
   }
 }
 
+function readSnapshotKind(value: string | undefined): MediaGenerationKind | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as { capability?: unknown };
+    return parsed.capability === 'image' || parsed.capability === 'video'
+      ? parsed.capability
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function requireParameters(value: unknown): AdapterParameters {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AgentToolPolicyError(
@@ -687,6 +797,29 @@ function parseCanonicalImageDataUrl(
     bytes,
     extension: contentType === 'image/png' ? 'png' : contentType === 'image/jpeg' ? 'jpg' : 'webp',
   };
+}
+
+function parseStoredImage(bytes: Buffer): {
+  bytes: Buffer;
+  contentType: MediaAttachmentSnapshot['contentType'];
+  extension: 'png' | 'jpg' | 'webp';
+} {
+  if (bytes.length < 1 || bytes.length > MAX_CONTROLLED_IMAGE_BYTES)
+    throw invalidParameter('images');
+  for (const contentType of ['image/png', 'image/jpeg', 'image/webp'] as const) {
+    if (!hasImageSignature(bytes, contentType)) continue;
+    return {
+      bytes,
+      contentType,
+      extension:
+        contentType === 'image/png' ? 'png' : contentType === 'image/jpeg' ? 'jpg' : 'webp',
+    };
+  }
+  throw invalidParameter('images');
+}
+
+function cleanupMaterializedPaths(paths: string[]): void {
+  for (const path of paths) rmSync(path, { force: true });
 }
 
 function normalizeImageContentType(
