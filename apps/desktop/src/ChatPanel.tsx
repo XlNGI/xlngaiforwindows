@@ -79,6 +79,7 @@ interface ChatPanelProps {
   onRejectSchemaProposal?: (adapterKey: string, version: number) => void;
   confirmation?: AgentToolConfirmationRequest | AgentTaskPendingConfirmationInfo;
   mediaSubmissionConfirmation?: MediaSubmissionConfirmationRequest;
+  activeVideoTaskCount?: number;
   onConfirmAgentAction?: (approved: boolean) => void;
   onConfirmMediaSubmission?: (approved: boolean) => void;
   onOpenTaskLog?: () => void;
@@ -159,6 +160,7 @@ export function ChatPanel({
   agentTask,
   confirmation,
   mediaSubmissionConfirmation,
+  activeVideoTaskCount = 0,
   onConfirmAgentAction,
   onConfirmMediaSubmission,
   onConfirmSchemaProposal,
@@ -706,6 +708,16 @@ export function ChatPanel({
       {agentTask?.task.status === 'failed' && agentTask.task.retryable && (
         <div className="agent-recovery-notice" role="status">
           <span>上次 Agent 任务未完成；可以重试，或先在任务日志中恢复未完成产物。</span>
+          {onOpenTaskLog && (
+            <button type="button" className="button secondary" onClick={onOpenTaskLog}>
+              查看任务日志
+            </button>
+          )}
+        </div>
+      )}
+      {activeVideoTaskCount > 0 && (
+        <div className="agent-recovery-notice" role="status">
+          <span>项目后台正在处理 {activeVideoTaskCount} 个视频任务。</span>
           {onOpenTaskLog && (
             <button type="button" className="button secondary" onClick={onOpenTaskLog}>
               查看任务日志

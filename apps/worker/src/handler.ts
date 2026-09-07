@@ -145,6 +145,7 @@ import { DomainToolGateway } from './domain-tool-gateway.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { MediaOrchestrationService } from './media-orchestration-service.js';
+import { ProjectTaskRuntime } from './project-task-runtime.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { getAdapter, setAdapterOverrides } from '@ai-video/generation-adapters';
@@ -598,6 +599,7 @@ const methods = new Set<WorkerMethod>([
   'video.generate.cancel',
   'video.generate.get',
   'video.generate.list',
+  'project.task.subscribe',
   'asset.list',
   'asset.preview',
   'asset.mediaSource',
@@ -643,6 +645,7 @@ let piConversationRuntime: PiConversationRuntime | undefined;
 
 export function configurePiConversationRuntime(bridge: NativeProviderBridge): void {
   nativeProviderBridge = bridge;
+  projectTaskRuntime.start();
   piConversationRuntime = new PiConversationRuntime({
     generation: generationService,
     plans: taskPlanService,
@@ -710,6 +713,12 @@ const mediaOrchestrationService = new MediaOrchestrationService(
     },
   } as unknown as NativeProviderBridge,
 );
+const projectTaskRuntime = new ProjectTaskRuntime(projectService, videoGenerationService, {
+  request: async (...args: Parameters<NativeProviderBridge['request']>) => {
+    if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
+    return nativeProviderBridge.request(...args);
+  },
+} as Pick<NativeProviderBridge, 'request'>);
 const agentSystemToolService = new AgentSystemToolService(
   projectService,
   contentService,
@@ -1019,6 +1028,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       mediaOrchestrationService,
       imageGenerationService,
       videoGenerationService,
+      projectTaskRuntime,
     });
     if (infrastructure.handled) {
       result = infrastructure.result;
@@ -1832,16 +1842,19 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = mediaOrchestrationService.requestSubmission(
             params as unknown as MediaSubmissionRequestParams,
           );
+          projectTaskRuntime.kick();
           break;
         case 'media.generation.confirmSubmission':
           result = await mediaOrchestrationService.confirmSubmission(
             params as unknown as MediaSubmissionConfirmParams,
           );
+          projectTaskRuntime.kick();
           break;
         case 'media.task.cancel':
           result = await mediaOrchestrationService.cancel(
             params as unknown as MediaTaskCancelParams,
           );
+          projectTaskRuntime.kick();
           break;
         case 'image.generate.complete':
           result = await imageGenerationService.complete({
@@ -1886,6 +1899,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             mediaModelSelection: selection.mediaModelSelection,
             assetKind: optionalVideoAssetKind(params, 'assetKind'),
           });
+          projectTaskRuntime.kick();
           break;
         }
         case 'video.generate.attachTask':
@@ -1893,6 +1907,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             jobId: requireString(params, 'jobId'),
             providerTaskId: requireString(params, 'providerTaskId'),
           } satisfies VideoGenerationAttachTaskParams);
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.observe':
           result = videoGenerationService.observe({
@@ -1901,6 +1916,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             providerStatus: requireNumber(params, 'providerStatus'),
             providerBody: params.providerBody,
           } satisfies VideoGenerationObserveParams);
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.fail':
           result = videoGenerationService.fail({
@@ -1908,24 +1924,34 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             failureKind: requireVideoFailureKind(params, 'failureKind'),
             message: typeof params.message === 'string' ? params.message : undefined,
           } satisfies VideoGenerationFailParams);
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.pause':
           result = videoGenerationService.pause(requireString(params, 'jobId'));
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.resume':
           result = videoGenerationService.resume(requireString(params, 'jobId'));
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.timeout':
           result = videoGenerationService.timeout(requireString(params, 'jobId'));
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.cancel':
           result = videoGenerationService.cancel(requireString(params, 'jobId'));
+          projectTaskRuntime.kick();
           break;
         case 'video.generate.get':
           result = videoGenerationService.get(requireString(params, 'jobId'));
           break;
         case 'video.generate.list':
           result = videoGenerationService.list();
+          break;
+        case 'project.task.subscribe':
+          result = projectTaskRuntime.snapshot(
+            typeof params.afterRevision === 'number' ? params.afterRevision : -1,
+          );
           break;
         case 'asset.list':
           result = imageGenerationService.listAssets({

@@ -10,14 +10,9 @@ import type {
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
-import { downloadVideoProviderTask, pollVideoProviderTask } from './provider-client';
 import { callWorker } from './worker-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
-vi.mock('./provider-client', () => ({
-  pollVideoProviderTask: vi.fn(),
-  downloadVideoProviderTask: vi.fn(),
-}));
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
 }));
@@ -964,7 +959,6 @@ describe('ProductionPanel', () => {
   });
 
   it('submits a video task once and persists its provider task association', async () => {
-    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
@@ -1015,7 +1009,7 @@ describe('ProductionPanel', () => {
       approved: true,
     });
     expect(confirmDialog).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText('视频任务已提交，正在本地查询。')).toBeInTheDocument();
+    expect(await screen.findByText('视频任务已提交，项目后台正在处理。')).toBeInTheDocument();
   });
 
   it('persists the bounded provider detail when video submission is rejected', async () => {
@@ -1108,7 +1102,6 @@ describe('ProductionPanel', () => {
   });
 
   it('stores dropped asset references in the draft and resolves them for submission', async () => {
-    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
@@ -1177,7 +1170,6 @@ describe('ProductionPanel', () => {
   });
 
   it('selects ordered local start and end frames and submits Data URLs once', async () => {
-    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
@@ -1270,13 +1262,11 @@ describe('ProductionPanel', () => {
 
   it('resumes without resubmission and keeps local cancellation when remote cancellation fails', async () => {
     const polling = videoJob('polling');
-    vi.mocked(pollVideoProviderTask).mockReturnValue(new Promise(() => undefined));
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'asset.list') return Promise.resolve([]);
-      if (method === 'video.generate.list') return Promise.resolve([polling]);
       if (method === 'media.task.cancel')
         return Promise.resolve({
           kind: 'video',
@@ -1286,17 +1276,18 @@ describe('ProductionPanel', () => {
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        assets={[]}
+        videoJobs={[polling]}
+      />,
+    );
     expect(await screen.findByText('生成中')).toBeInTheDocument();
     expect(screen.getByText(/视频通常需要几分钟生成/)).toBeInTheDocument();
-    await waitFor(() =>
-      expect(pollVideoProviderTask).toHaveBeenCalledWith(
-        videoDescriptor.key,
-        providerProfile.id,
-        'provider-task',
-        'cn',
-      ),
-    );
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.observe', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith(
       'media.generation.requestSubmission',
       expect.anything(),
@@ -1334,7 +1325,13 @@ describe('ProductionPanel', () => {
     });
 
     render(
-      <ProductionPanel projectId="project" shotId="shot" writable assets={[savedVideoAsset]} />,
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        assets={[savedVideoAsset]}
+        videoJobs={[completed]}
+      />,
     );
 
     expect(await screen.findByText(/结果已进入素材库/)).toBeInTheDocument();
@@ -1343,96 +1340,29 @@ describe('ProductionPanel', () => {
     expect(screen.getByRole('button', { name: '播放视频' })).toBeInTheDocument();
   });
 
-  it('downloads completed UniCompAPI video content through the native credential bridge', async () => {
-    const unicompProfile: ProviderProfileInfo = {
-      ...providerProfile,
-      id: '11111111-1111-4111-8111-111111111113',
-      name: 'UniCompAPI A',
-      providerType: 'unicompapi',
-      protocol: 'openai-chat-completions',
-      baseUrl: 'https://unicompapi.com/v1',
-    };
-    const unicompDescriptor: AdapterDescriptor = {
-      ...videoDescriptor,
-      key: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
-      capability: 'TEXT_TO_VIDEO',
-      provider: 'unicompapi',
-      providerLabel: 'UniCompAPI',
-      model: 'kling-v3-turbo',
-      modelLabel: 'kling-v3-turbo',
-      apiVersion: 'v1',
-      endpoint: 'https://unicompapi.com/v1/videos',
-      credentialProvider: 'unicompapi',
-    };
-    const unicompModel: ProviderModelInfo = {
-      ...providerModels[2]!,
-      id: '31111111-1111-4111-8111-111111111113',
-      providerProfileId: unicompProfile.id,
-      remoteModelId: 'kling-v3-turbo',
-      displayName: 'Kling v3 Turbo',
-    };
-    const polling: VideoGenerationJobInfo = {
-      ...videoJob('polling'),
-      adapterKey: unicompDescriptor.key,
-      metadata: {
-        ...videoJob('polling').metadata,
-        providerRegion: 'unicompapi',
-        providerProfileId: unicompProfile.id,
-        modelId: 'kling-v3-turbo',
-      },
-    };
-    vi.mocked(pollVideoProviderTask).mockResolvedValue({
-      status: 200,
-      body: { id: 'provider-task', status: 'completed' },
-    });
-    vi.mocked(downloadVideoProviderTask).mockResolvedValue({
-      path: 'C:\\Temp\\ai-video-workspace-unicompapi\\video.mp4',
-      contentType: 'video/mp4',
-    });
-    vi.mocked(callWorker).mockImplementation((method) => {
-      if (method === 'adapter.catalog') {
-        return Promise.resolve({
-          capabilities: [{ key: 'TEXT_TO_VIDEO', label: '文生视频' }],
-          providers: [{ key: 'unicompapi', label: 'UniCompAPI' }],
-          adapters: [unicompDescriptor],
-        });
-      }
-      if (method === 'provider.profile.list') return Promise.resolve([unicompProfile]);
-      if (method === 'provider.model.list') return Promise.resolve([unicompModel]);
-      if (method === 'adapter.resolve') return Promise.resolve(unicompDescriptor);
+  it('renders Worker-owned task snapshots without polling or observing the Provider', async () => {
+    const polling = videoJob('polling');
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
       if (method === 'asset.list') return Promise.resolve([]);
-      if (method === 'video.generate.list') return Promise.resolve([polling]);
-      if (method === 'video.generate.observe') {
-        return Promise.resolve({
-          ...polling,
-          status: 'failed' as const,
-          error: 'fixture terminal',
-        });
-      }
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
-
-    await waitFor(() =>
-      expect(downloadVideoProviderTask).toHaveBeenCalledWith(
-        unicompDescriptor.key,
-        unicompProfile.id,
-        'provider-task',
-        'unicompapi',
-      ),
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        assets={[]}
+        videoJobs={[polling]}
+      />,
     );
-    expect(callWorker).toHaveBeenCalledWith('video.generate.observe', {
-      jobId: polling.id,
-      providerTaskId: 'provider-task',
-      providerStatus: 200,
-      providerBody: {
-        status: 'completed',
-        data: { id: 'provider-task', status: 'completed' },
-        nativeVideoFilePath: 'C:\\Temp\\ai-video-workspace-unicompapi\\video.mp4',
-        contentType: 'video/mp4',
-      },
-    });
+
+    expect(await screen.findByText('生成中')).toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.list', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.observe', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.timeout', expect.anything());
   });
 });

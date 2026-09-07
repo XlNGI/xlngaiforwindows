@@ -18,6 +18,7 @@ import type {
   AssetInfo,
   VideoAssetKind,
   VideoGenerationAttachTaskParams,
+  VideoGenerationCostInfo,
   VideoGenerationFailParams,
   VideoGenerationFailureKind,
   VideoGenerationJobInfo,
@@ -292,7 +293,7 @@ export class VideoGenerationService {
 
     let source: string;
     try {
-      source = extractVideoSource(params.providerBody, metadata.providerRegion === 'unicompapi');
+      source = extractVideoSource(params.providerBody);
     } catch (error) {
       return this.transitionFailure(
         job.id,
@@ -971,13 +972,32 @@ function observedMetadata(
   body: unknown,
 ): VideoJobMetadata {
   const provider = getAdapter(adapterKey)?.provider;
-  const cost = (provider ? extractVideoCost(provider, body) : undefined) ?? metadata.cost;
+  const cost =
+    normalizedVideoCost(body) ??
+    (provider ? extractVideoCost(provider, body) : undefined) ??
+    metadata.cost;
   return {
     ...metadata,
     pollAttempts: metadata.pollAttempts + 1,
     lastPolledAt: new Date().toISOString(),
     cost: priceProviderCost(cost, metadata.pricingSnapshot),
   };
+}
+
+function normalizedVideoCost(body: unknown): VideoGenerationCostInfo | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const cost = (body as Record<string, unknown>).cost;
+  if (!cost || typeof cost !== 'object' || Array.isArray(cost)) return undefined;
+  const value = cost as Record<string, unknown>;
+  if (
+    typeof value.amount !== 'number' ||
+    !Number.isFinite(value.amount) ||
+    value.amount < 0 ||
+    (value.unit !== 'credits' && value.unit !== 'unknown')
+  ) {
+    return undefined;
+  }
+  return { amount: value.amount, unit: value.unit };
 }
 
 function normalizeCreditPricingSnapshot(value: unknown): CreditPricingSnapshot | undefined {
@@ -1040,8 +1060,8 @@ function findNamedString(value: unknown, keys: string[]): string | undefined {
   return data && typeof data === 'object' ? findNamedString(data, keys) : undefined;
 }
 
-function extractVideoSource(value: unknown, allowNativeFile = false): string {
-  const nativeFile = allowNativeFile ? nativeVideoFilePath(value) : undefined;
+function extractVideoSource(value: unknown): string {
+  const nativeFile = nativeVideoFilePath(value);
   if (nativeFile) return `native-file:${nativeFile}`;
   const source = findVideoCreationSource(value);
   if (!source) throw new Error('Provider reported success without a video output URL.');
@@ -1059,13 +1079,22 @@ function extractVideoSource(value: unknown, allowNativeFile = false): string {
 
 function nativeVideoFilePath(value: unknown): string | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const candidate = (value as Record<string, unknown>).nativeVideoFilePath;
+  const object = value as Record<string, unknown>;
+  const output =
+    object.output && typeof object.output === 'object' && !Array.isArray(object.output)
+      ? (object.output as Record<string, unknown>)
+      : undefined;
+  const candidate =
+    output?.type === 'native_temporary_file' ? output.path : object.nativeVideoFilePath;
   if (typeof candidate !== 'string' || candidate.length < 1 || candidate.length > 32_767) {
     return undefined;
   }
   const root = resolve(tmpdir(), 'ai-video-workspace-unicompapi');
   const path = resolve(candidate);
-  if (!path.startsWith(`${root}${sep}`) || extname(path).toLowerCase() !== '.mp4') {
+  if (
+    !path.startsWith(`${root}${sep}`) ||
+    !['.mp4', '.webm'].includes(extname(path).toLowerCase())
+  ) {
     throw new Error('Provider returned an unsafe native video file path.');
   }
   return path;
@@ -1239,10 +1268,14 @@ function copyNativeVideo(
     if (sizeBytes !== declaredSize || statSync(temporaryPath).size !== sizeBytes) {
       throw new Error('Video download was empty or truncated.');
     }
-    validateVideoSignature(temporaryPath, '.mp4');
+    const extension = extname(sourcePath).toLowerCase();
+    if (extension !== '.mp4' && extension !== '.webm') {
+      throw new Error('Provider returned an unsupported native video file type.');
+    }
+    validateVideoSignature(temporaryPath, extension);
     return {
       temporaryPath,
-      extension: '.mp4',
+      extension,
       contentHash: hash.digest('hex'),
       sizeBytes,
     };

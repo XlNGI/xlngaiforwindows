@@ -56,6 +56,7 @@ import type {
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
+  VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -64,6 +65,7 @@ import { useDocumentWorkspace } from './use-document-workspace';
 import { useConversationWorkspace } from './use-conversation-workspace';
 import { useAssetWorkspace } from './use-asset-workspace';
 import { useProductionState } from './use-production-state';
+import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel, type ChatAttachment, type ComposerMode } from './ChatPanel';
@@ -94,6 +96,7 @@ import {
 } from './workspace/detached-window';
 import type { WorkspacePanelId } from './workspace/workspace-types';
 import { MODAL_Z_INDEX } from './workspace/ui-layers';
+import { generationStatusLabel } from './generation-feedback';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
@@ -106,6 +109,24 @@ interface DetachedPanelRegistration {
   snapshot: DetachedPanelSnapshot;
   snapshotSequence: number;
   actionSequence: number;
+}
+
+const TERMINAL_VIDEO_STATUSES = new Set<VideoGenerationJobInfo['status']>([
+  'succeeded',
+  'failed',
+  'timed-out',
+  'cancelled',
+]);
+
+function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  try {
+    new Notification(job.status === 'succeeded' ? '视频生成完成' : '视频任务已结束', {
+      body: generationStatusLabel(job.status),
+    });
+  } catch {
+    // The task log remains the durable notification surface when OS notifications are unavailable.
+  }
 }
 
 function mediaConfirmationMessage(confirmation: MediaSubmissionConfirmationRequest): string {
@@ -734,6 +755,54 @@ export function App() {
     openAssetSource,
     reset: resetAssetWorkspace,
   } = assetWorkspace;
+  const projectTasks = useProjectTaskSubscription(project?.id);
+  const observedProjectTasks = useRef<
+    | {
+        projectSessionId: string;
+        statuses: Map<string, VideoGenerationJobInfo['status']>;
+      }
+    | undefined
+  >(undefined);
+  const activeProjectIdRef = useRef(project?.id);
+  const [taskCompletionRevision, setTaskCompletionRevision] = useState(0);
+  activeProjectIdRef.current = project?.id;
+
+  useEffect(() => {
+    if (!projectTasks) return;
+    const previous = observedProjectTasks.current;
+    const newSession = previous?.projectSessionId !== projectTasks.projectSessionId;
+    const statuses = new Map(projectTasks.videoJobs.map((job) => [job.id, job.status]));
+    const terminalTransitions = newSession
+      ? []
+      : projectTasks.videoJobs.filter((job) => {
+          const previousStatus = previous.statuses.get(job.id);
+          return (
+            TERMINAL_VIDEO_STATUSES.has(job.status) &&
+            (previousStatus === undefined || !TERMINAL_VIDEO_STATUSES.has(previousStatus))
+          );
+        });
+    observedProjectTasks.current = { projectSessionId: projectTasks.projectSessionId, statuses };
+
+    for (const job of terminalTransitions) notifyVideoTerminal(job);
+    const missingInitialAsset =
+      newSession &&
+      projectTasks.videoJobs.some(
+        (job) =>
+          job.status === 'succeeded' &&
+          job.results.some((result) => !assets.some((asset) => asset.id === result.asset.id)),
+      );
+    if (!missingInitialAsset && !terminalTransitions.some((job) => job.status === 'succeeded')) {
+      return;
+    }
+
+    const expectedProjectId = projectTasks.projectId;
+    setTaskCompletionRevision((revision) => revision + 1);
+    void callWorker('asset.list', {})
+      .then((items) => {
+        if (activeProjectIdRef.current === expectedProjectId) updateAssets(items);
+      })
+      .catch(() => undefined);
+  }, [projectTasks]);
   const productionWorkspace = useProductionState({ setNavigationMode });
   const {
     productionCapability,
@@ -2605,6 +2674,7 @@ export function App() {
       agentTask={agentTask}
       confirmation={agentConfirmation}
       mediaSubmissionConfirmation={mediaSubmissionConfirmation}
+      activeVideoTaskCount={projectTasks?.activeCount ?? 0}
       agentModelSelection={agentModelSelection}
       mediaModelSelection={agentMediaSelection}
       mediaReferenceImageInputs={activeMediaInputsRef.current}
@@ -2747,6 +2817,7 @@ export function App() {
       shotId={shot?.id}
       writable={writable}
       assets={assets}
+      videoJobs={projectTasks?.videoJobs ?? []}
       focusedAssetId={focusedSource?.assetId}
       focusedJobId={focusedSource?.jobId}
       onAssetsChanged={updateAssets}
@@ -3669,6 +3740,7 @@ export function App() {
             ) : view === 'tasks' ? (
               <TaskLogView
                 projectId={project?.id}
+                taskRevision={projectTasks?.revision}
                 onOpenDocument={(documentId) => void openDocumentById(documentId)}
                 onOpenConversation={(conversationId) => void openConversationById(conversationId)}
               />
@@ -3676,6 +3748,7 @@ export function App() {
               <AssetLibraryView
                 writable={writable}
                 selectedAssetId={assetLibrarySelectedId}
+                taskCompletionRevision={taskCompletionRevision}
                 onOpenSource={(source) => void openAssetSource(source)}
               />
             ) : (

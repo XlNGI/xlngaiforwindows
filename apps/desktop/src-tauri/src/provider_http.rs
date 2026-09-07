@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    net::{IpAddr, Ipv4Addr, ToSocketAddrs},
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -10,7 +11,8 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpSetTimeouts, ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_SECURE_FAILURE,
     ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_REDIRECTS,
     WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_TYPE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_RETRY_AFTER,
+    WINHTTP_QUERY_STATUS_CODE,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +68,7 @@ pub(crate) struct JsonHttpRequest<'a> {
 pub(crate) struct JsonHttpResponse {
     pub status: u32,
     pub body: serde_json::Value,
+    pub retry_after_ms: Option<u64>,
 }
 
 pub(crate) struct RawHttpResponse {
@@ -73,6 +76,7 @@ pub(crate) struct RawHttpResponse {
     pub body: Vec<u8>,
     pub content_type: Option<String>,
     pub location: Option<String>,
+    pub retry_after: Option<String>,
 }
 
 pub(crate) struct PublicHttpRequest<'a> {
@@ -81,6 +85,101 @@ pub(crate) struct PublicHttpRequest<'a> {
     pub accept: &'a str,
     pub response_body_limit: usize,
     pub cancellation: Option<&'a AtomicBool>,
+}
+
+pub(crate) struct PublicHttpsUrl {
+    pub host: String,
+    pub path: String,
+}
+
+pub(crate) fn parse_public_https_url(value: &str) -> Result<PublicHttpsUrl, String> {
+    let remainder = value
+        .strip_prefix("https://")
+        .ok_or("Public URLs must use HTTPS")?;
+    if remainder.is_empty() || remainder.contains(['\\', '#', '\r', '\n', '\0', '@']) {
+        return Err("Public URL is invalid".to_string());
+    }
+    let split = remainder.find(['/', '?']).unwrap_or(remainder.len());
+    let host = &remainder[..split];
+    if host.is_empty()
+        || host.contains(':')
+        || !host.is_ascii()
+        || host
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+        || host.ends_with('.')
+        || host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+    {
+        return Err("Public URL host is invalid".to_string());
+    }
+    let path = if split == remainder.len() {
+        "/".to_string()
+    } else if remainder.as_bytes()[split] == b'?' {
+        format!("/{}", &remainder[split..])
+    } else {
+        remainder[split..].to_string()
+    };
+    if path.contains(['\r', '\n', '\0']) || path.starts_with("//") {
+        return Err("Public URL path is invalid".to_string());
+    }
+    Ok(PublicHttpsUrl {
+        host: host.to_ascii_lowercase(),
+        path,
+    })
+}
+
+pub(crate) fn assert_public_host(host: &str) -> Result<(), String> {
+    let addresses = (host, 443)
+        .to_socket_addrs()
+        .map_err(|_| "Public hostname could not be resolved safely".to_string())?
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    if addresses.is_empty() || !addresses.iter().all(is_public_address) {
+        return Err("Hostname is outside the public network boundary".to_string());
+    }
+    Ok(())
+}
+
+fn is_public_address(address: &IpAddr) -> bool {
+    match address {
+        IpAddr::V4(value) => is_public_ipv4(value),
+        IpAddr::V6(value) => {
+            if let Some(mapped) = value.to_ipv4_mapped() {
+                return is_public_ipv4(&mapped);
+            }
+            let [first, second, ..] = value.segments();
+            first & 0xe000 == 0x2000
+                && !value.is_loopback()
+                && !value.is_unspecified()
+                && !value.is_multicast()
+                && !value.is_unique_local()
+                && !value.is_unicast_link_local()
+                && !(first == 0x2001
+                    && (second == 0
+                        || second == 2
+                        || (0x10..=0x1f).contains(&second)
+                        || second == 0x0db8))
+                && first != 0x2002
+                && !(first == 0x3fff && second & 0xf000 == 0)
+        }
+    }
+}
+
+fn is_public_ipv4(value: &Ipv4Addr) -> bool {
+    let [a, b, ..] = value.octets();
+    !value.is_private()
+        && !value.is_loopback()
+        && !value.is_link_local()
+        && !value.is_unspecified()
+        && !value.is_multicast()
+        && !value.is_broadcast()
+        && a != 0
+        && a < 224
+        && !(a == 100 && (64..=127).contains(&b))
+        && !(a == 192 && (b == 0 || b == 88 || b == 168))
+        && !(a == 198 && (b == 18 || b == 19 || b == 51))
+        && !(a == 203 && b == 0)
 }
 
 struct WinHttpHandle(*mut core::ffi::c_void);
@@ -243,6 +342,7 @@ pub(crate) fn request_bytes(
         body: response,
         content_type: query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE),
         location: query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION),
+        retry_after: query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER),
     })
 }
 
@@ -257,7 +357,7 @@ pub(crate) fn request_public_bytes(
     let cancelled = || {
         Err(JsonHttpError::new(
             JsonHttpErrorKind::Transport,
-            "Public research request was cancelled",
+            "Public request was cancelled",
         ))
     };
     if check_cancelled() {
@@ -276,15 +376,16 @@ pub(crate) fn request_public_bytes(
             request.accept,
             "text/html,application/xhtml+xml,application/json;q=0.8"
                 | "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.5"
+                | "video/mp4"
         )
         || request.response_body_limit == 0
     {
         return Err(JsonHttpError::new(
             JsonHttpErrorKind::InvalidRequest,
-            "Public research request is invalid",
+            "Public request is invalid",
         ));
     }
-    let agent = wide("XLNGAI-Research/1.0");
+    let agent = wide("XLNGAI/1.0");
     let host = wide(request.host);
     let path = wide(request.path);
     let verb = wide("GET");
@@ -298,14 +399,14 @@ pub(crate) fn request_public_bytes(
                 0,
             )
         },
-        "Unable to initialize research transport",
+        "Unable to initialize public transport",
     )?;
     if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, 15_000) } == 0 {
-        return Err(winhttp_error("Unable to configure research timeouts"));
+        return Err(winhttp_error("Unable to configure public request timeouts"));
     }
     let connection = WinHttpHandle::new(
         unsafe { WinHttpConnect(session.0, host.as_ptr(), 443, 0) },
-        "Unable to connect research transport",
+        "Unable to connect public transport",
     )?;
     let native_request = WinHttpHandle::new(
         unsafe {
@@ -319,7 +420,7 @@ pub(crate) fn request_public_bytes(
                 WINHTTP_FLAG_SECURE,
             )
         },
-        "Unable to create research request",
+        "Unable to create public request",
     )?;
     let disabled_features = WINHTTP_DISABLE_REDIRECTS;
     if unsafe {
@@ -331,7 +432,7 @@ pub(crate) fn request_public_bytes(
         )
     } == 0
     {
-        return Err(winhttp_error("Unable to disable research redirects"));
+        return Err(winhttp_error("Unable to disable public redirects"));
     }
     let mut headers: Vec<u16> = format!("Accept: {}\r\n", request.accept)
         .encode_utf16()
@@ -352,10 +453,10 @@ pub(crate) fn request_public_bytes(
     }
     headers.fill(0);
     if sent == 0 {
-        return Err(winhttp_error("Research request could not be sent"));
+        return Err(winhttp_error("Public request could not be sent"));
     }
     if unsafe { WinHttpReceiveResponse(native_request.0, std::ptr::null_mut()) } == 0 {
-        return Err(winhttp_error("Research response could not be received"));
+        return Err(winhttp_error("Public response could not be received"));
     }
     if check_cancelled() {
         return cancelled();
@@ -374,7 +475,7 @@ pub(crate) fn request_public_bytes(
         )
     } == 0
     {
-        return Err(winhttp_error("Research status could not be read"));
+        return Err(winhttp_error("Public response status could not be read"));
     }
     let content_type = query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE);
     let location = query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION);
@@ -394,7 +495,7 @@ pub(crate) fn request_public_bytes(
             )
         } == 0
         {
-            return Err(winhttp_error("Research response body could not be read"));
+            return Err(winhttp_error("Public response body could not be read"));
         }
         if read == 0 {
             break;
@@ -406,7 +507,7 @@ pub(crate) fn request_public_bytes(
         if body.len() > request.response_body_limit {
             return Err(JsonHttpError::new(
                 JsonHttpErrorKind::ResponseTooLarge,
-                "Research response exceeds the native transport limit",
+                "Public response exceeds the native transport limit",
             ));
         }
     }
@@ -415,6 +516,7 @@ pub(crate) fn request_public_bytes(
         body,
         content_type,
         location,
+        retry_after: query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER),
     })
 }
 
@@ -479,7 +581,16 @@ fn parse_json_response(response: RawHttpResponse) -> Result<JsonHttpResponse, Js
     Ok(JsonHttpResponse {
         status: response.status,
         body,
+        retry_after_ms: response
+            .retry_after
+            .as_deref()
+            .and_then(parse_retry_after_ms),
     })
+}
+
+fn parse_retry_after_ms(value: &str) -> Option<u64> {
+    let seconds = value.trim().parse::<u64>().ok()?;
+    Some(seconds.saturating_mul(1_000).min(30 * 60 * 1_000))
 }
 
 fn validate_request(request: &JsonHttpRequest<'_>) -> Result<(), JsonHttpError> {
@@ -574,10 +685,13 @@ fn winhttp_error(operation: &str) -> JsonHttpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_bytes, request_json, JsonHttpErrorKind, JsonHttpRequest};
+    use super::{
+        is_public_address, parse_retry_after_ms, request_bytes, request_json, JsonHttpErrorKind,
+        JsonHttpRequest,
+    };
     use std::{
         io::{Read, Write},
-        net::TcpListener,
+        net::{IpAddr, TcpListener},
         thread,
     };
 
@@ -714,5 +828,66 @@ mod tests {
         server.join().expect("mock provider should finish");
         assert_eq!(response.status, 404);
         assert!(response.body.is_null());
+    }
+
+    #[test]
+    fn captures_delta_seconds_retry_after_and_caps_untrusted_values() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider should bind");
+        let port = listener.local_addr().expect("mock address").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock request should connect");
+            let mut request = [0_u8; 4096];
+            stream
+                .read(&mut request)
+                .expect("mock request should be readable");
+            stream
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 17\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .expect("mock response should be written");
+        });
+
+        let response = request_json(JsonHttpRequest {
+            host: "127.0.0.1",
+            port,
+            secure: false,
+            method: "GET",
+            path: "/ent/v2/tasks/task/creations",
+            authorization_scheme: "Token",
+            accept: "application/json",
+            secret: "local-test-key",
+            body: None,
+            request_body_limit: 1,
+            response_body_limit: 1024,
+        })
+        .expect("Retry-After response should remain classifiable");
+        server.join().expect("mock provider should finish");
+        assert_eq!(response.status, 429);
+        assert_eq!(response.retry_after_ms, Some(17_000));
+        assert_eq!(parse_retry_after_ms("999999999"), Some(30 * 60 * 1_000));
+        assert_eq!(parse_retry_after_ms("Wed, 21 Oct 2015 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn public_address_filter_rejects_reserved_and_tunneled_ranges() {
+        for address in ["8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(is_public_address(
+                &address.parse::<IpAddr>().expect("public IP")
+            ));
+        }
+        for address in [
+            "0.1.2.3",
+            "192.88.99.1",
+            "240.0.0.1",
+            "::ffff:127.0.0.1",
+            "fec0::1",
+            "2001:db8::1",
+            "2002:7f00:1::",
+            "3fff::1",
+        ] {
+            assert!(!is_public_address(
+                &address.parse::<IpAddr>().expect("reserved IP")
+            ));
+        }
     }
 }

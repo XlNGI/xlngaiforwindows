@@ -38,7 +38,10 @@ use llm_stream::{
 };
 use novel_import::novel_import;
 use provider_connector::provider_test_connection;
-use provider_http::{request_bytes, request_json, JsonHttpRequest};
+use provider_http::{
+    assert_public_host, parse_public_https_url, request_bytes, request_json, request_public_bytes,
+    JsonHttpRequest, PublicHttpRequest,
+};
 use research_bridge::NativeResearchBridge;
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,6 +52,7 @@ const PROVIDER_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const UNICOMPAPI_IMAGE_INPUT_LIMIT: usize = 20 * 1024 * 1024;
 const NATIVE_IMAGE_OUTPUT_LIMIT: usize = 25 * 1024 * 1024;
 const NATIVE_IMAGE_RESULT_LIMIT: usize = 4;
+const NATIVE_VIDEO_OUTPUT_LIMIT: usize = 512 * 1024 * 1024;
 // Four maximum-size Base64 results need roughly 134 MiB before externalization.
 const UNICOMPAPI_RESPONSE_BODY_LIMIT: usize = 140 * 1024 * 1024;
 const NATIVE_IMAGE_STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -664,6 +668,8 @@ fn validate_image_edit_source(value: &str) -> Result<(), String> {
 struct ProviderHttpResponse {
     status: u32,
     body: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -761,6 +767,92 @@ fn provider_state(body: &serde_json::Value) -> Option<&str> {
                 .and_then(|data| data.get("state").or_else(|| data.get("status")))
                 .and_then(serde_json::Value::as_str)
         })
+}
+
+fn provider_video_source(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().find_map(provider_video_source),
+        serde_json::Value::Object(object) => {
+            for key in ["creations", "Creations"] {
+                if let Some(items) = object.get(key).and_then(serde_json::Value::as_array) {
+                    for item in items {
+                        for field in ["video_url", "videoUrl", "url", "uri"] {
+                            if let Some(source) =
+                                item.get(field).and_then(serde_json::Value::as_str)
+                            {
+                                return Some(source);
+                            }
+                        }
+                    }
+                }
+            }
+            object.values().find_map(provider_video_source)
+        }
+        _ => None,
+    }
+}
+
+fn provider_numeric_field(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| provider_numeric_field(item, keys)),
+        serde_json::Value::Object(object) => {
+            for key in keys {
+                if let Some(candidate) = object.get(*key) {
+                    let amount = candidate.as_f64().or_else(|| {
+                        candidate
+                            .as_str()
+                            .and_then(|text| text.trim().parse::<f64>().ok())
+                    });
+                    if amount.is_some_and(|number| number.is_finite() && number >= 0.0) {
+                        return amount;
+                    }
+                }
+            }
+            object
+                .values()
+                .find_map(|item| provider_numeric_field(item, keys))
+        }
+        _ => None,
+    }
+}
+
+fn provider_cost(body: &serde_json::Value) -> Option<serde_json::Value> {
+    for (keys, unit) in [
+        (&["credits_used", "creditsUsed", "credits"][..], "credits"),
+        (&["cost"][..], "unknown"),
+    ] {
+        if let Some(amount) = provider_numeric_field(body, keys) {
+            return Some(serde_json::json!({ "amount": amount, "unit": unit }));
+        }
+    }
+    None
+}
+
+fn sanitize_provider_diagnostic(value: &str) -> String {
+    let mut redacted = Vec::new();
+    let mut redact_next = false;
+    for word in value.split_whitespace() {
+        let normalized = word.to_ascii_lowercase();
+        if redact_next {
+            redacted.push("[CREDENTIAL]");
+            redact_next = false;
+        } else if normalized.starts_with("http://") || normalized.starts_with("https://") {
+            redacted.push("[URL]");
+        } else if normalized == "bearer" || normalized == "token" {
+            redacted.push("[CREDENTIAL]");
+            redact_next = true;
+        } else {
+            redacted.push(word);
+        }
+    }
+    redacted
+        .join(" ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(500)
+        .collect()
 }
 
 fn provider_error_field(body: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -1360,6 +1452,67 @@ fn provider_download_task_blocking(
     if response.body.is_empty() {
         return Err("Provider video download returned an empty body".to_string());
     }
+    store_native_video_output(&response.body, ".mp4", Some("video/mp4"))
+}
+
+fn provider_download_remote_video_blocking(
+    source: &str,
+) -> Result<ProviderBinaryDownloadResponse, String> {
+    let target = parse_public_https_url(source)?;
+    assert_public_host(&target.host)?;
+    let response = request_public_bytes(PublicHttpRequest {
+        host: &target.host,
+        path: &target.path,
+        accept: "video/mp4",
+        response_body_limit: NATIVE_VIDEO_OUTPUT_LIMIT,
+        cancellation: None,
+    })
+    .map_err(|error| error.to_string())?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "Provider video output download failed with HTTP {}",
+            response.status
+        ));
+    }
+    if response.body.is_empty() {
+        return Err("Provider video output download returned an empty body".to_string());
+    }
+    let extension = provider_video_extension(response.content_type.as_deref(), &target.path)?;
+    store_native_video_output(&response.body, extension, response.content_type.as_deref())
+}
+
+fn provider_video_extension(
+    content_type: Option<&str>,
+    path: &str,
+) -> Result<&'static str, String> {
+    let content_type = content_type
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if content_type == "video/mp4" {
+        return Ok(".mp4");
+    }
+    if content_type == "video/webm" {
+        return Ok(".webm");
+    }
+    let path = path.split('?').next().unwrap_or(path).to_ascii_lowercase();
+    if content_type == "application/octet-stream" && path.ends_with(".mp4") {
+        return Ok(".mp4");
+    }
+    if content_type == "application/octet-stream" && path.ends_with(".webm") {
+        return Ok(".webm");
+    }
+    Err("Downloaded result is not a supported MP4 or WebM video".to_string())
+}
+
+fn store_native_video_output(
+    bytes: &[u8],
+    extension: &str,
+    content_type: Option<&str>,
+) -> Result<ProviderBinaryDownloadResponse, String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "System clock is invalid")?
@@ -1367,12 +1520,12 @@ fn provider_download_task_blocking(
     let directory = std::env::temp_dir().join("ai-video-workspace-unicompapi");
     create_dir_all(&directory)
         .map_err(|error| format!("Unable to create provider download directory: {error}"))?;
-    let temporary_path = directory.join(format!("video-{}-{nonce}.mp4", std::process::id()));
-    write(&temporary_path, &response.body)
+    let temporary_path = directory.join(format!("video-{}-{nonce}{extension}", std::process::id()));
+    write(&temporary_path, bytes)
         .map_err(|error| format!("Unable to store provider video download: {error}"))?;
     Ok(ProviderBinaryDownloadResponse {
         path: temporary_path.to_string_lossy().into_owned(),
-        content_type: Some("video/mp4".to_string()),
+        content_type: content_type.map(str::to_string),
     })
 }
 
@@ -1535,6 +1688,7 @@ fn request_provider_json(
     Ok(ProviderHttpResponse {
         status: response.status,
         body: response.body,
+        retry_after_ms: response.retry_after_ms,
     })
 }
 
@@ -1568,6 +1722,7 @@ fn request_unicompapi_json(
     Ok(ProviderHttpResponse {
         status: response.status,
         body: response.body,
+        retry_after_ms: response.retry_after_ms,
     })
 }
 
@@ -1641,6 +1796,9 @@ impl WorkerProcess {
         ));
         let stdout = child.stdout.take().ok_or("Worker stdout is unavailable")?;
         let stderr = child.stderr.take().ok_or("Worker stderr is unavailable")?;
+        let host_streams = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let host_writer = Arc::clone(&stdin);
+        let stdout_host_streams = Arc::clone(&host_streams);
         let (response_tx, responses) = mpsc::channel();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -1659,6 +1817,20 @@ impl WorkerProcess {
                                     .send(Err("Worker message exceeds the 2 MiB sidecar limit"
                                         .to_string()));
                             break;
+                        }
+                        let host_request = serde_json::from_str::<serde_json::Value>(&line)
+                            .ok()
+                            .filter(|value| {
+                                value.get("kind").and_then(serde_json::Value::as_str)
+                                    == Some("host.request")
+                            });
+                        if let Some(value) = host_request {
+                            dispatch_host_request(
+                                value,
+                                Arc::clone(&host_writer),
+                                Arc::clone(&stdout_host_streams),
+                            );
+                            continue;
                         }
                         if response_tx.send(Ok(line)).is_err() {
                             break;
@@ -1699,7 +1871,7 @@ impl WorkerProcess {
             stdin,
             responses,
             stderr_tail,
-            host_streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            host_streams,
         })
     }
 
@@ -1831,6 +2003,20 @@ fn dispatch_host_request(
             }
             thread::spawn(move || {
                 let result = provider_media_cancel_blocking(&params, &streams);
+                let _ = send_host_response(&writer, &request_id, result);
+            });
+        }
+        "provider.media.poll" => {
+            if let Err(error) = validate_provider_media_cancel_params(&params) {
+                let _ = send_host_response(
+                    &writer,
+                    &request_id,
+                    Err(host_error("INVALID_PARAMETERS", error, false)),
+                );
+                return;
+            }
+            thread::spawn(move || {
+                let result = provider_media_poll_blocking(&params, &streams);
                 let _ = send_host_response(&writer, &request_id, result);
             });
         }
@@ -2176,6 +2362,138 @@ fn provider_media_cancel_blocking(
     .map_err(|error| host_error("PROVIDER_FAILED", error, true))?;
     serde_json::to_value(result)
         .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true))
+}
+
+fn provider_media_poll_blocking(
+    params: &serde_json::Value,
+    _streams: &Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let adapter_key = params["adapterKey"].as_str().unwrap_or_default();
+    let provider_region = params["providerRegion"].as_str().unwrap_or_default();
+    let provider_profile_id = params["providerProfileId"].as_str().unwrap_or_default();
+    let provider_task_id = params["providerTaskId"].as_str().unwrap_or_default();
+    let response = provider_poll_task_blocking(
+        adapter_key,
+        provider_region,
+        provider_profile_id,
+        provider_task_id,
+    )
+    .map_err(|error| host_error("PROVIDER_FAILED", error, true))?;
+    let succeeded = (200..300).contains(&response.status)
+        && provider_state(&response.body).is_some_and(|state| {
+            matches!(
+                state.trim().to_ascii_lowercase().as_str(),
+                "success" | "succeeded" | "completed"
+            )
+        });
+    let output = if succeeded {
+        if provider_region == "unicompapi" {
+            Some(provider_download_task_blocking(
+                adapter_key,
+                provider_region,
+                provider_profile_id,
+                provider_task_id,
+            ))
+        } else {
+            Some(
+                provider_video_source(&response.body)
+                    .ok_or_else(|| {
+                        "Provider reported success without a video output URL".to_string()
+                    })
+                    .and_then(provider_download_remote_video_blocking),
+            )
+        }
+        .transpose()
+        .map_err(|error| host_error("PROVIDER_FAILED", error, true))?
+    } else {
+        None
+    };
+    normalize_provider_media_poll(&response, provider_region, output.as_ref())
+        .map_err(|error| host_error("INTERNAL_ERROR", error, false))
+}
+
+fn normalize_provider_media_poll(
+    response: &ProviderHttpResponse,
+    provider_region: &str,
+    output: Option<&ProviderBinaryDownloadResponse>,
+) -> Result<serde_json::Value, String> {
+    let provider_state = provider_state(&response.body)
+        .map(str::trim)
+        .filter(|state| !state.is_empty() && state.len() <= 64)
+        .map(str::to_ascii_lowercase);
+    let state = if response.status == 429 || response.status >= 500 {
+        "running"
+    } else if !(200..300).contains(&response.status) {
+        "failed"
+    } else {
+        match provider_state.as_deref() {
+            Some("created" | "queueing" | "queued" | "pending") => "queued",
+            Some("in_progress" | "processing" | "running") => "running",
+            Some("unknown") if provider_region == "unicompapi" => "running",
+            Some("success" | "succeeded" | "completed") => "succeeded",
+            Some("cancelled" | "canceled") => "cancelled",
+            Some("failed" | "error") | None => "failed",
+            Some(_) => "failed",
+        }
+    };
+    if state == "succeeded" && output.is_none() {
+        return Err("Successful Provider task is missing its downloaded output".to_string());
+    }
+
+    let mut normalized = serde_json::Map::from_iter([
+        (
+            "providerStatus".to_string(),
+            serde_json::json!(response.status),
+        ),
+        ("state".to_string(), serde_json::json!(state)),
+    ]);
+    if let Some(provider_state) = provider_state {
+        normalized.insert(
+            "providerState".to_string(),
+            serde_json::json!(provider_state),
+        );
+    }
+    if let Some(retry_after_ms) = response.retry_after_ms {
+        normalized.insert(
+            "retryAfterMs".to_string(),
+            serde_json::json!(retry_after_ms),
+        );
+    }
+    if matches!(state, "queued" | "running") {
+        if let Some(progress) = provider_numeric_field(&response.body, &["progress"]) {
+            normalized.insert("progress".to_string(), serde_json::json!(progress));
+        }
+    }
+    if let Some(cost) = provider_cost(&response.body) {
+        normalized.insert("cost".to_string(), cost);
+    }
+    if let Some(output) = output {
+        let mut value = serde_json::json!({
+            "type": "native_temporary_file",
+            "path": output.path,
+        });
+        if let Some(content_type) = &output.content_type {
+            value["contentType"] = serde_json::json!(content_type);
+        }
+        normalized.insert("output".to_string(), value);
+    }
+    if state == "failed" {
+        let (code, message) = provider_submit_error(&response.body);
+        let message = sanitize_provider_diagnostic(
+            message
+                .as_deref()
+                .unwrap_or("Provider returned a failed or unsupported task state"),
+        );
+        normalized.insert(
+            "error".to_string(),
+            serde_json::json!({
+                "code": code.map(|value| sanitize_provider_diagnostic(&value)),
+                "message": message,
+                "retryable": false,
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(normalized))
 }
 
 fn run_host_provider_stream(
@@ -2901,16 +3219,17 @@ pub fn run() {
 mod tests {
     use super::{
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
-        ensure_video_adapter, externalize_embedded_images, is_profile_id, provider_cancel_path,
-        provider_payload, provider_state, provider_submit_error, provider_target,
-        provider_task_error, provider_task_id, provider_task_path,
-        resolve_controlled_media_inputs_at_root, resolve_media_selection, unicompapi_adapter_model,
-        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
-        validate_credential_provider, validate_host_request_envelope,
-        validate_provider_stream_params, ProviderHttpResponse, WorkerProcess, WorkerState,
-        BASE64_STANDARD, BUNDLED_WORKER_FILENAME, MARKDOWN_IMPORT_LIMIT,
-        PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES, UNICOMPAPI_AUTHORIZATION_SCHEME,
-        UNICOMPAPI_HOST,
+        ensure_video_adapter, externalize_embedded_images, is_profile_id,
+        normalize_provider_media_poll, provider_cancel_path, provider_payload, provider_state,
+        provider_submit_error, provider_target, provider_task_error, provider_task_id,
+        provider_task_path, provider_video_extension, resolve_controlled_media_inputs_at_root,
+        resolve_media_selection, unicompapi_adapter_model, unicompapi_payload,
+        unicompapi_video_content_path, unicompapi_video_task_path, validate_credential_provider,
+        validate_host_request_envelope, validate_provider_media_cancel_params,
+        validate_provider_stream_params, ProviderBinaryDownloadResponse, ProviderHttpResponse,
+        WorkerProcess, WorkerState, BASE64_STANDARD, BUNDLED_WORKER_FILENAME,
+        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES,
+        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
     };
     use base64::Engine as _;
     use serde_json::json;
@@ -3591,6 +3910,7 @@ mod tests {
         let mut response = ProviderHttpResponse {
             status: 200,
             body: json!({ "data": [{ "b64_json": BASE64_STANDARD.encode(png) }] }),
+            retry_after_ms: None,
         };
 
         externalize_embedded_images(&mut response).expect("externalize provider image");
@@ -3616,6 +3936,7 @@ mod tests {
                     { "url": "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=" }
                 ]
             }),
+            retry_after_ms: None,
         };
 
         externalize_embedded_images(&mut response).expect("externalize provider images");
@@ -3642,6 +3963,7 @@ mod tests {
                     { "b64_json": "not-valid-base64" }
                 ]
             }),
+            retry_after_ms: None,
         };
 
         let error = externalize_embedded_images(&mut response).expect_err("invalid second image");
@@ -3978,6 +4300,27 @@ mod tests {
     }
 
     #[test]
+    fn worker_dispatches_background_host_requests_without_a_legacy_request() {
+        let mut command = Command::new("node");
+        command.args([
+            "-e",
+            "const r=require('readline').createInterface({input:process.stdin});process.stdout.write(JSON.stringify({kind:'host.request',requestId:'background-host',method:'unknown.method',params:{}})+'\\n');r.on('line',l=>{const v=JSON.parse(l);if(v.kind==='host.response'&&v.requestId==='background-host'){process.stdout.write(JSON.stringify({id:'background-proof',ok:true,result:{dispatched:v.ok===false}})+'\\n')}})",
+        ]);
+        let worker = WorkerProcess::spawn_command(command).expect("fixture should start");
+
+        let line = worker
+            .responses
+            .recv_timeout(Duration::from_secs(5))
+            .expect("background host response should be dispatched")
+            .expect("fixture output should be readable");
+        let value: serde_json::Value =
+            serde_json::from_str(&line).expect("fixture output should be valid JSON");
+
+        assert_eq!(value["id"], "background-proof");
+        assert_eq!(value["result"]["dispatched"], true);
+    }
+
+    #[test]
     fn worker_rejects_a_mismatched_legacy_response_id() {
         let mut command = Command::new("node");
         command.args([
@@ -4037,5 +4380,104 @@ mod tests {
             "params": { "value": "x".repeat(SIDECAR_ENVELOPE_MAX_BYTES) },
         });
         assert!(validate_host_request_envelope(&oversized).is_err());
+    }
+
+    #[test]
+    fn provider_media_poll_contract_rejects_unknown_and_sensitive_fields() {
+        let valid = json!({
+            "projectSessionId": "session",
+            "providerProfileId": "123e4567-e89b-42d3-a456-426614174000",
+            "adapterKey": "TEXT_TO_VIDEO:vidu:viduq3-pro:v2",
+            "providerRegion": "global",
+            "providerTaskId": "task-123"
+        });
+        assert!(validate_provider_media_cancel_params(&valid).is_ok());
+
+        let mut unknown = valid.clone();
+        unknown["extra"] = json!(true);
+        let mut sensitive = valid.clone();
+        sensitive["apiKey"] = json!("secret");
+        let mut invalid_region = valid.clone();
+        invalid_region["providerRegion"] = json!("other");
+        for invalid in [unknown, sensitive, invalid_region] {
+            assert!(validate_provider_media_cancel_params(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_media_poll_normalizes_success_without_exposing_provider_body_or_signed_url() {
+        let response = ProviderHttpResponse {
+            status: 200,
+            body: json!({
+                "state": "success",
+                "credits_used": "4",
+                "creations": [{
+                    "url": "https://cdn.example/video.mp4?X-Amz-Signature=must-not-leave-native"
+                }],
+                "request_id": "provider-request-secret"
+            }),
+            retry_after_ms: None,
+        };
+        let output = ProviderBinaryDownloadResponse {
+            path: r"C:\Temp\ai-video-workspace-unicompapi\video.mp4".to_string(),
+            content_type: Some("video/mp4".to_string()),
+        };
+
+        let normalized = normalize_provider_media_poll(&response, "global", Some(&output))
+            .expect("successful poll should normalize");
+        let serialized = normalized.to_string();
+
+        assert_eq!(normalized["state"], "succeeded");
+        assert_eq!(
+            normalized["cost"],
+            json!({ "amount": 4.0, "unit": "credits" })
+        );
+        assert_eq!(normalized["output"]["type"], "native_temporary_file");
+        assert!(!serialized.contains("X-Amz-Signature"));
+        assert!(!serialized.contains("provider-request-secret"));
+        assert!(normalized.get("body").is_none());
+    }
+
+    #[test]
+    fn provider_media_poll_redacts_failed_diagnostics_and_keeps_retry_after_bounded() {
+        let response = ProviderHttpResponse {
+            status: 400,
+            body: json!({
+                "state": "failed",
+                "error": {
+                    "code": "bad_request",
+                    "message": "download https://signed.example/video?token=secret with Bearer secret"
+                }
+            }),
+            retry_after_ms: Some(17_000),
+        };
+
+        let normalized = normalize_provider_media_poll(&response, "global", None)
+            .expect("failed poll should normalize");
+
+        assert_eq!(normalized["state"], "failed");
+        assert_eq!(normalized["retryAfterMs"], 17_000);
+        assert_eq!(normalized["error"]["code"], "bad_request");
+        assert_eq!(
+            normalized["error"]["message"],
+            "download [URL] with [CREDENTIAL] [CREDENTIAL]"
+        );
+    }
+
+    #[test]
+    fn provider_video_output_type_requires_supported_media() {
+        assert_eq!(
+            provider_video_extension(Some("video/mp4; charset=binary"), "/output"),
+            Ok(".mp4")
+        );
+        assert_eq!(
+            provider_video_extension(Some("video/webm"), "/output"),
+            Ok(".webm")
+        );
+        assert_eq!(
+            provider_video_extension(Some("application/octet-stream"), "/output/video.webm?sig=x"),
+            Ok(".webm")
+        );
+        assert!(provider_video_extension(Some("text/html"), "/output/video.mp4").is_err());
     }
 }

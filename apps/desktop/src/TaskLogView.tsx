@@ -30,6 +30,7 @@ import {
 
 interface TaskLogViewProps {
   projectId?: string;
+  taskRevision?: number;
   onOpenDocument?: (documentId: string) => void;
   onOpenConversation?: (conversationId: string) => void;
 }
@@ -620,7 +621,12 @@ function MediaTaskDetailPanel({
   );
 }
 
-export function TaskLogView({ projectId, onOpenDocument, onOpenConversation }: TaskLogViewProps) {
+export function TaskLogView({
+  projectId,
+  taskRevision,
+  onOpenDocument,
+  onOpenConversation,
+}: TaskLogViewProps) {
   const [items, setItems] = useState<TaskLogItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<TaskLogItem>();
   const [detail, setDetail] = useState<AgentTaskDetail | null>(null);
@@ -633,6 +639,7 @@ export function TaskLogView({ projectId, onOpenDocument, onOpenConversation }: T
   const [message, setMessage] = useState('');
   const [detailMessage, setDetailMessage] = useState('');
   const detailRequestRef = useRef(0);
+  const observedTaskRevisionRef = useRef(taskRevision);
   const [kindFilter, setKindFilter] = useState<TaskLogItem['kind'] | ''>('');
   const [statusFilter, setStatusFilter] = useState('');
   const [nextCursor, setNextCursor] = useState<string>();
@@ -682,6 +689,13 @@ export function TaskLogView({ projectId, onOpenDocument, onOpenConversation }: T
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [projectId, refresh, busy, detailBusy, loadingMore]);
+
+  useEffect(() => {
+    if (taskRevision === undefined || observedTaskRevisionRef.current === taskRevision) return;
+    if (busy || detailBusy || loadingMore) return;
+    observedTaskRevisionRef.current = taskRevision;
+    void refresh();
+  }, [taskRevision, refresh, busy, detailBusy, loadingMore]);
 
   const openDetails = async (item: TaskLogItem) => {
     const requestId = ++detailRequestRef.current;

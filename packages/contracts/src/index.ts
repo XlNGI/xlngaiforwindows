@@ -1696,6 +1696,7 @@ export type HostMethod =
   | 'provider.stream.start'
   | 'provider.stream.cancel'
   | 'provider.media.submit'
+  | 'provider.media.poll'
   | 'provider.media.cancel'
   | 'provider.confirmation.wait'
   | 'provider.confirmation.resolve';
@@ -1744,6 +1745,32 @@ export interface NativeProviderMediaCancelParams {
   providerTaskId: string;
 }
 
+export type NativeProviderMediaPollParams = NativeProviderMediaCancelParams;
+
+export type NativeProviderMediaTaskState =
+  'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface NativeProviderMediaOutput {
+  type: 'native_temporary_file';
+  path: string;
+  contentType?: string;
+}
+
+export interface NativeProviderMediaPollResult {
+  providerStatus: number;
+  state: NativeProviderMediaTaskState;
+  providerState?: string;
+  progress?: number;
+  cost?: VideoGenerationCostInfo;
+  output?: NativeProviderMediaOutput;
+  error?: {
+    code?: string;
+    message: string;
+    retryable: boolean;
+  };
+  retryAfterMs?: number;
+}
+
 export interface NativeProviderConfirmationWaitParams {
   confirmationToken: string;
   projectSessionId: string;
@@ -1757,6 +1784,7 @@ export type HostMethodParams = {
   'provider.stream.start': NativeProviderStreamStartParams;
   'provider.stream.cancel': NativeProviderStreamCancelParams;
   'provider.media.submit': NativeProviderMediaSubmitParams;
+  'provider.media.poll': NativeProviderMediaPollParams;
   'provider.media.cancel': NativeProviderMediaCancelParams;
   'provider.confirmation.wait': NativeProviderConfirmationWaitParams;
   'provider.confirmation.resolve': NativeProviderConfirmationResolveParams;
@@ -2774,6 +2802,19 @@ export interface VideoGenerationJobInfo {
   updatedAt: string;
 }
 
+export interface ProjectTaskSubscriptionParams {
+  afterRevision?: number;
+}
+
+export interface ProjectTaskSnapshot {
+  projectId: string;
+  projectSessionId: string;
+  revision: number;
+  changed: boolean;
+  activeCount: number;
+  videoJobs: VideoGenerationJobInfo[];
+}
+
 export interface VideoGenerationPrepareParams {
   shotId?: string;
   adapterKey: string;
@@ -3348,6 +3389,10 @@ export interface WorkerMethodMap {
   'video.generate.list': {
     params: Record<string, never>;
     result: VideoGenerationJobInfo[];
+  };
+  'project.task.subscribe': {
+    params: ProjectTaskSubscriptionParams;
+    result: ProjectTaskSnapshot;
   };
   'asset.list': { params: AssetListParams; result: AssetInfo[] };
   'asset.preview': { params: AssetPreviewParams; result: ImagePreviewInfo };

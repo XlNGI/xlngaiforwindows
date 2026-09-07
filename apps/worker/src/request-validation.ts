@@ -107,6 +107,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'media.generation.confirmSubmission',
   'media.task.cancel',
   'video.generate.prepare',
+  'project.task.subscribe',
   'agent.changeSet.create',
   'agent.changeSet.list',
   'agent.changeSet.apply',
@@ -849,6 +850,10 @@ export function validateSessionRequestParams(
       optionalId(params, 'conversationId');
       optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
       optionalBoolean(params, 'costNoticeAcknowledged');
+      break;
+    case 'project.task.subscribe':
+      rejectUnknown(params, ['afterRevision']);
+      optionalInteger(params, 'afterRevision', -1, Number.MAX_SAFE_INTEGER);
       break;
     case 'llm.generate':
       rejectUnknown(params, ['conversationId', 'budgetTokens', 'prompt', 'idempotencyKey']);

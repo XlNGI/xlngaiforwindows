@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -15,7 +15,9 @@ use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 
-use crate::provider_http::{request_public_bytes, PublicHttpRequest};
+use crate::provider_http::{
+    assert_public_host, parse_public_https_url, request_public_bytes, PublicHttpRequest,
+};
 
 const REQUEST_LIMIT: usize = 32 * 1024;
 const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
@@ -261,86 +263,6 @@ fn write_json_response(stream: &mut TcpStream, status: u16, body: &impl Serializ
         body.len(),
     );
     let _ = stream.write_all(&body);
-}
-
-struct PublicHttpsUrl {
-    host: String,
-    path: String,
-}
-
-fn parse_public_https_url(value: &str) -> Result<PublicHttpsUrl, String> {
-    let remainder = value
-        .strip_prefix("https://")
-        .ok_or("Research URLs must use HTTPS")?;
-    if remainder.is_empty() || remainder.contains(['\\', '#', '\r', '\n', '\0', '@']) {
-        return Err("Research URL is invalid".to_string());
-    }
-    let split = remainder.find(['/', '?']).unwrap_or(remainder.len());
-    let host = &remainder[..split];
-    if host.is_empty()
-        || host.contains(':')
-        || !host.is_ascii()
-        || host
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
-        || host.ends_with('.')
-        || host.eq_ignore_ascii_case("localhost")
-        || host.to_ascii_lowercase().ends_with(".local")
-    {
-        return Err("Research URL host is invalid".to_string());
-    }
-    let path = if split == remainder.len() {
-        "/".to_string()
-    } else if remainder.as_bytes()[split] == b'?' {
-        format!("/{}", &remainder[split..])
-    } else {
-        remainder[split..].to_string()
-    };
-    if path.contains(['\r', '\n', '\0']) || path.starts_with("//") {
-        return Err("Research URL path is invalid".to_string());
-    }
-    Ok(PublicHttpsUrl {
-        host: host.to_ascii_lowercase(),
-        path,
-    })
-}
-
-fn assert_public_host(host: &str) -> Result<(), String> {
-    let addresses = (host, 443)
-        .to_socket_addrs()
-        .map_err(|_| "Research hostname could not be resolved safely".to_string())?
-        .map(|address| address.ip())
-        .collect::<Vec<_>>();
-    if addresses.is_empty() || !addresses.iter().all(is_public_address) {
-        return Err("Research hostname is outside the public network boundary".to_string());
-    }
-    Ok(())
-}
-
-fn is_public_address(address: &IpAddr) -> bool {
-    match address {
-        IpAddr::V4(value) => {
-            let [a, b, ..] = value.octets();
-            !value.is_private()
-                && !value.is_loopback()
-                && !value.is_link_local()
-                && !value.is_unspecified()
-                && !value.is_multicast()
-                && !value.is_broadcast()
-                && !(a == 100 && (64..=127).contains(&b))
-                && !(a == 192 && (b == 0 || b == 168))
-                && !(a == 198 && (b == 18 || b == 19 || b == 51))
-                && !(a == 203 && b == 0)
-        }
-        IpAddr::V6(value) => {
-            !value.is_loopback()
-                && !value.is_unspecified()
-                && !value.is_multicast()
-                && !value.is_unique_local()
-                && !value.is_unicast_link_local()
-                && !value.to_string().starts_with("2001:db8:")
-        }
-    }
 }
 
 fn random_token() -> Result<String, String> {

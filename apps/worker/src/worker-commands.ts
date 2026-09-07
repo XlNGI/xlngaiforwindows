@@ -7,6 +7,7 @@ import type { MaintenanceService } from './maintenance-service.js';
 import type { MarkdownExportService } from './markdown-export-service.js';
 import type { MediaOrchestrationService } from './media-orchestration-service.js';
 import type { ProjectService } from './project-service.js';
+import type { ProjectTaskRuntime } from './project-task-runtime.js';
 import type { PartialArtifactService } from './partial-artifact-service.js';
 import type { SampleProjectService } from './sample-project-service.js';
 import type { UsageService } from './usage-service.js';
@@ -25,6 +26,7 @@ export interface InfrastructureCommandServices {
   partialArtifactService: PartialArtifactService;
   markdownExportService: MarkdownExportService;
   mediaOrchestrationService: MediaOrchestrationService;
+  projectTaskRuntime: ProjectTaskRuntime;
 }
 
 export interface InfrastructureCommandResult {
@@ -39,6 +41,7 @@ function requireString(params: Record<string, unknown>, key: string): string {
 }
 
 async function resetRuntime(services: InfrastructureCommandServices): Promise<void> {
+  services.projectTaskRuntime.stop();
   await services.generationService.cancelAll();
   services.imageGenerationService.cancelAll();
   services.videoGenerationService.cancelAll();
@@ -52,6 +55,7 @@ function recoverRuntime(services: InfrastructureCommandServices): void {
   services.mediaOrchestrationService.recoverInterrupted();
   services.imageGenerationService.recoverInterrupted();
   services.videoGenerationService.recoverInterrupted();
+  services.projectTaskRuntime.start();
   services.partialArtifactService.expire();
   services.markdownExportService.reconcile();
   services.maintenanceService.cleanupResearchCache();

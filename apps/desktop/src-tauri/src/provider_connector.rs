@@ -403,6 +403,7 @@ mod tests {
             JsonHttpResponse {
                 status: 401,
                 body: json!({}),
+                retry_after_ms: None,
             },
             "openai",
         );
@@ -413,6 +414,7 @@ mod tests {
             JsonHttpResponse {
                 status: 429,
                 body: json!({}),
+                retry_after_ms: None,
             },
             "openai",
         );
@@ -422,6 +424,7 @@ mod tests {
             JsonHttpResponse {
                 status: 404,
                 body: json!({}),
+                retry_after_ms: None,
             },
             "relay",
         );

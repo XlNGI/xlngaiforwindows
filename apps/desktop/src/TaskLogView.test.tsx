@@ -429,4 +429,30 @@ describe('TaskLogView', () => {
     expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
     setIntervalSpy.mockRestore();
   });
+
+  it('refreshes a task revision received while the current list request is busy', async () => {
+    let resolveInitial:
+      ((value: { items: TaskLogItem[]; nextCursor?: string }) => void) | undefined;
+    let listCalls = 0;
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method !== 'task.log.list') {
+        return Promise.reject(new Error(`Unexpected method ${method}`));
+      }
+      listCalls += 1;
+      if (listCalls === 1) {
+        return new Promise((resolve) => {
+          resolveInitial = resolve;
+        });
+      }
+      return Promise.resolve({ items: [agentItem], nextCursor: undefined });
+    });
+
+    const { rerender } = render(<TaskLogView projectId="project-1" taskRevision={1} />);
+    await waitFor(() => expect(listCalls).toBe(1));
+    rerender(<TaskLogView projectId="project-1" taskRevision={2} />);
+    expect(listCalls).toBe(1);
+
+    resolveInitial?.({ items: [imageItem], nextCursor: undefined });
+    await waitFor(() => expect(listCalls).toBe(2));
+  });
 });

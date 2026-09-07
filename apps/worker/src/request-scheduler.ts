@@ -40,6 +40,7 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'image.generate.get',
   'video.generate.get',
   'video.generate.list',
+  'project.task.subscribe',
   'asset.list',
   'asset.preview',
   'asset.mediaSource',

@@ -39,8 +39,6 @@ import type {
   VideoGenerationMetadataInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
-import { downloadVideoProviderTask, pollVideoProviderTask } from './provider-client';
-import { VideoPollingScheduler } from './video-polling-scheduler';
 import {
   generationErrorFeedback,
   generationStatusLabel,
@@ -63,6 +61,7 @@ interface ProductionPanelProps {
   shotId?: string;
   writable: boolean;
   assets?: AssetInfo[];
+  videoJobs?: VideoGenerationJobInfo[];
   focusedAssetId?: string;
   focusedJobId?: string;
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
@@ -160,14 +159,6 @@ function isVideoCapability(capability: GenerationCapability | undefined): boolea
   );
 }
 
-function isProviderVideoCompleted(body: unknown): boolean {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
-  const object = body as Record<string, unknown>;
-  const state = object.state ?? object.status;
-  if (typeof state === 'string' && state.trim().toLowerCase() === 'completed') return true;
-  return isProviderVideoCompleted(object.data);
-}
-
 function formatElapsed(elapsedMs: number): string {
   const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
   const minutes = Math.floor(seconds / 60);
@@ -193,27 +184,6 @@ function formatVideoCost(cost: VideoGenerationMetadataInfo['cost'] | undefined):
 const SUBMISSION_UNKNOWN_MESSAGE =
   '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。';
 
-function upsertVideoJob(
-  jobs: VideoGenerationJobInfo[],
-  next: VideoGenerationJobInfo,
-): VideoGenerationJobInfo[] {
-  const existing = jobs.findIndex((job) => job.id === next.id);
-  if (existing < 0) return [next, ...jobs];
-  const updated = [...jobs];
-  updated[existing] = next;
-  return updated;
-}
-
-function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-  const title = job.status === 'succeeded' ? '视频生成完成' : '视频任务已结束';
-  try {
-    new Notification(title, { body: generationStatusLabel(job.status) });
-  } catch {
-    // The task center remains the durable notification surface when OS notifications are unavailable.
-  }
-}
-
 function mediaSrcForAbsolutePath(absolutePath: string): string | undefined {
   try {
     return convertFileSrc(absolutePath);
@@ -235,6 +205,7 @@ export function ProductionPanel({
   shotId,
   writable,
   assets: controlledAssets,
+  videoJobs = [],
   focusedAssetId,
   focusedJobId,
   onAssetsChanged,
@@ -258,15 +229,11 @@ export function ProductionPanel({
   const [generationStatus, setGenerationStatus] = useState('');
   const [assetKind, setAssetKind] = useState<ImageAssetKind>('generated-image');
   const [videoAssetKind, setVideoAssetKind] = useState<VideoAssetKind>('shot-video');
-  const [videoJobs, setVideoJobs] = useState<VideoGenerationJobInfo[]>([]);
   const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
   const [preview, setPreview] = useState<ImagePreviewInfo>();
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
   const [savingPreview, setSavingPreview] = useState(false);
-  const videoScheduler = useRef<VideoPollingScheduler | undefined>(undefined);
-  const onAssetsChangedRef = useRef(onAssetsChanged);
-  const controlledAssetsRef = useRef(controlledAssets);
   const currentProjectIdRef = useRef(projectId);
   const assets = controlledAssets ?? localAssets;
   const selectedAsset = assets.find((item) => item.id === selectedAssetId);
@@ -279,8 +246,6 @@ export function ProductionPanel({
       ? capability!
       : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
-  onAssetsChangedRef.current = onAssetsChanged;
-  controlledAssetsRef.current = controlledAssets;
   currentProjectIdRef.current = projectId;
 
   useEffect(() => {
@@ -433,101 +398,6 @@ export function ProductionPanel({
       active = false;
     };
   }, [controlledAssets, projectId]);
-
-  useEffect(() => {
-    videoScheduler.current?.dispose();
-    videoScheduler.current = undefined;
-    setVideoJobs([]);
-    if (!projectId) return () => undefined;
-    let active = true;
-    const scheduler = writable
-      ? new VideoPollingScheduler({
-          poll: async (job) => {
-            const response = await pollVideoProviderTask(
-              job.adapterKey,
-              job.metadata.providerProfileId,
-              job.providerTaskId!,
-              job.metadata.providerRegion,
-            );
-            if (
-              job.metadata.providerRegion !== 'unicompapi' ||
-              !isProviderVideoCompleted(response.body)
-            ) {
-              return response;
-            }
-            const download = await downloadVideoProviderTask(
-              job.adapterKey,
-              job.metadata.providerProfileId,
-              job.providerTaskId!,
-              job.metadata.providerRegion,
-            );
-            return {
-              ...response,
-              body: {
-                status: 'completed',
-                data: response.body,
-                nativeVideoFilePath: download.path,
-                contentType: download.contentType,
-              },
-            };
-          },
-          observe: (job, response) =>
-            callWorker('video.generate.observe', {
-              jobId: job.id,
-              providerTaskId: job.providerTaskId!,
-              providerStatus: response.status,
-              providerBody: response.body,
-            }),
-          timeout: (job) => callWorker('video.generate.timeout', { jobId: job.id }),
-          refresh: (job) => callWorker('video.generate.get', { jobId: job.id }),
-          onUpdate: (job) => {
-            if (!active || job.projectId !== projectId) return;
-            setVideoJobs((current) => upsertVideoJob(current, job));
-          },
-          onTransientError: (job, reason) => {
-            if (!active || job.projectId !== projectId) return;
-            setGenerationStatus(
-              `视频任务查询暂时失败，正在自动重试：${errorMessage(reason, '网络错误')}`,
-            );
-          },
-          onTerminal: (job) => {
-            if (!active || job.projectId !== projectId) return;
-            setGenerationStatus(
-              job.error
-                ? generationErrorFeedback(job.error, job.metadata.failureKind).userMessage
-                : `视频任务${generationStatusLabel(job.status)}。`,
-            );
-            notifyVideoTerminal(job);
-            if (job.status === 'succeeded') {
-              const assetId = job.results[0]?.asset.id;
-              if (assetId) setSelectedAssetId(assetId);
-              void callWorker('asset.list', {}).then((items) => {
-                if (!active) return;
-                if (controlledAssetsRef.current === undefined) setLocalAssets(items);
-                onAssetsChangedRef.current?.(items, assetId);
-              });
-            }
-          },
-        })
-      : undefined;
-    videoScheduler.current = scheduler;
-    void callWorker('video.generate.list', {})
-      .then((jobs) => {
-        if (active) setVideoJobs(jobs);
-      })
-      .catch((reason) => {
-        if (active) setGenerationStatus(errorMessage(reason, '视频任务列表读取失败。'));
-      });
-    return () => {
-      active = false;
-      scheduler?.dispose();
-      if (videoScheduler.current === scheduler) videoScheduler.current = undefined;
-    };
-  }, [projectId, writable]);
-
-  useEffect(() => {
-    videoScheduler.current?.sync(videoJobs);
-  }, [videoJobs]);
 
   useEffect(() => {
     if (!selectedAssetId || isVideoAsset(selectedAsset)) {
@@ -846,7 +716,6 @@ export function ProductionPanel({
         assetKind: videoAssetKind,
       });
       if (currentProjectIdRef.current !== submissionProjectId) return;
-      setVideoJobs((current) => upsertVideoJob(current, prepared));
       setGenerationStatus('正在提交视频任务...');
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         void Notification.requestPermission().catch(() => undefined);
@@ -858,7 +727,7 @@ export function ProductionPanel({
       if (!pending.confirmation) throw new Error('Video submission confirmation is unavailable.');
       if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
         const cancelled = await callWorker('media.task.cancel', { jobId: prepared.id });
-        setVideoJobs((current) => upsertVideoJob(current, cancelled.job as VideoGenerationJobInfo));
+        setGenerationStatus(cancellationMessage(cancelled.cancellation));
         return;
       }
       const response = await callWorker('media.generation.confirmSubmission', {
@@ -868,12 +737,10 @@ export function ProductionPanel({
       });
       const submitted = response.job as VideoGenerationJobInfo;
       if (submitted.mediaState === 'submission_unknown') {
-        setVideoJobs((current) => upsertVideoJob(current, submitted));
         setGenerationStatus(SUBMISSION_UNKNOWN_MESSAGE);
         return;
       }
       if (submitted.status === 'failed' || !submitted.providerTaskId) {
-        setVideoJobs((current) => upsertVideoJob(current, submitted));
         setGenerationStatus(
           submitted.error
             ? generationErrorFeedback(submitted.error, 'provider').userMessage
@@ -881,10 +748,8 @@ export function ProductionPanel({
         );
         return;
       }
-      const attached = submitted;
       if (currentProjectIdRef.current !== submissionProjectId) return;
-      setVideoJobs((current) => upsertVideoJob(current, attached));
-      setGenerationStatus('视频任务已提交，正在本地查询。');
+      setGenerationStatus('视频任务已提交，项目后台正在处理。');
     } catch (reason) {
       if (currentProjectIdRef.current === submissionProjectId) {
         setGenerationStatus(errorMessage(reason, '视频任务提交失败。'));
@@ -896,8 +761,7 @@ export function ProductionPanel({
 
   const pauseVideo = async (job: VideoGenerationJobInfo) => {
     try {
-      const paused = await callWorker('video.generate.pause', { jobId: job.id });
-      setVideoJobs((current) => upsertVideoJob(current, paused));
+      await callWorker('video.generate.pause', { jobId: job.id });
       setGenerationStatus('视频任务轮询已暂停。');
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '暂停视频任务失败。'));
@@ -906,8 +770,7 @@ export function ProductionPanel({
 
   const resumeVideo = async (job: VideoGenerationJobInfo) => {
     try {
-      const resumed = await callWorker('video.generate.resume', { jobId: job.id });
-      setVideoJobs((current) => upsertVideoJob(current, resumed));
+      await callWorker('video.generate.resume', { jobId: job.id });
       setGenerationStatus('视频任务已继续查询。');
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '继续视频任务失败。'));
@@ -917,7 +780,6 @@ export function ProductionPanel({
   const cancelVideo = async (job: VideoGenerationJobInfo) => {
     try {
       const cancelled = await callWorker('media.task.cancel', { jobId: job.id });
-      setVideoJobs((current) => upsertVideoJob(current, cancelled.job as VideoGenerationJobInfo));
       setGenerationStatus(cancellationMessage(cancelled.cancellation));
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '取消视频任务失败。'));
