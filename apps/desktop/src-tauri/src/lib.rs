@@ -2745,6 +2745,7 @@ fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), Stri
         "systemInstruction",
         "context",
         "prompt",
+        "attachments",
         "tools",
         "continuation",
     ];
@@ -4351,7 +4352,12 @@ mod tests {
             "baseUrl": "https://example.com/v1",
             "systemInstruction": "system",
             "context": "context",
-            "prompt": "prompt"
+            "prompt": "prompt",
+            "attachments": [{
+                "name": "reference.png",
+                "mimeType": "image/png",
+                "dataUrl": "data:image/png;base64,AAAA"
+            }]
         });
         assert!(validate_provider_stream_params(&valid).is_ok());
         let mut with_api_key = valid.clone();
@@ -4360,9 +4366,17 @@ mod tests {
         with_headers["headers"] = json!({ "Authorization": "secret" });
         let mut with_signed_url = valid.clone();
         with_signed_url["baseUrl"] = json!("https://example.com/v1?X-Amz-Signature=secret");
+        let mut with_attachment_secret = valid.clone();
+        with_attachment_secret["attachments"][0]["apiKey"] = json!("secret");
         let mut with_unknown = valid.clone();
         with_unknown["unknown"] = json!(true);
-        for invalid in [with_api_key, with_headers, with_signed_url, with_unknown] {
+        for invalid in [
+            with_api_key,
+            with_headers,
+            with_signed_url,
+            with_attachment_secret,
+            with_unknown,
+        ] {
             assert!(validate_provider_stream_params(&invalid).is_err());
         }
 
