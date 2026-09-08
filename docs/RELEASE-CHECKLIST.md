@@ -5,13 +5,13 @@
 
 ## 1. 版本和仓库
 
-- [ ] 工作区干净，阶段提交已经推送到远端。
-- [ ] `package.json`、Tauri `Cargo.toml`、`tauri.conf.json` 版本一致。
-- [ ] SQLite `CURRENT_SCHEMA_VERSION` 和迁移测试已更新。
-- [ ] `docs/QUALITY-GATES.md` 没有未接受的 P0/P1 问题。
-- [ ] 默认测试未配置真实 Provider 密钥，未消耗额度。
+- [x] 工作区干净，阶段提交已经推送到远端。
+- [x] `package.json`、Tauri `Cargo.toml`、`tauri.conf.json` 版本一致。
+- [x] SQLite `CURRENT_SCHEMA_VERSION` 和迁移测试已更新。
+- [x] `docs/QUALITY-GATES.md` 没有未接受的 P0/P1 问题。
+- [x] 默认测试未配置真实 Provider 密钥，未消耗额度。
 
-P6 状态同步：统一 Agent 工具覆盖、Worker 共用业务 Service、任务计划依赖/完整性门禁、Schema v38 迁移和模型选择 provenance 已完成；本轮自动质量门禁全部通过。以下真实 Provider、签名、跨版本升级、干净 VM 和人工验收项目仍保持未完成，因此发布结论继续为 `HOLD`。
+P7 本地验收同步（2026-09-08）：依赖冻结安装、Tauri/NSIS 构建、M7 sidecar、Rust/JS 质量门禁及干净安装/启动/优雅退出/卸载均通过；证据见 [P7 本地发布验收记录](./code-traces/2026-09-08-p7-local-release-validation.md)。正式签名检查结果为 `NotSigned`，真实 Provider、上一正式版本升级、干净 Windows VM、断网/休眠/长稳和人工产品验收仍未完成，因此发布结论继续为 `HOLD`。
 
 ## 2. 自动质量门禁
 
@@ -31,9 +31,9 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 pnpm tauri:build
 ```
 
-- [ ] 所有命令退出码为 0。
+- [x] 所有命令退出码为 0。
 - [ ] GitHub Hosted Windows CI 全部通过且没有错误注解。
-- [ ] M7 Sidecar 输出确认损坏 JSON 恢复、离线示例、缓存边界、诊断脱敏和完整性。
+- [x] M7 Sidecar 输出确认损坏 JSON 恢复、离线示例、缓存边界、诊断脱敏和完整性。
 
 ## 3. 安装与升级
 
@@ -48,7 +48,7 @@ pnpm tauri:build
 
 `validate-nsis-upgrade.ps1` rejects identical installer content by default. `-AllowSameInstallerBaseline` is reserved for the separate same-package overwrite smoke test and does not satisfy the previous-version upgrade gate.
 
-- [ ] 干净安装、桌面启动、Worker 启动、优雅退出和卸载清理通过。
+- [x] 干净安装、桌面启动、Worker 启动、优雅退出和卸载清理通过。
 - [ ] CI 同包覆盖基线通过，外部项目身份、文档摘要和完整性保持不变。
 - [ ] 使用上一正式版本安装包执行真实跨版本升级脚本并通过。
 - [ ] 卸载应用后，用户外部项目仍存在且内容不变。
