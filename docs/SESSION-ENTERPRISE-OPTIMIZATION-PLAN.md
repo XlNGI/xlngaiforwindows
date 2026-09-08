@@ -420,6 +420,19 @@ details
 - [x] 全局请求队列已替换为分层并发模型；
 - [x] 长任务不阻塞会话读写。
 
+### 12.3 实施记录：2026-09-08 媒体异步回写 session 隔离
+
+本轮完成并验证媒体生成链路的 session epoch 隔离：
+
+- 图片 complete、preview、fail、cancel 在下载或数据库回写前后校验 `projectSessionId`；
+- 视频 attach、observe、fail、timeout、cancel 以及后台下载和最终入库均校验 `projectSessionId`；
+- `ProjectTaskRuntime` 捕获运行时 session，并将其传递给轮询、超时、取消和失败回写；
+- Media orchestration 在 Provider submit/cancel 的 `await` 前后拒绝已关闭或重开的旧 session，不再把旧回调终结到新 session；
+- IPC validator 和 handler 支持并透传可选 `projectSessionId`，同时保持旧 Desktop 调用兼容；
+- focused Worker tests：5 个测试文件、104 个测试通过；Worker typecheck 通过，`git diff --check` 通过。
+
+本条仍未将 P3 总检查项标记为完成，因为备份、导出等其他长期异步写回路径尚未统一纳入本轮验证。证据：[媒体 session epoch 异步回写隔离](./code-traces/2026-09-08-session-epoch-async-writeback.md)。
+
 ### P4/P5
 
 - [x] 数据库不变量由 Schema 和 Service 双重保证；

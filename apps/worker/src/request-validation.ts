@@ -105,10 +105,19 @@ const sessionMethods = new Set<WorkerMethod>([
   'agent.providerStep.complete',
   'agent.providerStep.start',
   'image.generate.prepare',
+  'image.generate.complete',
+  'image.generate.savePreview',
+  'image.generate.fail',
+  'image.generate.cancel',
   'media.generation.requestSubmission',
   'media.generation.confirmSubmission',
   'media.task.cancel',
   'video.generate.prepare',
+  'video.generate.attachTask',
+  'video.generate.observe',
+  'video.generate.fail',
+  'video.generate.timeout',
+  'video.generate.cancel',
   'project.task.subscribe',
   'agent.changeSet.create',
   'agent.changeSet.list',
@@ -125,6 +134,7 @@ const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'fa
 const documentKinds = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
 const documentAuthors = new Set(['user', 'import']);
 const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video']);
+const videoFailureKinds = new Set(['transport', 'provider', 'download', 'interrupted', 'timeout']);
 const agentDocumentOperations = new Set([
   'adapter.schema.get',
   'adapter.schema.propose',
@@ -952,15 +962,49 @@ export function validateSessionRequestParams(
       optionalBoolean(params, 'costNoticeAcknowledged');
       break;
     case 'media.generation.requestSubmission':
-    case 'media.task.cancel':
       rejectUnknown(params, ['jobId']);
       requireId(params, 'jobId');
+      break;
+    case 'media.task.cancel':
+      rejectUnknown(params, ['jobId', 'projectSessionId']);
+      requireId(params, 'jobId');
+      optionalId(params, 'projectSessionId');
       break;
     case 'media.generation.confirmSubmission':
       rejectUnknown(params, ['jobId', 'confirmationToken', 'approved']);
       requireId(params, 'jobId');
       requireString(params, 'confirmationToken', 512);
       requireBoolean(params, 'approved');
+      break;
+    case 'image.generate.complete':
+      rejectUnknown(params, [
+        'jobId',
+        'projectSessionId',
+        'providerStatus',
+        'providerBody',
+        'assetKind',
+        'saveAsset',
+      ]);
+      requireId(params, 'jobId');
+      optionalId(params, 'projectSessionId');
+      requireInteger(params, 'providerStatus', 0, 599);
+      requireObject(params.providerBody, 'providerBody');
+      optionalString(params, 'assetKind', MAX_KIND_LENGTH);
+      optionalBoolean(params, 'saveAsset');
+      break;
+    case 'image.generate.savePreview':
+      rejectUnknown(params, ['jobId', 'projectSessionId', 'dataUrl', 'contentType', 'assetKind']);
+      requireId(params, 'jobId');
+      optionalId(params, 'projectSessionId');
+      requireString(params, 'dataUrl', MAX_MESSAGE_LENGTH);
+      requireString(params, 'contentType', 100);
+      optionalString(params, 'assetKind', MAX_KIND_LENGTH);
+      break;
+    case 'image.generate.fail':
+    case 'image.generate.cancel':
+      rejectUnknown(params, ['jobId', 'projectSessionId']);
+      requireId(params, 'jobId');
+      optionalId(params, 'projectSessionId');
       break;
     case 'video.generate.prepare':
       rejectUnknown(params, [
@@ -985,6 +1029,39 @@ export function validateSessionRequestParams(
       optionalId(params, 'conversationId');
       optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
       optionalBoolean(params, 'costNoticeAcknowledged');
+      break;
+    case 'video.generate.attachTask':
+      rejectUnknown(params, ['jobId', 'providerTaskId', 'projectSessionId']);
+      requireId(params, 'jobId');
+      requireString(params, 'providerTaskId', 256);
+      optionalId(params, 'projectSessionId');
+      break;
+    case 'video.generate.observe':
+      rejectUnknown(params, [
+        'jobId',
+        'providerTaskId',
+        'providerStatus',
+        'providerBody',
+        'projectSessionId',
+      ]);
+      requireId(params, 'jobId');
+      requireString(params, 'providerTaskId', 256);
+      requireInteger(params, 'providerStatus', 0, 599);
+      requireObject(params.providerBody, 'providerBody');
+      optionalId(params, 'projectSessionId');
+      break;
+    case 'video.generate.fail':
+      rejectUnknown(params, ['jobId', 'failureKind', 'message', 'projectSessionId']);
+      requireId(params, 'jobId');
+      requireEnum(params, 'failureKind', videoFailureKinds);
+      optionalString(params, 'message', MAX_ERROR_LENGTH);
+      optionalId(params, 'projectSessionId');
+      break;
+    case 'video.generate.timeout':
+    case 'video.generate.cancel':
+      rejectUnknown(params, ['jobId', 'projectSessionId']);
+      requireId(params, 'jobId');
+      optionalId(params, 'projectSessionId');
       break;
     case 'project.task.subscribe':
       rejectUnknown(params, ['afterRevision']);

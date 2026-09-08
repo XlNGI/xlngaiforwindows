@@ -135,8 +135,8 @@ export class ImageGenerationService {
   }
 
   async complete(params: ImageGenerationCompleteParams): Promise<ImageGenerationJobInfo> {
-    const projectSession = this.projects.current();
-    if (!projectSession) throw new Error('No project is open.');
+    const projectSessionId = params.projectSessionId ?? this.projects.currentSessionId();
+    const projectSession = this.assertProjectSession(projectSessionId);
     const job = this.projects.access(false, (database, project) => {
       if (project !== projectSession) throw new Error('Project session changed during generation.');
       const repositories = createRepositories(database);
@@ -151,7 +151,7 @@ export class ImageGenerationService {
         params.providerStatus === 401
           ? 'Provider authentication failed with HTTP 401. Check the selected service region and API key.'
           : `Provider request failed with HTTP ${params.providerStatus}.`;
-      return this.fail(job.id, message);
+      return this.fail(job.id, message, projectSessionId);
     }
     let images: DownloadedImage[];
     let sources: ImageSource[] = [];
@@ -162,7 +162,11 @@ export class ImageGenerationService {
     } catch (error) {
       if (this.projects.current() !== projectSession)
         throw new Error('Project session changed during generation.');
-      return this.fail(job.id, error instanceof Error ? error.message : 'Image download failed.');
+      return this.fail(
+        job.id,
+        error instanceof Error ? error.message : 'Image download failed.',
+        projectSessionId,
+      );
     } finally {
       cleanupNativeImageSources(sources);
     }
@@ -262,7 +266,7 @@ export class ImageGenerationService {
       if (this.projects.current() === projectSession) {
         try {
           const message = error instanceof Error ? error.message : 'Unknown database error.';
-          return this.fail(job.id, `Image asset registration failed: ${message}`);
+          return this.fail(job.id, `Image asset registration failed: ${message}`, projectSessionId);
         } catch {
           // Preserve the original database or project-session error when terminalization also fails.
         }
@@ -272,8 +276,8 @@ export class ImageGenerationService {
   }
 
   savePreview(params: ImageGenerationSavePreviewParams): ImageGenerationJobInfo {
-    const projectSession = this.projects.current();
-    if (!projectSession) throw new Error('No project is open.');
+    const projectSessionId = params.projectSessionId ?? this.projects.currentSessionId();
+    const projectSession = this.assertProjectSession(projectSessionId);
     const image = imageFromPreview(params);
     const existing = this.projects.access(false, (database, project) => {
       if (project !== projectSession) throw new Error('Project session changed during generation.');
@@ -342,7 +346,8 @@ export class ImageGenerationService {
     }
   }
 
-  cancel(jobId: string): ImageGenerationJobInfo {
+  cancel(jobId: string, projectSessionId?: string): ImageGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -368,12 +373,16 @@ export class ImageGenerationService {
     });
   }
 
-  failTransport(jobId: string): ImageGenerationJobInfo {
-    return this.fail(jobId, 'Provider transport failed before completion.');
+  failTransport(jobId: string, projectSessionId?: string): ImageGenerationJobInfo {
+    return this.fail(jobId, 'Provider transport failed before completion.', projectSessionId);
   }
 
-  failSubmission(jobId: string, message: string): ImageGenerationJobInfo {
-    return this.fail(jobId, message);
+  failSubmission(
+    jobId: string,
+    message: string,
+    projectSessionId?: string,
+  ): ImageGenerationJobInfo {
+    return this.fail(jobId, message, projectSessionId);
   }
 
   cancelAll(): number {
@@ -871,7 +880,8 @@ export class ImageGenerationService {
     }
   }
 
-  private fail(jobId: string, message: string): ImageGenerationJobInfo {
+  private fail(jobId: string, message: string, projectSessionId?: string): ImageGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -905,6 +915,18 @@ export class ImageGenerationService {
       project.updatedAt = now;
       return this.toInfo(failed, [], repositories.generationResults.listByJob(job.id));
     });
+  }
+
+  private assertProjectSession(
+    expectedSessionId?: string,
+  ): NonNullable<ReturnType<ProjectService['current']>> {
+    const project = this.projects.current();
+    const currentSessionId = this.projects.currentSessionId();
+    if (!project || !currentSessionId) throw new Error('No project is open.');
+    if (expectedSessionId && currentSessionId !== expectedSessionId) {
+      throw new Error('Project session changed during image generation.');
+    }
+    return project;
   }
 
   private finishActiveJobs(status: 'failed' | 'cancelled', message?: string): number {

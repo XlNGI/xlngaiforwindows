@@ -2416,6 +2416,7 @@ export interface AgentGenerationConfirmMediaSubmissionParams extends LlmGenerati
 
 export interface MediaTaskCancelParams {
   jobId: string;
+  projectSessionId?: string;
 }
 
 export interface AgentToolConfirmationRequest extends AgentConfirmationRequestV1 {
@@ -2768,6 +2769,7 @@ export interface ImageGenerationPrepareParams {
 
 export interface ImageGenerationCompleteParams {
   jobId: string;
+  projectSessionId?: string;
   providerStatus: number;
   providerBody: unknown;
   assetKind?: ImageAssetKind;
@@ -2776,6 +2778,7 @@ export interface ImageGenerationCompleteParams {
 
 export interface ImageGenerationSavePreviewParams {
   jobId: string;
+  projectSessionId?: string;
   dataUrl: string;
   contentType: string;
   assetKind?: ImageAssetKind;
@@ -2783,10 +2786,12 @@ export interface ImageGenerationSavePreviewParams {
 
 export interface ImageGenerationFailParams {
   jobId: string;
+  projectSessionId?: string;
 }
 
 export interface ImageGenerationCancelParams {
   jobId: string;
+  projectSessionId?: string;
 }
 
 export interface ImageGenerationGetParams {
@@ -2887,6 +2892,7 @@ export interface VideoGenerationPrepareParams {
 export interface VideoGenerationAttachTaskParams {
   jobId: string;
   providerTaskId: string;
+  projectSessionId?: string;
 }
 
 export interface VideoGenerationObserveParams {
@@ -2894,16 +2900,19 @@ export interface VideoGenerationObserveParams {
   providerTaskId: string;
   providerStatus: number;
   providerBody: unknown;
+  projectSessionId?: string;
 }
 
 export interface VideoGenerationFailParams {
   jobId: string;
   failureKind: VideoGenerationFailureKind;
   message?: string;
+  projectSessionId?: string;
 }
 
 export interface VideoGenerationJobParams {
   jobId: string;
+  projectSessionId?: string;
 }
 
 export interface AssetListParams {

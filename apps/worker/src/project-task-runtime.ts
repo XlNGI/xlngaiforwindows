@@ -173,7 +173,7 @@ export class ProjectTaskRuntime {
         ? Date.parse(current.metadata.pollDeadlineAt)
         : Number.POSITIVE_INFINITY;
       if (Number.isFinite(deadline) && deadline <= this.now()) {
-        this.recordUpdate(scheduled, this.videos.timeout(current.id));
+        this.recordUpdate(scheduled, this.videos.timeout(current.id, this.runningSessionId));
         this.remove(current.id);
         return;
       }
@@ -194,6 +194,7 @@ export class ProjectTaskRuntime {
             jobId: current.id,
             failureKind: 'interrupted',
             message: 'Recovered video task is missing its frozen Provider profile.',
+            projectSessionId: this.runningSessionId,
           }),
         );
         this.remove(current.id);
@@ -222,12 +223,13 @@ export class ProjectTaskRuntime {
       if (!this.isCurrentSession() || this.jobs.get(current.id) !== scheduled) return;
       const observed =
         response.state === 'cancelled'
-          ? this.videos.cancel(current.id)
+          ? this.videos.cancel(current.id, this.runningSessionId)
           : this.videos.observe({
               jobId: current.id,
               providerTaskId: current.providerTaskId,
               providerStatus: response.providerStatus,
               providerBody: normalizedProviderBody(response),
+              projectSessionId: this.runningSessionId,
             });
       scheduled.transportFailures = 0;
       this.recordUpdate(scheduled, observed);
@@ -258,6 +260,7 @@ export class ProjectTaskRuntime {
               jobId: scheduled.job.id,
               failureKind: 'transport',
               message: error instanceof Error ? error.message : 'Native Provider polling failed.',
+              projectSessionId: this.runningSessionId,
             }),
           );
         } finally {

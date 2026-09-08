@@ -183,6 +183,7 @@ export class VideoGenerationService {
   }
 
   attachTask(params: VideoGenerationAttachTaskParams): VideoGenerationJobInfo {
+    this.assertProjectSession(params.projectSessionId);
     const providerTaskId = requireProviderTaskId(params.providerTaskId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -238,8 +239,8 @@ export class VideoGenerationService {
 
   observe(params: VideoGenerationObserveParams): VideoGenerationJobInfo {
     const providerTaskId = requireProviderTaskId(params.providerTaskId);
-    const projectSession = this.projects.current();
-    if (!projectSession) throw new Error('No project is open.');
+    const projectSessionId = params.projectSessionId ?? this.projects.currentSessionId();
+    const projectSession = this.assertProjectSession(projectSessionId);
     const job = this.projects.access(false, (database, project) => {
       if (project !== projectSession)
         throw new Error('Project session changed during video polling.');
@@ -254,10 +255,15 @@ export class VideoGenerationService {
 
     const metadata = observedMetadata(this.metadata(job), job.adapterKey, params.providerBody);
     if (params.providerStatus === 429 || params.providerStatus >= 500) {
-      return this.persistObservation(job.id, providerTaskId, {
-        ...metadata,
-        providerState: `retryable-http-${params.providerStatus}`,
-      });
+      return this.persistObservation(
+        job.id,
+        providerTaskId,
+        {
+          ...metadata,
+          providerState: `retryable-http-${params.providerStatus}`,
+        },
+        projectSessionId,
+      );
     }
     if (params.providerStatus < 200 || params.providerStatus >= 300) {
       return this.transitionFailure(
@@ -265,12 +271,19 @@ export class VideoGenerationService {
         'provider',
         `Provider polling failed with HTTP ${params.providerStatus}.`,
         metadata,
+        'failed',
+        projectSessionId,
       );
     }
 
     const state = providerState(params.providerBody);
     if (state && isActiveProviderState(state, metadata.providerRegion)) {
-      return this.persistObservation(job.id, providerTaskId, { ...metadata, providerState: state });
+      return this.persistObservation(
+        job.id,
+        providerTaskId,
+        { ...metadata, providerState: state },
+        projectSessionId,
+      );
     }
     if (state === 'failed' || state === 'error') {
       return this.transitionFailure(
@@ -278,6 +291,8 @@ export class VideoGenerationService {
         'provider',
         providerFailureMessage(params.providerBody),
         { ...metadata, providerState: state },
+        'failed',
+        projectSessionId,
       );
     }
     if (state !== 'success' && state !== 'succeeded' && state !== 'completed') {
@@ -288,6 +303,8 @@ export class VideoGenerationService {
           ? `Provider returned unsupported video task state: ${state}.`
           : 'Provider polling response did not contain a supported task state.',
         metadata,
+        'failed',
+        projectSessionId,
       );
     }
 
@@ -300,14 +317,28 @@ export class VideoGenerationService {
         'provider',
         error instanceof Error ? error.message : 'Provider returned no video output.',
         { ...metadata, providerState: state },
+        'failed',
+        projectSessionId,
       );
     }
     const completedMetadata = {
       ...metadata,
       providerState: state,
     };
-    const downloading = this.transitionToDownloading(job.id, providerTaskId, completedMetadata);
-    this.startDownload(projectSession, job, providerTaskId, source, completedMetadata);
+    const downloading = this.transitionToDownloading(
+      job.id,
+      providerTaskId,
+      completedMetadata,
+      projectSessionId,
+    );
+    this.startDownload(
+      projectSession,
+      projectSessionId!,
+      job,
+      providerTaskId,
+      source,
+      completedMetadata,
+    );
     return downloading;
   }
 
@@ -316,6 +347,9 @@ export class VideoGenerationService {
       params.jobId,
       params.failureKind,
       params.message ?? failureMessage(params.failureKind),
+      undefined,
+      'failed',
+      params.projectSessionId,
     );
   }
 
@@ -355,7 +389,8 @@ export class VideoGenerationService {
     });
   }
 
-  timeout(jobId: string): VideoGenerationJobInfo {
+  timeout(jobId: string, projectSessionId?: string): VideoGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -372,11 +407,13 @@ export class VideoGenerationService {
         'Video generation timed out before Provider completion.',
         metadata,
         'timed-out',
+        projectSessionId,
       );
     });
   }
 
-  cancel(jobId: string): VideoGenerationJobInfo {
+  cancel(jobId: string, projectSessionId?: string): VideoGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     this.downloads.get(jobId)?.abort();
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -497,7 +534,9 @@ export class VideoGenerationService {
     jobId: string,
     providerTaskId: string,
     metadata: VideoJobMetadata,
+    projectSessionId?: string,
   ): VideoGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -557,7 +596,9 @@ export class VideoGenerationService {
     message: string,
     suppliedMetadata?: VideoJobMetadata,
     status: 'failed' | 'timed-out' = 'failed',
+    projectSessionId?: string,
   ): VideoGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -595,7 +636,9 @@ export class VideoGenerationService {
     jobId: string,
     providerTaskId: string,
     metadata: VideoJobMetadata,
+    projectSessionId?: string,
   ): VideoGenerationJobInfo {
+    this.assertProjectSession(projectSessionId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -631,6 +674,7 @@ export class VideoGenerationService {
 
   private startDownload(
     projectSession: NonNullable<ReturnType<ProjectService['current']>>,
+    projectSessionId: string,
     job: JobRecord,
     providerTaskId: string,
     source: string,
@@ -641,6 +685,7 @@ export class VideoGenerationService {
     this.downloads.set(job.id, controller);
     void this.downloadAndComplete(
       projectSession,
+      projectSessionId,
       job,
       providerTaskId,
       source,
@@ -655,6 +700,8 @@ export class VideoGenerationService {
             'download',
             error instanceof Error ? error.message : 'Video download finalization failed.',
             metadata,
+            'failed',
+            projectSessionId,
           );
         } catch {
           // A concurrent close owns recovery when the project session is no longer writable.
@@ -667,6 +714,7 @@ export class VideoGenerationService {
 
   private async downloadAndComplete(
     projectSession: NonNullable<ReturnType<ProjectService['current']>>,
+    projectSessionId: string,
     job: JobRecord,
     providerTaskId: string,
     source: string,
@@ -692,6 +740,8 @@ export class VideoGenerationService {
         'download',
         error instanceof Error ? error.message : 'Video download failed.',
         metadata,
+        'failed',
+        projectSessionId,
       );
     }
 
@@ -763,6 +813,18 @@ export class VideoGenerationService {
       project.updatedAt = now;
       return this.toInfo(completed, [asset], [result]);
     });
+  }
+
+  private assertProjectSession(
+    expectedSessionId?: string,
+  ): NonNullable<ReturnType<ProjectService['current']>> {
+    const project = this.projects.current();
+    const currentSessionId = this.projects.currentSessionId();
+    if (!project || !currentSessionId) throw new Error('No project is open.');
+    if (expectedSessionId && currentSessionId !== expectedSessionId) {
+      throw new Error('Project session changed during video generation.');
+    }
+    return project;
   }
 
   private requireVideoJob(job: JobRecord | undefined, projectId: string): asserts job is JobRecord {

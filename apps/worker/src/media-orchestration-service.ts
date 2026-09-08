@@ -235,10 +235,7 @@ export class MediaOrchestrationService {
     const job = this.info(kind, prepared.job.id);
     if (this.projects.currentSessionId() !== prepared.projectSessionId) {
       cleanupControlledInputs(prepared.snapshot, this.projects.current()?.rootPath);
-      return {
-        kind,
-        job: this.failKnown(job.id, kind, 'The project session changed before media submission.'),
-      };
+      throw new Error('Project session changed before media submission.');
     }
     const snapshot = prepared.snapshot;
     const resolved = prepared.resolved;
@@ -257,6 +254,10 @@ export class MediaOrchestrationService {
     try {
       response = await this.native.request('provider.media.submit', request);
     } catch (error) {
+      if (this.projects.currentSessionId() !== prepared.projectSessionId) {
+        cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
+        throw new Error('Project session changed during media submission.');
+      }
       if (
         error instanceof NativeProviderRequestError &&
         ['INVALID_PARAMETERS', 'METHOD_NOT_FOUND'].includes(error.hostError.code)
@@ -275,10 +276,14 @@ export class MediaOrchestrationService {
     }
     const body = asRecord(response);
     cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
+    if (this.projects.currentSessionId() !== prepared.projectSessionId) {
+      throw new Error('Project session changed during media submission.');
+    }
     const status = typeof body.status === 'number' ? body.status : 0;
     if (kind === 'image') {
       const completed = await this.images.complete({
         jobId: job.id,
+        projectSessionId: prepared.projectSessionId,
         providerStatus: status,
         providerBody: body.body,
         assetKind: 'generated-image',
@@ -289,13 +294,18 @@ export class MediaOrchestrationService {
     if (status < 200 || status >= 300 || !taskId) {
       const failed = this.videos.fail({
         jobId: job.id,
+        projectSessionId: prepared.projectSessionId,
         failureKind: 'provider',
         message:
           typeof body.errorMessage === 'string' ? body.errorMessage : `Provider HTTP ${status}`,
       });
       return { kind, job: failed };
     }
-    const attached = this.videos.attachTask({ jobId: job.id, providerTaskId: taskId });
+    const attached = this.videos.attachTask({
+      jobId: job.id,
+      providerTaskId: taskId,
+      projectSessionId: prepared.projectSessionId,
+    });
     return { kind, job: attached };
   }
 
@@ -310,6 +320,10 @@ export class MediaOrchestrationService {
   }
 
   async cancel(params: MediaTaskCancelParams): Promise<MediaSubmissionResult> {
+    const projectSessionId = params.projectSessionId ?? this.projects.currentSessionId();
+    if (!projectSessionId || this.projects.currentSessionId() !== projectSessionId) {
+      throw new Error('Project session changed before media cancellation.');
+    }
     const current = this.projects.access(false, (database, project) => {
       const job = createRepositories(database).jobs.get(params.jobId);
       if (!job || job.projectId !== project.id)
@@ -332,7 +346,7 @@ export class MediaOrchestrationService {
       try {
         const resolved = this.resolveSubmission(current, snapshot, kind);
         const request: NativeProviderMediaCancelParams = {
-          projectSessionId: this.projects.currentSessionId() ?? 'unknown-session',
+          projectSessionId,
           providerProfileId: resolved.providerProfileId,
           adapterKey: current.adapterKey,
           providerRegion: resolved.providerRegion,
@@ -358,7 +372,13 @@ export class MediaOrchestrationService {
       }
     }
     cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
-    const job = kind === 'image' ? this.images.cancel(current.id) : this.videos.cancel(current.id);
+    if (this.projects.currentSessionId() !== projectSessionId) {
+      throw new Error('Project session changed during media cancellation.');
+    }
+    const job =
+      kind === 'image'
+        ? this.images.cancel(current.id, projectSessionId)
+        : this.videos.cancel(current.id, projectSessionId);
     return { kind, job, cancellation };
   }
 

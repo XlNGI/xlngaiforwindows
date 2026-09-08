@@ -1889,16 +1889,24 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'image.generate.savePreview':
           result = imageGenerationService.savePreview({
             jobId: requireString(params, 'jobId'),
+            projectSessionId:
+              typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
             dataUrl: requireString(params, 'dataUrl'),
             contentType: requireString(params, 'contentType'),
             assetKind: optionalImageAssetKind(params, 'assetKind'),
           } satisfies ImageGenerationSavePreviewParams);
           break;
         case 'image.generate.fail':
-          result = imageGenerationService.failTransport(requireString(params, 'jobId'));
+          result = imageGenerationService.failTransport(
+            requireString(params, 'jobId'),
+            typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
+          );
           break;
         case 'image.generate.cancel':
-          result = imageGenerationService.cancel(requireString(params, 'jobId'));
+          result = imageGenerationService.cancel(
+            requireString(params, 'jobId'),
+            typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
+          );
           break;
         case 'image.generate.get':
           result = imageGenerationService.get(requireString(params, 'jobId'));
@@ -1928,6 +1936,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = videoGenerationService.attachTask({
             jobId: requireString(params, 'jobId'),
             providerTaskId: requireString(params, 'providerTaskId'),
+            projectSessionId:
+              typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
           } satisfies VideoGenerationAttachTaskParams);
           projectTaskRuntime.kick();
           break;
@@ -1937,6 +1947,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             providerTaskId: requireString(params, 'providerTaskId'),
             providerStatus: requireNumber(params, 'providerStatus'),
             providerBody: params.providerBody,
+            projectSessionId:
+              typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
           } satisfies VideoGenerationObserveParams);
           projectTaskRuntime.kick();
           break;
@@ -1945,6 +1957,8 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             jobId: requireString(params, 'jobId'),
             failureKind: requireVideoFailureKind(params, 'failureKind'),
             message: typeof params.message === 'string' ? params.message : undefined,
+            projectSessionId:
+              typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
           } satisfies VideoGenerationFailParams);
           projectTaskRuntime.kick();
           break;
@@ -1957,11 +1971,17 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           projectTaskRuntime.kick();
           break;
         case 'video.generate.timeout':
-          result = videoGenerationService.timeout(requireString(params, 'jobId'));
+          result = videoGenerationService.timeout(
+            requireString(params, 'jobId'),
+            typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
+          );
           projectTaskRuntime.kick();
           break;
         case 'video.generate.cancel':
-          result = videoGenerationService.cancel(requireString(params, 'jobId'));
+          result = videoGenerationService.cancel(
+            requireString(params, 'jobId'),
+            typeof params.projectSessionId === 'string' ? params.projectSessionId : undefined,
+          );
           projectTaskRuntime.kick();
           break;
         case 'video.generate.get':
