@@ -5,7 +5,7 @@
 
 ## 1. 版本和仓库
 
-- [x] 工作区干净，阶段提交已经推送到远端。
+- [ ] 工作区干净，阶段提交已经推送到远端。
 - [x] `package.json`、Tauri `Cargo.toml`、`tauri.conf.json` 版本一致。
 - [x] SQLite `CURRENT_SCHEMA_VERSION` 和迁移测试已更新。
 - [x] `docs/QUALITY-GATES.md` 没有未接受的 P0/P1 问题。
