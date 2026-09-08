@@ -110,4 +110,32 @@ describe('ContextService', () => {
     expect(first.sources[0]?.summaryCacheKey).toBe(second.sources[0]?.summaryCacheKey);
     expect(snapshots.filter((snapshot) => snapshot.purpose === 'summary-cache')).toHaveLength(1);
   });
+
+  it('includes published scene and shot documents in the project Agent context', async () => {
+    const { content, contexts, workflow } = await setup();
+    const scene = content.saveScene({ title: '场次一' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '镜头一' });
+    const sceneDocument = content.saveDocument({
+      kind: 'scene',
+      title: '场次资料',
+      contentMarkdown: '场次级约束与人物调度',
+      scopeType: 'scene',
+      scopeId: scene.id,
+    });
+    const shotDocument = content.saveDocument({
+      kind: 'storyboard',
+      title: '镜头资料',
+      contentMarkdown: '镜头级构图与运动',
+      scopeType: 'shot',
+      scopeId: shot.id,
+    });
+    publishDocument(workflow, sceneDocument.id, sceneDocument.rowVersion);
+    publishDocument(workflow, shotDocument.id, shotDocument.rowVersion);
+
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const context = contexts.compile(conversation.id);
+
+    expect(context.rendered).toContain('场次级约束与人物调度');
+    expect(context.rendered).toContain('镜头级构图与运动');
+  });
 });

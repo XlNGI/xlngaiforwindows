@@ -248,7 +248,7 @@ adapter.schema.audit.list
 - [x] 图片生成完成后直接显示素材入口。
 - [x] 视频生成中显示轮询状态、预计等待说明和取消入口。
 - [x] Provider 不支持某字段时，提示检查必填项、修改 schema 或更换模型。
-- [ ] 普通入口隐藏旧的功能模式选择器，高级设置保留兼容入口。
+- [x] 普通入口隐藏旧的作用域和功能模式选择器；项目级会话保留历史字段兼容，但不再作为用户入口。
 
 ## 6. 数据和权限边界
 
@@ -302,7 +302,7 @@ adapter.schema.audit.list
 
 ### 用户体验
 
-- [ ] 用户只输入自然语言即可完成文本、文档、研究、图片和视频任务。
+- [x] 用户只输入自然语言即可进入统一项目 Agent；Worker 根据提示词和项目上下文自动选择文档、小说或短剧内部编排，媒体模型/参数/付费提交仍在需要时询问。
 - [ ] 只有真正需要模型或参数时才询问，询问后可以继续原任务。
 - [ ] 同一会话不会反复询问同一能力的模型。
 - [ ] 用户明确要求换模型时可以重新选择。
@@ -319,11 +319,11 @@ adapter.schema.audit.list
 
 ### 工程质量
 
-- [ ] Contracts build 通过。
-- [ ] Desktop typecheck 和测试通过。
-- [ ] Worker typecheck 和测试通过。
-- [ ] 全仓测试通过。
-- [ ] ESLint、Prettier、`git diff --check` 通过。
+- [x] Contracts build 通过。
+- [x] Desktop typecheck 和测试通过。
+- [x] Worker typecheck 和测试通过。
+- [x] 全仓测试通过。
+- [x] ESLint、Prettier、`git diff --check` 通过。
 - [ ] 新增每个 IPC 方法都有正常、拒绝未知字段和越权场景测试。
 
 ## 9. 实施顺序
@@ -341,7 +341,7 @@ adapter.schema.audit.list
 
 ## 10. 当前状态与下一步
 
-阶段 A 的查询、提议、确认、审计和回滚，阶段 B 的项目级会话模型偏好，阶段 C 的媒体任务快照/生命周期，以及全系统编排 P0-P6 的统一 Runtime、策略、业务工具覆盖、媒体准备/提交/取消和项目级后台任务均已接通。当前还需要：
+阶段 A 的查询、提议、确认、审计和回滚，阶段 B 的项目级会话模型偏好，阶段 C 的媒体任务快照/生命周期，以及全系统编排 P0-P6 的统一 Runtime、策略、业务工具覆盖、媒体准备/提交/取消和项目级后台任务均已接通。项目级统一 Agent 入口也已完成：Desktop 不再让用户选择作用域或会话模式，项目上下文默认纳入项目内已发布的场次/镜头资料，Worker 会根据自然语言和章节上下文自动选择内部编排。当前还需要：
 
 1. 继续执行 P7 的真实 Provider、Windows 重启/断网、多窗口、性能和发布门禁验收；
 2. 保持发布状态 `HOLD`，不把自动化 mock、同包覆盖或本地构建冒充正式发布证据。
@@ -350,6 +350,9 @@ adapter.schema.audit.list
 
 ## 11. Latest implementation status (2026-09-08)
 
+- [x] Desktop 项目助手已收敛为单一项目级会话入口：移除项目/场次/镜头作用域 tabs 及会话/文档/小说/短剧模式 tabs；历史 scope 字段继续保留用于数据兼容。
+- [x] 项目 Agent 上下文默认包含当前项目所有已发布的 project/scene/shot 资料，并继续执行项目归属校验。
+- [x] `agent.run` 现在根据自然语言和可选章节上下文自动选择 document、novel-writing 或 short-drama 内部编排；小说目标不完整时返回可恢复的 pending intent，短剧仍由 Worker 冻结章节和平台快照。
 - [x] Added `adapter.schema.propose`, `adapter.schema.confirm`, `adapter.schema.rollback`, and `adapter.schema.audit.list` contracts and IPC routes.
 - [x] Added descriptor validation, required-field checks, HTTPS endpoint checks, and malformed-schema protection.
 - [x] Proposals persist as `needs_confirmation`; only confirmed descriptors load into the runtime adapter registry.

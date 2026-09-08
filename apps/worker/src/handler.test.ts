@@ -12,6 +12,7 @@ import {
 import {
   handleRequest,
   inferAgentDocumentIntent,
+  inferConversationTaskMode,
   inferUnifiedAgentCapability,
   modelMatchesUnifiedAgentRequest,
   parseRequest,
@@ -51,6 +52,21 @@ describe('inferAgentDocumentIntent', () => {
     expect(inferAgentDocumentIntent('根据这些参数写一份视频分镜文档')).toEqual({
       operation: 'document.create_draft',
     });
+  });
+});
+
+describe('inferConversationTaskMode', () => {
+  it('routes natural-language project requests without exposing a mode switch', () => {
+    expect(inferConversationTaskMode('续写小说下一章')).toBe('novel-writing');
+    expect(inferConversationTaskMode('把选中的章节改编成短剧分镜', ['chapter-1'])).toBe(
+      'short-drama',
+    );
+    expect(inferConversationTaskMode('根据项目资料写一份制作说明')).toBe('document');
+  });
+
+  it('uses selected chapters as adaptation context for otherwise generic requests', () => {
+    expect(inferConversationTaskMode('生成本集内容', ['chapter-1'])).toBe('short-drama');
+    expect(inferConversationTaskMode('续写小说', ['chapter-1'])).toBe('novel-writing');
   });
 });
 

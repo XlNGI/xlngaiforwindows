@@ -99,6 +99,29 @@ describe('AgentOrchestrationService', () => {
     ).toEqual({ tasks: { count: 0 }, chapters: { count: 0 }, pending: { count: 1 } });
   });
 
+  it('keeps an inferred novel action pending until its chapter target is explicit', async () => {
+    const { project, conversation, orchestration } = await setup();
+    const pending = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '续写小说下一章',
+    });
+
+    expect(pending).toMatchObject({
+      pendingIntent: {
+        requestedAction: 'continue_chapter',
+        reasonCode: 'TARGET_REQUIRED',
+        status: 'pending',
+      },
+    });
+    expect(
+      project.access(false, (database) => ({
+        tasks: database.prepare('SELECT COUNT(*) AS count FROM agent_tasks').get(),
+        pending: database.prepare('SELECT COUNT(*) AS count FROM agent_pending_intents').get(),
+      })),
+    ).toEqual({ tasks: { count: 0 }, pending: { count: 1 } });
+  });
+
   it('permits only one active task per chapter and releases the lock at a terminal task state', async () => {
     const { project, conversation, orchestration } = await setup();
     const initial = orchestration.prepareNovelTask({

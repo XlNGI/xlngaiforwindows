@@ -392,6 +392,40 @@ describe('GenerationService', () => {
     );
   });
 
+  it('ignores a delayed shorter observe snapshot instead of failing the generation', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
+      stream: () => Promise.resolve({ model: 'test-model', content: '', toolCalls: [] }),
+    };
+    const { conversation, generations } = await setup(provider, {
+      resolveLlmSelection: () => ({
+        providerProfileId: 'profile-selection',
+        modelId: 'model-selection',
+        providerName: 'Test',
+        modelName: 'test-model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses' as const,
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Concurrent observe',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+
+    generations.observe({ ...prepared.stream, content: 'Newer tool response' });
+    expect(generations.observe({ ...prepared.stream, content: 'Newer' })).toMatchObject({
+      status: 'streaming',
+      assistantMessage: { content: 'Newer tool response' },
+    });
+    expect(generations.complete({ ...prepared.stream, content: 'Newer' })).toMatchObject({
+      status: 'complete',
+      assistantMessage: { content: 'Newer tool response' },
+    });
+  });
+
   it('deduplicates native prepare requests by idempotency key', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),

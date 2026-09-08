@@ -192,6 +192,11 @@ export class GenerationService {
     const state = this.requireNativeState(params);
     if (!isActive(state.status)) return publicState(state);
     this.assertMonotonicContent(state, params.content);
+    // Native/Pi callbacks can arrive concurrently around a tool continuation.
+    // A delayed, shorter snapshot is stale rather than an invalid generation.
+    if (params.content.length < state.assistantMessage.content.length) {
+      return publicState(state);
+    }
     const observedAt = nowIso();
     const attempt: LlmGenerationAttemptRecord = {
       ...state.attempt,
@@ -212,6 +217,10 @@ export class GenerationService {
     const state = this.requireNativeState(params);
     if (!isActive(state.status)) return publicState(state);
     this.assertMonotonicContent(state, params.content);
+    const content =
+      params.content.length < state.assistantMessage.content.length
+        ? state.assistantMessage.content
+        : params.content;
     const usage = normalizeUsage(params.usage);
     const pricing = pricingSnapshotOf(state.attempt);
     const estimatedCost = calculateEstimatedCost(usage, pricing);
@@ -222,7 +231,7 @@ export class GenerationService {
       ...state.attempt,
       status: 'complete',
       firstTokenAt:
-        state.attempt.firstTokenAt || !params.content ? state.attempt.firstTokenAt : completedAt,
+        state.attempt.firstTokenAt || !content ? state.attempt.firstTokenAt : completedAt,
       completedAt,
       providerResponseId,
       finishReason,
@@ -232,7 +241,7 @@ export class GenerationService {
       errorCode: undefined,
       errorMessage: undefined,
     };
-    const saved = this.persistAssistantAndAttempt(state, params.content, 'complete', attempt);
+    const saved = this.persistAssistantAndAttempt(state, content, 'complete', attempt);
     if (!saved) throw new Error('Project session changed during generation.');
     state.assistantMessage = saved;
     state.attempt = attempt;
@@ -249,12 +258,16 @@ export class GenerationService {
     const state = this.requireNativeState(params);
     if (!isActive(state.status)) return publicState(state);
     this.assertMonotonicContent(state, params.content);
+    const content =
+      params.content.length < state.assistantMessage.content.length
+        ? state.assistantMessage.content
+        : params.content;
     this.finishNativeFailure(
       state,
       false,
       params.error,
       params.retryable,
-      params.content,
+      content,
       params.usage,
     );
     return publicState(state);
@@ -875,7 +888,9 @@ export class GenerationService {
   }
 
   private assertMonotonicContent(state: GenerationState, content: string): void {
-    if (!content.startsWith(state.assistantMessage.content)) {
+    const current = state.assistantMessage.content;
+    const isStaleSnapshot = content.length < current.length && current.startsWith(content);
+    if (!isStaleSnapshot && !content.startsWith(current)) {
       throw new Error('Out-of-order LLM stream content was rejected.');
     }
   }

@@ -244,8 +244,11 @@ function renderSource(source: ContextSourceInput, content: string): string {
 }
 
 function isRelevant(source: ContextSourceInput, scope: ContextScope): boolean {
+  // A project conversation is the project-wide Agent workspace. It must see
+  // every published project/scene/shot source that belongs to this project;
+  // scene and shot filtering is retained only for legacy scoped conversations.
+  if (scope.type === 'project') return true;
   if (source.scopeType === 'project') return true;
-  if (scope.type === 'project') return false;
   if (source.scopeType === 'scene')
     return source.scopeId === (scope.type === 'scene' ? scope.id : scope.sceneId);
   return scope.type === 'shot' && source.scopeId === scope.id;

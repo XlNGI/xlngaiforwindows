@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AgentTaskDetail,
   AgentToolConfirmationRequest,
   ChatMessageInfo,
   ConversationInfo,
@@ -11,6 +12,89 @@ import { ChatPanel } from './ChatPanel';
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
+  it('shows Agent phase, Provider step, and tool activity while a task runs', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '工具进度',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const agentTask: AgentTaskDetail = {
+      task: {
+        id: 'task',
+        projectId: 'project',
+        conversationId: conversation.id,
+        taskType: 'document-create',
+        scopeType: 'project',
+        title: '创建文档',
+        status: 'running',
+        phase: 'tool_validating',
+        rowVersion: 1,
+        createdAt: '2026-09-09T00:00:00.000Z',
+        updatedAt: '2026-09-09T00:00:01.000Z',
+      },
+      events: [
+        {
+          id: 'event',
+          taskId: 'task',
+          sequence: 0,
+          eventType: 'agent.tool.started',
+          level: 'info',
+          summary: '正在调用工具：document.create_draft',
+          createdAt: '2026-09-09T00:00:01.000Z',
+        },
+      ],
+      documents: [],
+      providerSteps: [
+        {
+          id: 'step',
+          generationId: 'generation',
+          attemptId: 'attempt',
+          ordinal: 0,
+          protocol: 'openai-chat-completions',
+          status: 'in_flight',
+          toolCallCount: 1,
+          startedAt: '2026-09-09T00:00:00.500Z',
+        },
+      ],
+      researchSources: [],
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentTask={agentTask}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Agent 执行进度')).toBeInTheDocument();
+    expect(screen.getByText('校验工具调用')).toBeInTheDocument();
+    expect(screen.getByText('正在调用工具：document.create_draft')).toBeInTheDocument();
+    expect(screen.getByText(/Provider 步骤 1 · 调用中 · 工具 1 次/)).toBeInTheDocument();
+  });
+
   it('provides an attachment picker for image, video, and document files', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
@@ -41,7 +125,6 @@ describe('ChatPanel attempt metadata', () => {
           { id: 'a1', name: 'reference.png', mimeType: 'image/png', size: 12, kind: 'image' },
         ]}
         onAddAttachments={onAdd}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -122,7 +205,6 @@ describe('ChatPanel attempt metadata', () => {
           ],
         }}
         onSelectAgentModel={onSelect}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -182,7 +264,6 @@ describe('ChatPanel attempt metadata', () => {
           expiresAt: '2999-01-01T00:00:00.000Z',
         }}
         onConfirmMediaSubmission={onConfirm}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -283,7 +364,6 @@ describe('ChatPanel attempt metadata', () => {
         mediaModelSelection={request}
         onSelectMediaModel={onSelectMedia}
         onSelectAgentModel={onSelectAgent}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -354,7 +434,6 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmModelId=""
         confirmation={confirmation}
         onConfirmAgentAction={onConfirm}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -423,7 +502,6 @@ describe('ChatPanel attempt metadata', () => {
         confirmation={confirmation}
         onConfirmAgentAction={onConfirm}
         onOpenProtectedUi={onOpenProtectedUi}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -491,7 +569,6 @@ describe('ChatPanel attempt metadata', () => {
           researchSources: [],
         }}
         onOpenTaskLog={onOpenTaskLog}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -570,7 +647,6 @@ describe('ChatPanel attempt metadata', () => {
           providerSteps: [],
           researchSources: [],
         }}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -668,7 +744,6 @@ describe('ChatPanel attempt metadata', () => {
           researchSources: [],
         }}
         onContinueAgentTask={onContinue}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -712,7 +787,6 @@ describe('ChatPanel attempt metadata', () => {
         llmModels={[]}
         selectedLlmProfileId=""
         selectedLlmModelId=""
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -782,7 +856,6 @@ describe('ChatPanel attempt metadata', () => {
           },
           sources: [],
         }}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -800,7 +873,7 @@ describe('ChatPanel attempt metadata', () => {
     expect(onSendMessage).not.toHaveBeenCalled();
   });
 
-  it('exposes an explicit document draft action only for a writable message', () => {
+  it('uses the unified natural-language composer without document or mode shortcuts', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -809,8 +882,7 @@ describe('ChatPanel attempt metadata', () => {
       createdAt: '2026-08-03T00:00:00.000Z',
       updatedAt: '2026-08-03T00:00:00.000Z',
     };
-    const onCreateDocumentDraft = vi.fn();
-    const { rerender } = render(
+    render(
       <ChatPanel
         scopeType="project"
         scopeAvailable
@@ -826,7 +898,6 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmProfileId=""
         selectedLlmModelId=""
         onCollapse={vi.fn()}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -837,48 +908,18 @@ describe('ChatPanel attempt metadata', () => {
         onComposerChange={vi.fn()}
         onCancelGeneration={vi.fn()}
         onSendMessage={vi.fn()}
-        onCreateDocumentDraft={onCreateDocumentDraft}
       />,
     );
 
-    fireEvent.click(screen.getByTitle('创建文档草稿'));
-    expect(onCreateDocumentDraft).toHaveBeenCalledOnce();
-
-    rerender(
-      <ChatPanel
-        scopeType="project"
-        scopeAvailable
-        writable={false}
-        conversations={[conversation]}
-        conversation={conversation}
-        messages={[]}
-        composer="Draft a project brief"
-        statusMessage=""
-        legacyLlmConfigured={false}
-        llmProfiles={[]}
-        llmModels={[]}
-        selectedLlmProfileId=""
-        selectedLlmModelId=""
-        onCollapse={vi.fn()}
-        onScopeChange={vi.fn()}
-        onSelectConversation={vi.fn()}
-        onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
-        onRetryGeneration={vi.fn()}
-        onLlmProfileChange={vi.fn()}
-        onLlmModelChange={vi.fn()}
-        onOpenProviderSettings={vi.fn()}
-        onComposerChange={vi.fn()}
-        onCancelGeneration={vi.fn()}
-        onSendMessage={vi.fn()}
-        onCreateDocumentDraft={onCreateDocumentDraft}
-      />,
-    );
-
-    expect(screen.getByTitle('创建文档草稿')).toBeDisabled();
+    expect(screen.queryByTitle('创建文档草稿')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '项目' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '场次' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '镜头' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '小说创作' })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/描述你要完成的任务/)).toBeInTheDocument();
   });
 
-  it('hides the document draft action and shows the selected-chapter hint in short-drama mode', () => {
+  it('does not expose internal workflow mode labels', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -887,8 +928,7 @@ describe('ChatPanel attempt metadata', () => {
       createdAt: '2026-08-03T00:00:00.000Z',
       updatedAt: '2026-08-03T00:00:00.000Z',
     };
-    const onCreateDocumentDraft = vi.fn();
-    const { rerender } = render(
+    render(
       <ChatPanel
         scopeType="project"
         scopeAvailable
@@ -903,10 +943,7 @@ describe('ChatPanel attempt metadata', () => {
         llmModels={[]}
         selectedLlmProfileId=""
         selectedLlmModelId=""
-        composerMode="short-drama"
-        episodeChapterCount={3}
         onCollapse={vi.fn()}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -917,45 +954,11 @@ describe('ChatPanel attempt metadata', () => {
         onComposerChange={vi.fn()}
         onCancelGeneration={vi.fn()}
         onSendMessage={vi.fn()}
-        onCreateDocumentDraft={onCreateDocumentDraft}
       />,
     );
     expect(screen.queryByTitle('创建文档草稿')).not.toBeInTheDocument();
-    expect(screen.getByText('短剧创作 · 已选 3 个章节作为本集范围')).toBeInTheDocument();
-
-    rerender(
-      <ChatPanel
-        scopeType="project"
-        scopeAvailable
-        writable
-        conversations={[conversation]}
-        conversation={conversation}
-        messages={[]}
-        composer="生成本集的场次和镜头提示词"
-        statusMessage=""
-        legacyLlmConfigured={false}
-        llmProfiles={[]}
-        llmModels={[]}
-        selectedLlmProfileId=""
-        selectedLlmModelId=""
-        composerMode="short-drama"
-        episodeChapterCount={0}
-        onCollapse={vi.fn()}
-        onScopeChange={vi.fn()}
-        onSelectConversation={vi.fn()}
-        onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
-        onRetryGeneration={vi.fn()}
-        onLlmProfileChange={vi.fn()}
-        onLlmModelChange={vi.fn()}
-        onOpenProviderSettings={vi.fn()}
-        onComposerChange={vi.fn()}
-        onCancelGeneration={vi.fn()}
-        onSendMessage={vi.fn()}
-        onCreateDocumentDraft={onCreateDocumentDraft}
-      />,
-    );
-    expect(screen.getByText('短剧创作 · 请先在小说章节页选择章节')).toBeInTheDocument();
+    expect(screen.queryByText(/短剧创作/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/小说创作/)).not.toBeInTheDocument();
   });
 
   it('shows provider usage, snapshot cost, latency details, and missing usage', () => {
@@ -1047,7 +1050,6 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmProfileId=""
         selectedLlmModelId=""
         onCollapse={vi.fn()}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onPromoteMessage={vi.fn()}
@@ -1104,7 +1106,6 @@ describe('ChatPanel attempt metadata', () => {
         onShowArchivedConversationsChange={vi.fn()}
         canLoadMoreConversations
         onLoadMoreConversations={onLoadMoreConversations}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onArchiveConversation={onArchiveConversation}
@@ -1143,7 +1144,6 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmModelId=""
         showArchivedConversations
         onShowArchivedConversationsChange={vi.fn()}
-        onScopeChange={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onArchiveConversation={onArchiveConversation}

@@ -1,11 +1,9 @@
 import {
   Archive,
-  BookOpenText,
   Bot,
   ChevronDown,
   ChevronRight,
   Copy,
-  FilePlus2,
   MessageSquarePlus,
   PanelRightClose,
   Paperclip,
@@ -33,6 +31,8 @@ import type {
   AdapterDescriptor,
   AdapterParameters,
   AdapterParameterProperty,
+  AgentTaskDetail,
+  AgentTaskPhase,
   MediaModelCandidate,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
@@ -40,7 +40,6 @@ import type {
 } from '@ai-video/contracts';
 
 type PromotionTarget = 'document' | 'memory' | 'constraint';
-export type ComposerMode = 'chat' | 'document' | 'novel-writing' | 'short-drama';
 
 export interface ChatAttachment {
   id: string;
@@ -55,6 +54,7 @@ export interface ChatAttachment {
 }
 
 interface ChatPanelProps {
+  /** Retained for detached-window and migration compatibility; always project. */
   scopeType: ConversationScopeType;
   scopeAvailable: boolean;
   writable: boolean;
@@ -70,9 +70,6 @@ interface ChatPanelProps {
   selectedLlmProfileId: string;
   selectedLlmModelId: string;
   researchMode?: AgentResearchMode;
-  composerMode?: ComposerMode;
-  /** Number of chapters selected as the current short-drama episode scope. */
-  episodeChapterCount?: number;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
   agentTask?: import('@ai-video/contracts').AgentTaskDetail;
@@ -90,7 +87,6 @@ interface ChatPanelProps {
   showCloseAction?: boolean;
   /** @deprecated Use onClose. Kept temporarily for component consumers outside the workspace host. */
   onCollapse?: () => void;
-  onScopeChange: (scope: ConversationScopeType) => void;
   onSelectConversation: (conversation: ConversationInfo) => void;
   onCreateConversation: () => void;
   showArchivedConversations?: boolean;
@@ -105,7 +101,6 @@ interface ChatPanelProps {
   onLlmProfileChange: (profileId: string) => void;
   onLlmModelChange: (modelId: string) => void;
   onResearchModeChange?: (mode: AgentResearchMode) => void;
-  onComposerModeChange?: (mode: ComposerMode) => void;
   onOpenProviderSettings: () => void;
   onComposerChange: (value: string) => void;
   onCancelGeneration: () => void;
@@ -131,16 +126,9 @@ interface ChatPanelProps {
     proposedParameters?: AdapterParameters;
   };
   onSubmitAgentParameters?: (adapterKey: string, parameters: AdapterParameters) => void;
-  onCreateDocumentDraft?: () => void;
-  onCreateNovelChapter?: () => void;
-}
-
-function scopeLabel(scope: ConversationScopeType): string {
-  return scope === 'project' ? '项目' : scope === 'scene' ? '场次' : '镜头';
 }
 
 export function ChatPanel({
-  scopeType,
   scopeAvailable,
   writable,
   conversations,
@@ -155,8 +143,6 @@ export function ChatPanel({
   selectedLlmProfileId,
   selectedLlmModelId,
   researchMode = 'auto',
-  composerMode = 'chat',
-  episodeChapterCount = 0,
   contextPreview,
   generation,
   agentTask,
@@ -173,7 +159,6 @@ export function ChatPanel({
   onClose,
   showCloseAction = true,
   onCollapse,
-  onScopeChange,
   onSelectConversation,
   onCreateConversation,
   showArchivedConversations = false,
@@ -188,7 +173,6 @@ export function ChatPanel({
   onLlmProfileChange,
   onLlmModelChange,
   onResearchModeChange,
-  onComposerModeChange,
   onOpenProviderSettings,
   onComposerChange,
   onCancelGeneration,
@@ -204,8 +188,6 @@ export function ChatPanel({
   onCancelMediaModelSelection,
   agentParameterRequest,
   onSubmitAgentParameters,
-  onCreateDocumentDraft,
-  onCreateNovelChapter,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
   const fileInputId = 'chat-attachment-input';
@@ -231,26 +213,14 @@ export function ChatPanel({
         onConfirmAgentAction,
       );
   return (
-    <section className="chat-panel panel-border" aria-label="项目会话">
+    <section className="chat-panel panel-border" aria-label="项目 AI 助手">
       <div className="panel-heading">
-        <span>{scopeLabel(scopeType)}会话</span>
+        <span>项目 AI 助手</span>
         {showCloseAction && close && (
           <button className="icon-button subtle" type="button" title="关闭会话" onClick={close}>
             <PanelRightClose size={16} />
           </button>
         )}
-      </div>
-      <div className="scope-tabs">
-        {(['project', 'scene', 'shot'] as const).map((scope) => (
-          <button
-            type="button"
-            key={scope}
-            className={scopeType === scope ? 'active' : ''}
-            onClick={() => onScopeChange(scope)}
-          >
-            {scopeLabel(scope)}
-          </button>
-        ))}
       </div>
       <div className="conversation-bar">
         <select
@@ -261,9 +231,7 @@ export function ChatPanel({
           }}
           disabled={!scopeAvailable}
         >
-          <option value="">
-            {scopeAvailable ? '选择会话' : `请先选择${scopeLabel(scopeType)}`}
-          </option>
+          <option value="">{scopeAvailable ? '选择项目会话' : '请先打开项目'}</option>
           {conversations.map((item) => (
             <option key={item.id} value={item.id}>
               {item.archivedAt ? `${item.title}（已归档）` : item.title}
@@ -398,49 +366,6 @@ export function ChatPanel({
             )}
           </div>
         )}
-        {onComposerModeChange && (
-          <div className="scope-tabs" aria-label="会话模式">
-            <button
-              type="button"
-              className={composerMode === 'chat' ? 'active' : ''}
-              onClick={() => onComposerModeChange('chat')}
-              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
-            >
-              会话
-            </button>
-            <button
-              type="button"
-              className={composerMode === 'document' ? 'active' : ''}
-              onClick={() => onComposerModeChange('document')}
-              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
-            >
-              文档
-            </button>
-            <button
-              type="button"
-              className={composerMode === 'novel-writing' ? 'active' : ''}
-              onClick={() => onComposerModeChange('novel-writing')}
-              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
-            >
-              小说创作
-            </button>
-            <button
-              type="button"
-              className={composerMode === 'short-drama' ? 'active' : ''}
-              onClick={() => onComposerModeChange('short-drama')}
-              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
-            >
-              短剧创作
-            </button>
-          </div>
-        )}
-        {composerMode === 'short-drama' && (
-          <div className="short-drama-hint" role="status">
-            {episodeChapterCount && episodeChapterCount > 0
-              ? `短剧创作 · 已选 ${episodeChapterCount} 个章节作为本集范围`
-              : '短剧创作 · 请先在小说章节页选择章节'}
-          </div>
-        )}
         {contextPreview && (
           <details>
             <summary>
@@ -462,8 +387,8 @@ export function ChatPanel({
         {messages.length === 0 ? (
           <div className="chat-empty">
             <Bot size={22} />
-            <strong>创作助手</strong>
-            <span>会话内容与正式项目文档相互独立。</span>
+            <strong>项目 AI 助手</strong>
+            <span>直接描述任务，助手会结合项目资料自动判断并执行。</span>
           </div>
         ) : (
           messages.map((message) => (
@@ -621,6 +546,7 @@ export function ChatPanel({
           )}
         </div>
       )}
+      {agentTask && <AgentActivityPanel detail={agentTask} />}
       {displayedConfirmation && (
         <div className="agent-confirmation" role="alert">
           <strong>
@@ -815,13 +741,7 @@ export function ChatPanel({
         <textarea
           aria-label="会话消息"
           placeholder={
-            conversation
-              ? composerMode === 'novel-writing'
-                ? '输入明确的章节创作指令…'
-                : composerMode === 'short-drama'
-                  ? '输入短剧创作指令（如：生成本集整体把控 / 生成场次和镜头提示词 / 把前三章的人物和场景做成提示词）…'
-                  : '输入消息…'
-              : '请先新建会话'
+            conversation ? '描述你要完成的任务，助手会自动读取项目资料并执行…' : '请先新建会话'
           }
           rows={3}
           value={composer}
@@ -858,28 +778,6 @@ export function ChatPanel({
           </button>
         ) : (
           <>
-            {onCreateDocumentDraft && composerMode !== 'short-drama' && (
-              <button
-                className="icon-button subtle"
-                type="button"
-                title="创建文档草稿"
-                onClick={onCreateDocumentDraft}
-                disabled={!composer.trim() || !conversation || !writable}
-              >
-                <FilePlus2 size={16} />
-              </button>
-            )}
-            {onCreateNovelChapter && composerMode === 'novel-writing' && (
-              <button
-                className="icon-button subtle"
-                type="button"
-                title="创建小说章节草稿"
-                onClick={onCreateNovelChapter}
-                disabled={!conversation || !writable}
-              >
-                <BookOpenText size={16} />
-              </button>
-            )}
             <input
               ref={fileInputRef}
               id={fileInputId}
@@ -917,6 +815,91 @@ export function ChatPanel({
           </>
         )}
       </div>
+    </section>
+  );
+}
+
+const agentPhaseLabels: Record<AgentTaskPhase, string> = {
+  queued: '排队中',
+  intent_resolving: '理解任务',
+  context_compiling: '整理项目资料',
+  model_running: '模型处理中',
+  tool_validating: '校验工具调用',
+  waiting_confirmation: '等待确认',
+  artifact_persisting: '保存生成文件',
+  waiting_review: '等待审核',
+  recovering: '恢复任务',
+};
+
+const agentStatusLabels: Record<AgentTaskDetail['task']['status'], string> = {
+  queued: '排队中',
+  running: '执行中',
+  waiting_review: '等待审核',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+};
+
+const agentStepStatusLabels: Record<AgentTaskDetail['providerSteps'][number]['status'], string> = {
+  prepared: '已准备',
+  in_flight: '调用中',
+  complete: '已完成',
+  failed: '失败',
+  interrupted: '已中断',
+};
+
+function agentEventSummary(event: AgentTaskDetail['events'][number]): string {
+  const summaries: Record<string, string> = {
+    'agent.task.created': '已创建 Agent 任务',
+    'agent.novel.task.created': '已创建小说任务',
+    'agent.novel.task.started': '已开始执行创作任务',
+    'agent.tool.started': event.summary,
+    'agent.tool.succeeded': '工具调用已完成',
+    'agent.research.completed': '项目研究已完成',
+    'agent.media.selection.requested': '等待选择媒体模型',
+    'agent.task.completed': 'Agent 任务已完成',
+    'agent.task.interrupted': 'Agent 任务已中断',
+  };
+  return summaries[event.eventType] ?? event.summary;
+}
+
+function AgentActivityPanel({ detail }: { detail: AgentTaskDetail }) {
+  const latestStep = detail.providerSteps.at(-1);
+  const recentEvents = detail.events.slice(-5);
+  return (
+    <section className="agent-activity" role="status" aria-live="polite">
+      <div className="agent-activity-heading">
+        <strong>Agent 执行进度</strong>
+        <span>{agentStatusLabels[detail.task.status]}</span>
+      </div>
+      <div className="agent-activity-summary">
+        <span>{agentPhaseLabels[detail.task.phase]}</span>
+        {latestStep && (
+          <span>
+            Provider 步骤 {latestStep.ordinal + 1} · {agentStepStatusLabels[latestStep.status]} · 工具{' '}
+            {latestStep.toolCallCount} 次
+          </span>
+        )}
+      </div>
+      {recentEvents.length > 0 ? (
+        <ol className="agent-activity-events">
+          {recentEvents.map((event) => (
+            <li key={event.id} data-level={event.level}>
+              <span>{agentEventSummary(event)}</span>
+              <time dateTime={event.createdAt}>
+                {new Date(event.createdAt).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })}
+              </time>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="agent-activity-empty">正在准备项目上下文和工具…</p>
+      )}
+      {detail.task.errorMessage && <p className="agent-activity-error">{detail.task.errorMessage}</p>}
     </section>
   );
 }

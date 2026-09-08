@@ -1204,6 +1204,10 @@ export function validateSessionRequestParams(
         'providerRegion',
         'assetKind',
         'attachments',
+        'selectedChapterIds',
+        'targetPlatform',
+        'researchMode',
+        'novelIntent',
       ]);
       requireId(params, 'conversationId');
       requireString(params, 'prompt', MAX_PROMPT_LENGTH);
@@ -1229,6 +1233,10 @@ export function validateSessionRequestParams(
       optionalId(params, 'adapterKey');
       optionalId(params, 'shotId');
       validateLlmAttachments(params.attachments);
+      validateSelectedChapterIds(params);
+      optionalEnum(params, 'targetPlatform', conversationTargetPlatforms);
+      optionalEnum(params, 'researchMode', agentResearchModes);
+      validateNovelWritingIntent(params.novelIntent);
       optionalEnum(params, 'providerRegion', new Set(['global', 'cn', 'unicompapi']));
       optionalEnum(
         params,

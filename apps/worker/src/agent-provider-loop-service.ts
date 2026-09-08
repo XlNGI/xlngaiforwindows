@@ -513,6 +513,7 @@ export class AgentProviderLoopService {
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
     try {
+      this.markToolCallsStarted(params);
       return await this.executeAuthorizedTools(params);
     } catch (error) {
       if (error instanceof AgentToolPolicyError) {
@@ -520,6 +521,42 @@ export class AgentProviderLoopService {
       }
       throw error;
     }
+  }
+
+  private markToolCallsStarted(params: AgentGenerationExecuteToolsParams): void {
+    if (params.calls.length === 0) return;
+    this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const task = this.requireTask(database, project.id, params.generationId);
+        const step = this.requireOpenStep(database, params.attemptId);
+        const hasExistingCall = params.calls.some((call) =>
+          Boolean(
+            database
+              .prepare(
+                `SELECT 1 FROM agent_tool_calls
+                 WHERE task_id = ? AND provider_step_id = ? AND provider_call_id = ? LIMIT 1`,
+              )
+              .get(task.id, step.id, call.id),
+          ),
+        );
+        if (hasExistingCall) return;
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            `UPDATE agent_tasks SET phase = 'tool_validating', updated_at = ?, row_version = row_version + 1
+             WHERE id = ? AND status = 'running' AND phase <> 'waiting_confirmation'`,
+          )
+          .run(now, task.id);
+        this.appendEvent(
+          database,
+          project.id,
+          task.id,
+          'agent.tool.started',
+          `正在调用工具：${params.calls.map((call) => call.name).join('、')}`,
+          now,
+        );
+      })(),
+    );
   }
 
   selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult {

@@ -69,7 +69,7 @@ import { useProductionState } from './use-production-state';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
-import { ChatPanel, type ChatAttachment, type ComposerMode } from './ChatPanel';
+import { ChatPanel, type ChatAttachment } from './ChatPanel';
 import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
@@ -233,14 +233,13 @@ export function inferDocumentIntent(
   return { needsTarget: false };
 }
 
-/** Legacy Native Agent routing only. The Pi Task Plan path uses structured
- * deliverables and never reads this keyword-based inference result. */
+/** @deprecated Kept for callers of the legacy direct-generation helper. */
 export function inferShortDramaIntent(prompt: string): AgentDocumentOperation {
   const value = prompt.trim().toLocaleLowerCase();
-  const wantsCharacters = /人物|角色|场景提示词|场景设定|人物提示词|角色提示词/u.test(value);
-  const wantsStructure = /场次|镜头|分镜|分集结构/u.test(value);
-  if (wantsCharacters) return 'document.create_draft';
-  if (wantsStructure) return 'novel.episode.submit_structure';
+  if (/人物|角色|场景提示词|场景设定|人物提示词|角色提示词/u.test(value)) {
+    return 'document.create_draft';
+  }
+  if (/场次|镜头|分镜|分集结构/u.test(value)) return 'novel.episode.submit_structure';
   return 'novel.episode.submit_draft';
 }
 
@@ -269,19 +268,6 @@ function initialResearchMode(): AgentResearchMode {
       : 'auto';
   } catch {
     return 'auto';
-  }
-}
-
-function initialComposerMode(): ComposerMode {
-  try {
-    const stored = window.localStorage.getItem(LLM_SELECTION_STORAGE_KEY);
-    if (!stored) return 'chat';
-    const value = JSON.parse(stored) as { composerMode?: unknown };
-    return value.composerMode === 'document' || value.composerMode === 'novel-writing'
-      ? value.composerMode
-      : 'chat';
-  } catch {
-    return 'chat';
   }
 }
 
@@ -397,6 +383,14 @@ function readableFailure(reason: unknown, fallback: string): string {
     if (typeof message === 'string' && message.trim()) return message;
   }
   return fallback;
+}
+
+function readableGenerationError(error: string | undefined): string | undefined {
+  if (!error) return undefined;
+  if (/Out-of-order LLM stream content was rejected/i.test(error)) {
+    return '生成流出现了延迟片段，已停止本次任务；请重新发送，工具调用不会重复提交。';
+  }
+  return error;
 }
 
 function documentStateLabel(state: DocumentVersionInfo['state'] | 'new'): string {
@@ -597,7 +591,6 @@ export function App() {
   const [shotStoryboardBusy, setShotStoryboardBusy] = useState(false);
   const shotStoryboardRequest = useRef(0);
 
-  const [scopeType, setScopeType] = useState<ConversationScopeType>('project');
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
@@ -633,7 +626,6 @@ export function App() {
     initialLlmSelectionValue.modelId ?? '',
   );
   const [researchMode, setResearchMode] = useState<AgentResearchMode>(initialResearchMode);
-  const [composerMode, setComposerMode] = useState<ComposerMode>(initialComposerMode);
   const [episodeChapterIds, setEpisodeChapterIds] = useState<string[]>([]);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const [agentTask, setAgentTask] = useState<import('@ai-video/contracts').AgentTaskDetail>();
@@ -819,8 +811,12 @@ export function App() {
     setProviderSettingsFocusId(undefined);
     setProviderSettingsRevision((revision) => revision + 1);
   };
-  const scopeId = scopeType === 'scene' ? scene?.id : scopeType === 'shot' ? shot?.id : undefined;
-  const scopeAvailable = scopeType === 'project' || Boolean(scopeId);
+  // A conversation is the project-wide Agent workspace. Scene/shot ownership
+  // remains an internal entity attribute, never a user-selectable session
+  // scope.
+  const scopeType: ConversationScopeType = 'project';
+  const scopeId = undefined;
+  const scopeAvailable = Boolean(project);
   const selectedLlmProfile = llmProfiles.find((profile) => profile.id === selectedLlmProfileId);
   const selectedLlmModel = llmModels.find(
     (model) => model.id === selectedLlmModelId && model.providerProfileId === selectedLlmProfileId,
@@ -918,13 +914,20 @@ export function App() {
         .then((result) => {
           if (agentTaskEventPollRef.current !== poll) return;
           void callWorker('agent.task.get', { taskId })
-            .then(setAgentTask)
+            .then((detail) => {
+              if (agentTaskEventPollRef.current === poll) setAgentTask(detail);
+            })
             .catch(() => undefined);
           poll.afterSequence = result.nextSequence;
           const latest = result.events.at(-1);
-          if (latest?.level === 'error') setChatMessage(latest.summary);
+          if (latest?.level === 'error') {
+            setChatMessage(readableGenerationError(latest.summary) ?? latest.summary);
+          }
           if (['completed', 'failed', 'cancelled'].includes(result.task.status)) {
-            if (result.task.errorMessage) setChatMessage(result.task.errorMessage);
+            if (result.task.errorMessage)
+              setChatMessage(
+                readableGenerationError(result.task.errorMessage) ?? result.task.errorMessage,
+              );
             stopAgentTaskEventPolling();
           }
         })
@@ -1022,7 +1025,7 @@ export function App() {
           mediaSubmissionResolverRef.current?.(false);
           mediaSelectionResolverRef.current?.(undefined);
           activeMediaInputsRef.current = [];
-          setChatMessage(next.error ?? '生成完成');
+          setChatMessage(readableGenerationError(next.error) ?? '生成完成');
           refreshAgentDocuments();
         }
       },
@@ -1067,7 +1070,16 @@ export function App() {
           setChatMessage(reason instanceof Error ? reason.message : '原生 LLM 流处理失败');
         }
       })
-      .finally(() => {
+      .finally(async () => {
+        // The terminal Provider step and its task event can be committed just
+        // after the generation reaches its terminal state. Read the task once
+        // before stopping the poller so the UI does not remain on "执行中".
+        if (isAgentGeneration && agentTaskId && nativeRunIsCurrent(run)) {
+          const detail = await callWorker('agent.task.get', { taskId: agentTaskId }).catch(
+            () => undefined,
+          );
+          if (detail && nativeRunIsCurrent(run)) setAgentTask(detail);
+        }
         stopAgentTaskEventPolling();
         if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
           confirmationResolverRef.current?.(false);
@@ -1260,13 +1272,12 @@ export function App() {
           providerProfileId: selectedLlmProfileId || undefined,
           modelId: selectedLlmModelId || undefined,
           researchMode,
-          composerMode,
         }),
       );
     } catch {
       // The selection remains available for the current session when storage is unavailable.
     }
-  }, [selectedLlmProfileId, selectedLlmModelId, researchMode, composerMode]);
+  }, [selectedLlmProfileId, selectedLlmModelId, researchMode]);
 
   useEffect(
     () => () => {
@@ -1328,7 +1339,7 @@ export function App() {
           setGeneration(next);
           setMessages((current) => mergeGenerationMessage(current, conversationId, next));
           if (next.status !== 'streaming') {
-            setChatMessage(next.error ?? '生成完成');
+            setChatMessage(readableGenerationError(next.error) ?? '生成完成');
           }
         })
         .catch((reason) => {
@@ -1508,7 +1519,10 @@ export function App() {
 
   const openConversationById = async (conversationId: string) => {
     try {
-      const page = await callWorker('conversation.list', { includeArchived: true });
+      const page = await callWorker('conversation.list', {
+        scopeType: 'project',
+        includeArchived: true,
+      });
       const conversation = page.items.find((item) => item.id === conversationId);
       if (!conversation) {
         setChatMessage('来源会话不存在或已被删除。');
@@ -1633,43 +1647,6 @@ export function App() {
     }
   };
 
-  const runShortDramaGeneration = async (prompt: string) => {
-    if (!conversation) return;
-    if (!selectedLlmProfile || !selectedLlmModel) {
-      setComposer(prompt);
-      setChatMessage('短剧创作需要已配置支持工具调用的 LLM 模型。');
-      return;
-    }
-    if (episodeChapterIds.length === 0) {
-      setComposer(prompt);
-      setChatMessage('请先在小说章节页选择章节，再生成短剧内容。');
-      return;
-    }
-    try {
-      const prepared = await callWorker('agent.generation.prepare', {
-        conversationId: conversation.id,
-        prompt,
-        providerProfileId: selectedLlmProfile.id,
-        modelId: selectedLlmModel.id,
-        agentMode: 'short-drama',
-        targetPlatform: 'seedance',
-        researchMode,
-        documentIntent: { operation: inferShortDramaIntent(prompt) },
-        selectedChapterIds: episodeChapterIds,
-      });
-      if ('pendingIntent' in prepared) {
-        setComposer(prompt);
-        setChatMessage('短剧创作目标需要澄清；请补充指令后再提交。');
-        return;
-      }
-      launchPreparedGeneration(prepared);
-    } catch (reason) {
-      setComposer(prompt);
-      setChatMessage(reason instanceof Error ? reason.message : '短剧生成任务启动失败');
-      void loadLlmCatalog();
-    }
-  };
-
   const sendMessage = async (
     composerValue = composer,
     modelSelection?: {
@@ -1697,7 +1674,7 @@ export function App() {
       : '';
     const promptForAgent = prompt.includes('[附件：') ? prompt : `${prompt}${attachmentContext}`;
     setComposer('');
-    if (composerMode === 'chat' && isModelSchemaQuery(prompt)) {
+    if (isModelSchemaQuery(prompt)) {
       try {
         const capability = inferAgentCapability(prompt);
         const catalog = await callWorker('model.catalog.list', {
@@ -1715,16 +1692,7 @@ export function App() {
       }
       return;
     }
-    if (composerMode === 'novel-writing') {
-      await createNovelDraft(promptForAgent);
-      return;
-    }
-    if (composerMode === 'short-drama') {
-      await runShortDramaGeneration(promptForAgent);
-      return;
-    }
     if (
-      composerMode === 'chat' &&
       (selectedLlmProfile || llmProfiles.length > 0) &&
       (modelSelection || (selectedLlmProfile && selectedLlmModel) || llmProfiles.length > 0)
     ) {
@@ -1785,8 +1753,14 @@ export function App() {
           conversationId: conversation.id,
           prompt: agentPrompt || '请分析我提供的附件。',
           capability,
-          ...(agentAttachments ? { attachments: agentAttachments } : {}),
+          ...(agentAttachments && agentAttachments.length > 0
+            ? { attachments: agentAttachments }
+            : {}),
           ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
+          researchMode,
+          ...(episodeChapterIds.length > 0
+            ? { selectedChapterIds: episodeChapterIds, targetPlatform: 'seedance' as const }
+            : {}),
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         });
@@ -1823,6 +1797,18 @@ export function App() {
             ...unified,
           });
           setChatMessage('');
+          return;
+        }
+        if (unified.status === 'pending_intent') {
+          setComposer(prompt);
+          const reason = unified.pendingIntent.reasonCode;
+          setChatMessage(
+            reason === 'TARGET_REQUIRED'
+              ? '请补充要操作的小说章节或新章节标题，助手会继续当前任务。'
+              : reason === 'AMBIGUOUS_ACTION'
+                ? '请明确是新建、续写还是重写小说章节。'
+                : '当前小说任务需要补充说明后才能继续。',
+          );
           return;
         }
         if (unified.status === 'image_prepared' || unified.status === 'video_prepared') {
@@ -1987,91 +1973,6 @@ export function App() {
 
   const removeChatAttachment = (id: string) => {
     setChatAttachments((current) => current.filter((attachment) => attachment.id !== id));
-  };
-
-  const createDocumentDraft = async () => {
-    if (!composer.trim() || !conversation) return;
-    const prompt = composer;
-    if (composerMode === 'short-drama') {
-      setComposer('');
-      await runShortDramaGeneration(prompt);
-      return;
-    }
-    if (!selectedLlmProfile || !selectedLlmModel) {
-      setChatMessage('创建文档草稿需要已配置支持工具调用的 LLM 模型。');
-      return;
-    }
-    setComposer('');
-    try {
-      const prepared = await callWorker('agent.generation.prepare', {
-        conversationId: conversation.id,
-        prompt,
-        providerProfileId: selectedLlmProfile.id,
-        modelId: selectedLlmModel.id,
-        agentMode: 'document',
-        researchMode,
-        documentIntent: { operation: 'document.create_draft' },
-      });
-      if ('pendingIntent' in prepared) {
-        setComposer(prompt);
-        setChatMessage('文档目标需要澄清；补充目标后再提交。');
-        return;
-      }
-      launchPreparedGeneration(prepared);
-    } catch (reason) {
-      setComposer(prompt);
-      setChatMessage(reason instanceof Error ? reason.message : '文档草稿任务启动失败');
-    }
-  };
-
-  const createNovelDraft = async (
-    prompt: string,
-    novelIntent?: {
-      action?: 'create_chapter' | 'continue_chapter' | 'rewrite_chapter';
-      chapterTitle?: string;
-      displayLabel?: string;
-    },
-  ) => {
-    if (!conversation) return;
-    if (!selectedLlmProfile || !selectedLlmModel) {
-      setComposer(prompt);
-      setChatMessage('小说创作需要已配置支持工具调用的 LLM 模型。');
-      return;
-    }
-    try {
-      const prepared = await callWorker('agent.generation.prepare', {
-        conversationId: conversation.id,
-        prompt,
-        providerProfileId: selectedLlmProfile.id,
-        modelId: selectedLlmModel.id,
-        agentMode: 'novel-writing',
-        researchMode,
-        novelIntent,
-      });
-      if ('pendingIntent' in prepared) {
-        setComposer(prompt);
-        setChatMessage('创作目标需要澄清；补充章节或动作后再提交。');
-        return;
-      }
-      launchPreparedGeneration(prepared);
-    } catch (reason) {
-      setComposer(prompt);
-      setChatMessage(reason instanceof Error ? reason.message : '小说草稿任务启动失败');
-    }
-  };
-
-  const createNovelChapter = async () => {
-    if (!conversation) return;
-    const title = window.prompt('章节名称');
-    if (!title?.trim()) return;
-    const label = window.prompt('章节显示标签', '');
-    const prompt = composer.trim() || `创作章节《${title.trim()}》。`;
-    setComposer('');
-    await createNovelDraft(prompt, {
-      action: 'create_chapter',
-      chapterTitle: title.trim(),
-      displayLabel: label?.trim() || undefined,
-    });
   };
 
   const cancelGeneration = async () => {
@@ -2557,14 +2458,7 @@ export function App() {
       registration.config.projectId !== project?.id
     )
       return;
-    if (action.type === 'conversation-scope') {
-      void (async () => {
-        await cancelNativeLlmRun();
-        conversationRequest.current += 1;
-        generationPollVersion.current += 1;
-        setScopeType(action.scope);
-      })();
-    } else if (action.type === 'conversation-select') {
+    if (action.type === 'conversation-select') {
       const selected = conversations.find((item) => item.id === action.conversationId);
       if (selected) void selectConversation(selected);
     } else if (action.type === 'conversation-create') {
@@ -2690,8 +2584,6 @@ export function App() {
       selectedLlmProfileId={selectedLlmProfileId}
       selectedLlmModelId={selectedLlmModelId}
       researchMode={researchMode}
-      composerMode={composerMode}
-      episodeChapterCount={episodeChapterIds.length}
       contextPreview={contextPreview}
       generation={generation}
       agentTask={agentTask}
@@ -2734,18 +2626,10 @@ export function App() {
       onContinueAgentTask={() => {
         const prompt = '请继续完成尚未成功的短剧交付物，并调用已授权工具。';
         setComposer(prompt);
-        if (conversation && composerMode === 'short-drama') void sendMessage(prompt);
+        if (conversation) void sendMessage(prompt);
       }}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
       showCloseAction={false}
-      onScopeChange={(scope) => {
-        void (async () => {
-          await cancelNativeLlmRun();
-          conversationRequest.current += 1;
-          generationPollVersion.current += 1;
-          setScopeType(scope);
-        })();
-      }}
       onSelectConversation={(selected) => void selectConversation(selected)}
       onCreateConversation={() => void createConversation()}
       onRenameConversation={(conversationId, title) =>
@@ -2827,8 +2711,6 @@ export function App() {
           parameters: adapterParameters,
         });
       }}
-      onCreateDocumentDraft={() => void createDocumentDraft()}
-      onCreateNovelChapter={() => void createNovelChapter()}
     />
   );
 
@@ -3492,10 +3374,9 @@ export function App() {
                 onOpenDocument={(documentId) => void openNovelDocument(documentId)}
                 onGenerateEpisode={(chapterIds) => {
                   setEpisodeChapterIds(chapterIds);
-                  setComposerMode('short-drama');
                   workspaceDispatch({ type: 'open', panelId: 'conversation' });
                   setChatMessage(
-                    `已选择 ${chapterIds.length} 个章节作为本集范围。请在会话中输入生成指令。`,
+                    `已将 ${chapterIds.length} 个章节加入当前项目助手上下文，请直接描述要生成或修改的内容。`,
                   );
                 }}
               />

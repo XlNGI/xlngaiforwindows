@@ -150,8 +150,17 @@ export class PiConversationRuntime implements ConversationRuntime {
     let planningRound = plannedWorkflow;
     let turnCount = 0;
     let aggregate = '';
+    const aggregateState = {
+      aggregate: '',
+      responseId: undefined as string | undefined,
+      segment: '',
+    };
     let lastResponseId: string | undefined;
     let lastUsage: NormalizedLlmUsage | undefined;
+    const captureAssistantText = (message: AssistantMessage): string => {
+      aggregate = appendAssistantText(aggregateState, message);
+      return aggregate;
+    };
     const streamFn = this.options.streamFn ?? this.createNativeStream(identity);
     const agent = new Agent({
       streamFn,
@@ -188,11 +197,8 @@ export class PiConversationRuntime implements ConversationRuntime {
         if (message.role === 'assistant') {
           lastResponseId = message.responseId;
           lastUsage = usageFromPi(message);
-          const text = assistantText(message);
-          if (text.length > aggregate.length) {
-            aggregate = text;
-            this.options.generation.observe({ ...identity, content: aggregate });
-          }
+          const nextAggregate = captureAssistantText(message);
+          this.options.generation.observe({ ...identity, content: nextAggregate });
         }
         const plan = plannedWorkflow ? this.options.plans.getByTask(request.taskId) : undefined;
         if (plan?.status === 'active') planningRound = false;
@@ -515,15 +521,12 @@ export class PiConversationRuntime implements ConversationRuntime {
     plannedWorkflow: boolean,
     providerGateway?: AgentProviderToolGateway,
   ): Promise<void> {
-    let latest = '';
+    const observed = { aggregate: '', responseId: undefined as string | undefined, segment: '' };
     agent.subscribe((event) => {
       if (event.type !== 'message_update' && event.type !== 'message_end') return;
       if (event.message.role !== 'assistant') return;
-      const text = assistantText(event.message);
-      if (text.length > latest.length) {
-        latest = text;
-        this.options.generation.observe({ ...identity, content: text });
-      }
+      const text = appendAssistantText(observed, event.message);
+      if (text) this.options.generation.observe({ ...identity, content: text });
     });
     try {
       await agent.prompt(prompt);
@@ -535,7 +538,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         providerGateway?.terminate('failed');
         this.options.generation.failNative({
           ...identity,
-          content: final.aggregate || latest,
+          content: final.aggregate || observed.aggregate,
           error: state.errorMessage,
           retryable: true,
         });
@@ -544,7 +547,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
       const completed: LlmGenerationCompleteParams = {
         ...identity,
-        content: final.aggregate || latest,
+        content: final.aggregate || observed.aggregate,
         providerResponseId: final.lastResponseId,
         finishReason: plan?.status === 'succeeded' ? 'task_package_complete' : 'stop',
         usage: final.lastUsage,
@@ -562,7 +565,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       providerGateway?.terminate('failed');
       this.options.generation.failNative({
         ...identity,
-        content: latest,
+        content: observed.aggregate,
         error: message,
         retryable: true,
       });
@@ -616,6 +619,33 @@ function assistantText(message: {
         .map((block) => block.text ?? '')
         .join('')
     : '';
+}
+
+type AssistantTextAccumulator = {
+  aggregate: string;
+  responseId?: string;
+  segment: string;
+};
+
+function appendAssistantText(accumulator: AssistantTextAccumulator, message: AssistantMessage): string {
+  const text = assistantText(message);
+  if (!text) return accumulator.aggregate;
+  const responseId = message.responseId?.trim() || undefined;
+  const sameTurn = responseId
+    ? responseId === accumulator.responseId
+    : accumulator.segment.length === 0 || text.startsWith(accumulator.segment);
+  if (sameTurn) {
+    if (text.length < accumulator.segment.length) return accumulator.aggregate;
+    accumulator.aggregate =
+      accumulator.aggregate.slice(0, Math.max(0, accumulator.aggregate.length - accumulator.segment.length)) +
+      text;
+    accumulator.segment = text;
+    return accumulator.aggregate;
+  }
+  accumulator.responseId = responseId;
+  accumulator.segment = text;
+  accumulator.aggregate = accumulator.aggregate ? `${accumulator.aggregate}\n\n${text}` : text;
+  return accumulator.aggregate;
 }
 
 function usageFromPi(message: AssistantMessage): NormalizedLlmUsage | undefined {

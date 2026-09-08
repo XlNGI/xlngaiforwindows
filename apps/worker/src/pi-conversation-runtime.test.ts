@@ -524,10 +524,13 @@ describe('PiConversationRuntime', () => {
   it('exposes a pending Worker confirmation and resumes Pi only with the matching token', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall('document.archive', {}, { id: 'archive-call' })], {
-        stopReason: 'toolUse',
-        responseId: 'response-archive',
-      }),
+      fauxAssistantMessage(
+        [
+          { type: 'text', text: 'I will archive the draft.' },
+          fauxToolCall('document.archive', {}, { id: 'archive-call' }),
+        ],
+        { stopReason: 'toolUse', responseId: 'response-archive' },
+      ),
       fauxAssistantMessage('The archive request was approved.'),
     ]);
     const plans = new FakePlanService();
@@ -602,6 +605,12 @@ describe('PiConversationRuntime', () => {
       approved: true,
     });
     expect(generation.complete).toHaveBeenCalledOnce();
+    expect(generation.failNative).not.toHaveBeenCalled();
+    expect(generation.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('I will archive the draft.'),
+      }),
+    );
   });
 
   it('exposes a pending media selection and resumes the same Pi task with the matching token', async () => {

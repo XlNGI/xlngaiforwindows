@@ -86,6 +86,43 @@ describe('compileProductionContext', () => {
     expect(context.rendered).not.toContain('Leak');
   });
 
+  it('treats a project conversation as the complete project knowledge base', () => {
+    const context = compileProductionContext({
+      projectId: 'project',
+      projectName: 'Drama',
+      scope: { type: 'project', label: 'Project' },
+      sources: [
+        {
+          id: 'project-source',
+          type: 'document',
+          scopeType: 'project',
+          label: '项目资料',
+          content: 'Project source',
+        },
+        {
+          id: 'scene-source',
+          type: 'document',
+          scopeType: 'scene',
+          scopeId: 'scene-1',
+          label: '场次资料',
+          content: 'Scene source',
+        },
+        {
+          id: 'shot-source',
+          type: 'document',
+          scopeType: 'shot',
+          scopeId: 'shot-1',
+          label: '镜头资料',
+          content: 'Shot source',
+        },
+      ],
+    });
+
+    expect(context.rendered).toContain('Project source');
+    expect(context.rendered).toContain('Scene source');
+    expect(context.rendered).toContain('Shot source');
+  });
+
   it('does not infer document authority from its title', () => {
     const context = compileProductionContext({
       projectId: 'project',

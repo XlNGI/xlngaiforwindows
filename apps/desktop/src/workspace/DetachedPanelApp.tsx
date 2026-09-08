@@ -11,7 +11,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { ChatMessageInfo, ConversationScopeType } from '@ai-video/contracts';
+import type { ChatMessageInfo } from '@ai-video/contracts';
 import { ChatPanel } from '../ChatPanel';
 import {
   DETACHED_PANEL_ACTION_EVENT,
@@ -300,14 +300,10 @@ function DetachedConversationPanel({
       messageId: message.id,
       target,
     });
-  const changeScope = (scope: ConversationScopeType) =>
-    onAction({ panelId: 'conversation', type: 'conversation-scope', scope });
-
   return (
     <ChatPanel
       {...snapshot}
       onClose={() => void getCurrentWindow().close()}
-      onScopeChange={changeScope}
       onSelectConversation={(conversation) =>
         onAction({
           panelId: 'conversation',

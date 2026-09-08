@@ -1944,6 +1944,13 @@ export interface UnifiedAgentRunParams {
   shotId?: string;
   providerRegion?: VideoProviderRegion;
   assetKind?: ImageAssetKind | VideoAssetKind;
+  /** Optional project context selected from the novel workspace. The Worker
+   * decides whether it is needed for a short-drama adaptation; it is not a
+   * user-selectable conversation scope. */
+  selectedChapterIds?: string[];
+  targetPlatform?: ConversationTargetPlatform;
+  researchMode?: AgentResearchMode;
+  novelIntent?: NovelWritingIntent;
   budgetTokens?: number;
   idempotencyKey?: string;
 }
@@ -1982,6 +1989,11 @@ export type UnifiedAgentRunResult =
       status: 'video_prepared';
       capability: 'video';
       job: VideoGenerationJobInfo;
+    }
+  | {
+      status: 'pending_intent';
+      capability: UnifiedAgentCapability;
+      pendingIntent: AgentPendingIntentInfo;
     }
   | ({ status: 'started'; capability: UnifiedAgentCapability } & AgentGenerationPrepareResult);
 

@@ -120,16 +120,24 @@ export function streamPreparedLlmGeneration(
     callbacks.onState(state);
   };
 
+  // Tool continuations can begin while a timer-backed observe from the
+  // previous Provider step is still in flight. Keep every Worker write in one
+  // queue so an older snapshot can never arrive after a newer one.
+  const enqueueObserve = (force = false) => {
+    writes = writes.then(() => observe(force));
+    return writes;
+  };
+
   const queueObserve = () => {
     if (aggregate.length - persisted.length >= FLUSH_CHARACTER_THRESHOLD) {
       clearFlushTimer();
-      writes = writes.then(() => observe());
+      void enqueueObserve();
       return;
     }
     if (flushTimer) return;
     flushTimer = setTimeout(() => {
       flushTimer = undefined;
-      writes = writes.then(() => observe());
+      void enqueueObserve();
     }, FLUSH_INTERVAL_MS);
   };
 
@@ -163,7 +171,7 @@ export function streamPreparedLlmGeneration(
     clearFlushTimer();
     try {
       await writes.catch(() => undefined);
-      await observe().catch(() => undefined);
+      await enqueueObserve().catch(() => undefined);
       callbacks.onState(
         await callWorker('llm.generation.cancel', { generationId: identity.generationId }),
       );
@@ -189,7 +197,7 @@ export function streamPreparedLlmGeneration(
         if ((prepared as AgentCapablePrepared).agentTaskId && !nativeAgentRuntime) {
           await callWorker('agent.providerStep.start', identity);
         }
-        if (!nativeAgentRuntime) await observe(true);
+        if (!nativeAgentRuntime) await enqueueObserve(true);
         break;
       case 'delta':
         if (cancelRequested || !event.delta) return;

@@ -10,7 +10,9 @@ import { callWorker } from './worker-client';
 export interface UseConversationWorkspaceOptions {
   projectId?: string;
   scopeAvailable: boolean;
+  /** @deprecated Project conversations are the only user-facing workspace. */
   scopeType: ConversationScopeType;
+  /** @deprecated Scene/shot conversation ids are retained only for migrations. */
   scopeId?: string;
   setMessages: Dispatch<SetStateAction<ChatMessageInfo[]>>;
   setContextPreview: Dispatch<SetStateAction<ProductionContextInfo | undefined>>;
@@ -21,8 +23,6 @@ export interface UseConversationWorkspaceOptions {
 export function useConversationWorkspace({
   projectId,
   scopeAvailable,
-  scopeType,
-  scopeId,
   setMessages,
   setContextPreview,
   setChatMessage,
@@ -37,6 +37,9 @@ export function useConversationWorkspace({
   useEffect(() => {
     const requestId = ++conversationRequest.current;
     let active = true;
+    // The unified Agent always operates on the project conversation. Keep the
+    // legacy scope arguments in the hook signature so old detached snapshots
+    // and callers can migrate without changing persistence contracts.
     if (!projectId || !scopeAvailable) {
       setConversations([]);
       setConversationNextCursor(undefined);
@@ -48,8 +51,7 @@ export function useConversationWorkspace({
     void (async () => {
       try {
         const page = await callWorker('conversation.list', {
-          scopeType,
-          scopeId,
+          scopeType: 'project',
           includeArchived: showArchivedConversations,
         });
         const items = page.items;
@@ -80,8 +82,6 @@ export function useConversationWorkspace({
   }, [
     projectId,
     scopeAvailable,
-    scopeType,
-    scopeId,
     showArchivedConversations,
     setMessages,
     setContextPreview,
@@ -92,7 +92,7 @@ export function useConversationWorkspace({
     if (!scopeAvailable) return;
     const requestId = ++conversationRequest.current;
     try {
-      const created = await callWorker('conversation.create', { scopeType, scopeId });
+      const created = await callWorker('conversation.create', { scopeType: 'project' });
       const preview = await callWorker('context.preview', { conversationId: created.id });
       if (requestId !== conversationRequest.current) return;
       setConversations((current) => [created, ...current]);
@@ -152,8 +152,7 @@ export function useConversationWorkspace({
     const requestId = conversationRequest.current;
     try {
       const page = await callWorker('conversation.list', {
-        scopeType,
-        scopeId,
+        scopeType: 'project',
         includeArchived: showArchivedConversations,
         limit: 50,
         cursor: conversationNextCursor,

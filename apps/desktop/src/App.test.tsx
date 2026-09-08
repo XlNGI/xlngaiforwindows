@@ -236,7 +236,7 @@ describe('App', () => {
     render(<App />);
     expect(screen.getByText('项目文档')).toBeInTheDocument();
     expect(screen.getByText('文档编辑器')).toBeInTheDocument();
-    expect(screen.getByText('项目会话')).toBeInTheDocument();
+    expect(screen.getAllByText('项目 AI 助手').length).toBeGreaterThan(0);
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
   });
 
@@ -473,7 +473,7 @@ describe('App', () => {
     expect(mergeGenerationMessage(messages, 'conversation-b', generation)).toBe(messages);
   });
 
-  it('ignores a stale conversation load after switching scope', async () => {
+  it('keeps the conversation workspace on the project scope', async () => {
     let resolveProjectConversations!: (value: ConversationInfo[]) => void;
     const projectConversations = new Promise<ConversationInfo[]>((resolve) => {
       resolveProjectConversations = resolve;
@@ -595,17 +595,15 @@ describe('App', () => {
     render(<App />);
     await waitFor(() => expect(callWorker).toHaveBeenCalledWith('shot.list', { sceneId: 'scene' }));
 
-    fireEvent.click(screen.getByRole('button', { name: '场次' }));
-    expect(await screen.findByText('当前场次消息')).toBeInTheDocument();
-
     await act(async () => {
       resolveProjectConversations([projectConversation]);
       await Promise.resolve();
     });
 
-    await waitFor(() => expect(screen.queryByText('过期项目消息')).not.toBeInTheDocument());
-    expect(screen.queryByRole('option', { name: '旧项目会话' })).not.toBeInTheDocument();
-    expect(screen.getByRole('option', { name: '场次会话' })).toBeInTheDocument();
+    expect(await screen.findByText('过期项目消息')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '旧项目会话' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '场次会话' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '场次' })).not.toBeInTheDocument();
   });
 
   it('ignores an in-flight generation poll after switching conversations', async () => {
@@ -773,7 +771,7 @@ describe('App', () => {
     ).toHaveLength(1);
   });
 
-  it('starts an explicit document draft agent and refreshes documents when it completes', async () => {
+  it('keeps an incomplete novel request for clarification, then refreshes an Agent document', async () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -881,7 +879,7 @@ describe('App', () => {
     };
     let documentListCalls = 0;
 
-    vi.mocked(callWorker).mockImplementation((method) => {
+    vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -939,7 +937,38 @@ describe('App', () => {
           budgetTokens: 1_000,
           sources: [],
         });
-      if (method === 'agent.generation.prepare') return Promise.resolve(prepared);
+      if (method === 'conversation.modelPreference.set')
+        return Promise.resolve({
+          conversationId: conversation.id,
+          capability: 'text' as const,
+          providerProfileId: profile.id,
+          modelId: model.id,
+          confirmedAt: 'now',
+          updatedAt: 'now',
+        });
+      if (method === 'agent.run' && (params as { prompt?: string }).prompt === '续写小说下一章') {
+        return Promise.resolve({
+          status: 'pending_intent' as const,
+          capability: 'novel' as const,
+          pendingIntent: {
+            id: 'pending-intent',
+            projectId: 'project',
+            conversationId: conversation.id,
+            requestedAction: 'continue_chapter' as const,
+            reasonCode: 'TARGET_REQUIRED' as const,
+            status: 'pending' as const,
+            expiresAt: 'later',
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        });
+      }
+      if (method === 'agent.run')
+        return Promise.resolve({
+          status: 'started' as const,
+          capability: 'text' as const,
+          ...prepared,
+        });
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -950,19 +979,28 @@ describe('App', () => {
     });
     fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: model.id } });
     fireEvent.change(screen.getByLabelText('会话消息'), {
+      target: { value: '续写小说下一章' },
+    });
+    fireEvent.click(screen.getByTitle('发送消息'));
+
+    expect(
+      await screen.findByText('请补充要操作的小说章节或新章节标题，助手会继续当前任务。'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('会话消息')).toHaveValue('续写小说下一章');
+
+    fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: 'Draft a project brief' },
     });
-    fireEvent.click(screen.getByTitle('创建文档草稿'));
+    fireEvent.click(screen.getByTitle('发送消息'));
 
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('agent.generation.prepare', {
+      expect(callWorker).toHaveBeenCalledWith('agent.run', {
         conversationId: conversation.id,
         prompt: 'Draft a project brief',
+        capability: 'text',
         providerProfileId: profile.id,
         modelId: model.id,
-        agentMode: 'document',
         researchMode: 'auto',
-        documentIntent: { operation: 'document.create_draft' },
       }),
     );
     expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);

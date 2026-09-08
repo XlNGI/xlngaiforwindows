@@ -86,7 +86,6 @@ export type DetachedPanelAction =
   | { panelId: 'document'; type: 'document-submit-review' }
   | { panelId: 'document'; type: 'document-request-changes' }
   | { panelId: 'document'; type: 'document-publish' }
-  | { panelId: 'conversation'; type: 'conversation-scope'; scope: ConversationScopeType }
   | { panelId: 'conversation'; type: 'conversation-select'; conversationId: string }
   | { panelId: 'conversation'; type: 'conversation-create' }
   | {

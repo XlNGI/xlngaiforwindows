@@ -10,6 +10,7 @@ import {
   type AgentDocumentIntent,
   type UnifiedAgentRunParams,
   type UnifiedAgentCapability,
+  type ConversationTaskMode,
   type UnifiedAgentModelCandidate,
   type UnifiedAgentModelCatalogListParams,
   type UnifiedAgentModelCatalogGetParams,
@@ -299,6 +300,40 @@ export function inferAgentDocumentIntent(prompt: string): AgentDocumentIntent {
   return mentionsSchema && asksToInspect
     ? { operation: 'adapter.schema.get' }
     : { operation: 'document.create_draft' };
+}
+
+/**
+ * Selects the internal orchestration workflow for a project-wide Agent turn.
+ * This is deliberately a hint: the Provider still chooses registered tools,
+ * while the Worker freezes the resulting task scope and authorization. The
+ * user never has to switch a conversation mode.
+ */
+export function inferConversationTaskMode(
+  prompt: string,
+  selectedChapterIds?: readonly string[],
+): ConversationTaskMode {
+  const value = prompt.normalize('NFC').trim();
+  const novelLanguage =
+    /(?:小说|章节|续写|继续写|新建章节|创建章节|写一章|重写章节|改写章节)/u.test(value);
+  const shortDramaLanguage =
+    /(?:短剧|短视频剧|剧本|分镜|场次|镜头|本集|改编(?:成|为)?(?:短剧|剧本|分镜)?)/u.test(value);
+
+  // An explicit novel-only instruction wins when no episode language is
+  // present (for example, “改写小说章节” should not become an episode).
+  if (novelLanguage && !shortDramaLanguage) return 'novel-writing';
+  if (shortDramaLanguage || (selectedChapterIds?.length ?? 0) > 0) return 'short-drama';
+  return 'document';
+}
+
+function inferShortDramaDocumentIntent(prompt: string): AgentDocumentIntent {
+  const value = prompt.normalize('NFC').trim();
+  if (/(人物|角色|场景提示词|场景设定|人物提示词|角色提示词)/u.test(value)) {
+    return { operation: 'document.create_draft' };
+  }
+  if (/(场次|镜头|分镜|结构|提示词)/u.test(value)) {
+    return { operation: 'novel.episode.submit_structure' };
+  }
+  return { operation: 'novel.episode.submit_draft' };
 }
 
 function capabilityMatchesModel(
@@ -1400,39 +1435,121 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             .listModels(selected.providerProfileId)
             .find((candidate) => candidate.id === selected.modelId);
           assertAgentToolLoopSelection(profile, model);
-          const prepared = generationService.prepare({
-            conversationId: agentParams.conversationId,
-            prompt: agentParams.prompt,
-            providerProfileId: selected.providerProfileId,
-            modelId: selected.modelId,
-            attachments: agentParams.attachments,
-            budgetTokens: agentParams.budgetTokens,
-            idempotencyKey: agentParams.idempotencyKey,
-          });
-          const agent = agentProviderLoopService.prepare(
-            prepared.stream,
+          const requestedTaskMode = inferConversationTaskMode(
             agentParams.prompt,
-            undefined,
-            inferAgentDocumentIntent(agentParams.prompt),
-            'auto',
-            undefined,
-            undefined,
-            undefined,
-            {
-              source: storedPreference ? 'conversation-preference' : 'request',
-              capability: 'text',
-              confirmedAt: storedPreference?.confirmedAt ?? new Date().toISOString(),
-            },
+            agentParams.selectedChapterIds,
           );
-          generationService.configureAgentTools(prepared.stream, agent.tools);
-          result = {
-            status: 'started',
-            capability: capabilityHint,
-            ...prepared,
-            agentTaskId: agent.taskId,
-            runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
-            runtimeMode: 'document',
+          const provenance = {
+            source: storedPreference ? ('conversation-preference' as const) : ('request' as const),
+            capability: 'text' as const,
+            confirmedAt: storedPreference?.confirmedAt ?? new Date().toISOString(),
           };
+
+          if (requestedTaskMode === 'novel-writing') {
+            const orchestration = agentOrchestrationService.prepareNovelTask({
+              conversationId: agentParams.conversationId,
+              projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
+              prompt: agentParams.prompt,
+              intent: agentParams.novelIntent,
+              idempotencyKey: agentParams.idempotencyKey,
+            });
+            if ('pendingIntent' in orchestration) {
+              result = {
+                status: 'pending_intent',
+                capability: 'novel',
+                pendingIntent: orchestration.pendingIntent,
+              };
+              break;
+            }
+            try {
+              const prepared = generationService.prepare({
+                conversationId: agentParams.conversationId,
+                prompt: agentParams.prompt,
+                providerProfileId: selected.providerProfileId,
+                modelId: selected.modelId,
+                attachments: agentParams.attachments,
+                budgetTokens: agentParams.budgetTokens,
+                idempotencyKey: agentParams.idempotencyKey,
+                agentMode: 'novel-writing',
+                researchMode: agentParams.researchMode,
+                novelIntent: {
+                  ...agentParams.novelIntent,
+                  chapterId: orchestration.chapterId,
+                },
+              });
+              const agent = agentProviderLoopService.prepare(
+                prepared.stream,
+                agentParams.prompt,
+                undefined,
+                orchestration.documentIntent,
+                agentParams.researchMode,
+                orchestration.taskId,
+                undefined,
+                undefined,
+                provenance,
+              );
+              generationService.configureAgentTools(prepared.stream, agent.tools);
+              result = {
+                status: 'started',
+                capability: 'novel',
+                ...prepared,
+                agentTaskId: agent.taskId,
+                runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+                runtimeMode: 'novel-writing',
+              };
+            } catch (error) {
+              agentOrchestrationService.failTaskBeforeGeneration(
+                orchestration.taskId,
+                error instanceof Error ? error.message : 'Generation preparation failed.',
+              );
+              throw error;
+            }
+          } else {
+            // Selected chapters are trusted context for an episode adaptation;
+            // the Worker chooses the short-drama workflow automatically.
+            const shortDrama =
+              requestedTaskMode === 'short-drama' &&
+              (agentParams.selectedChapterIds?.length ?? 0) > 0;
+            const mode = shortDrama ? 'short-drama' : 'document';
+            const prepared = generationService.prepare({
+              conversationId: agentParams.conversationId,
+              prompt: agentParams.prompt,
+              providerProfileId: selected.providerProfileId,
+              modelId: selected.modelId,
+              attachments: agentParams.attachments,
+              budgetTokens: agentParams.budgetTokens,
+              idempotencyKey: agentParams.idempotencyKey,
+              agentMode: mode,
+              researchMode: agentParams.researchMode,
+              documentIntent: shortDrama
+                ? inferShortDramaDocumentIntent(agentParams.prompt)
+                : inferAgentDocumentIntent(agentParams.prompt),
+              selectedChapterIds: shortDrama ? agentParams.selectedChapterIds : undefined,
+              targetPlatform: shortDrama ? (agentParams.targetPlatform ?? 'seedance') : undefined,
+            });
+            const agent = agentProviderLoopService.prepare(
+              prepared.stream,
+              agentParams.prompt,
+              undefined,
+              shortDrama
+                ? inferShortDramaDocumentIntent(agentParams.prompt)
+                : inferAgentDocumentIntent(agentParams.prompt),
+              agentParams.researchMode,
+              undefined,
+              shortDrama ? agentParams.selectedChapterIds : undefined,
+              shortDrama ? (agentParams.targetPlatform ?? 'seedance') : undefined,
+              provenance,
+            );
+            generationService.configureAgentTools(prepared.stream, agent.tools);
+            result = {
+              status: 'started',
+              capability: shortDrama ? 'short-drama' : capabilityHint,
+              ...prepared,
+              agentTaskId: agent.taskId,
+              runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+              runtimeMode: mode,
+            };
+          }
           break;
         }
         case 'agent.generation.prepare': {
