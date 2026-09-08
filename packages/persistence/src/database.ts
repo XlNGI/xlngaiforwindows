@@ -37,6 +37,7 @@ import {
   MIGRATION_V33,
   MIGRATION_V34,
   MIGRATION_V36,
+  MIGRATION_V38,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
@@ -399,6 +400,14 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(37, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 37) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V38);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(38, now);
     })();
   }
   return getSchemaVersion(database);

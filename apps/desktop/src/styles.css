@@ -2783,6 +2783,16 @@ button {
   font-size: 10px;
 }
 
+.agent-confirmation-entities {
+  display: grid;
+  gap: 3px;
+  max-height: 120px;
+  margin: 0;
+  padding-left: 18px;
+  overflow: auto;
+  color: #d8d3c4;
+}
+
 .agent-confirmation-parameters {
   display: grid;
   gap: 3px;

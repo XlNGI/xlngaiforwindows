@@ -1,6 +1,6 @@
 # Windows 发布检查清单
 
-日期：2026-08-02  
+日期：2026-09-08  
 目标版本：0.1.0
 
 ## 1. 版本和仓库
@@ -10,6 +10,8 @@
 - [ ] SQLite `CURRENT_SCHEMA_VERSION` 和迁移测试已更新。
 - [ ] `docs/QUALITY-GATES.md` 没有未接受的 P0/P1 问题。
 - [ ] 默认测试未配置真实 Provider 密钥，未消耗额度。
+
+P6 状态同步：统一 Agent 工具覆盖、Worker 共用业务 Service、任务计划依赖/完整性门禁、Schema v38 迁移和模型选择 provenance 已完成；本轮自动质量门禁全部通过。以下真实 Provider、签名、跨版本升级、干净 VM 和人工验收项目仍保持未完成，因此发布结论继续为 `HOLD`。
 
 ## 2. 自动质量门禁
 

@@ -2,19 +2,26 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ConversationDeliverableKind, ConversationTaskPlanV1 } from '@ai-video/contracts';
+import type {
+  ConversationDeliverableKind,
+  ConversationTaskPlanV1,
+  ConversationTaskPlanV2,
+} from '@ai-video/contracts';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
 import {
   assertDeliverableStatusTransition,
   assertPlanStatusTransition,
   buildMissingDeliverablesFollowUp,
+  inferRequiredPlanOperations,
+  shouldRequireStructuredPlan,
   TaskPlanService,
   TaskPlanServiceError,
 } from './task-plan-service.js';
 import {
   ConversationTaskPlanValidationError,
   validateConversationTaskPlanV1,
+  validateConversationTaskPlanV2,
 } from './request-validation.js';
 
 const directories: string[] = [];
@@ -41,6 +48,27 @@ const validPlan: ConversationTaskPlanV1 = {
     { kind: 'shot-prompts', required: true, dependsOn: ['scene-shot-structure'] },
   ],
   constraints: ['每集控制在 3 分钟内', '输出适配 Seedance 的中文提示词'],
+};
+
+const validGenericPlan: ConversationTaskPlanV2 = {
+  version: 2,
+  steps: [
+    {
+      id: 'generate-image',
+      operation: 'media.image.prepare',
+      required: true,
+      dependsOn: [],
+      constraints: ['Create one dragon image.'],
+    },
+    {
+      id: 'generate-video',
+      operation: 'media.video.prepare',
+      required: true,
+      dependsOn: ['generate-image'],
+      constraints: ['Use the image result as the video input.'],
+    },
+  ],
+  constraints: ['Keep all media inside the current project.'],
 };
 
 async function setup(targetPlatform: 'seedance' | 'generic-video' = 'seedance') {
@@ -97,6 +125,25 @@ async function setup(targetPlatform: 'seedance' | 'generic-video' = 'seedance') 
     return { projectId: current.id, taskId: 'task-1', chapterId: 'chapter-1' };
   });
   return { project, service: new TaskPlanService(project), ...identifiers };
+}
+
+async function setupGeneric(requiredOperations = ['media.image.prepare', 'media.video.prepare']) {
+  const fixture = await setup();
+  fixture.project.access(true, (database) => {
+    database.prepare('UPDATE agent_tasks SET request_snapshot_json = ? WHERE id = ?').run(
+      JSON.stringify({
+        agentMode: 'document',
+        structuredPlan: {
+          version: 2,
+          mode: 'document',
+          authorizedOperations: ['media.image.prepare', 'media.video.prepare'],
+          requiredOperations,
+        },
+      }),
+      fixture.taskId,
+    );
+  });
+  return fixture;
 }
 
 function validationCode(action: () => unknown): string | undefined {
@@ -248,6 +295,210 @@ describe('ConversationTaskPlanV1 validation', () => {
         validateConversationTaskPlanV1({ ...validPlan, deliverables: repeated }),
       ),
     ).toBe('TASK_PLAN_INVALID_DELIVERABLE');
+  });
+});
+
+describe('ConversationTaskPlanV2 validation and inference', () => {
+  it('accepts stable generic steps and rejects authority, duplicates and cycles', () => {
+    expect(validateConversationTaskPlanV2(validGenericPlan)).toEqual(validGenericPlan);
+    expect(
+      validationCode(() =>
+        validateConversationTaskPlanV2({
+          ...validGenericPlan,
+          steps: [
+            ...validGenericPlan.steps,
+            {
+              id: 'generate-image',
+              operation: 'media.image.prepare',
+              required: false,
+              dependsOn: [],
+              constraints: [],
+            },
+          ],
+        }),
+      ),
+    ).toBe('TASK_PLAN_DUPLICATE_STEP');
+    expect(
+      validationCode(() =>
+        validateConversationTaskPlanV2({
+          ...validGenericPlan,
+          steps: validGenericPlan.steps.map((step) =>
+            step.id === 'generate-image' ? { ...step, dependsOn: ['generate-video'] } : step,
+          ),
+        }),
+      ),
+    ).toBe('TASK_PLAN_CYCLIC_DEPENDENCY');
+    expect(
+      validationCode(() =>
+        validateConversationTaskPlanV2({
+          ...validGenericPlan,
+          steps: [
+            { ...validGenericPlan.steps[0], projectId: 'forbidden' },
+            validGenericPlan.steps[1],
+          ],
+        }),
+      ),
+    ).toBe('TASK_PLAN_AUTHORITY_FIELD_FORBIDDEN');
+  });
+
+  it('requires a plan for the image-to-video dependency but not a single tag write', () => {
+    const operations = ['media.image.prepare', 'media.video.prepare', 'tag.create'];
+    expect(inferRequiredPlanOperations('生成一张龙的图片，再把它生成视频', operations)).toEqual([
+      'media.image.prepare',
+      'media.video.prepare',
+    ]);
+    expect(
+      shouldRequireStructuredPlan('document', '生成一张龙的图片，再把它生成视频', operations),
+    ).toBe(true);
+    expect(shouldRequireStructuredPlan('document', '把这个素材加上龙标签', operations)).toBe(false);
+    expect(inferRequiredPlanOperations('生成一张龙的图片，再生成一张虎的图片', operations)).toEqual(
+      ['media.image.prepare', 'media.image.prepare'],
+    );
+    expect(
+      shouldRequireStructuredPlan('document', '生成一张龙的图片，再生成一张虎的图片', operations),
+    ).toBe(true);
+  });
+});
+
+describe('TaskPlanService P6 generic dependency plans', () => {
+  it('validates task authorization and the required operation order', async () => {
+    const { service, taskId } = await setupGeneric();
+    expect(
+      serviceCode(() =>
+        service.submitPlanOnly({
+          taskId,
+          candidate: {
+            ...validGenericPlan,
+            steps: validGenericPlan.steps.map((step) =>
+              step.id === 'generate-video'
+                ? { ...step, operation: 'project.export.prepare' }
+                : step,
+            ),
+          },
+        }),
+      ),
+    ).toBe('TASK_PLAN_OPERATION_UNAUTHORIZED');
+    expect(
+      serviceCode(() =>
+        service.submitPlanOnly({
+          taskId,
+          candidate: {
+            ...validGenericPlan,
+            steps: validGenericPlan.steps.map((step) => ({ ...step, dependsOn: [] })),
+          },
+        }),
+      ),
+    ).toBe('TASK_PLAN_INVALID_DEPENDENCY');
+  });
+
+  it('unlocks only dependency-ready operations and completes from actual tool results', async () => {
+    const { project, service, taskId } = await setupGeneric();
+    const plan = service.submitPlanOnly({ taskId, candidate: validGenericPlan });
+    expect(plan.plan).toEqual(validGenericPlan);
+    expect(service.availableOperations(taskId)).toEqual(['media.image.prepare']);
+
+    const imageStepId = plan.deliverables.find((step) => step.kind === 'generate-image')!.id;
+    expect(service.beginStep({ taskId, operation: 'media.image.prepare' })).toBe(imageStepId);
+    expect(
+      service.recordStepSuccess({
+        taskId,
+        stepId: imageStepId,
+        operation: 'media.image.prepare',
+        resultText: JSON.stringify({ status: 'prepared', jobId: 'image-job' }),
+      }),
+    ).toBe(true);
+    expect(service.availableOperations(taskId)).toEqual(['media.video.prepare']);
+
+    const videoStepId = plan.deliverables.find((step) => step.kind === 'generate-video')!.id;
+    service.beginStep({ taskId, operation: 'media.video.prepare' });
+    expect(
+      service.recordStepSuccess({
+        taskId,
+        stepId: videoStepId,
+        operation: 'media.video.prepare',
+        resultText: JSON.stringify({ status: 'prepared', jobId: 'video-job' }),
+      }),
+    ).toBe(true);
+    expect(service.completePackage(taskId)).toEqual({ complete: true, taskStatus: 'completed' });
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT status FROM agent_tasks WHERE id = ?').get(taskId),
+      ),
+    ).toEqual({ status: 'completed' });
+  });
+
+  it.each(['rejected', 'unavailable', 'not_found', 'confirmation_rejected'])(
+    'does not unlock a dependency when the Worker tool result is %s',
+    async (status) => {
+      const { service, taskId } = await setupGeneric();
+      const plan = service.submitPlanOnly({ taskId, candidate: validGenericPlan });
+      const imageStepId = plan.deliverables.find((step) => step.kind === 'generate-image')!.id;
+      service.beginStep({ taskId, operation: 'media.image.prepare' });
+      expect(
+        service.recordStepSuccess({
+          taskId,
+          stepId: imageStepId,
+          operation: 'media.image.prepare',
+          resultText: JSON.stringify({ status }),
+        }),
+      ).toBe(false);
+      expect(service.availableOperations(taskId)).toEqual([]);
+      expect(service.completePackage(taskId)).toMatchObject({
+        complete: false,
+        followUp: { ordinal: 1, missingDeliverables: ['generate-image', 'generate-video'] },
+      });
+      expect(service.availableOperations(taskId)).toEqual(['media.image.prepare']);
+    },
+  );
+
+  it('requires distinct dependency-ordered steps for repeated paid operations', async () => {
+    const { service, taskId } = await setupGeneric(['media.image.prepare', 'media.image.prepare']);
+    const repeatedPlan: ConversationTaskPlanV2 = {
+      version: 2,
+      steps: [
+        {
+          id: 'dragon-image',
+          operation: 'media.image.prepare',
+          required: true,
+          dependsOn: [],
+          constraints: ['Generate the dragon image.'],
+        },
+        {
+          id: 'tiger-image',
+          operation: 'media.image.prepare',
+          required: true,
+          dependsOn: ['dragon-image'],
+          constraints: ['Generate a separate tiger image.'],
+        },
+      ],
+      constraints: [],
+    };
+    expect(
+      serviceCode(() =>
+        service.submitPlanOnly({
+          taskId,
+          candidate: {
+            ...repeatedPlan,
+            steps: repeatedPlan.steps.map((step, index) =>
+              index === 1 ? { ...step, required: false } : step,
+            ),
+          },
+        }),
+      ),
+    ).toBe('TASK_PLAN_REQUIRED_OPERATION_MISSING');
+    const plan = service.submitPlanOnly({ taskId, candidate: repeatedPlan });
+    const first = plan.deliverables.find((step) => step.kind === 'dragon-image')!;
+    const second = plan.deliverables.find((step) => step.kind === 'tiger-image')!;
+    expect(service.beginStep({ taskId, operation: 'media.image.prepare' })).toBe(first.id);
+    expect(
+      service.recordStepSuccess({
+        taskId,
+        stepId: first.id,
+        operation: 'media.image.prepare',
+        resultText: JSON.stringify({ status: 'prepared', jobId: 'dragon-job' }),
+      }),
+    ).toBe(true);
+    expect(service.beginStep({ taskId, operation: 'media.image.prepare' })).toBe(second.id);
   });
 });
 

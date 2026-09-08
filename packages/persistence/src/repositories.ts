@@ -1968,7 +1968,7 @@ interface AgentTaskPlanRow {
   id: string;
   task_id: string;
   project_id: string;
-  version: 1;
+  version: 1 | 2;
   mode: AgentTaskPlanRecord['mode'];
   action: AgentTaskPlanRecord['action'];
   target_platform: AgentTaskPlanRecord['targetPlatform'] | null;
@@ -2010,9 +2010,10 @@ class SqliteAgentTaskDeliverableRepository
     this.database
       .prepare(
         `INSERT INTO agent_task_deliverables
-         (id, plan_id, task_id, project_id, ordinal, kind, required, depends_on_json, status,
-          entity_type, entity_id, error_code, error_message, row_version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, plan_id, task_id, project_id, ordinal, kind, operation, required, depends_on_json,
+          status, entity_type, entity_id, error_code, error_message, result_summary_json,
+          row_version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -2021,6 +2022,7 @@ class SqliteAgentTaskDeliverableRepository
         record.projectId,
         record.ordinal,
         record.kind,
+        record.operation,
         record.required ? 1 : 0,
         record.dependsOnJson,
         record.status,
@@ -2028,6 +2030,7 @@ class SqliteAgentTaskDeliverableRepository
         record.entityId ?? null,
         record.errorCode ?? null,
         record.errorMessage ?? null,
+        record.resultSummaryJson ?? null,
         record.rowVersion,
         record.createdAt,
         record.updatedAt,
@@ -2074,6 +2077,7 @@ interface AgentTaskDeliverableRow {
   project_id: string;
   ordinal: number;
   kind: AgentTaskDeliverableRecord['kind'];
+  operation: string;
   required: number;
   depends_on_json: string;
   status: AgentTaskDeliverableRecord['status'];
@@ -2081,6 +2085,7 @@ interface AgentTaskDeliverableRow {
   entity_id: string | null;
   error_code: string | null;
   error_message: string | null;
+  result_summary_json: string | null;
   row_version: number;
   created_at: string;
   updated_at: string;
@@ -2094,6 +2099,7 @@ function mapAgentTaskDeliverable(row: AgentTaskDeliverableRow): AgentTaskDeliver
     projectId: row.project_id,
     ordinal: row.ordinal,
     kind: row.kind,
+    operation: row.operation,
     required: row.required === 1,
     dependsOnJson: row.depends_on_json,
     status: row.status,
@@ -2101,6 +2107,7 @@ function mapAgentTaskDeliverable(row: AgentTaskDeliverableRow): AgentTaskDeliver
     entityId: row.entity_id ?? undefined,
     errorCode: row.error_code ?? undefined,
     errorMessage: row.error_message ?? undefined,
+    resultSummaryJson: row.result_summary_json ?? undefined,
     rowVersion: row.row_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

@@ -12,6 +12,7 @@ import type {
   AgentTaskInfo,
   AgentTaskPendingConfirmationInfo,
   AgentTaskPendingSchemaConfirmationInfo,
+  AgentProtectedUiHandoff,
   ConversationTaskPlanInfo,
   AgentTaskListParams,
   DocumentDetail,
@@ -1471,31 +1472,37 @@ export class DocumentWorkflowService {
       }));
       const confirmationRow = database
         .prepare(
-          `SELECT confirmations.action, confirmations.target_document_id, confirmations.status,
-                  confirmations.expires_at, documents.title
+          `SELECT confirmations.id, confirmations.task_id, confirmations.original_tool_call_id,
+                  confirmations.action, confirmations.target_document_id,
+                  confirmations.normalized_arguments_hash,
+                  confirmations.continuation_descriptor_json, confirmations.status,
+                  confirmations.expires_at, documents.title,
+                  auth.project_session_id
              FROM agent_task_confirmations confirmations
-             INNER JOIN documents ON documents.id = confirmations.target_document_id
+             INNER JOIN agent_tool_calls calls ON calls.id = confirmations.original_tool_call_id
+             INNER JOIN agent_tool_authorizations auth ON auth.id = calls.authorization_id
+              LEFT JOIN documents ON documents.id = confirmations.target_document_id
             WHERE confirmations.task_id = ? AND confirmations.project_id = ?
               AND confirmations.status IN ('pending', 'expired')
             ORDER BY confirmations.created_at DESC LIMIT 1`,
         )
         .get(task.id, project.id) as
         | {
-            action: AgentTaskPendingConfirmationInfo['action'];
-            target_document_id: string;
+            id: string;
+            task_id: string;
+            original_tool_call_id: string;
+            action: string;
+            target_document_id: string | null;
+            normalized_arguments_hash: string;
+            continuation_descriptor_json: string;
             expires_at: string;
-            title: string;
+            title: string | null;
+            project_session_id: string;
             status: AgentTaskPendingConfirmationInfo['status'];
           }
         | undefined;
       const pendingConfirmation = confirmationRow
-        ? ({
-            action: confirmationRow.action,
-            documentId: confirmationRow.target_document_id,
-            documentTitle: confirmationRow.title,
-            expiresAt: confirmationRow.expires_at,
-            status: confirmationRow.status,
-          } satisfies AgentTaskPendingConfirmationInfo)
+        ? toPendingConfirmationInfo(confirmationRow)
         : undefined;
       const schemaProposalRow = database
         .prepare(
@@ -2464,4 +2471,121 @@ export class DocumentWorkflowService {
       heading?.slice(0, MAX_TITLE_LENGTH) || `会话草稿 ${new Date().toLocaleDateString('zh-CN')}`
     );
   }
+}
+
+function toPendingConfirmationInfo(row: {
+  id: string;
+  task_id: string;
+  original_tool_call_id: string;
+  action: string;
+  target_document_id: string | null;
+  normalized_arguments_hash: string;
+  continuation_descriptor_json: string;
+  expires_at: string;
+  title: string | null;
+  project_session_id: string;
+  status: AgentTaskPendingConfirmationInfo['status'];
+}): AgentTaskPendingConfirmationInfo {
+  let descriptor: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.continuation_descriptor_json) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      descriptor = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Legacy confirmation rows remain visible with a bounded fallback summary.
+  }
+  const systemDescriptor = descriptor.kind === 'system' ? descriptor : undefined;
+  const affectedEntities = parseConfirmationEntities(systemDescriptor?.affectedEntities);
+  const protectedUi = parseProtectedUiHandoff(systemDescriptor?.protectedUi);
+  const documentTitle = row.title ?? undefined;
+  const summary =
+    typeof systemDescriptor?.summary === 'string' && systemDescriptor.summary.trim()
+      ? systemDescriptor.summary.slice(0, 500)
+      : row.action === 'document.archive'
+        ? `归档文档“${documentTitle ?? row.target_document_id ?? '未知文档'}”`
+        : row.action === 'document.restore'
+          ? `恢复文档“${documentTitle ?? row.target_document_id ?? '未知文档'}”`
+          : `确认执行 ${row.action}`;
+  const status =
+    row.status === 'pending' && row.expires_at <= new Date().toISOString() ? 'expired' : row.status;
+  return {
+    version: 1,
+    confirmationId: row.id,
+    taskId: row.task_id,
+    toolCallId: row.original_tool_call_id,
+    operation: row.action,
+    action: row.action,
+    argumentsHash: row.normalized_arguments_hash,
+    projectSessionId: row.project_session_id,
+    riskLevel: isProtectedConfirmationOperation(row.action) ? 'R3' : 'R2',
+    summary,
+    affectedEntities:
+      affectedEntities.length > 0
+        ? affectedEntities
+        : row.target_document_id
+          ? [
+              {
+                type: 'document',
+                id: row.target_document_id,
+                ...(documentTitle ? { label: documentTitle } : {}),
+              },
+            ]
+          : [],
+    ...(protectedUi ? { protectedUi } : {}),
+    ...(row.target_document_id ? { documentId: row.target_document_id } : {}),
+    ...(documentTitle ? { documentTitle } : {}),
+    expiresAt: row.expires_at,
+    status,
+  };
+}
+
+function parseConfirmationEntities(
+  value: unknown,
+): Array<{ type: string; id: string; label?: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((candidate) => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+      const entity = candidate as Record<string, unknown>;
+      if (typeof entity.type !== 'string' || typeof entity.id !== 'string') return [];
+      return [
+        {
+          type: entity.type.slice(0, 100),
+          id: entity.id.slice(0, 200),
+          ...(typeof entity.label === 'string' ? { label: entity.label.slice(0, 200) } : {}),
+        },
+      ];
+    })
+    .slice(0, 100);
+}
+
+function parseProtectedUiHandoff(value: unknown): AgentProtectedUiHandoff | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const handoff = value as Record<string, unknown>;
+  if (
+    (handoff.page !== 'providers' &&
+      handoff.page !== 'maintenance' &&
+      handoff.page !== 'asset-library') ||
+    typeof handoff.reason !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    page: handoff.page,
+    reason: handoff.reason.slice(0, 500),
+    ...(typeof handoff.focusId === 'string' ? { focusId: handoff.focusId.slice(0, 200) } : {}),
+  };
+}
+
+function isProtectedConfirmationOperation(operation: string): boolean {
+  return (
+    operation === 'project.backup.prepare' ||
+    operation === 'project.export.prepare' ||
+    operation === 'project.restore.prepare' ||
+    operation === 'asset.purge' ||
+    operation === 'settings.propose_update' ||
+    operation === 'settings.apply_update' ||
+    operation === 'maintenance.diagnostics.prepare'
+  );
 }

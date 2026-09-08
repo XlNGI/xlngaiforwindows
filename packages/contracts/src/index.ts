@@ -919,7 +919,17 @@ export interface AgentConfirmationRequestV1 {
   affectedEntities: Array<{ type: string; id: string; label?: string }>;
   costNotice?: string;
   draftVersion?: number;
+  protectedUi?: AgentProtectedUiHandoff;
   expiresAt: string;
+}
+
+export type AgentProtectedUiPage = 'providers' | 'maintenance' | 'asset-library';
+
+/** A safe navigation request. Sensitive values are entered only after this handoff. */
+export interface AgentProtectedUiHandoff {
+  page: AgentProtectedUiPage;
+  focusId?: string;
+  reason: string;
 }
 
 /** Opaque, short-lived grant. The handle must never enter Provider messages or durable snapshots. */
@@ -1175,9 +1185,20 @@ export interface AgentTaskPendingSchemaConfirmationInfo {
 
 /** Safe-to-display confirmation metadata; the one-time token is never persisted or returned. */
 export interface AgentTaskPendingConfirmationInfo {
-  action: AgentToolConfirmationRequest['action'];
-  documentId: string;
-  documentTitle: string;
+  version: 1;
+  confirmationId: string;
+  taskId: string;
+  toolCallId: string;
+  operation: string;
+  action: string;
+  argumentsHash: string;
+  projectSessionId: string;
+  riskLevel: Extract<AgentToolRiskLevel, 'R2' | 'R3'>;
+  summary: string;
+  affectedEntities: Array<{ type: string; id: string; label?: string }>;
+  protectedUi?: AgentProtectedUiHandoff;
+  documentId?: string;
+  documentTitle?: string;
   expiresAt: string;
   status: 'pending' | 'expired';
 }
@@ -1991,6 +2012,25 @@ export interface ConversationTaskPlanV1 {
   constraints: string[];
 }
 
+export interface ConversationTaskStepV2 {
+  /** Model-owned stable identifier used only inside this plan. */
+  id: string;
+  /** Exact Worker-registered operation; authority still comes from the task authorization. */
+  operation: string;
+  required: boolean;
+  dependsOn: string[];
+  constraints: string[];
+}
+
+/** Generic plan for cross-domain or dependent Worker tool operations. */
+export interface ConversationTaskPlanV2 {
+  version: 2;
+  steps: ConversationTaskStepV2[];
+  constraints: string[];
+}
+
+export type ConversationTaskPlan = ConversationTaskPlanV1 | ConversationTaskPlanV2;
+
 export type ConversationTaskPlanStatus = 'frozen' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 export type ConversationDeliverableStatus =
   'pending' | 'ready' | 'in_progress' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
@@ -2005,6 +2045,10 @@ export type ConversationTaskPlanErrorCode =
   | 'TASK_PLAN_INVALID_PLATFORM'
   | 'TASK_PLAN_INVALID_DELIVERABLE'
   | 'TASK_PLAN_DUPLICATE_DELIVERABLE'
+  | 'TASK_PLAN_INVALID_STEP'
+  | 'TASK_PLAN_DUPLICATE_STEP'
+  | 'TASK_PLAN_OPERATION_UNAUTHORIZED'
+  | 'TASK_PLAN_REQUIRED_OPERATION_MISSING'
   | 'TASK_PLAN_INVALID_DEPENDENCY'
   | 'TASK_PLAN_CYCLIC_DEPENDENCY'
   | 'TASK_PLAN_TASK_NOT_FOUND'
@@ -2039,7 +2083,7 @@ export interface DomainToolResultV1 {
   entityType?: 'document' | 'change-set' | 'task';
   entityId?: string;
   summary: string;
-  remainingRequiredDeliverables: ConversationDeliverableKind[];
+  remainingRequiredDeliverables: string[];
   retryable: boolean;
 }
 
@@ -2050,7 +2094,7 @@ export interface ConversationPackageCompleteResult {
   followUp?: {
     ordinal: 1 | 2;
     prompt: string;
-    missingDeliverables: ConversationDeliverableKind[];
+    missingDeliverables: string[];
   };
 }
 
@@ -2058,16 +2102,22 @@ export interface ConversationTaskPlanInfo {
   id: string;
   taskId: string;
   projectId: string;
-  plan: ConversationTaskPlanV1;
+  plan: ConversationTaskPlan;
   /** Worker-owned scope copied from the frozen task snapshot, never from model output. */
-  trustedScope: { selectedChapterIds: string[] };
+  trustedScope: {
+    selectedChapterIds: string[];
+    authorizedOperations?: string[];
+    requiredOperations?: string[];
+  };
   status: ConversationTaskPlanStatus;
-  deliverables: Array<
-    ConversationTaskDeliverableV1 & {
-      id: string;
-      status: ConversationDeliverableStatus;
-    }
-  >;
+  deliverables: Array<{
+    id: string;
+    kind: string;
+    operation?: string;
+    required: boolean;
+    dependsOn: string[];
+    status: ConversationDeliverableStatus;
+  }>;
   createdAt: string;
   updatedAt: string;
 }
@@ -2368,12 +2418,12 @@ export interface MediaTaskCancelParams {
   jobId: string;
 }
 
-export interface AgentToolConfirmationRequest {
+export interface AgentToolConfirmationRequest extends AgentConfirmationRequestV1 {
   confirmationToken: string;
-  action: 'document.archive' | 'document.restore';
-  documentId: string;
-  documentTitle: string;
-  expiresAt: string;
+  /** Compatibility alias for operation used by existing Desktop callers. */
+  action: string;
+  documentId?: string;
+  documentTitle?: string;
 }
 
 export interface AgentGenerationConfirmToolParams extends LlmGenerationIdentity {

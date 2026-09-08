@@ -2,8 +2,8 @@
 
 版本：1.0  
 日期：2026-09-02  
-最近同步：2026-09-07  
-状态：实施中（P0-P5 已完成；P6-P7 未完成；整机发布状态保持 `HOLD`）  
+最近同步：2026-09-08  
+状态：实施中（P0-P6 已完成；P7 发布验收未完成；整机发布状态保持 `HOLD`）  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM、Generation Adapters
 
 > **方案结论** 会话是面向整个应用的统一人工智能助手，不再按“普通聊天、通用模式、专用模式”划分运行方式。用户在会话中选择一个支持工具调用的推理模型，之后由 Pi Agent 理解自然语言、规划步骤、选择受控业务工具并连续执行；Worker 始终负责权限、确认、状态机、幂等、事务和审计，Tauri Native 始终负责凭据与 Provider 网络边界。图片、视频、小说、文档、素材和项目操作均逐步接入同一个 Agent 工具面。
@@ -85,11 +85,12 @@
 - P3 已接入 `media.image.prepare`、`media.video.prepare`、`media.task.get`、显式媒体模型选择、冻结 Provider/模型/Adapter 快照和受控本地输入。
 - P4 已接入 `media.generation.submit`、`media.task.cancel` 和 Worker-owned `MediaOrchestrationService`；确认前不请求 Provider，确认卡展示冻结草稿版本、参数摘要和费用提示。
 - P5 已用 Worker-owned `ProjectTaskRuntime` 接管视频轮询；项目打开时恢复，项目/应用关闭时停止本地调度，并统一处理并发、全局间隔、指数退避、抖动、`Retry-After` 和项目 session 失效响应。
+- P6 已完成全系统业务工具覆盖：项目、会话、文档、小说、短剧、素材、模型 Schema、设置和维护工具均通过统一 Registry/Policy 接线；生产入口与 Agent 共用 Worker Service；通用任务计划支持依赖图、环检测、重复 operation 拒绝和 Tool Result 完成语义；Provider/model 选择 provenance 已冻结并持久化；高风险设置和受保护 UI 交接保持在 Worker/Native 边界内。
 - Native `provider.media.poll` 只向 Worker 返回有界规范化状态和受控临时文件；UniCompAPI 鉴权下载与 Vidu 公网签名输出下载均停留在 Native，原始 Provider 正文、签名 URL 和认证信息不跨边界。
 - App 通过单一 revisioned `project.task.subscribe` owner 向会话、制作面板、任务日志和素材库分发状态；成功任务触发素材刷新，原 React `VideoPollingScheduler` 已删除。
 - Schema v37 持久化媒体状态、提交幂等键、确认哈希/session 和提交 attempt；`submission_unknown` 禁止自动重试，历史 `pending/running` 保守迁移，终态不可回退。
 - Desktop 制作入口与 Agent 工具均复用 Worker 提交边界；Native 只持有凭据、受控文件和 Provider 网络请求，项目 SQLite 继续是唯一运行时事实源。
-- 最新验证基线：全仓 620 项 JS/TS 与 79 项 Rust 测试通过，typecheck、ESLint、Prettier、rustfmt 和 `git diff --check` 通过；完整构建/打包证据见 [P5 trace](./code-traces/2026-09-07-agent-orchestration-p5-project-task-runtime.md)。
+- 最新验证基线：全量 `pnpm.cmd test`、typecheck、lint、format:check、build、sidecar、audit、license、SBOM、Rust fmt/check/test 和 `git diff --check` 均通过；本轮 P6 证据见 [P6 trace](./code-traces/2026-09-08-agent-orchestration-p6-tool-coverage.md)。
 
 ## 4. 目标架构
 
@@ -472,13 +473,13 @@ P5 证据：[Agent 编排 P5 项目级后台任务运行时](./code-traces/2026-
 
 ### P6：全系统工具覆盖
 
-- [ ] 按风险矩阵逐步补齐项目、会话、文档、小说、短剧、素材、标签、素材组、模型 Schema、设置和维护工具。
-- [ ] 生产按钮与 Agent 工具调用共享同一个 Worker Service，不维护两套业务实现。
-- [ ] 为多步骤任务接入结构化计划、依赖图、完整性门禁和有界自动修复。
-- [ ] Provider 设置变更使用提议/确认流程；secret 录入始终跳转 Native 安全 UI。
-- [ ] 删除、发布、恢复覆盖和清理等 R2/R3 操作全部具有预览、确认和审计。
+- [x] 按风险矩阵逐步补齐项目、会话、文档、小说、短剧、素材、标签、素材组、模型 Schema、设置和维护工具。
+- [x] 生产按钮与 Agent 工具调用共享同一个 Worker Service，不维护两套业务实现。
+- [x] 为多步骤任务接入结构化计划、依赖图、完整性门禁和有界自动修复。
+- [x] Provider 设置变更使用提议/确认流程；secret 录入始终跳转 Native 安全 UI。
+- [x] 删除、发布、恢复覆盖和清理等 R2/R3 操作全部具有预览、确认和审计。
 
-完成门禁：系统公开业务能力都有明确工具合同或明确说明只能由受保护 UI 完成；不存在模型可以绕过的隐藏写入口。
+完成门禁：系统公开业务能力都有明确工具合同或明确说明只能由受保护 UI 完成；不存在模型可以绕过的隐藏写入口。证据：[P6 全系统工具覆盖](./code-traces/2026-09-08-agent-orchestration-p6-tool-coverage.md)。
 
 ### P7：收口、迁移和发布门禁
 
@@ -636,10 +637,10 @@ correlationId
 
 ## 18. 下一步
 
-当前处于 **P0-P5 已完成，P6-P7 未完成，整机发布保持 `HOLD`** 的状态。下一步按以下顺序推进：
+当前处于 **P0-P6 已完成，P7 发布验收未完成，整机发布保持 `HOLD`** 的状态。下一步按以下顺序推进：
 
-1. P6 补齐全系统工具覆盖和生产按钮/Agent 共用 Service 的剩余边界；
-2. P7 完成真实 Provider、Windows 长稳、安装升级、人工验收和发布签收。
+1. P7 完成真实 Provider、Windows 长稳、安装升级、人工验收和发布签收；
+2. 在 P7 完成前保持 Legacy 回退开关、发布 `HOLD` 和本地优先边界不变。
 
 > **冻结原则** Agent 可以用自然语言发起整个系统的操作，但模型永远不是权限、状态和数据事实源；付费与高风险动作必须确认，Provider 凭据永不进入 Agent 边界，成功媒体必须先完成本地落盘再进入素材库。
 
@@ -647,6 +648,7 @@ correlationId
 
 | 日期 | 状态 | 证据 | 未完成边界 |
 |---|---|---|---|
+| 2026-09-08 | P6 全系统工具覆盖完成 | [P6 全系统工具覆盖验证证据](./code-traces/2026-09-08-agent-orchestration-p6-tool-coverage.md)；统一 Registry/Policy 覆盖业务工具与受保护 UI 交接，通用 `ConversationTaskPlanV2` 完成依赖图、环检测、重复 operation 拒绝和 Tool Result 完成语义，模型选择 provenance 冻结；Schema v38 迁移和 Desktop/Worker/Provider/Pi 接线完成；全量测试、类型、lint、格式、构建、sidecar、Rust 和供应链门禁通过 | P7 真实 Provider、正式签名、上一正式版本升级、干净 Windows VM、断网/休眠/长稳和人工产品验收未完成；发布保持 `HOLD` |
 | 2026-09-07 | P5 项目级后台任务运行时完成 | [P5 项目级后台任务运行时验证证据](./code-traces/2026-09-07-agent-orchestration-p5-project-task-runtime.md)；Worker `ProjectTaskRuntime`、Native 规范化轮询/下载、revisioned `project.task.subscribe`、页面无关状态分发、项目恢复、退避/限流/`Retry-After`、旧 session 隔离和幂等素材入库完成；全仓 620 项 JS/TS、79 项 Rust 及完整质量门禁通过 | 未调用真实付费 Provider；P6 全系统工具覆盖、P7 Windows 断网/休眠/多窗口/长稳、安装升级卸载签名与发布验收未完成；发布保持 `HOLD` |
 | 2026-09-07 | P4 付费提交与统一状态机完成 | [P4 付费媒体提交验证证据](./code-traces/2026-09-07-agent-orchestration-p4-media-submission.md)；Agent/制作入口共用 Worker 编排，R2 一次性确认、冻结快照二次校验、Schema v37 幂等/状态事实、Native 单次请求、`submission_unknown` 和明确取消结果完成；全仓 614 项 JS/TS、72 项 Rust 及质量门禁通过 | P5 项目级后台轮询、P6 全系统工具覆盖、P7 真实 Provider/Windows 长稳与发布验收未完成；发布保持 `HOLD` |
 | 2026-09-04 | P3 媒体准备与用户选择模型适配完成 | [P3 媒体准备验证证据](./code-traces/2026-09-04-agent-orchestration-p3-media-preparation.md)；Worker 341 项、Desktop 179 项、Persistence 26 项测试通过；全仓 typecheck、format:check、`git diff --check` 通过 | P4 付费提交、`submission_unknown`、项目级后台轮询、真实 Provider 和 Windows 长稳/发布验收仍未完成 |

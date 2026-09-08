@@ -28,6 +28,7 @@ import type {
   ProductionContextInfo,
   AgentToolConfirmationRequest,
   AgentTaskPendingConfirmationInfo,
+  AgentProtectedUiHandoff,
   MediaSubmissionConfirmationRequest,
   AdapterDescriptor,
   AdapterParameters,
@@ -81,6 +82,7 @@ interface ChatPanelProps {
   mediaSubmissionConfirmation?: MediaSubmissionConfirmationRequest;
   activeVideoTaskCount?: number;
   onConfirmAgentAction?: (approved: boolean) => void;
+  onOpenProtectedUi?: (handoff: AgentProtectedUiHandoff) => void;
   onConfirmMediaSubmission?: (approved: boolean) => void;
   onOpenTaskLog?: () => void;
   onContinueAgentTask?: () => void;
@@ -162,6 +164,7 @@ export function ChatPanel({
   mediaSubmissionConfirmation,
   activeVideoTaskCount = 0,
   onConfirmAgentAction,
+  onOpenProtectedUi,
   onConfirmMediaSubmission,
   onConfirmSchemaProposal,
   onRejectSchemaProposal,
@@ -210,9 +213,23 @@ export function ChatPanel({
   const displayedConfirmation =
     mediaSubmissionConfirmation ?? confirmation ?? agentTask?.pendingConfirmation;
   const isMediaSubmission = Boolean(displayedConfirmation && 'jobId' in displayedConfirmation);
+  const protectedHandoff =
+    displayedConfirmation && !('jobId' in displayedConfirmation)
+      ? displayedConfirmation.protectedUi
+      : undefined;
+  const confirmationExpired = Boolean(
+    displayedConfirmation &&
+    'status' in displayedConfirmation &&
+    displayedConfirmation.status === 'expired',
+  );
   const confirmationIsActionable = isMediaSubmission
     ? Boolean(mediaSubmissionConfirmation && onConfirmMediaSubmission)
-    : Boolean(confirmation && 'confirmationToken' in confirmation && onConfirmAgentAction);
+    : Boolean(
+        !confirmationExpired &&
+        confirmation &&
+        'confirmationToken' in confirmation &&
+        onConfirmAgentAction,
+      );
   return (
     <section className="chat-panel panel-border" aria-label="项目会话">
       <div className="panel-heading">
@@ -610,7 +627,7 @@ export function ChatPanel({
             需要确认：
             {'jobId' in displayedConfirmation
               ? `提交${displayedConfirmation.kind === 'image' ? '图片' : '视频'}生成任务`
-              : `${displayedConfirmation.action === 'document.archive' ? '归档' : '恢复归档'}文档`}
+              : displayedConfirmation.summary}
           </strong>
           {'jobId' in displayedConfirmation ? (
             <>
@@ -629,7 +646,21 @@ export function ChatPanel({
               <small>{displayedConfirmation.costNotice.summary}</small>
             </>
           ) : (
-            <span>“{displayedConfirmation.documentTitle}”</span>
+            <>
+              <small>风险等级：{displayedConfirmation.riskLevel}</small>
+              {displayedConfirmation.affectedEntities.length > 0 && (
+                <ul className="agent-confirmation-entities" aria-label="受影响对象">
+                  {displayedConfirmation.affectedEntities.map((entity) => (
+                    <li key={`${entity.type}:${entity.id}`}>
+                      {entity.label || entity.id} <small>({entity.type})</small>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {displayedConfirmation.protectedUi && (
+                <small>{displayedConfirmation.protectedUi.reason}</small>
+              )}
+            </>
           )}
           <small>确认有效期至 {new Date(displayedConfirmation.expiresAt).toLocaleString()}</small>
           {confirmationIsActionable ? (
@@ -637,13 +668,18 @@ export function ChatPanel({
               <button
                 type="button"
                 className="button primary"
-                onClick={() =>
-                  isMediaSubmission
-                    ? onConfirmMediaSubmission?.(true)
-                    : onConfirmAgentAction?.(true)
-                }
+                onClick={() => {
+                  if (isMediaSubmission) {
+                    onConfirmMediaSubmission?.(true);
+                    return;
+                  }
+                  if (protectedHandoff) {
+                    onOpenProtectedUi?.(protectedHandoff);
+                  }
+                  onConfirmAgentAction?.(true);
+                }}
               >
-                批准
+                {!isMediaSubmission && protectedHandoff ? '在受保护页面继续' : '批准'}
               </button>
               <button
                 type="button"
@@ -658,7 +694,22 @@ export function ChatPanel({
               </button>
             </div>
           ) : (
-            <small>应用已重新启动，原 Provider 会话不可恢复。请重试任务以重新申请确认。</small>
+            <>
+              {!isMediaSubmission && protectedHandoff && onOpenProtectedUi && (
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => onOpenProtectedUi(protectedHandoff)}
+                >
+                  打开受保护页面
+                </button>
+              )}
+              <small>
+                {confirmationExpired
+                  ? '确认已过期，请重试任务以重新申请。'
+                  : '应用已重新启动，原 Provider 会话不可恢复。请重试任务以重新申请确认。'}
+              </small>
+            </>
           )}
         </div>
       )}

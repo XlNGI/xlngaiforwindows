@@ -21,9 +21,10 @@ import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works
 import { createPiStreamFunction, NativeProviderBridge } from './native-provider-bridge.js';
 import { DomainToolGateway, type PiToolIdentity } from './domain-tool-gateway.js';
 import type { GenerationService } from './generation-service.js';
-import { TaskPlanService } from './task-plan-service.js';
+import { shouldRequireStructuredPlan, TaskPlanService } from './task-plan-service.js';
 import {
   AgentProviderToolGateway,
+  type AgentProviderPlanHooks,
   type AgentProviderToolExecutor,
 } from './agent-provider-tool-gateway.js';
 
@@ -119,14 +120,27 @@ export class PiConversationRuntime implements ConversationRuntime {
       projectSessionId: request.projectSessionId,
       conversationId: request.conversationId,
     };
-    const plannedWorkflow = request.mode === 'short-drama';
+    const shortDramaWorkflow = request.mode === 'short-drama';
+    const genericPlanWorkflow =
+      !shortDramaWorkflow &&
+      shouldRequireStructuredPlan(
+        request.mode,
+        prompt,
+        (runtime.tools ?? []).map((tool) => tool.name),
+      );
+    const plannedWorkflow = shortDramaWorkflow || genericPlanWorkflow;
     const gateway = plannedWorkflow ? this.options.createGateway(gatewayIdentity) : undefined;
     const planning = plannedWorkflow
-      ? this.options.plans.planOnlyRound(request.taskId, prompt)
+      ? this.options.plans.planOnlyRound(request.taskId, prompt, request.mode)
       : undefined;
     const planningGrants = planning?.tools ?? [];
-    const providerGateway = !plannedWorkflow
-      ? this.createProviderGateway(identity, runtime.tools ?? [])
+    const providerGateway = !shortDramaWorkflow
+      ? this.createProviderGateway(
+          identity,
+          runtime.tools ?? [],
+          genericPlanWorkflow,
+          request.taskId,
+        )
       : undefined;
     const initialDefinitions = plannedWorkflow
       ? planningGrants.map((grant) => grant.tool)
@@ -156,7 +170,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         if (planningRound && toolCall.name !== 'task.plan.submit') {
           return { block: true, reason: 'Only task.plan.submit is available during planning.' };
         }
-        if (providerGateway) {
+        if (!planningRound && providerGateway?.hasDefinition(toolCall.name)) {
           providerGateway.captureProviderCall(
             toolCall.id,
             assistantMessage.responseId,
@@ -187,20 +201,52 @@ export class PiConversationRuntime implements ConversationRuntime {
             ? planningGrants
             : this.options.plans.availableToolGrants(request.taskId)
           : [];
-        const definitions = plannedWorkflow
-          ? grants.map((grant) => grant.tool)
-          : providerGateway!.currentDefinitions();
+        const readyOperations =
+          genericPlanWorkflow && !planningRound
+            ? this.options.plans.availableOperations(request.taskId)
+            : undefined;
+        const definitions =
+          plannedWorkflow && planningRound
+            ? planningGrants.map((grant) => grant.tool)
+            : shortDramaWorkflow
+              ? grants.map((grant) => grant.tool)
+              : genericPlanWorkflow
+                ? [
+                    ...providerGateway!.currentDefinitions(readyOperations),
+                    ...grants.map((grant) => grant.tool),
+                  ]
+                : providerGateway!.currentDefinitions();
         const continuation = buildContinuation(
           runtimeProtocol(this.options.generation.runtime(identity)),
           message,
           toolResults,
         );
         this.options.generation.configureAgentTools(identity, definitions, continuation);
-        if (providerGateway && toolResults.length > 0) providerGateway.startProviderStep();
+        if (
+          providerGateway &&
+          toolResults.length > 0 &&
+          plan?.status !== 'succeeded' &&
+          (!genericPlanWorkflow || (readyOperations?.length ?? 0) > 0)
+        ) {
+          providerGateway.startProviderStep();
+        }
         return {
           context: {
             ...context,
-            tools: plannedWorkflow ? gateway!.tools(grants) : providerGateway!.tools(),
+            systemPrompt: planningRound
+              ? context.systemPrompt
+              : withFrozenContext(
+                  unifiedAgentInstruction(runtime.systemInstruction),
+                  runtime.context,
+                ),
+            tools:
+              plannedWorkflow && planningRound
+                ? gateway!.tools(planningGrants)
+                : shortDramaWorkflow
+                  ? gateway!.tools(grants)
+                  : genericPlanWorkflow
+                    ? [...providerGateway!.tools(readyOperations), ...gateway!.tools(grants)]
+                    : providerGateway!.tools(),
           },
         };
       },
@@ -216,7 +262,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       },
     });
 
-    if (providerGateway) providerGateway.startProviderStep();
+    if (providerGateway && !plannedWorkflow) providerGateway.startProviderStep();
 
     const completion = this.run(
       agent,
@@ -328,10 +374,31 @@ export class PiConversationRuntime implements ConversationRuntime {
   private createProviderGateway(
     identity: LlmGenerationIdentity,
     tools: LlmToolDefinition[],
+    planned: boolean,
+    taskId: string,
   ): AgentProviderToolGateway {
     if (!this.options.providerTools) {
       throw new Error('Pi runtime requires the Worker Agent tool executor for this workflow.');
     }
+    const planHooks: AgentProviderPlanHooks | undefined = planned
+      ? {
+          begin: (operation) => this.options.plans.beginStep({ taskId, operation }),
+          succeed: (stepId, operation, resultText) =>
+            this.options.plans.recordStepSuccess({
+              taskId,
+              stepId,
+              operation,
+              resultText,
+            }),
+          fail: (stepId, operation, error) =>
+            this.options.plans.recordStepFailure({
+              taskId,
+              stepId,
+              operation,
+              error,
+            }),
+        }
+      : undefined;
     return new AgentProviderToolGateway(
       this.options.providerTools,
       identity,
@@ -339,6 +406,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       (request) => this.requestConfirmation(identity.generationId, request),
       (request) => this.requestMediaSelection(identity.generationId, request),
       (request) => this.requestMediaSubmission(identity.generationId, request),
+      planHooks,
     );
   }
 

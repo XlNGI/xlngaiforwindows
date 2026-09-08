@@ -7,11 +7,40 @@ import type {
 
 export type SystemAgentToolOperation =
   | 'project.get_context'
+  | 'project.integrity.check'
+  | 'project.backup.prepare'
+  | 'project.export.prepare'
+  | 'project.restore.prepare'
   | 'conversation.search'
+  | 'conversation.create'
   | 'conversation.rename'
+  | 'conversation.archive'
+  | 'conversation.restore'
+  | 'document.publish'
   | 'asset.search'
+  | 'asset.get'
   | 'asset.update_alias'
+  | 'asset.update_tags'
+  | 'asset.move_to_trash'
+  | 'asset.restore'
+  | 'asset.purge'
+  | 'tag.list'
+  | 'tag.create'
+  | 'tag.update'
+  | 'tag.delete'
+  | 'assetGroup.list'
+  | 'assetGroup.create'
+  | 'assetGroup.update'
+  | 'assetGroup.delete'
+  | 'assetGroup.resolve'
   | 'settings.get'
+  | 'settings.propose_update'
+  | 'settings.apply_update'
+  | 'maintenance.status'
+  | 'maintenance.clear_cache'
+  | 'maintenance.cleanup_research_cache'
+  | 'maintenance.cleanup_context_snapshots'
+  | 'maintenance.diagnostics.prepare'
   | 'media.task.get';
 
 export type MediaPrepareToolOperation = 'media.image.prepare' | 'media.video.prepare';
@@ -306,6 +335,29 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
+    name: 'project.integrity.check',
+    description: 'Check the open project database integrity. This is read-only.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'project.backup.prepare',
+    description:
+      'Request a handoff to protected Project Maintenance for backup. The Agent never receives or chooses a local path.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'project.export.prepare',
+    description:
+      'Request a handoff to protected Project Maintenance for export destination selection.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'project.restore.prepare',
+    description:
+      'Request a handoff to protected Project Maintenance for backup restore. Paths and overwrite decisions stay outside the Agent boundary.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
     name: 'conversation.search',
     description: 'Search conversations in the current project. This is read-only.',
     parameters: {
@@ -319,6 +371,15 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
   {
+    name: 'conversation.create',
+    description: 'Create a new project-scoped conversation with a bounded title.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { title: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
     name: 'conversation.rename',
     description:
       'Rename only the current conversation when the user explicitly requested that rename. This is a reversible local change.',
@@ -327,6 +388,37 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       additionalProperties: false,
       required: ['title'],
       properties: { title: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
+    name: 'conversation.archive',
+    description: 'Archive one current-project conversation after explicit confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['conversationId'],
+      properties: { conversationId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
+    name: 'conversation.restore',
+    description: 'Restore one archived current-project conversation after explicit confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['conversationId'],
+      properties: { conversationId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
+    name: 'document.publish',
+    description:
+      'Publish the current reviewable version of a current-project document after explicit confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['documentId'],
+      properties: { documentId: { type: 'string', minLength: 1, maxLength: 200 } },
     },
   },
   {
@@ -344,6 +436,16 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
   {
+    name: 'asset.get',
+    description: 'Get bounded metadata for one current-project asset. This is read-only.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['assetId'],
+      properties: { assetId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
     name: 'asset.update_alias',
     description:
       'Update the alias of one current-project asset when the user explicitly requested it. This is a reversible local change.',
@@ -358,6 +460,35 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
   {
+    name: 'asset.update_tags',
+    description: 'Add or remove project tags on up to 100 active current-project assets.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['assetIds', 'tagIds', 'operation'],
+      properties: {
+        assetIds: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+        },
+        tagIds: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+        },
+        operation: { enum: ['add', 'remove'] },
+      },
+    },
+  },
+  ...assetLifecycleDefinitions(),
+  ...tagDefinitions(),
+  ...assetGroupDefinitions(),
+  {
     name: 'settings.get',
     description:
       'List redacted Provider and model capability status. Credentials, headers, and connection URLs are never returned.',
@@ -367,7 +498,186 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: { capability: { enum: ['text', 'image', 'video'] } },
     },
   },
+  {
+    name: 'settings.propose_update',
+    description:
+      'Propose opening protected Provider Settings for a profile change. Values and credentials are never accepted by this tool.',
+    parameters: providerSettingsHandoffSchema(true),
+  },
+  {
+    name: 'settings.apply_update',
+    description:
+      'Continue a Provider settings change in protected UI. This tool never applies configuration or receives credentials itself.',
+    parameters: providerSettingsHandoffSchema(false),
+  },
+  {
+    name: 'maintenance.status',
+    description: 'Inspect bounded Worker and project-cache health summaries. This is read-only.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'maintenance.clear_cache',
+    description: 'Clear derived project cache after explicit confirmation.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'maintenance.cleanup_research_cache',
+    description: 'Clean the bounded local research cache after explicit confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { maxBytes: { type: 'integer', minimum: 0, maximum: 10_737_418_240 } },
+    },
+  },
+  {
+    name: 'maintenance.cleanup_context_snapshots',
+    description: 'Remove old unreferenced context snapshots after explicit confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { olderThanDays: { type: 'integer', minimum: 1, maximum: 3650 } },
+    },
+  },
+  {
+    name: 'maintenance.diagnostics.prepare',
+    description:
+      'Request a handoff to protected Project Maintenance for redacted diagnostic export and destination selection.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
 ];
+
+function assetLifecycleDefinitions(): LlmToolDefinition[] {
+  return [
+    lifecycleDefinition('asset.move_to_trash', 'Move one asset to the recycle bin', 'assetId'),
+    lifecycleDefinition('asset.restore', 'Restore one asset from the recycle bin', 'assetId'),
+    lifecycleDefinition(
+      'asset.purge',
+      'Open the protected asset-library deletion flow for one trashed asset',
+      'assetId',
+    ),
+  ];
+}
+
+function tagDefinitions(): LlmToolDefinition[] {
+  return [
+    listDefinition('tag.list', 'List bounded project tags and usage counts'),
+    namedDefinition('tag.create', 'Create a project tag'),
+    namedDefinition('tag.update', 'Rename a project tag', 'tagId'),
+    lifecycleDefinition('tag.delete', 'Delete a project tag after explicit confirmation', 'tagId'),
+  ];
+}
+
+function assetGroupDefinitions(): LlmToolDefinition[] {
+  const groupWrite = (
+    name: string,
+    description: string,
+    includeId: boolean,
+  ): LlmToolDefinition => ({
+    name,
+    description,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: includeId ? ['groupId', 'name', 'tagIds'] : ['name', 'tagIds'],
+      properties: {
+        ...(includeId ? { groupId: { type: 'string', minLength: 1, maxLength: 200 } } : {}),
+        name: { type: 'string', minLength: 1, maxLength: 120 },
+        tagIds: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+        },
+      },
+    },
+  });
+  return [
+    listDefinition('assetGroup.list', 'List bounded dynamic asset groups'),
+    groupWrite('assetGroup.create', 'Create a dynamic AND-tag asset group', false),
+    groupWrite('assetGroup.update', 'Update a dynamic AND-tag asset group', true),
+    lifecycleDefinition(
+      'assetGroup.delete',
+      'Delete an asset group after explicit confirmation',
+      'groupId',
+    ),
+    lifecycleDefinition(
+      'assetGroup.resolve',
+      'Resolve the current bounded group membership',
+      'groupId',
+    ),
+  ];
+}
+
+function listDefinition(name: string, description: string): LlmToolDefinition {
+  return {
+    name,
+    description: `${description}. This is read-only.`,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { keyword: { type: 'string', maxLength: 200 } },
+    },
+  };
+}
+
+function namedDefinition(name: string, description: string, idField?: 'tagId'): LlmToolDefinition {
+  return {
+    name,
+    description: `${description}.`,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: idField ? [idField, 'name'] : ['name'],
+      properties: {
+        ...(idField ? { [idField]: { type: 'string', minLength: 1, maxLength: 200 } } : {}),
+        name: { type: 'string', minLength: 1, maxLength: 120 },
+      },
+    },
+  };
+}
+
+function lifecycleDefinition(
+  name: string,
+  description: string,
+  idField: 'assetId' | 'tagId' | 'groupId',
+): LlmToolDefinition {
+  return {
+    name,
+    description: `${description}.`,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: [idField],
+      properties: { [idField]: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  };
+}
+
+function providerSettingsHandoffSchema(includeFields: boolean): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['providerProfileId', ...(includeFields ? ['requestedFields'] : [])],
+    properties: {
+      providerProfileId: { type: 'string', minLength: 1, maxLength: 200 },
+      ...(includeFields
+        ? {
+            requestedFields: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 6,
+              uniqueItems: true,
+              items: {
+                enum: ['name', 'enabled', 'base-url', 'protocol', 'region', 'credentials'],
+              },
+            },
+          }
+        : {}),
+      reason: { type: 'string', minLength: 1, maxLength: 500 },
+    },
+  };
+}
 
 const MEDIA_PARAMETER_VALUE_SCHEMA = {
   oneOf: [
@@ -507,11 +817,40 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'task.plan.submit': writePolicy(),
   'task.package.complete': writePolicy(),
   'project.get_context': readPolicy(),
+  'project.integrity.check': readPolicy(),
+  'project.backup.prepare': protectedPolicy(),
+  'project.export.prepare': protectedPolicy(),
+  'project.restore.prepare': protectedPolicy(),
   'conversation.search': readPolicy(),
+  'conversation.create': writePolicy(),
   'conversation.rename': writePolicy(),
+  'conversation.archive': confirmedPolicy(),
+  'conversation.restore': confirmedPolicy(),
+  'document.publish': confirmedPolicy(),
   'asset.search': readPolicy(),
+  'asset.get': readPolicy(),
   'asset.update_alias': writePolicy(),
+  'asset.update_tags': writePolicy(),
+  'asset.move_to_trash': confirmedPolicy(),
+  'asset.restore': confirmedPolicy(),
+  'asset.purge': protectedPolicy(),
+  'tag.list': readPolicy(),
+  'tag.create': writePolicy(),
+  'tag.update': writePolicy(),
+  'tag.delete': confirmedPolicy(),
+  'assetGroup.list': readPolicy(),
+  'assetGroup.create': writePolicy(),
+  'assetGroup.update': writePolicy(),
+  'assetGroup.delete': confirmedPolicy(),
+  'assetGroup.resolve': readPolicy(),
   'settings.get': readPolicy(),
+  'settings.propose_update': protectedPolicy(),
+  'settings.apply_update': protectedPolicy(),
+  'maintenance.status': readPolicy(),
+  'maintenance.clear_cache': confirmedPolicy(),
+  'maintenance.cleanup_research_cache': confirmedPolicy(),
+  'maintenance.cleanup_context_snapshots': confirmedPolicy(),
+  'maintenance.diagnostics.prepare': protectedPolicy(),
   'media.image.prepare': writePolicy(),
   'media.video.prepare': writePolicy(),
   'media.task.get': readPolicy(),
@@ -529,4 +868,8 @@ function writePolicy(): RegisteredAgentToolPolicy {
 
 function confirmedPolicy(): RegisteredAgentToolPolicy {
   return { riskLevel: 'R2', executionLane: 'serial' };
+}
+
+function protectedPolicy(): RegisteredAgentToolPolicy {
+  return { riskLevel: 'R3', executionLane: 'serial' };
 }

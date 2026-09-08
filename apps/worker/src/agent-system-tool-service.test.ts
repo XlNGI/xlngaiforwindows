@@ -43,10 +43,34 @@ async function setup() {
   };
   const assets: AgentAssetToolService = {
     listAssets: () => [asset],
+    getAssetInfo: (assetId) => {
+      if (assetId !== asset.id) throw new Error('Asset was not found.');
+      return asset;
+    },
     updateAssetAlias: ({ assetId, alias }) => {
       if (assetId !== asset.id) throw new Error('Asset was not found.');
       return { ...asset, alias };
     },
+    listTags: () => [],
+    createTag: () => {
+      throw new Error('Not implemented in this fixture.');
+    },
+    updateTag: () => {
+      throw new Error('Not implemented in this fixture.');
+    },
+    deleteTag: () => ({ deleted: true }),
+    changeAssetTags: () => [asset],
+    listGroups: () => [],
+    createGroup: () => {
+      throw new Error('Not implemented in this fixture.');
+    },
+    updateGroup: () => {
+      throw new Error('Not implemented in this fixture.');
+    },
+    deleteGroup: () => ({ deleted: true }),
+    resolveGroup: () => [asset],
+    deleteAsset: () => ({ deleted: true, referenceCount: 0 }),
+    restoreAsset: () => asset,
   };
   const profile: ProviderProfileInfo = {
     id: 'profile-1',

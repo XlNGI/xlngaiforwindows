@@ -145,6 +145,16 @@ created -> streaming -> complete
 
 ## 6. 本轮复验状态
 
+2026-09-08 全系统 Agent 编排 P6 复验：
+
+- `pnpm.cmd test`：通过；Worker 391 项、Persistence 28 项、Desktop 176 项及其余 workspace 测试通过。
+- `pnpm.cmd typecheck`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`pnpm.cmd build`：通过。
+- `pnpm.cmd worker:sidecar`、`pnpm.cmd audit --prod --audit-level=high`、`pnpm.cmd license:check`、`pnpm.cmd sbom:generate`：通过；无高危生产依赖，SBOM 已重新生成。
+- `cargo fmt --check`、`cargo check`、`cargo test`：通过；Pi runtime、统一工具网关、通用任务计划、Schema v38 迁移和项目隔离回归通过。
+- `git diff --check`：通过。
+- P6 工具覆盖、受保护 UI 交接、任务计划依赖/完整性门禁和模型选择 provenance 证据见 [P6 trace](./code-traces/2026-09-08-agent-orchestration-p6-tool-coverage.md)。
+- 本轮仍未验证真实 Provider 成功请求、正式签名、上一正式版本升级、干净 Windows VM、断网/休眠/长稳和完整人工产品验收；发布状态继续为 `HOLD`。
+
 2026-08-03 历史自动化与外部条件复验：
 
 - `pnpm test`：22 个实际测试文件、146 个测试通过。

@@ -117,6 +117,14 @@ interface GenerationRow {
   conversation_id: string;
   context_snapshot_id: string;
   user_message_id: string;
+  provider_profile_id: string | null;
+  model_id: string | null;
+}
+
+export interface AgentModelSelectionProvenance {
+  source: 'request' | 'conversation-preference';
+  capability: 'text';
+  confirmedAt: string;
 }
 
 interface ConversationRow {
@@ -197,6 +205,26 @@ interface StagedResearchCall {
   budgetFailure?: ResearchExecutionOutcome & { ok: false };
 }
 
+interface LegacyConfirmationContinuationDescriptor {
+  kind?: undefined;
+  providerResponseId: string;
+  callId: string;
+}
+
+interface SystemConfirmationContinuationDescriptor {
+  version: 1;
+  kind: 'system';
+  providerResponseId: string;
+  callId: string;
+  operation: SystemAgentToolOperation;
+  originalArguments: Record<string, unknown>;
+  executionArguments: Record<string, unknown>;
+  executionArgumentsHash: string;
+  summary: string;
+  affectedEntities: Array<{ type: string; id: string; label?: string }>;
+  protectedUi?: import('@ai-video/contracts').AgentProtectedUiHandoff;
+}
+
 type ResearchExecutionOutcome =
   | { ok: true; result: ResearchSearchResult | ResearchFetchResult }
   | {
@@ -239,6 +267,7 @@ export class AgentProviderLoopService {
     existingTaskId?: string,
     selectedChapterIds?: string[],
     targetPlatform?: ConversationTargetPlatform,
+    modelSelectionProvenance?: AgentModelSelectionProvenance,
   ): PreparedAgentLoop {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -257,6 +286,12 @@ export class AgentProviderLoopService {
           .get(identity.generationId) as { task_id: string } | undefined;
         if (existing) {
           const now = new Date().toISOString();
+          freezeAgentModelSelection(
+            database,
+            existing.task_id,
+            generation,
+            modelSelectionProvenance,
+          );
           database
             .prepare(
               `UPDATE agent_tool_authorizations SET status = 'revoked', revoked_at = ?,
@@ -319,6 +354,16 @@ export class AgentProviderLoopService {
             throw new Error('Pre-created novel task is no longer available.');
           }
           const now = new Date().toISOString();
+          freezeAgentModelSelection(
+            database,
+            task.id,
+            generation,
+            modelSelectionProvenance ?? {
+              source: 'request',
+              capability: 'text',
+              confirmedAt: now,
+            },
+          );
           const resolvedAuthorization = this.resolveAuthorization(
             database,
             project.id,
@@ -409,6 +454,14 @@ export class AgentProviderLoopService {
               agentMode: selectedChapterIds ? 'short-drama' : 'document',
               documentOperation: authorization.operation,
               researchMode,
+              modelSelection: agentModelSelectionSnapshot(
+                generation,
+                modelSelectionProvenance ?? {
+                  source: 'request',
+                  capability: 'text',
+                  confirmedAt: now,
+                },
+              ),
               ...(selectedChapterIds ? { selectedChapterIds, targetPlatform } : {}),
             }),
             requestHash,
@@ -1328,9 +1381,144 @@ export class AgentProviderLoopService {
             });
             continue;
           }
+          const registration = unifiedAgentToolRegistry.require(call.name);
+          const awaitsConfirmation =
+            registration.confirmationPolicy === 'always' ||
+            registration.confirmationPolicy === 'protected-ui';
+          const argumentsHash = hashAgentToolArguments(args);
+          const existing = database
+            .prepare(
+              `SELECT result_summary_json FROM agent_tool_calls
+               WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
+            )
+            .get(task.id, params.attemptId, step.id, call.id) as
+            { result_summary_json: string | null } | undefined;
+          if (existing?.result_summary_json) {
+            outputs.push({ callId: call.id, output: existing.result_summary_json });
+            continue;
+          }
+          if (awaitsConfirmation) {
+            if (params.calls.length !== 1) {
+              throw new AgentToolPolicyError(
+                'AGENT_TOOL_UNAUTHORIZED',
+                'A confirmation-required system tool must execute alone.',
+              );
+            }
+            const preview = systemTools.prepareConfirmation(call.name, args, params);
+            const toolCallId = randomUUID();
+            database
+              .prepare(
+                `INSERT INTO agent_tool_calls
+                 (id, project_id, task_id, generation_id, attempt_id, authorization_id,
+                  provider_step_id, provider_call_id, tool_ordinal, tool_name,
+                  normalized_arguments_hash, arguments_summary_json, status, created_at,
+                  started_at, version, redaction_state)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_confirmation', ?, ?, 0, 'native')`,
+              )
+              .run(
+                toolCallId,
+                project.id,
+                task.id,
+                params.generationId,
+                params.attemptId,
+                authorization.id,
+                step.id,
+                call.id,
+                ordinal,
+                call.name,
+                argumentsHash,
+                JSON.stringify({ operation: call.name, keys: Object.keys(args).sort() }),
+                now,
+                now,
+              );
+            const token = randomBytes(32).toString('base64url');
+            const confirmationId = randomUUID();
+            const expiresAt = new Date(Date.now() + AUTHORIZATION_TTL_MS).toISOString();
+            const documentEntity = preview.affectedEntities.find(
+              (entity) => entity.type === 'document',
+            );
+            const expectedDocumentRowVersion =
+              typeof preview.executionArguments.expectedDocumentRowVersion === 'number'
+                ? preview.executionArguments.expectedDocumentRowVersion
+                : undefined;
+            database
+              .prepare(
+                `INSERT INTO agent_task_confirmations
+                 (id, project_id, task_id, generation_id, attempt_id, original_tool_call_id, action,
+                  target_document_id, expected_document_row_version, normalized_arguments_hash,
+                  continuation_descriptor_json, token_hash, status, expires_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+              )
+              .run(
+                confirmationId,
+                project.id,
+                task.id,
+                params.generationId,
+                params.attemptId,
+                toolCallId,
+                call.name,
+                documentEntity?.id ?? null,
+                expectedDocumentRowVersion ?? null,
+                argumentsHash,
+                JSON.stringify({
+                  version: 1,
+                  kind: 'system',
+                  providerResponseId: params.providerResponseId,
+                  callId: call.id,
+                  operation: call.name,
+                  originalArguments: args,
+                  executionArguments: preview.executionArguments,
+                  executionArgumentsHash: hashAgentToolArguments(preview.executionArguments),
+                  summary: preview.summary,
+                  affectedEntities: preview.affectedEntities,
+                  protectedUi: preview.protectedUi,
+                }),
+                hash(token),
+                expiresAt,
+                now,
+              );
+            this.completeStep(
+              database,
+              step,
+              params.providerResponseId,
+              1,
+              params.usage,
+              now,
+              'awaiting_confirmation',
+              JSON.stringify({ version: 1, callIds: [call.id], confirmationPending: true }),
+            );
+            database
+              .prepare(
+                "UPDATE agent_tasks SET phase = 'waiting_confirmation', updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'",
+              )
+              .run(now, task.id);
+            if (registration.riskLevel !== 'R2' && registration.riskLevel !== 'R3') {
+              throw new Error('Confirmation-required tool has an invalid risk level.');
+            }
+            return {
+              confirmation: {
+                version: 1 as const,
+                confirmationId,
+                confirmationToken: token,
+                taskId: task.id,
+                toolCallId,
+                operation: call.name,
+                action: call.name,
+                argumentsHash,
+                projectSessionId: params.projectSessionId,
+                riskLevel: registration.riskLevel,
+                summary: preview.summary,
+                affectedEntities: preview.affectedEntities,
+                ...(preview.protectedUi ? { protectedUi: preview.protectedUi } : {}),
+                ...(documentEntity
+                  ? { documentId: documentEntity.id, documentTitle: documentEntity.label ?? '' }
+                  : {}),
+                expiresAt,
+              },
+            };
+          }
           this.reserveExecution(database, authorization, task.id, now, 'model_running');
           const toolCallId = randomUUID();
-          const argumentsHash = hashAgentToolArguments(args);
           database
             .prepare(
               `INSERT INTO agent_tool_calls
@@ -1678,6 +1866,7 @@ export class AgentProviderLoopService {
           );
         if (lifecycleAction) {
           const token = randomBytes(32).toString('base64url');
+          const confirmationId = randomUUID();
           const expiresAt = new Date(Date.now() + AUTHORIZATION_TTL_MS).toISOString();
           const target = authorization.targetDocumentId;
           if (!target || authorization.expectedDocumentRowVersion === undefined) {
@@ -1695,7 +1884,7 @@ export class AgentProviderLoopService {
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
             )
             .run(
-              randomUUID(),
+              confirmationId,
               project.id,
               task.id,
               params.generationId,
@@ -1727,8 +1916,18 @@ export class AgentProviderLoopService {
             .run(now, task.id);
           return {
             confirmation: {
+              version: 1 as const,
+              confirmationId,
               confirmationToken: token,
+              taskId: task.id,
+              toolCallId,
+              operation: lifecycleAction,
               action: lifecycleAction,
+              argumentsHash,
+              projectSessionId: params.projectSessionId,
+              riskLevel: 'R2' as const,
+              summary: `${lifecycleAction === 'document.archive' ? '归档' : '恢复'}文档“${row.title}”`,
+              affectedEntities: [{ type: 'document', id: target, label: row.title }],
               documentId: target,
               documentTitle: row.title,
               expiresAt,
@@ -2419,15 +2618,15 @@ export class AgentProviderLoopService {
               authorizationMaxCallUses: number;
               authorizationExpiresAt: string;
               original_tool_call_id: string;
-              action: AgentDocumentOperation;
+              action: AgentToolOperation;
               confirmationStatus: string;
               confirmationExpiresAt: string;
               confirmationArgumentsHash: string;
               callArgumentsHash: string;
               provider_call_id: string;
-              tool_name: AgentDocumentOperation;
+              tool_name: AgentToolOperation;
               continuation_descriptor_json: string;
-              expectedDocumentRowVersion: number;
+              expectedDocumentRowVersion?: number;
             })
           | undefined;
         if (!confirmation) {
@@ -2479,14 +2678,34 @@ export class AgentProviderLoopService {
             'Confirmation operation no longer matches its bound authorization.',
           );
         }
+        const descriptor = parseConfirmationContinuationDescriptor(
+          confirmation.continuation_descriptor_json,
+        );
+        const systemDescriptor = descriptor.kind === 'system' ? descriptor : undefined;
+        if (
+          systemDescriptor &&
+          (systemDescriptor.operation !== confirmation.action ||
+            confirmation.tool_name !== confirmation.action)
+        ) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_ARGUMENTS_TAMPERED',
+            'Confirmation continuation no longer matches its bound operation.',
+          );
+        }
+        if (
+          systemDescriptor &&
+          (hashAgentToolArguments(systemDescriptor.originalArguments) !==
+            confirmation.confirmationArgumentsHash ||
+            hashAgentToolArguments(systemDescriptor.executionArguments) !==
+              systemDescriptor.executionArgumentsHash)
+        ) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_ARGUMENTS_TAMPERED',
+            'Confirmation continuation arguments no longer match the original preview.',
+          );
+        }
         let output: string;
         if (params.approved) {
-          if (
-            !confirmation.targetDocumentId ||
-            confirmation.expectedDocumentRowVersion === undefined
-          ) {
-            throw new Error('Confirmation is missing its trusted target.');
-          }
           this.reserveExecution(
             database,
             {
@@ -2496,16 +2715,44 @@ export class AgentProviderLoopService {
             task.id,
             now,
           );
-          this.documents.applyTrustedAgentLifecycleInTransaction(database, project, {
-            taskId: task.id,
-            documentId: confirmation.targetDocumentId,
-            expectedDocumentRowVersion: confirmation.expectedDocumentRowVersion,
-            outcome: confirmation.action === 'document.archive' ? 'archived' : 'restored',
-          });
-          output = unifiedAgentToolRegistry.serializeResult({
-            status: confirmation.action === 'document.archive' ? 'archived' : 'restored',
-            documentId: confirmation.targetDocumentId,
-          });
+          if (systemDescriptor) {
+            if (!this.systemTools) {
+              throw new AgentToolPolicyError(
+                'AGENT_TOOL_UNAUTHORIZED',
+                'System tools are not configured for this runtime.',
+              );
+            }
+            output = unifiedAgentToolRegistry.serializeResult(
+              this.systemTools.executeConfirmed(
+                systemDescriptor.operation,
+                systemDescriptor.executionArguments,
+                {
+                  projectId: project.id,
+                  projectSessionId: params.projectSessionId,
+                  conversationId: params.conversationId,
+                },
+              ),
+            );
+          } else {
+            if (
+              !confirmation.targetDocumentId ||
+              confirmation.expectedDocumentRowVersion === undefined ||
+              (confirmation.action !== 'document.archive' &&
+                confirmation.action !== 'document.restore')
+            ) {
+              throw new Error('Confirmation is missing its trusted document target.');
+            }
+            this.documents.applyTrustedAgentLifecycleInTransaction(database, project, {
+              taskId: task.id,
+              documentId: confirmation.targetDocumentId,
+              expectedDocumentRowVersion: confirmation.expectedDocumentRowVersion,
+              outcome: confirmation.action === 'document.archive' ? 'archived' : 'restored',
+            });
+            output = unifiedAgentToolRegistry.serializeResult({
+              status: confirmation.action === 'document.archive' ? 'archived' : 'restored',
+              documentId: confirmation.targetDocumentId,
+            });
+          }
         } else {
           database
             .prepare(
@@ -2538,10 +2785,6 @@ export class AgentProviderLoopService {
             "UPDATE agent_tool_calls SET status = 'succeeded', result_summary_json = ?, completed_at = ?, version = version + 1 WHERE id = ?",
           )
           .run(output, now, confirmation.original_tool_call_id);
-        const descriptor = JSON.parse(confirmation.continuation_descriptor_json) as {
-          providerResponseId: string;
-          callId: string;
-        };
         this.appendEvent(
           database,
           project.id,
@@ -2561,7 +2804,7 @@ export class AgentProviderLoopService {
                 {
                   id: descriptor.callId,
                   name: confirmation.tool_name,
-                  argumentsJson: '{}',
+                  argumentsJson: JSON.stringify(systemDescriptor?.originalArguments ?? {}),
                 },
               ],
               [{ callId: descriptor.callId, output }],
@@ -2616,7 +2859,7 @@ export class AgentProviderLoopService {
               {
                 id: descriptor.callId,
                 name: confirmation.tool_name,
-                argumentsJson: '{}',
+                argumentsJson: JSON.stringify(systemDescriptor?.originalArguments ?? {}),
               },
             ],
             [{ callId: descriptor.callId, output }],
@@ -3798,24 +4041,19 @@ function systemAuthorizationSpecsForTask(
   const prompt = row?.content?.normalize('NFKC') ?? '';
   const operations: SystemAgentToolOperation[] = [
     'project.get_context',
+    'project.integrity.check',
     'conversation.search',
+    'asset.get',
     'asset.search',
+    'tag.list',
+    'assetGroup.list',
+    'assetGroup.resolve',
     'settings.get',
+    'maintenance.status',
     'media.task.get',
   ];
-  if (
-    /(?:重命名|改名|标题.{0,8}(?:改|设|换)|rename|change\s+(?:the\s+)?(?:conversation|chat)\s+title)/iu.test(
-      prompt,
-    )
-  ) {
-    operations.push('conversation.rename');
-  }
-  if (
-    /(?:(?:素材|资源).{0,64}(?:别名|改名|重命名)|(?:alias|rename).{0,64}(?:asset|media))/iu.test(
-      prompt,
-    )
-  ) {
-    operations.push('asset.update_alias');
+  for (const operation of SYSTEM_MUTATING_OPERATIONS) {
+    if (hasSystemOperationIntent(prompt, operation)) operations.push(operation);
   }
   return operations.map((operation) => ({ operation }));
 }
@@ -3825,6 +4063,70 @@ function researchModeFromTask(database: Database.Database, taskId: string): Agen
     .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
     .get(taskId) as { request_snapshot_json: string } | undefined;
   return researchModeFromSnapshot(row?.request_snapshot_json);
+}
+
+function agentModelSelectionSnapshot(
+  generation: GenerationRow,
+  provenance: AgentModelSelectionProvenance,
+): Record<string, unknown> {
+  if (!generation.provider_profile_id || !generation.model_id) {
+    throw new Error('Agent generation is missing its frozen Provider and model selection.');
+  }
+  return {
+    version: 1,
+    capability: provenance.capability,
+    providerProfileId: generation.provider_profile_id,
+    modelId: generation.model_id,
+    source: provenance.source,
+    confirmedAt: provenance.confirmedAt,
+  };
+}
+
+function freezeAgentModelSelection(
+  database: Database.Database,
+  taskId: string,
+  generation: GenerationRow,
+  provenance?: AgentModelSelectionProvenance,
+): void {
+  const row = database
+    .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
+    .get(taskId) as { request_snapshot_json: string } | undefined;
+  if (!row) throw new Error('Agent task was not found while freezing model selection.');
+  const parsed = JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
+  const existing = parsed.modelSelection;
+  if (existing !== undefined) {
+    if (!provenance) {
+      const frozen = existing as Record<string, unknown>;
+      if (
+        frozen.version !== 1 ||
+        frozen.capability !== 'text' ||
+        frozen.providerProfileId !== generation.provider_profile_id ||
+        frozen.modelId !== generation.model_id
+      ) {
+        throw new Error('Agent task model-selection provenance is already frozen.');
+      }
+      return;
+    }
+    const modelSelection = agentModelSelectionSnapshot(generation, provenance);
+    if (JSON.stringify(existing) !== JSON.stringify(modelSelection)) {
+      throw new Error('Agent task model-selection provenance is already frozen.');
+    }
+    return;
+  }
+  const modelSelection = agentModelSelectionSnapshot(
+    generation,
+    provenance ?? {
+      source: 'request',
+      capability: 'text',
+      confirmedAt: new Date().toISOString(),
+    },
+  );
+  database
+    .prepare(
+      `UPDATE agent_tasks SET request_snapshot_json = ?, row_version = row_version + 1
+       WHERE id = ?`,
+    )
+    .run(JSON.stringify({ ...parsed, modelSelection }), taskId);
 }
 
 function researchModeFromSnapshot(value: string | undefined): AgentResearchMode {
@@ -3929,15 +4231,180 @@ function nextStepOrdinal(database: Database.Database, attemptId: string): number
 }
 
 function isSystemOperation(value: string): value is SystemAgentToolOperation {
-  return (
-    value === 'project.get_context' ||
-    value === 'conversation.search' ||
-    value === 'conversation.rename' ||
-    value === 'asset.search' ||
-    value === 'asset.update_alias' ||
-    value === 'settings.get' ||
-    value === 'media.task.get'
-  );
+  return SYSTEM_AGENT_OPERATIONS.has(value as SystemAgentToolOperation);
+}
+
+const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
+  'project.get_context',
+  'project.integrity.check',
+  'project.backup.prepare',
+  'project.export.prepare',
+  'project.restore.prepare',
+  'conversation.search',
+  'conversation.create',
+  'conversation.rename',
+  'conversation.archive',
+  'conversation.restore',
+  'document.publish',
+  'asset.search',
+  'asset.get',
+  'asset.update_alias',
+  'asset.update_tags',
+  'asset.move_to_trash',
+  'asset.restore',
+  'asset.purge',
+  'tag.list',
+  'tag.create',
+  'tag.update',
+  'tag.delete',
+  'assetGroup.list',
+  'assetGroup.create',
+  'assetGroup.update',
+  'assetGroup.delete',
+  'assetGroup.resolve',
+  'settings.get',
+  'settings.propose_update',
+  'settings.apply_update',
+  'maintenance.status',
+  'maintenance.clear_cache',
+  'maintenance.cleanup_research_cache',
+  'maintenance.cleanup_context_snapshots',
+  'maintenance.diagnostics.prepare',
+  'media.task.get',
+]);
+
+const SYSTEM_MUTATING_OPERATIONS = [
+  'project.backup.prepare',
+  'project.export.prepare',
+  'project.restore.prepare',
+  'conversation.create',
+  'conversation.rename',
+  'conversation.archive',
+  'conversation.restore',
+  'document.publish',
+  'asset.update_alias',
+  'asset.update_tags',
+  'asset.move_to_trash',
+  'asset.restore',
+  'asset.purge',
+  'tag.create',
+  'tag.update',
+  'tag.delete',
+  'assetGroup.create',
+  'assetGroup.update',
+  'assetGroup.delete',
+  'settings.propose_update',
+  'settings.apply_update',
+  'maintenance.clear_cache',
+  'maintenance.cleanup_research_cache',
+  'maintenance.cleanup_context_snapshots',
+  'maintenance.diagnostics.prepare',
+] as const satisfies readonly SystemAgentToolOperation[];
+
+function hasSystemOperationIntent(
+  prompt: string,
+  operation: (typeof SYSTEM_MUTATING_OPERATIONS)[number],
+): boolean {
+  const patterns: Record<(typeof SYSTEM_MUTATING_OPERATIONS)[number], RegExp> = {
+    'project.backup.prepare': /(?:备份项目|项目备份|backup\s+(?:the\s+)?project)/iu,
+    'project.export.prepare': /(?:导出项目|项目导出|export\s+(?:the\s+)?project)/iu,
+    'project.restore.prepare': /(?:恢复项目|还原项目|restore\s+(?:the\s+)?project)/iu,
+    'conversation.create':
+      /(?:新建|创建|新增).{0,12}(?:会话|对话)|create.{0,12}(?:conversation|chat)/iu,
+    'conversation.rename':
+      /(?:会话|对话).{0,12}(?:重命名|改名|修改标题)|rename.{0,12}(?:conversation|chat)/iu,
+    'conversation.archive': /(?:归档).{0,12}(?:会话|对话)|archive.{0,12}(?:conversation|chat)/iu,
+    'conversation.restore':
+      /(?:恢复|取消归档).{0,12}(?:会话|对话)|(?:restore|unarchive).{0,12}(?:conversation|chat)/iu,
+    'document.publish': /(?:发布).{0,12}(?:文档|草稿)|publish.{0,12}(?:document|draft)/iu,
+    'asset.update_alias':
+      /(?:素材|资源).{0,32}(?:别名|改名|重命名)|(?:alias|rename).{0,32}(?:asset|media)/iu,
+    'asset.update_tags':
+      /(?:素材|资源).{0,32}(?:添加|移除|更新|修改).{0,12}标签|(?:add|remove|update).{0,32}(?:asset|media).{0,12}tag/iu,
+    'asset.move_to_trash':
+      /(?:删除|移入回收站).{0,20}(?:素材|资源)|(?:trash|delete).{0,20}(?:asset|media)/iu,
+    'asset.restore': /(?:恢复|还原).{0,20}(?:素材|资源)|restore.{0,20}(?:asset|media)/iu,
+    'asset.purge':
+      /(?:彻底|永久).{0,12}删除.{0,20}(?:素材|资源)|permanent(?:ly)?.{0,20}delete.{0,20}(?:asset|media)/iu,
+    'tag.create': /(?:新建|创建|新增).{0,12}标签|create.{0,12}tag/iu,
+    'tag.update': /(?:修改|更新|重命名).{0,12}标签|(?:update|rename).{0,12}tag/iu,
+    'tag.delete': /删除.{0,12}标签|delete.{0,12}tag/iu,
+    'assetGroup.create':
+      /(?:新建|创建|新增).{0,12}(?:素材组|资源组)|create.{0,12}(?:asset|media).{0,8}group/iu,
+    'assetGroup.update':
+      /(?:修改|更新|重命名).{0,12}(?:素材组|资源组)|(?:update|rename).{0,12}(?:asset|media).{0,8}group/iu,
+    'assetGroup.delete': /删除.{0,12}(?:素材组|资源组)|delete.{0,12}(?:asset|media).{0,8}group/iu,
+    'settings.propose_update':
+      /(?:修改|更新|配置).{0,24}(?:Provider|提供商|模型服务|连接|凭据|设置)|(?:update|configure).{0,24}(?:provider|connection|credential|setting)/iu,
+    'settings.apply_update':
+      /(?:继续|应用|确认).{0,16}(?:Provider|提供商|模型服务|连接|凭据|设置).{0,12}(?:修改|更新|配置)?|apply.{0,16}(?:provider|setting).{0,12}(?:change|update)/iu,
+    'maintenance.clear_cache': /(?:清理|清空).{0,12}缓存|clear.{0,12}cache/iu,
+    'maintenance.cleanup_research_cache':
+      /(?:清理|清空).{0,12}(?:研究|检索).{0,8}缓存|clear.{0,12}research.{0,8}cache/iu,
+    'maintenance.cleanup_context_snapshots':
+      /(?:清理|删除).{0,12}上下文快照|clean.{0,12}context.{0,8}snapshot/iu,
+    'maintenance.diagnostics.prepare':
+      /(?:导出|生成).{0,12}(?:诊断包|诊断信息)|(?:export|create).{0,12}diagnostic/iu,
+  };
+  return patterns[operation].test(prompt);
+}
+
+function parseConfirmationContinuationDescriptor(
+  value: string,
+): LegacyConfirmationContinuationDescriptor | SystemConfirmationContinuationDescriptor {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new AgentToolPolicyError(
+      'AGENT_TOOL_ARGUMENTS_TAMPERED',
+      'Confirmation continuation is not valid JSON.',
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new AgentToolPolicyError(
+      'AGENT_TOOL_ARGUMENTS_TAMPERED',
+      'Confirmation continuation is invalid.',
+    );
+  }
+  const descriptor = parsed as Record<string, unknown>;
+  if (
+    typeof descriptor.providerResponseId !== 'string' ||
+    !descriptor.providerResponseId.trim() ||
+    typeof descriptor.callId !== 'string' ||
+    !descriptor.callId.trim()
+  ) {
+    throw new AgentToolPolicyError(
+      'AGENT_TOOL_ARGUMENTS_TAMPERED',
+      'Confirmation continuation is missing its Provider identity.',
+    );
+  }
+  if (descriptor.kind !== 'system') {
+    return {
+      providerResponseId: descriptor.providerResponseId,
+      callId: descriptor.callId,
+    };
+  }
+  if (
+    descriptor.version !== 1 ||
+    typeof descriptor.operation !== 'string' ||
+    !isSystemOperation(descriptor.operation) ||
+    !descriptor.originalArguments ||
+    typeof descriptor.originalArguments !== 'object' ||
+    Array.isArray(descriptor.originalArguments) ||
+    !descriptor.executionArguments ||
+    typeof descriptor.executionArguments !== 'object' ||
+    Array.isArray(descriptor.executionArguments) ||
+    typeof descriptor.executionArgumentsHash !== 'string' ||
+    typeof descriptor.summary !== 'string' ||
+    !Array.isArray(descriptor.affectedEntities)
+  ) {
+    throw new AgentToolPolicyError(
+      'AGENT_TOOL_ARGUMENTS_TAMPERED',
+      'System confirmation continuation is invalid.',
+    );
+  }
+  return descriptor as unknown as SystemConfirmationContinuationDescriptor;
 }
 
 function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {

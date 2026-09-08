@@ -19,6 +19,7 @@ import {
   MIGRATION_V11,
   MIGRATION_V12,
   MIGRATION_V13,
+  MIGRATION_V31,
   migrateDatabase,
   openProjectDatabase,
   rewriteLegacyContextSnapshots,
@@ -39,8 +40,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(37);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 37 });
+    expect(migrateDatabase(database)).toBe(38);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -177,7 +178,7 @@ describe('project database', () => {
       ALTER TABLE generation_jobs DROP COLUMN submission_confirmation_token_hash;
       ALTER TABLE generation_jobs DROP COLUMN submission_idempotency_key;
       ALTER TABLE generation_jobs DROP COLUMN media_state;
-      DELETE FROM schema_migrations WHERE version = 37;
+      DELETE FROM schema_migrations WHERE version >= 37;
     `);
     database
       .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
@@ -207,7 +208,7 @@ describe('project database', () => {
       insertJob.run(`job-${status}`, status, legacySnapshot);
     }
 
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     const states = database
       .prepare('SELECT id, media_state AS mediaState FROM generation_jobs ORDER BY id')
       .all();
@@ -244,7 +245,156 @@ describe('project database', () => {
         .prepare('UPDATE generation_jobs SET submission_idempotency_key = ? WHERE id = ?')
         .run('same-attempt', 'job-pending'),
     ).toThrow();
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 37 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
+    database.close();
+  });
+
+  it('preserves frozen v1 task plans and deliverables when upgrading from v37', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database.exec(`
+      DROP TRIGGER IF EXISTS agent_task_plan_project_match;
+      DROP TRIGGER IF EXISTS agent_task_deliverable_scope_match;
+      DROP TRIGGER IF EXISTS agent_task_plan_status_transition;
+      DROP TRIGGER IF EXISTS agent_task_deliverable_status_transition;
+      DROP TABLE agent_task_deliverables;
+      DROP TABLE agent_task_plans;
+      DELETE FROM schema_migrations WHERE version = 38;
+    `);
+    database.exec(MIGRATION_V31);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('project', 'Legacy Plan', 'created', 'updated');
+    database
+      .prepare(
+        `INSERT INTO agent_tasks
+         (id, project_id, project_session_id, task_type, scope_type, title,
+          request_snapshot_json, request_hash, status, created_at, updated_at, phase,
+          row_version, tool_call_limit)
+         VALUES ('task', 'project', 'session', 'document-update', 'project', 'Legacy plan',
+                 '{}', 'request-hash', 'running', 'created', 'updated', 'model_running', 0, 16)`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO agent_task_plans
+         (id, task_id, project_id, version, mode, action, target_platform, plan_json,
+          trusted_scope_json, plan_hash, status, idempotency_key, row_version, created_at, updated_at)
+         VALUES ('plan', 'task', 'project', 1, 'short-drama', 'generate', 'seedance', ?, ?, ?,
+                 'active', 'legacy-plan-key', 3, 'plan-created', 'plan-updated')`,
+      )
+      .run(
+        JSON.stringify({ version: 1, deliverables: [], constraints: ['keep'] }),
+        JSON.stringify({ selectedChapterIds: ['chapter-1'] }),
+        'a'.repeat(64),
+      );
+    const insertDeliverable = database.prepare(
+      `INSERT INTO agent_task_deliverables
+       (id, plan_id, task_id, project_id, ordinal, kind, required, depends_on_json,
+        status, entity_type, entity_id, error_code, error_message, row_version, created_at, updated_at)
+       VALUES (?, 'plan', 'task', 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertDeliverable.run(
+      'outline',
+      0,
+      'episode-outline',
+      1,
+      '[]',
+      'succeeded',
+      'document',
+      'document-1',
+      null,
+      null,
+      2,
+      'outline-created',
+      'outline-updated',
+    );
+    insertDeliverable.run(
+      'characters',
+      1,
+      'character-prompts',
+      1,
+      '["episode-outline"]',
+      'failed',
+      null,
+      null,
+      'LEGACY_FAILURE',
+      'Retry this deliverable.',
+      4,
+      'characters-created',
+      'characters-updated',
+    );
+
+    expect(getSchemaVersion(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
+    expect(
+      database
+        .prepare(
+          `SELECT version, mode, action, target_platform, plan_json, trusted_scope_json,
+                  plan_hash, status, idempotency_key, row_version, created_at, updated_at
+           FROM agent_task_plans WHERE id = 'plan'`,
+        )
+        .get(),
+    ).toEqual({
+      version: 1,
+      mode: 'short-drama',
+      action: 'generate',
+      target_platform: 'seedance',
+      plan_json: JSON.stringify({ version: 1, deliverables: [], constraints: ['keep'] }),
+      trusted_scope_json: JSON.stringify({ selectedChapterIds: ['chapter-1'] }),
+      plan_hash: 'a'.repeat(64),
+      status: 'active',
+      idempotency_key: 'legacy-plan-key',
+      row_version: 3,
+      created_at: 'plan-created',
+      updated_at: 'plan-updated',
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT id, ordinal, kind, operation, required, depends_on_json, status,
+                  entity_type, entity_id, error_code, error_message, result_summary_json,
+                  row_version, created_at, updated_at
+           FROM agent_task_deliverables WHERE plan_id = 'plan' ORDER BY ordinal`,
+        )
+        .all(),
+    ).toEqual([
+      {
+        id: 'outline',
+        ordinal: 0,
+        kind: 'episode-outline',
+        operation: 'novel.episode.submit_draft',
+        required: 1,
+        depends_on_json: '[]',
+        status: 'succeeded',
+        entity_type: 'document',
+        entity_id: 'document-1',
+        error_code: null,
+        error_message: null,
+        result_summary_json: null,
+        row_version: 2,
+        created_at: 'outline-created',
+        updated_at: 'outline-updated',
+      },
+      {
+        id: 'characters',
+        ordinal: 1,
+        kind: 'character-prompts',
+        operation: 'document.create_draft',
+        required: 1,
+        depends_on_json: '["episode-outline"]',
+        status: 'failed',
+        entity_type: null,
+        entity_id: null,
+        error_code: 'LEGACY_FAILURE',
+        error_message: 'Retry this deliverable.',
+        result_summary_json: null,
+        row_version: 4,
+        created_at: 'characters-created',
+        updated_at: 'characters-updated',
+      },
+    ]);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
     database.close();
   });
 
@@ -420,7 +570,7 @@ describe('project database', () => {
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     const chunks = database
       .prepare(
         `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
@@ -660,7 +810,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -687,7 +837,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -749,7 +899,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -797,7 +947,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     expect(
       database
         .prepare(
@@ -870,8 +1020,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(37);
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(38);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -1026,7 +1176,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(37);
+    expect(migrateDatabase(database)).toBe(38);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -1064,7 +1214,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 37 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
     database.close();
   });
 

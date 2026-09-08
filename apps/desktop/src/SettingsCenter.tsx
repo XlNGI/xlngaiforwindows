@@ -9,6 +9,7 @@ type SettingsPage = 'providers' | 'usage' | 'maintenance';
 interface SettingsCenterProps {
   maintenance: ReactNode;
   initialPage?: SettingsPage;
+  providerFocusId?: string;
   onClose: () => void;
 }
 
@@ -21,6 +22,7 @@ const pages: Array<{ id: SettingsPage; label: string; icon: typeof Server }> = [
 export function SettingsCenter({
   maintenance,
   initialPage = 'providers',
+  providerFocusId,
   onClose,
 }: SettingsCenterProps) {
   const [page, setPage] = useState<SettingsPage>(initialPage);
@@ -100,7 +102,9 @@ export function SettingsCenter({
         </aside>
 
         <div className="settings-content">
-          {page === 'providers' && <ProviderConnectionsView />}
+          {page === 'providers' && (
+            <ProviderConnectionsView initialSelectedProfileId={providerFocusId} />
+          )}
           {page === 'usage' && <UsageDashboard />}
           {page === 'maintenance' && maintenance}
         </div>

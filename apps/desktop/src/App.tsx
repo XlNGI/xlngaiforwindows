@@ -56,6 +56,7 @@ import type {
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
+  AgentProtectedUiHandoff,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
@@ -575,6 +576,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [providerSettingsRevision, setProviderSettingsRevision] = useState(0);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
+  const [providerSettingsFocusId, setProviderSettingsFocusId] = useState<string>();
+  const [assetTrashRequest, setAssetTrashRequest] = useState(0);
   const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
 
   const [view, setView] = useState<WorkspaceView>('documents');
@@ -813,6 +816,7 @@ export function App() {
 
   const closeSettings = () => {
     setSettingsOpen(false);
+    setProviderSettingsFocusId(undefined);
     setProviderSettingsRevision((revision) => revision + 1);
   };
   const scopeId = scopeType === 'scene' ? scene?.id : scopeType === 'shot' ? shot?.id : undefined;
@@ -1476,11 +1480,30 @@ export function App() {
       return '项目已安全关闭';
     });
 
-  const openSettings = (page: SettingsPage = project ? 'providers' : 'maintenance') => {
+  const openSettings = (
+    page: SettingsPage = project ? 'providers' : 'maintenance',
+    providerFocusId?: string,
+  ) => {
     setSettingsInitialPage(page);
+    setProviderSettingsFocusId(page === 'providers' ? providerFocusId : undefined);
     setSettingsOpen(true);
     maintenance.clearMaintenanceMessage();
     if (project) void maintenance.inspectCache();
+  };
+
+  const openAgentProtectedUi = (handoff: AgentProtectedUiHandoff) => {
+    if (handoff.page === 'providers') {
+      openSettings('providers', handoff.focusId);
+      return;
+    }
+    if (handoff.page === 'maintenance') {
+      openSettings('maintenance');
+      return;
+    }
+    setNavigationMode('project');
+    setView('assets');
+    if (handoff.focusId) setAssetLibrarySelectedId(handoff.focusId);
+    setAssetTrashRequest((revision) => revision + 1);
   };
 
   const openConversationById = async (conversationId: string) => {
@@ -2694,6 +2717,7 @@ export function App() {
         }
       }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
+      onOpenProtectedUi={openAgentProtectedUi}
       onConfirmMediaSubmission={(approved) => mediaSubmissionResolverRef.current?.(approved)}
       onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
       onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
@@ -3109,6 +3133,7 @@ export function App() {
       {settingsOpen && (
         <SettingsCenter
           initialPage={settingsInitialPage}
+          providerFocusId={providerSettingsFocusId}
           onClose={closeSettings}
           maintenance={
             <MaintenanceDialog
@@ -3748,6 +3773,7 @@ export function App() {
               <AssetLibraryView
                 writable={writable}
                 selectedAssetId={assetLibrarySelectedId}
+                openTrashRequest={assetTrashRequest}
                 taskCompletionRevision={taskCompletionRevision}
                 onOpenSource={(source) => void openAssetSource(source)}
               />

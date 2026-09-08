@@ -40,7 +40,11 @@ function grant(name: string, deliverableKind?: string): ConversationTaskToolGran
     tool: {
       name: name as any,
       description: name,
-      parameters: { type: 'object', additionalProperties: false, properties: {} },
+      parameters: {
+        type: 'object',
+        additionalProperties: name === 'task.plan.submit',
+        properties: {},
+      },
     },
   } as ConversationTaskToolGrant;
 }
@@ -68,7 +72,10 @@ function fakeProviderExecutor() {
 class FakePlanService {
   phase = 0;
   completed = false;
-  planOnlyRound() {
+  generic = false;
+  failures: string[] = [];
+  planOnlyRound(_taskId?: string, _prompt?: string, mode?: string) {
+    this.generic = mode !== undefined && mode !== 'short-drama';
     return { systemInstruction: 'plan only', tools: [grant('task.plan.submit')] };
   }
   submitPlanOnly() {
@@ -76,9 +83,12 @@ class FakePlanService {
     return {};
   }
   getByTask(): ConversationTaskPlanInfo | undefined {
+    if (this.phase === 0) return undefined;
     return { status: this.completed ? 'succeeded' : 'active' } as ConversationTaskPlanInfo;
   }
   availableToolGrants(): ConversationTaskToolGrant[] {
+    if (this.completed) return [];
+    if (this.generic) return [grant('task.package.complete')];
     if (this.phase === 1) return [grant('novel.episode.submit_draft', 'episode-outline')];
     if (this.phase === 2) return [grant('document.create_draft', 'character-prompts')];
     if (this.phase === 3) return [grant('document.create_draft', 'scene-prompts')];
@@ -98,6 +108,22 @@ class FakePlanService {
       retryable: false,
       summary: 'done',
     } as any;
+  }
+  availableOperations(): string[] {
+    if (!this.generic) return [];
+    if (this.phase === 1) return ['media.image.prepare'];
+    if (this.phase === 2) return ['media.video.prepare'];
+    return [];
+  }
+  beginStep(_input: { taskId: string; operation: string }) {
+    return `step-${this.phase}`;
+  }
+  recordStepSuccess() {
+    this.phase += 1;
+    return true;
+  }
+  recordStepFailure(input: { operation: string }) {
+    this.failures.push(input.operation);
   }
   completePackage() {
     this.completed = true;
@@ -247,6 +273,112 @@ describe('PiConversationRuntime', () => {
       expect.objectContaining({ content: 'The project currently has one active draft.' }),
     );
     expect(systemPrompt).toContain('unified project Agent');
+  });
+
+  it('enforces an image-to-video generic dependency plan before Worker tool execution', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall(
+            'task.plan.submit',
+            { version: 2, steps: [], constraints: [] },
+            { id: 'plan' },
+          ),
+        ],
+        { stopReason: 'toolUse' },
+      ),
+      fauxAssistantMessage(
+        [fauxToolCall('media.image.prepare', { prompt: 'Dragon' }, { id: 'image-call' })],
+        { stopReason: 'toolUse', responseId: 'response-image' },
+      ),
+      fauxAssistantMessage(
+        [
+          fauxToolCall(
+            'media.video.prepare',
+            { prompt: 'Animate the dragon' },
+            { id: 'video-call' },
+          ),
+        ],
+        { stopReason: 'toolUse', responseId: 'response-video' },
+      ),
+      fauxAssistantMessage([fauxToolCall('task.package.complete', {}, { id: 'complete' })], {
+        stopReason: 'toolUse',
+      }),
+    ]);
+    const plans = new FakePlanService();
+    const providerTools = fakeProviderExecutor();
+    vi.mocked(providerTools.executeTools).mockImplementation((params) =>
+      Promise.resolve({
+        continuation: {
+          protocol: 'openai-responses',
+          previousResponseId: params.providerResponseId,
+          outputs: params.calls.map((call) => ({
+            callId: call.id,
+            output: JSON.stringify({ status: 'prepared', operation: call.name }),
+          })),
+        },
+        tools: [
+          providerDefinition('media.image.prepare', 'image-next'),
+          providerDefinition('media.video.prepare', 'video-next'),
+        ],
+      }),
+    );
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [
+          providerDefinition('media.image.prepare', 'image-initial'),
+          providerDefinition('media.video.prepare', 'video-initial'),
+        ],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: '生成一张龙的图片，再把它生成视频',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(plans.generic).toBe(true);
+    expect(generation.failNative.mock.calls).toEqual([]);
+    expect(plans.completed).toBe(true);
+    const configuredCalls = generation.configureAgentTools.mock.calls as unknown as Array<
+      [unknown, LlmToolDefinition[]]
+    >;
+    expect(configuredCalls.map((call) => call[1].map((tool) => tool.name))).toEqual([
+      ['task.plan.submit'],
+      ['media.image.prepare', 'task.package.complete'],
+      ['media.video.prepare', 'task.package.complete'],
+      ['task.package.complete'],
+      [],
+    ]);
+    expect(
+      vi.mocked(providerTools.executeTools).mock.calls.map(([params]) => params.calls[0]?.name),
+    ).toEqual(['media.image.prepare', 'media.video.prepare']);
+    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(2);
+    expect(configuredCalls[0]?.[1].map((tool) => tool.name)).toEqual(['task.plan.submit']);
+    expect(generation.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ finishReason: 'task_package_complete' }),
+    );
   });
 
   it('executes a document tool and refreshes Worker authorizations for the next Pi turn', async () => {
@@ -401,8 +533,18 @@ describe('PiConversationRuntime', () => {
     const plans = new FakePlanService();
     const providerTools = fakeProviderExecutor();
     const confirmation = {
+      version: 1 as const,
+      confirmationId: 'confirmation',
       confirmationToken: 'confirmation-token',
+      taskId: 'task',
+      toolCallId: 'tool-call',
+      operation: 'document.archive',
       action: 'document.archive' as const,
+      argumentsHash: 'arguments-hash',
+      projectSessionId: identity.projectSessionId,
+      riskLevel: 'R2' as const,
+      summary: '归档文档“Draft”',
+      affectedEntities: [{ type: 'document', id: 'document', label: 'Draft' }],
       documentId: 'document',
       documentTitle: 'Draft',
       expiresAt: '2099-01-01T00:00:00.000Z',

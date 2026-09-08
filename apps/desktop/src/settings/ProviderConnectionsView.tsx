@@ -37,10 +37,16 @@ const statusLabels: Record<ProviderProfileInfo['connectionStatus'], string> = {
   disabled: '已停用',
 };
 
-export function ProviderConnectionsView() {
+export function ProviderConnectionsView({
+  initialSelectedProfileId,
+}: {
+  initialSelectedProfileId?: string;
+}) {
   const [definitions, setDefinitions] = useState<ProviderDefinitionInfo[]>([]);
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
-  const [selectedProfileId, setSelectedProfileId] = useState<string>();
+  const [selectedProfileId, setSelectedProfileId] = useState<string | undefined>(
+    initialSelectedProfileId,
+  );
   const [models, setModels] = useState<ProviderModelInfo[]>([]);
   const [pricing, setPricing] = useState<ModelPricingInfo[]>([]);
   const [defaults, setDefaults] = useState<ProviderDefaultInfo[]>([]);
@@ -95,13 +101,13 @@ export function ProviderConnectionsView() {
 
   useEffect(() => {
     let active = true;
-    void loadProfiles().catch((reason) => {
+    void loadProfiles(initialSelectedProfileId).catch((reason) => {
       if (active) setMessage(reason instanceof Error ? reason.message : '供应商列表加载失败。');
     });
     return () => {
       active = false;
     };
-  }, []);
+  }, [initialSelectedProfileId]);
 
   useEffect(() => {
     let active = true;

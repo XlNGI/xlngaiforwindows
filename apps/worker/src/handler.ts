@@ -725,6 +725,8 @@ const agentSystemToolService = new AgentSystemToolService(
   imageGenerationService,
   appSettingsService,
   mediaPreparationService,
+  documentWorkflowService,
+  maintenanceService,
 );
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
@@ -1413,6 +1415,14 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             undefined,
             inferAgentDocumentIntent(agentParams.prompt),
             'auto',
+            undefined,
+            undefined,
+            undefined,
+            {
+              source: storedPreference ? 'conversation-preference' : 'request',
+              capability: 'text',
+              confirmedAt: storedPreference?.confirmedAt ?? new Date().toISOString(),
+            },
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
           result = {
@@ -1475,6 +1485,13 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                 orchestration.documentIntent,
                 agentParams.researchMode,
                 orchestration.taskId,
+                undefined,
+                undefined,
+                {
+                  source: 'request',
+                  capability: 'text',
+                  confirmedAt: new Date().toISOString(),
+                },
               );
               generationService.configureAgentTools(prepared.stream, agent.tools);
               result = {
@@ -1510,6 +1527,11 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             undefined,
             agentParams.agentMode === 'short-drama' ? agentParams.selectedChapterIds : undefined,
             agentParams.agentMode === 'short-drama' ? agentParams.targetPlatform : undefined,
+            {
+              source: 'request',
+              capability: 'text',
+              confirmedAt: new Date().toISOString(),
+            },
           );
           generationService.configureAgentTools(prepared.stream, agent.tools);
           result = {

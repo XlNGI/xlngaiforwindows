@@ -418,6 +418,22 @@ export class ImageGenerationService {
     });
   }
 
+  getAssetInfo(assetId: string): AssetInfo {
+    return this.projects.access(false, (database, project) => {
+      const repo = createRepositories(database).assets;
+      const asset = repo.get(assetId);
+      if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
+      const tagsById = new Map(repo.listTags(project.id).map((tag) => [tag.id, tag]));
+      return {
+        ...toAssetInfo(asset),
+        tags: repo
+          .listTagIds(asset.id)
+          .map((id) => tagsById.get(id))
+          .filter((tag): tag is NonNullable<typeof tag> => Boolean(tag)),
+      };
+    });
+  }
+
   updateAssetAlias(params: { assetId: string; alias: string }): AssetInfo {
     const alias = params.alias.normalize('NFKC').trim();
     if ([...alias].length > 120) throw new Error('Asset alias is too long.');

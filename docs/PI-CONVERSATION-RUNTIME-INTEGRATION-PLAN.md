@@ -2,8 +2,8 @@
 
 版本：0.6  
 日期：2026-08-28  
-最近同步：2026-09-07  
-状态：本文 P0-P4 完成、P5/P6 核心已接线；全系统 Agent 编排 P0-P5 已完成；剩余工具覆盖与发布边界未完成，发布 `HOLD`  
+最近同步：2026-09-08  
+状态：本文 P0-P6 核心实现已接线；全系统 Agent 编排 P0-P6 已完成；真实 Windows/Provider 与发布边界未完成，发布 `HOLD`  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档规划如何选择性引入 `@earendil-works/pi-agent-core` 的低层 Agent 循环，改造当前会话中的模型工具选择、多工具连续执行和多交付物完整性治理。本文档本身不授权直接修改代码；用户已于 2026-08-28 分别授权执行 P1、P2、P3、P4，各阶段仍必须按顺序实施并在完成后记录验证证据。
@@ -972,7 +972,7 @@ apps/worker/src/change-set-service.ts
 - 新增 fake-provider 端到端测试与真实 SQLite `DomainToolGateway` 测试，覆盖四类交付物、多文档归属、change set、非法参数和重复写入保护；Pi/网关测试及 Worker typecheck 已通过；
 - 当时尚未完成：独立 `conversation.runtime.start/subscribe` IPC 合同、Desktop/P6 owner/订阅 UI、Pi provider-step/authorization 的完整正式映射、RAG 只读工具和真实 Worker↔Rust 端到端运行；当时 Pi feature flag 仍默认关闭。该历史状态已由下方 2026-09-07 同步部分更新。
 
-后续状态同步（2026-09-07）：`conversation.runtime.start`、Desktop owner/有界观察、所有项目会话默认 Pi、统一 Registry/Policy，以及媒体准备/提交/取消工具均已完成；全系统编排 P5 又完成了 revisioned `project.task.subscribe` 和项目级视频后台运行时。独立的 conversation runtime 推送订阅、完整事件映射、RAG 只读工具、真实 Provider 与 Windows 长稳/性能验收仍未完成。上段“默认关闭”只描述 2026-08-29 的历史增量状态。
+后续状态同步（2026-09-08）：`conversation.runtime.start`、Desktop owner/有界观察、所有项目会话默认 Pi、统一 Registry/Policy、全系统业务工具覆盖、受保护 UI 交接、媒体准备/提交/取消工具、通用任务计划和模型选择 provenance 均已完成；全系统编排 P5 又完成了 revisioned `project.task.subscribe` 和项目级视频后台运行时，P6 完成了 Schema v38 与 Desktop/Worker/Provider/Pi 接线。独立的 conversation runtime 推送订阅、完整事件映射、RAG 只读工具和真实 Provider/Windows 长稳/性能验收仍未完成。上段“默认关闭”只描述 2026-08-29 的历史增量状态。
 
 退出门禁：fake provider 端到端“选择章节 → 多交付物 → 草稿/change set → 审核”通过；无重复业务写入和双重消息持久化。
 
@@ -1020,7 +1020,7 @@ apps/worker/src/partial-artifact-service.ts
 - 本地代码侧已完成：计划/交付物进度、缺失项继续入口、confirmation 安全恢复、partial 恢复/丢弃、重试幂等、重启恢复向导、冻结长上下文注入、Pi 断线超时和 16 次 Tool Call storm 保护；仅剩真实 Windows Tauri 多窗口/退出/断网/慢首 Token 和性能预算实测。
 - Windows 构建证据（2026-08-30）：`pnpm tauri:build` 成功构建 Worker sidecar、Release Tauri EXE 与 NSIS `unicomp_0.1.0_x64-setup.exe`；Release EXE 隐藏启动 5 秒进程级 smoke test 通过。尚未宣称通过的仅是需要人工/真实 Provider 操作的多窗口、断网、慢首 Token 与完整退出重开业务流程。
 
-后续状态同步（2026-09-07）：全系统编排 P1 已让普通问答、文档、研究、小说、短剧和媒体意图统一进入 Pi；P3/P4 已补齐媒体确认卡、准备、提交、查询和取消链；P5 已补齐项目级视频后台 Runtime 和任务状态订阅。本文 P6 仍因独立的 conversation runtime 推送订阅、真实 Windows 多窗口/断网/退出重开、慢首 Token 和性能预算未通过而保持未完成。
+后续状态同步（2026-09-08）：全系统编排 P1 已让普通问答、文档、研究、小说、短剧和媒体意图统一进入 Pi；P3/P4 已补齐媒体确认卡、准备、提交、查询和取消链；P5 已补齐项目级视频后台 Runtime 和任务状态订阅；P6 已补齐全系统工具覆盖、通用任务计划、受保护 UI 交接和 provenance。本文 P6 清单中的真实 Windows 多窗口/断网/退出重开、慢首 Token 和性能预算属于 P7 真实环境发布验收边界，尚未通过。
 
 退出门禁：Windows Tauri 实机、多窗口、断网、退出、重开、取消、重试和真实长篇 RAG 测试通过。
 
@@ -1161,7 +1161,7 @@ git diff --check
 - [ ] P6 Desktop、恢复与可靠性
 - [ ] P7 灰度、文档与生产门禁
 
-P5/P6 的核心代码已经接入并有自动化验证；所有项目会话统一接入已由全系统编排 P1 完成，项目级视频后台 Runtime 与 revisioned 任务订阅已由全系统编排 P5 完成。本文阶段清单继续保持未完成，原因是 RAG 只读工具、完整事件映射、独立的 conversation runtime 推送订阅、真实 Windows 多窗口/断网/慢首 Token 和性能预算等退出门禁尚未全部通过。
+P5/P6 的核心代码已经接入并有自动化验证；所有项目会话统一接入已由全系统编排 P1 完成，项目级视频后台 Runtime 与 revisioned 任务订阅已由全系统编排 P5 完成，全系统工具覆盖、通用任务计划、受保护 UI 交接和 provenance 已由全系统编排 P6 完成。本文阶段清单中保留的未勾选项只代表 RAG 只读工具、完整事件映射、独立的 conversation runtime 推送订阅、真实 Windows 多窗口/断网/慢首 Token 和性能预算等真实环境退出门禁，不能覆盖总方案对 P6 核心实现已完成的权威状态。
 
 ### 18.3 实施与验证记录
 
@@ -1180,6 +1180,7 @@ P5/P6 的核心代码已经接入并有自动化验证；所有项目会话统�
 | 2026-09-04 | 全系统编排 P3 | 完成 | `media.image.prepare`、`media.video.prepare`、`media.task.get` 接入统一工具循环；用户显式选择媒体 Provider/模型，Worker 冻结并二次校验 Provider/region/model/Adapter Schema，附件与素材输入转为受控引用；证据见 `code-traces/2026-09-04-agent-orchestration-p3-media-preparation.md` | 付费提交、`submission_unknown`、项目级媒体轮询和发布验收仍未完成 | Codex |
 | 2026-09-07 | 全系统编排 P4 | 完成 | `media.generation.submit`、`media.task.cancel`、Worker `MediaOrchestrationService`、Native 单次请求、Schema v37、一轮 R2 确认、冻结参数展示、幂等和 `submission_unknown` 完成；全仓 614 项 JS/TS、72 项 Rust 测试与质量门禁通过；证据见 `code-traces/2026-09-07-agent-orchestration-p4-media-submission.md` | 项目级视频后台 Runtime、剩余工具覆盖、真实 Provider/Windows 长稳和发布验收仍未完成；发布 `HOLD` | Codex |
 | 2026-09-07 | 全系统编排 P5 | 完成 | Worker `ProjectTaskRuntime`、Native 规范化 Provider 轮询/下载、revisioned `project.task.subscribe`、页面无关状态分发、项目重开恢复、退避/限流/`Retry-After`、旧 session 隔离和幂等素材入库完成；全仓 620 项 JS/TS、79 项 Rust 测试与完整质量门禁通过；证据见 `code-traces/2026-09-07-agent-orchestration-p5-project-task-runtime.md` | 本文历史 P5/P6 的 RAG、完整事件映射、conversation runtime 推送订阅与真实 Windows 门禁仍未全部通过；全系统编排 P6/P7、真实 Provider/Windows 长稳和发布验收未完成；发布 `HOLD` | Codex |
+| 2026-09-08 | 全系统编排 P6 | 完成 | 全系统 Registry/Policy 工具覆盖、受保护 UI 交接、`ConversationTaskPlanV2` 依赖/完整性门禁、模型选择 provenance、Schema v38 迁移和 Desktop/Worker/Provider/Pi 接线完成；全量质量门禁通过；证据见 `code-traces/2026-09-08-agent-orchestration-p6-tool-coverage.md` | 真实 Provider、Windows 多窗口/断网/休眠/长稳、正式签名、上一正式版本升级和人工发布验收未完成；发布 `HOLD` | Codex |
 
 ## 19. P0 已确认项
 

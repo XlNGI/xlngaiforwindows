@@ -210,7 +210,7 @@ export interface AgentTaskPlanRecord {
   id: string;
   taskId: string;
   projectId: string;
-  version: 1;
+  version: 1 | 2;
   mode: 'document' | 'novel-writing' | 'short-drama';
   action: 'generate' | 'revise' | 'analyze';
   targetPlatform?: 'seedance' | 'generic-video' | 'generic-image';
@@ -230,13 +230,8 @@ export interface AgentTaskDeliverableRecord {
   taskId: string;
   projectId: string;
   ordinal: number;
-  kind:
-    | 'episode-outline'
-    | 'character-prompts'
-    | 'scene-prompts'
-    | 'scene-shot-structure'
-    | 'shot-prompts'
-    | 'production-notes';
+  kind: string;
+  operation: string;
   required: boolean;
   dependsOnJson: string;
   status: AgentTaskDeliverableStatus;
@@ -244,6 +239,7 @@ export interface AgentTaskDeliverableRecord {
   entityId?: string;
   errorCode?: string;
   errorMessage?: string;
+  resultSummaryJson?: string;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;

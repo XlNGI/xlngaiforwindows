@@ -31,6 +31,7 @@ const DRAG_MIME = 'application/x-ai-video-asset+json';
 interface AssetLibraryViewProps {
   writable: boolean;
   selectedAssetId?: string;
+  openTrashRequest?: number;
   taskCompletionRevision?: number;
   onOpenSource?: (source: AssetSourceInfo) => void;
 }
@@ -55,6 +56,7 @@ function mediaSrcFor(assetId: string, absolutePath: string): string | undefined 
 export function AssetLibraryView({
   writable,
   selectedAssetId,
+  openTrashRequest = 0,
   taskCompletionRevision = 0,
   onOpenSource,
 }: AssetLibraryViewProps) {
@@ -135,6 +137,10 @@ export function AssetLibraryView({
   useEffect(() => {
     if (selectedAssetId) setSelectedIds([selectedAssetId]);
   }, [selectedAssetId]);
+
+  useEffect(() => {
+    if (openTrashRequest > 0) setShowTrash(true);
+  }, [openTrashRequest]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

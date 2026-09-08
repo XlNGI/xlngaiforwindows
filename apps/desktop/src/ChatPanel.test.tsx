@@ -320,8 +320,18 @@ describe('ChatPanel attempt metadata', () => {
       updatedAt: '2026-08-03T00:00:00.000Z',
     };
     const confirmation: AgentToolConfirmationRequest = {
+      version: 1,
+      confirmationId: 'confirmation',
       confirmationToken: 'token',
+      taskId: 'task',
+      toolCallId: 'tool-call',
+      operation: 'document.archive',
       action: 'document.archive',
+      argumentsHash: 'arguments-hash',
+      projectSessionId: 'project-session',
+      riskLevel: 'R2',
+      summary: '归档文档“旧草稿”',
+      affectedEntities: [{ type: 'document', id: 'document', label: '旧草稿' }],
       documentId: 'document',
       documentTitle: '旧草稿',
       expiresAt: '2026-08-03T01:00:00.000Z',
@@ -362,6 +372,77 @@ describe('ChatPanel attempt metadata', () => {
     expect(onConfirm).toHaveBeenCalledWith(true);
     fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
     expect(onConfirm).toHaveBeenCalledWith(false);
+  });
+
+  it('renders a generic R3 confirmation and opens its protected UI handoff', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '设置会话',
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    };
+    const confirmation: AgentToolConfirmationRequest = {
+      version: 1,
+      confirmationId: 'confirmation',
+      confirmationToken: 'token',
+      taskId: 'task',
+      toolCallId: 'tool-call',
+      operation: 'settings.propose_update',
+      action: 'settings.propose_update',
+      argumentsHash: 'arguments-hash',
+      projectSessionId: 'project-session',
+      riskLevel: 'R3',
+      summary: '在受保护设置中修改“主供应商”',
+      affectedEntities: [{ type: 'provider-profile', id: 'provider-profile', label: '主供应商' }],
+      protectedUi: {
+        page: 'providers',
+        focusId: 'provider-profile',
+        reason: '连接地址和凭据只能在受保护设置界面中修改。',
+      },
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    };
+    const onConfirm = vi.fn();
+    const onOpenProtectedUi = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        confirmation={confirmation}
+        onConfirmAgentAction={onConfirm}
+        onOpenProtectedUi={onOpenProtectedUi}
+        onScopeChange={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('风险等级：R3');
+    expect(screen.getByRole('alert')).toHaveTextContent('主供应商');
+    expect(screen.getByRole('alert')).toHaveTextContent('连接地址和凭据只能');
+    fireEvent.click(screen.getByRole('button', { name: '在受保护页面继续' }));
+    expect(onOpenProtectedUi).toHaveBeenCalledWith(confirmation.protectedUi);
+    expect(onConfirm).toHaveBeenCalledWith(true);
   });
 
   it('shows a restart recovery notice for retryable Agent tasks', () => {
@@ -468,7 +549,17 @@ describe('ChatPanel attempt metadata', () => {
             rowVersion: 1,
           },
           pendingConfirmation: {
+            version: 1,
+            confirmationId: 'confirmation',
+            taskId: 'task',
+            toolCallId: 'tool-call',
+            operation: 'document.archive',
             action: 'document.archive',
+            argumentsHash: 'arguments-hash',
+            projectSessionId: 'project-session',
+            riskLevel: 'R2',
+            summary: '归档文档“待归档草稿”',
+            affectedEntities: [{ type: 'document', id: 'document', label: '待归档草稿' }],
             documentId: 'document',
             documentTitle: '待归档草稿',
             expiresAt: '2026-08-03T01:00:00.000Z',
@@ -493,7 +584,7 @@ describe('ChatPanel attempt metadata', () => {
       />,
     );
     expect(screen.getByRole('alert')).toHaveTextContent('待归档草稿');
-    expect(screen.getByText(/原 Provider 会话不可恢复/)).toBeInTheDocument();
+    expect(screen.getByText(/确认已过期/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '批准' })).not.toBeInTheDocument();
   });
 

@@ -25,6 +25,7 @@ import { AppSettingsService } from './app-settings-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { MediaPreparationService } from './media-preparation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
+import { AgentOrchestrationService } from './agent-orchestration-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -146,13 +147,47 @@ function createSystemLoop(project: ProjectService, workflow: DocumentWorkflowSer
       new ContentService(project),
       {
         listAssets: () => [],
+        getAssetInfo: () => {
+          throw new Error('Asset was not found.');
+        },
         updateAssetAlias: () => {
+          throw new Error('Asset was not found.');
+        },
+        listTags: () => [],
+        createTag: () => {
+          throw new Error('Not implemented in this fixture.');
+        },
+        updateTag: () => {
+          throw new Error('Not implemented in this fixture.');
+        },
+        deleteTag: () => ({ deleted: true }),
+        changeAssetTags: () => [],
+        listGroups: () => [],
+        createGroup: () => {
+          throw new Error('Not implemented in this fixture.');
+        },
+        updateGroup: () => {
+          throw new Error('Not implemented in this fixture.');
+        },
+        deleteGroup: () => ({ deleted: true }),
+        resolveGroup: () => [],
+        deleteAsset: () => ({ deleted: true, referenceCount: 0 }),
+        restoreAsset: () => {
           throw new Error('Asset was not found.');
         },
       },
       { listProfiles: () => [], listModels: () => [] },
     ),
   );
+}
+
+function taskSnapshot(project: ProjectService, taskId: string): Record<string, unknown> {
+  return project.access(false, (database) => {
+    const row = database
+      .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
+      .get(taskId) as { request_snapshot_json: string };
+    return JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
+  });
 }
 
 describe('AgentProviderLoopService', () => {
@@ -827,6 +862,152 @@ describe('AgentProviderLoopService', () => {
       agentMode: 'short-drama',
       selectedChapterIds: ['chapter-1'],
       targetPlatform: 'seedance',
+    });
+  });
+
+  it('freezes explicit request model-selection provenance on a new Agent task', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const confirmedAt = '2026-09-07T10:00:00.000Z';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Draft a project brief',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      'Draft a project brief',
+      undefined,
+      { operation: 'document.create_draft' },
+      'project_only',
+      undefined,
+      undefined,
+      undefined,
+      { source: 'request', capability: 'text', confirmedAt },
+    );
+
+    expect(taskSnapshot(project, agent.taskId).modelSelection).toEqual({
+      version: 1,
+      capability: 'text',
+      providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+      modelId: '123e4567-e89b-42d3-a456-426614174001',
+      source: 'request',
+      confirmedAt,
+    });
+  });
+
+  it('freezes persisted conversation-preference provenance with its confirmation time', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const confirmedAt = '2026-09-06T08:30:00.000Z';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Summarize this project',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      'Summarize this project',
+      undefined,
+      { operation: 'document.list' },
+      'project_only',
+      undefined,
+      undefined,
+      undefined,
+      { source: 'conversation-preference', capability: 'text', confirmedAt },
+    );
+
+    expect(taskSnapshot(project, agent.taskId).modelSelection).toMatchObject({
+      source: 'conversation-preference',
+      confirmedAt,
+      providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+      modelId: '123e4567-e89b-42d3-a456-426614174001',
+    });
+  });
+
+  it('merges model-selection provenance into a pre-created novel task snapshot', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const novel = new NovelService(project);
+    const chapter = novel.saveChapter({ title: '雾港来客' });
+    const orchestration = new AgentOrchestrationService(project).prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '续写当前章节',
+      intent: { action: 'continue_chapter', chapterId: chapter.id },
+    });
+    if ('pendingIntent' in orchestration) throw new Error('Expected a pre-created novel task.');
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '续写当前章节',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const confirmedAt = '2026-09-07T11:00:00.000Z';
+
+    loop.prepare(
+      prepared.stream,
+      '续写当前章节',
+      chapter.title,
+      orchestration.documentIntent,
+      'project_only',
+      orchestration.taskId,
+      undefined,
+      undefined,
+      { source: 'request', capability: 'text', confirmedAt },
+    );
+
+    expect(taskSnapshot(project, orchestration.taskId)).toMatchObject({
+      version: 1,
+      agentMode: 'novel-writing',
+      action: 'continue_chapter',
+      chapterId: chapter.id,
+      documentId: chapter.documentId,
+      modelSelection: {
+        version: 1,
+        source: 'request',
+        capability: 'text',
+        confirmedAt,
+      },
+    });
+  });
+
+  it('rejects conflicting provenance after an Agent task model selection is frozen', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Draft a project brief',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const confirmedAt = '2026-09-07T12:00:00.000Z';
+    const agent = loop.prepare(
+      prepared.stream,
+      'Draft a project brief',
+      undefined,
+      { operation: 'document.create_draft' },
+      'project_only',
+      undefined,
+      undefined,
+      undefined,
+      { source: 'request', capability: 'text', confirmedAt },
+    );
+
+    expect(() =>
+      loop.prepare(
+        prepared.stream,
+        'Draft a project brief',
+        undefined,
+        { operation: 'document.create_draft' },
+        'project_only',
+        undefined,
+        undefined,
+        undefined,
+        { source: 'conversation-preference', capability: 'text', confirmedAt },
+      ),
+    ).toThrow('Agent task model-selection provenance is already frozen.');
+    expect(taskSnapshot(project, agent.taskId).modelSelection).toMatchObject({
+      source: 'request',
+      confirmedAt,
     });
   });
 
@@ -2313,9 +2494,15 @@ describe('AgentProviderLoopService', () => {
     expect(agent.tools.map((tool) => tool.name)).toEqual([
       'document.list',
       'project.get_context',
+      'project.integrity.check',
       'conversation.search',
+      'asset.get',
       'asset.search',
+      'tag.list',
+      'assetGroup.list',
+      'assetGroup.resolve',
       'settings.get',
+      'maintenance.status',
       'media.task.get',
       'conversation.rename',
       'research.search',
@@ -2340,6 +2527,118 @@ describe('AgentProviderLoopService', () => {
     expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
       status: 'succeeded',
       conversation: { id: conversation.id, title: '项目讨论' },
+    });
+  });
+
+  it('previews and executes a system R2 action exactly once with recoverable metadata', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prompt = `请归档会话 ${conversation.id}`;
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    const archive = agent.tools.find((tool) => tool.name === 'conversation.archive')!;
+    expect(archive).toBeDefined();
+    loop.startProviderStep(prepared.stream);
+
+    const pending = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'conversation-archive-response',
+      calls: [
+        {
+          id: 'conversation-archive-call',
+          name: 'conversation.archive',
+          authorizationHandle: archive.authorizationHandle,
+          argumentsJson: JSON.stringify({ conversationId: conversation.id }),
+        },
+      ],
+    });
+
+    expect(pending.confirmation).toMatchObject({
+      operation: 'conversation.archive',
+      riskLevel: 'R2',
+      affectedEntities: [{ type: 'conversation', id: conversation.id, label: conversation.title }],
+    });
+    expect(pending.confirmation?.summary).toContain(conversation.title);
+    expect(
+      new ContentService(project)
+        .listConversations({ includeArchived: true })
+        .items.find((item) => item.id === conversation.id)?.archivedAt,
+    ).toBeUndefined();
+    expect(workflow.getTask({ taskId: agent.taskId }).pendingConfirmation).toMatchObject({
+      confirmationId: pending.confirmation!.confirmationId,
+      operation: 'conversation.archive',
+      riskLevel: 'R2',
+      summary: pending.confirmation!.summary,
+      status: 'pending',
+    });
+
+    const confirmed = loop.confirmTool({
+      ...prepared.stream,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(JSON.parse(confirmed.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'archived',
+      conversation: { id: conversation.id },
+    });
+    expect(
+      new ContentService(project)
+        .listConversations({ includeArchived: true })
+        .items.find((item) => item.id === conversation.id)?.archivedAt,
+    ).toBeDefined();
+    expect(() =>
+      loop.confirmTool({
+        ...prepared.stream,
+        confirmationToken: pending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).toThrow('AGENT_TOOL_CONFIRMATION_REPLAYED');
+  });
+
+  it('returns an R3 project handoff without performing the protected operation', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prompt = '请备份项目';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    const backup = agent.tools.find((tool) => tool.name === 'project.backup.prepare')!;
+    expect(backup).toBeDefined();
+    loop.startProviderStep(prepared.stream);
+    const pending = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'project-backup-response',
+      calls: [
+        {
+          id: 'project-backup-call',
+          name: 'project.backup.prepare',
+          authorizationHandle: backup.authorizationHandle,
+          argumentsJson: '{}',
+        },
+      ],
+    });
+    expect(pending.confirmation).toMatchObject({
+      riskLevel: 'R3',
+      protectedUi: { page: 'maintenance', focusId: 'backup' },
+    });
+
+    const confirmed = loop.confirmTool({
+      ...prepared.stream,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(JSON.parse(confirmed.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'protected_ui_required',
+      protectedUi: { page: 'maintenance', focusId: 'backup' },
     });
   });
 

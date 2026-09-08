@@ -100,8 +100,18 @@ describe('AgentProviderToolGateway', () => {
     'returns an explicit confirmation decision to Worker (%s)',
     async (approved) => {
       const request = {
+        version: 1 as const,
+        confirmationId: 'confirmation',
         confirmationToken: 'confirmation-token',
+        taskId: 'task',
+        toolCallId: 'tool-call',
+        operation: 'document.archive',
         action: 'document.archive' as const,
+        argumentsHash: 'arguments-hash',
+        projectSessionId: identity.projectSessionId,
+        riskLevel: 'R2' as const,
+        summary: '归档文档“Draft”',
+        affectedEntities: [{ type: 'document', id: 'document', label: 'Draft' }],
         documentId: 'document',
         documentTitle: 'Draft',
         expiresAt: '2099-01-01T00:00:00.000Z',
@@ -196,6 +206,91 @@ describe('AgentProviderToolGateway', () => {
       'missing its Provider response context',
     );
     expect(worker.executeTools).not.toHaveBeenCalled();
+  });
+
+  it('exposes only the operations that are ready in the frozen plan', () => {
+    const worker = executor({});
+    const image = definition('media.image.prepare', 'image-handle');
+    const video = definition('media.video.prepare', 'video-handle');
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [image, video],
+      vi.fn(),
+      vi.fn(),
+    );
+
+    expect(gateway.currentDefinitions(['media.image.prepare'])).toEqual([image]);
+    expect(gateway.tools(['media.video.prepare']).map((tool) => tool.name)).toEqual([
+      'media.video.prepare',
+    ]);
+    expect(gateway.currentDefinitions([])).toEqual([]);
+  });
+
+  it('records planned tool success only after a successful Worker Tool Result', async () => {
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-planned',
+        outputs: [{ callId: 'call-planned', output: '{"status":"prepared"}' }],
+      },
+      tools: [],
+    });
+    const planHooks = {
+      begin: vi.fn(() => 'step-image'),
+      succeed: vi.fn(() => true),
+      fail: vi.fn(),
+    };
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition('media.image.prepare')],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      planHooks,
+    );
+
+    gateway.captureProviderCall('call-planned', 'response-planned');
+    await gateway.tools()[0]!.execute('call-planned', { title: 'Dragon' });
+
+    expect(planHooks.begin).toHaveBeenCalledWith('media.image.prepare');
+    expect(planHooks.succeed).toHaveBeenCalledWith(
+      'step-image',
+      'media.image.prepare',
+      '{"status":"prepared"}',
+    );
+    expect(planHooks.fail).not.toHaveBeenCalled();
+  });
+
+  it('records a planned tool failure when Worker execution rejects', async () => {
+    const worker = executor({});
+    vi.mocked(worker.executeTools).mockRejectedValueOnce(new Error('Worker execution failed.'));
+    const planHooks = {
+      begin: vi.fn(() => 'step-video'),
+      succeed: vi.fn(() => true),
+      fail: vi.fn(),
+    };
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition('media.video.prepare')],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      planHooks,
+    );
+
+    gateway.captureProviderCall('call-failed', 'response-failed');
+    await expect(gateway.tools()[0]!.execute('call-failed', {})).rejects.toThrow(
+      'Worker execution failed.',
+    );
+    expect(planHooks.succeed).not.toHaveBeenCalled();
+    expect(planHooks.fail).toHaveBeenCalledWith(
+      'step-video',
+      'media.video.prepare',
+      expect.any(Error),
+    );
   });
 
   it('forwards provider-step and terminal lifecycle operations', () => {

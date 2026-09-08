@@ -3,7 +3,9 @@ import type {
   ChatMessageStatus,
   ConversationDeliverableKind,
   ConversationTaskPlanErrorCode,
+  ConversationTaskPlan,
   ConversationTaskPlanV1,
+  ConversationTaskPlanV2,
   ConversationScopeType,
   NormalizedLlmUsage,
   TaskLogKind,
@@ -316,6 +318,139 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
     deliverables,
     constraints,
   };
+}
+
+/** Dispatches the versioned model-owned portion of a task plan. */
+export function validateConversationTaskPlan(input: unknown): ConversationTaskPlan {
+  const candidate = taskPlanObject(input, 'plan');
+  if (candidate.version === 1) return validateConversationTaskPlanV1(input);
+  if (candidate.version === 2) return validateConversationTaskPlanV2(input);
+  throw taskPlanError('TASK_PLAN_INVALID_VERSION', 'Task plan version must be 1 or 2.');
+}
+
+/** Strict generic-plan validator. Worker authorization is checked by TaskPlanService. */
+export function validateConversationTaskPlanV2(input: unknown): ConversationTaskPlanV2 {
+  const plan = taskPlanObject(input, 'plan');
+  rejectTaskPlanFields(plan, ['version', 'steps', 'constraints']);
+  if (plan.version !== 2) {
+    throw taskPlanError('TASK_PLAN_INVALID_VERSION', 'Generic task plan version must be 2.');
+  }
+  if (!Array.isArray(plan.steps) || plan.steps.length < 2 || plan.steps.length > 12) {
+    throw taskPlanError(
+      'TASK_PLAN_INVALID_STEP',
+      'Generic task plans must contain between two and twelve steps.',
+    );
+  }
+
+  const ids = new Set<string>();
+  const steps = plan.steps.map((rawStep, index) => {
+    const step = taskPlanObject(rawStep, `steps[${index}]`);
+    rejectTaskPlanFields(step, ['id', 'operation', 'required', 'dependsOn', 'constraints']);
+    if (typeof step.id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/u.test(step.id)) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_STEP',
+        `Step ${index} must have a stable lowercase identifier.`,
+      );
+    }
+    if (ids.has(step.id)) {
+      throw taskPlanError('TASK_PLAN_DUPLICATE_STEP', `Step ID ${step.id} is duplicated.`);
+    }
+    ids.add(step.id);
+    if (typeof step.operation !== 'string' || !/^[a-z][a-z0-9_.-]{1,127}$/u.test(step.operation)) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_STEP',
+        `Step ${step.id} must name one bounded Worker operation.`,
+      );
+    }
+    if (typeof step.required !== 'boolean') {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_STEP',
+        `Step ${step.id} must declare required as a boolean.`,
+      );
+    }
+    if (!Array.isArray(step.dependsOn) || step.dependsOn.length > 11) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_DEPENDENCY',
+        `Step ${step.id} has invalid dependencies.`,
+      );
+    }
+    const dependencies = new Set<string>();
+    const dependsOn = step.dependsOn.map((dependency) => {
+      if (
+        typeof dependency !== 'string' ||
+        !/^[a-z][a-z0-9-]{0,63}$/u.test(dependency) ||
+        dependency === step.id ||
+        dependencies.has(dependency)
+      ) {
+        throw taskPlanError(
+          'TASK_PLAN_INVALID_DEPENDENCY',
+          `Step ${String(step.id)} has a self, duplicate, or invalid dependency.`,
+        );
+      }
+      dependencies.add(dependency);
+      return dependency;
+    });
+    return {
+      id: step.id,
+      operation: step.operation,
+      required: step.required,
+      dependsOn,
+      constraints: validatePlanConstraints(step.constraints, `Step ${step.id}`, 10),
+    };
+  });
+
+  for (const step of steps) {
+    if (step.dependsOn.some((dependency) => !ids.has(dependency))) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_DEPENDENCY',
+        `Step ${step.id} depends on a step not present in the plan.`,
+      );
+    }
+  }
+  assertAcyclicGenericSteps(steps);
+  return {
+    version: 2,
+    steps,
+    constraints: validatePlanConstraints(plan.constraints, 'Plan', 20),
+  };
+}
+
+function validatePlanConstraints(value: unknown, label: string, maximumItems: number): string[] {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    throw taskPlanError(
+      'TASK_PLAN_INVALID_TYPE',
+      `${label} constraints must be an array with at most ${maximumItems} items.`,
+    );
+  }
+  return value.map((constraint, index) => {
+    if (typeof constraint !== 'string' || !constraint.trim() || constraint.length > 500) {
+      throw taskPlanError(
+        'TASK_PLAN_INVALID_TYPE',
+        `${label} constraint ${index} must contain between one and 500 characters.`,
+      );
+    }
+    return constraint.normalize('NFC').trim();
+  });
+}
+
+function assertAcyclicGenericSteps(steps: ConversationTaskPlanV2['steps']): void {
+  const graph = new Map(steps.map((step) => [step.id, step.dependsOn]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): void => {
+    if (visiting.has(id)) {
+      throw taskPlanError(
+        'TASK_PLAN_CYCLIC_DEPENDENCY',
+        `Task plan contains a dependency cycle at ${id}.`,
+      );
+    }
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dependency of graph.get(id) ?? []) visit(dependency);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of graph.keys()) visit(id);
 }
 
 function taskPlanObject(input: unknown, label: string): Record<string, unknown> {
