@@ -175,27 +175,6 @@ export function useDocumentWorkspace({
     }
   };
 
-  const submitDocumentReview = async () => {
-    if (!document?.currentVersionId || documentDirty) return;
-    setContentBusy(true);
-    setContentMessage('');
-    try {
-      await callWorker('document.review.submit', {
-        documentId: document.id,
-        documentVersionId: document.currentVersionId,
-        expectedDocumentRowVersion: document.rowVersion,
-      });
-      const next = await callWorker('document.get', { documentId: document.id });
-      setDocument(next);
-      setVersions(await callWorker('document.versions', { documentId: document.id }));
-      setContentMessage('已提交审核，发布前仍不会进入 LLM 权威上下文');
-    } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : '提交审核失败');
-    } finally {
-      setContentBusy(false);
-    }
-  };
-
   const requestDocumentChanges = async () => {
     if (!document?.currentVersionId) return;
     const comment = window.prompt('请输入退回原因（可选）') ?? undefined;
@@ -236,6 +215,61 @@ export function useDocumentWorkspace({
       setContentMessage(`已发布权威版本 v${result.publication.publicationNo}`);
     } catch (reason) {
       setContentMessage(reason instanceof Error ? reason.message : '发布失败，请检查版本冲突');
+    } finally {
+      setContentBusy(false);
+    }
+  };
+
+  /**
+   * Saves the editor content and publishes it in one user action. The Worker
+   * still creates and approves a review record inside a single transaction, so
+   * the audit trail and conflict checks are identical to the manual
+   * save/submit/publish sequence; only the extra clicks disappear.
+   */
+  const saveAndPublishDocument = async () => {
+    if (!documentEditorWritable) {
+      setContentMessage('审核中的版本不可编辑，请先退回修改。');
+      return;
+    }
+    if (!documentTitle.trim()) {
+      setContentMessage('发布前请填写文档标题。');
+      return;
+    }
+    setContentBusy(true);
+    setContentMessage('');
+    try {
+      const saved = await callWorker('document.draft.save', {
+        documentId: document?.id,
+        kind: documentKind,
+        title: documentTitle,
+        contentMarkdown: documentContent,
+        expectedDocumentRowVersion: document?.rowVersion,
+      });
+      const result = await callWorker('document.selfPublish', {
+        documentId: saved.id,
+        documentVersionId: saved.currentVersionId,
+        expectedDocumentRowVersion: saved.rowVersion,
+        expectedPublishedVersionId: saved.publishedVersionId,
+      });
+      setDocument(result.document);
+      setDocuments(await callWorker('document.list', {}));
+      setVersions(await callWorker('document.versions', { documentId: saved.id }));
+      setContentMessage(`已发布权威版本 v${result.publication.publicationNo}`);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '发布失败，请检查版本冲突';
+      setContentMessage(message);
+      // A conflict leaves the saved draft in place; resync so the editor shows
+      // the persisted row version instead of a stale one.
+      if (document?.id) {
+        try {
+          const next = await callWorker('document.get', { documentId: document.id });
+          setDocument(next);
+          setDocuments(await callWorker('document.list', {}));
+          setVersions(await callWorker('document.versions', { documentId: document.id }));
+        } catch {
+          // Keep the original failure message when the resync also fails.
+        }
+      }
     } finally {
       setContentBusy(false);
     }
@@ -336,15 +370,14 @@ export function useDocumentWorkspace({
     documentCloseConfirmation,
     setDocumentCloseConfirmation,
     documentEditorWritable,
-    documentDirty,
     selectDocument,
     openDocumentById,
     newDocument,
     importMarkdownDocument,
     saveDocument,
-    submitDocumentReview,
     requestDocumentChanges,
     publishDocument,
+    saveAndPublishDocument,
     restoreVersion,
     openCreatedDocument,
     requestCloseDocument,

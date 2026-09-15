@@ -44,6 +44,7 @@ import {
   generationStatusLabel,
   videoProgressGuidance,
 } from './generation-feedback';
+import { MediaSubmissionConfirmationDialog } from './media-confirmation';
 import {
   hasLocalImageParameters,
   isLocalImageDataUrl,
@@ -73,6 +74,63 @@ interface ProductionPanelProps {
 
 const PROVIDER_PROFILE_STORAGE_KEY = 'ai-video.production-provider-profiles';
 
+/**
+ * Remember the user's parameter values per adapter so that switching models or
+ * capabilities does not silently reset a filled-in form.
+ *
+ * Local image data URLs are deliberately excluded: they are per-submission
+ * payloads that can exceed the storage quota and must never be persisted.
+ */
+const PARAMETER_STORAGE_KEY = 'ai-video.production-adapter-parameters';
+
+function readStoredParameters(adapterKey: string): AdapterParameters {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(PARAMETER_STORAGE_KEY) ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    const entry = stored[adapterKey];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return {};
+    return Object.fromEntries(
+      Object.entries(entry as Record<string, unknown>).filter(
+        ([, value]) =>
+          typeof value === 'string' ||
+          typeof value === 'number' ||
+          typeof value === 'boolean' ||
+          (Array.isArray(value) &&
+            value.every(
+              (item) =>
+                typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean',
+            ) &&
+            !value.some(isLocalImageDataUrl)),
+      ),
+    ) as AdapterParameters;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredParameters(adapterKey: string, parameters: AdapterParameters): void {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(PARAMETER_STORAGE_KEY) ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    const persisted = Object.fromEntries(
+      Object.entries(parameters).filter(
+        ([, value]) =>
+          value !== undefined &&
+          !isLocalImageDataUrl(value) &&
+          !(Array.isArray(value) && value.some(isLocalImageDataUrl)),
+      ),
+    );
+    stored[adapterKey] = persisted;
+    window.localStorage.setItem(PARAMETER_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // Parameter memory is best-effort; the form still works without storage.
+  }
+}
+
 function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
   return Object.fromEntries(
     Object.entries(adapter.parameterSchema.properties)
@@ -93,18 +151,6 @@ function errorMessage(reason: unknown, fallback: string): string {
     if (typeof message === 'string' && message.trim()) return message.trim();
   }
   return fallback;
-}
-
-function mediaConfirmationMessage(confirmation: MediaSubmissionConfirmationRequest): string {
-  const parameters = confirmation.parameterSummary
-    .map(({ key, value }) => `${key}: ${value}`)
-    .join('\n');
-  return [
-    `${confirmation.providerName} / ${confirmation.modelName}`,
-    `草稿版本：v${confirmation.draftVersion}`,
-    parameters ? `参数：\n${parameters}` : '参数：无',
-    confirmation.costNotice.summary,
-  ].join('\n');
 }
 
 function cancellationMessage(cancellation?: MediaTaskCancellationOutcome): string {
@@ -224,6 +270,21 @@ export function ProductionPanel({
   const [errors, setErrors] = useState<AdapterValidationError[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  /** Pending paid submission awaiting an explicit user decision. */
+  const [paidSubmission, setPaidSubmission] = useState<MediaSubmissionConfirmationRequest>();
+  const paidSubmissionResolver = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const requestPaidSubmissionApproval = (
+    confirmation: MediaSubmissionConfirmationRequest,
+  ): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      paidSubmissionResolver.current?.(false);
+      setPaidSubmission(confirmation);
+      paidSubmissionResolver.current = (approved) => {
+        paidSubmissionResolver.current = undefined;
+        setPaidSubmission(undefined);
+        resolve(approved);
+      };
+    });
 
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
@@ -360,14 +421,25 @@ export function ProductionPanel({
           return;
         }
         const selectedModel = models.find((model) => model.remoteModelId === resolved.model);
-        if (!selectedProfile || !selectedModel) return;
+        if (!selectedProfile || !selectedModel) {
+          // Without a project draft the remembered form values are the only
+          // thing standing between the user and an empty parameter form.
+          if (active) setParameters({ ...defaults, ...readStoredParameters(resolved.key) });
+          return;
+        }
         const draft = await callWorker('generation.draft.get', {
           shotId,
           adapterKey: resolved.key,
           providerProfileId: selectedProfile.id,
           modelId: selectedModel.remoteModelId,
         });
-        if (active) setParameters({ ...defaults, ...(draft?.parameters ?? {}) });
+        // Precedence: schema defaults < remembered form values < project draft.
+        if (active)
+          setParameters({
+            ...defaults,
+            ...readStoredParameters(resolved.key),
+            ...(draft?.parameters ?? {}),
+          });
       })
       .catch((reason) => {
         if (active) {
@@ -483,12 +555,14 @@ export function ProductionPanel({
 
   const updateParameter = (key: string, value: AdapterParameters[string] | undefined) => {
     setParameters((current) => {
+      const next = { ...current };
       if (value === undefined || value === '') {
-        const next = { ...current };
         delete next[key];
-        return next;
+      } else {
+        next[key] = value;
       }
-      return { ...current, [key]: value };
+      if (adapterKey) writeStoredParameters(adapterKey, next);
+      return next;
     });
     setErrors((current) => current.filter((error) => normalizeErrorPath(error.path) !== key));
     setMessage('');
@@ -628,7 +702,7 @@ export function ProductionPanel({
       setGenerationStatus('正在请求 Provider...');
       const pending = await callWorker('media.generation.requestSubmission', { jobId: job.id });
       if (!pending.confirmation) throw new Error('Image submission confirmation is unavailable.');
-      if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+      if (!(await requestPaidSubmissionApproval(pending.confirmation))) {
         await callWorker('media.task.cancel', { jobId: job.id });
         return;
       }
@@ -725,7 +799,7 @@ export function ProductionPanel({
         jobId: prepared.id,
       });
       if (!pending.confirmation) throw new Error('Video submission confirmation is unavailable.');
-      if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+      if (!(await requestPaidSubmissionApproval(pending.confirmation))) {
         const cancelled = await callWorker('media.task.cancel', { jobId: prepared.id });
         setGenerationStatus(cancellationMessage(cancelled.cancellation));
         return;
@@ -838,6 +912,12 @@ export function ProductionPanel({
 
   return (
     <aside className={`production-panel panel-border${expanded ? ' expanded' : ''}`}>
+      {paidSubmission && (
+        <MediaSubmissionConfirmationDialog
+          confirmation={paidSubmission}
+          onDecide={(approved) => paidSubmissionResolver.current?.(approved)}
+        />
+      )}
       <div className="panel-heading">
         <span>生产参数</span>
         <div className="production-panel-heading-actions">

@@ -80,10 +80,10 @@ export type DetachedPanelAction =
   | { panelId: 'document'; type: 'document-kind'; value: string }
   | { panelId: 'document'; type: 'document-content'; value: string }
   | { panelId: 'document'; type: 'document-save' }
+  | { panelId: 'document'; type: 'document-save-publish' }
   | { panelId: 'document'; type: 'document-new' }
   | { panelId: 'document'; type: 'document-import' }
   | { panelId: 'document'; type: 'document-restore'; versionId: string }
-  | { panelId: 'document'; type: 'document-submit-review' }
   | { panelId: 'document'; type: 'document-request-changes' }
   | { panelId: 'document'; type: 'document-publish' }
   | { panelId: 'conversation'; type: 'conversation-select'; conversationId: string }

@@ -94,6 +94,15 @@ function mockWorker(
   }) as typeof callWorker);
 }
 
+/**
+ * Paid submissions now await the shared confirmation card instead of a native
+ * `window.confirm`, so every generate click needs an explicit approval.
+ */
+async function submitPaidGeneration(buttonName: '生成图片' | '提交视频任务'): Promise<void> {
+  fireEvent.click(screen.getByRole('button', { name: buttonName }));
+  fireEvent.click(await screen.findByRole('button', { name: '批准' }));
+}
+
 const descriptor: AdapterDescriptor = {
   key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
   capability: 'TEXT_TO_IMAGE',
@@ -420,6 +429,31 @@ describe('ProductionPanel', () => {
 
     render(<ProductionPanel shotId="shot" writable />);
     expect(await screen.findByLabelText('分辨率*')).toHaveValue('1080p');
+  });
+
+  it('remembers parameter values per adapter so switching models keeps the form', async () => {
+    window.localStorage.clear();
+    const { unmount } = render(<ProductionPanel shotId="shot" writable />);
+    const prompt = await screen.findByLabelText(/画面提示词/);
+    fireEvent.change(prompt, { target: { value: '记住这段提示词' } });
+    unmount();
+
+    // A fresh panel for the same adapter restores the remembered value.
+    render(<ProductionPanel shotId="shot" writable />);
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('记住这段提示词');
+  });
+
+  it('never persists local image data URLs in the parameter memory', async () => {
+    window.localStorage.clear();
+    render(<ProductionPanel shotId="shot" writable />);
+    const prompt = await screen.findByLabelText(/画面提示词/);
+    fireEvent.change(prompt, {
+      target: { value: 'data:image/png;base64,iVBORw0KGgo=' },
+    });
+
+    expect(
+      window.localStorage.getItem('ai-video.production-adapter-parameters') ?? '',
+    ).not.toContain('data:image/png;base64,iVBORw0KGgo=');
   });
 
   it('uses the controlled production capability and removes the right-side mode selector', async () => {
@@ -791,6 +825,13 @@ describe('ProductionPanel', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
+    // The frozen draft is reviewed on the shared card, not a native dialog.
+    expect(await screen.findByText(`${providerProfile.name} / Vidu Q2`)).toBeInTheDocument();
+    expect(screen.getByText('草稿版本 v1')).toBeInTheDocument();
+    expect(screen.getByText('prompt')).toBeInTheDocument();
+    expect(screen.getByText('本次操作可能产生费用。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '批准' }));
+
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
         jobId: 'job',
@@ -798,9 +839,7 @@ describe('ProductionPanel', () => {
         approved: true,
       }),
     );
-    expect(confirmDialog).toHaveBeenCalledWith(
-      `${providerProfile.name} / Vidu Q2\n草稿版本：v1\n参数：\nprompt: 电影画面\n本次操作可能产生费用。`,
-    );
+    expect(confirmDialog).not.toHaveBeenCalled();
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
     expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
     expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
@@ -859,7 +898,7 @@ describe('ProductionPanel', () => {
     fireEvent.click(await screen.findByText(priorAsset.relativePath));
     expect(await screen.findByRole('img', { name: priorAsset.relativePath })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await submitPaidGeneration('生成图片');
 
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
     await waitFor(() =>
@@ -904,7 +943,7 @@ describe('ProductionPanel', () => {
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await submitPaidGeneration('生成图片');
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
@@ -947,7 +986,7 @@ describe('ProductionPanel', () => {
       target: { value: '电影画面' },
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await submitPaidGeneration('生成图片');
 
     expect(
       await screen.findAllByText(
@@ -985,7 +1024,7 @@ describe('ProductionPanel', () => {
     fireEvent.change(screen.getByLabelText('尾帧 URL'), {
       target: { value: 'https://example.invalid/end.png' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await submitPaidGeneration('提交视频任务');
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
@@ -1008,7 +1047,7 @@ describe('ProductionPanel', () => {
       confirmationToken: 'confirmation-video-job',
       approved: true,
     });
-    expect(confirmDialog).toHaveBeenCalledTimes(1);
+    expect(confirmDialog).not.toHaveBeenCalled();
     expect(await screen.findByText('视频任务已提交，项目后台正在处理。')).toBeInTheDocument();
   });
 
@@ -1044,7 +1083,7 @@ describe('ProductionPanel', () => {
     fireEvent.change(screen.getByLabelText('尾帧 URL'), {
       target: { value: 'https://example.invalid/end.png' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await submitPaidGeneration('提交视频任务');
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
@@ -1090,7 +1129,7 @@ describe('ProductionPanel', () => {
     fireEvent.change(screen.getByLabelText('尾帧 URL'), {
       target: { value: 'https://example.invalid/end.png' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await submitPaidGeneration('提交视频任务');
 
     expect(
       await screen.findAllByText(
@@ -1156,7 +1195,7 @@ describe('ProductionPanel', () => {
         parameters: { images: ['asset://asset-start', 'asset://asset-end'] },
       });
     });
-    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await submitPaidGeneration('提交视频任务');
     await waitFor(() => {
       const prepareCall = vi
         .mocked(callWorker)
@@ -1197,7 +1236,7 @@ describe('ProductionPanel', () => {
     });
     expect(await screen.findByText('end.jpg')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await submitPaidGeneration('提交视频任务');
 
     await waitFor(() => {
       const prepareCall = vi

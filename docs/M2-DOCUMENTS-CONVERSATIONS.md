@@ -5,7 +5,7 @@
 
 ## 正式文档
 
-正式文档以 Markdown 项目资料形式保存，运行时权威内容位于项目根目录的 `project.sqlite`，不依赖独立 `.md` 文件。旧 `kind` 字段仍兼容保留项目大纲、项目计划、角色设定、场景设定、分镜文档和创作笔记等历史值，但不再由界面选择，也不参与上下文优先级。`documents.current_version_id` 保存当前工作版本指针，`documents.published_version_id` 保存默认权威版本指针，`document_versions` 保存不可变 Markdown 内容。
+正式文档以 Markdown 项目资料形式保存，运行时权威内容位于项目根目录的 `project.sqlite`，不依赖独立 `.md` 文件。`kind` 保留项目大纲、项目计划、角色设定、场景设定、分镜文档和创作笔记等值：编辑器的类型选择器可修改它，文档工作区列表按它筛选，短剧上下文按 `character`/`scene` 取用已发布的角色与场景提示词。`kind` 本身不影响上下文排序：普通项目文档按来源类型（约束、文档、记忆）计算优先级，短剧路径由 `novel-context-service` 按 `domain_scope` 显式指定。`documents.current_version_id` 保存当前工作版本指针，`documents.published_version_id` 保存默认权威版本指针，`document_versions` 保存不可变 Markdown 内容。
 
 M3 Schema v2 已为正式文档增加项目、场次和镜头作用域；Schema v1 文档迁移后保持项目作用域。
 
@@ -13,10 +13,10 @@ M3 Schema v2 已为正式文档增加项目、场次和镜头作用域；Schema 
 - 文档元数据、版本记录和当前工作版本指针在同一事务内提交；发布事务才更新权威版本指针。
 - 恢复历史版本不会覆盖记录，而是复制历史内容并创建一个新版本。
 - 普通聊天消息不会自动修改文档。
-- 会话“保存为文档”只创建可审阅草稿；只有用户显式发布后，内容才进入正式资料。
+- 会话“保存为文档”只创建可审阅草稿；只有用户显式发布后，内容才进入正式资料。工具栏的“保存并发布”把草稿保存与发布合并为一次用户操作，Worker 仍在一个事务内创建并批准审核记录（`mode: 'self_publish'`），因此审核留痕与冲突校验不变。
 - 文档工具栏支持一次选择并导入 UTF-8 编码的 `.md` 或 `.markdown` 文件。导入标题取文件名，正文保持 Markdown，并创建可审阅的导入草稿；只有用户显式发布后才成为正式资料并进入后续 LLM 上下文。单文件上限为 5 MiB，不支持的扩展名、目录、非 UTF-8 内容和超限文件由 Tauri 原生边界拒绝。
 
-页面展示按领域隔离：项目文档页只展示大纲（`outline`）、计划（`plan`）等整体把控资料并列出约束；小说章节在小说工作区、角色与场景文档在角色与场景页、分镜文档挂在具体镜头下，均不进入项目文档页。
+文档工作区把大纲（`outline`）、计划（`plan`）和角色与场景（`character`/`scene`）合并为一个列表，并提供类型筛选和类型标签；新建文档沿用当前筛选类型，已打开的文档即使不匹配筛选也保持可见。其余类型仍按领域隔离：作为 `note` 落库的小说章节在小说工作区、`storyboard` 文档挂在具体镜头下，均不进入文档工作区列表。类型选择器保留全部类型，用于把 Agent 创建的 `note` 草稿归类到文档工作区。
 
 ## 场次与镜头
 
@@ -47,6 +47,7 @@ document.review.submit
 document.review.requestChanges
 document.review.reject
 document.publish
+document.selfPublish
 agent.task.createDocumentDraft
 agent.task.list
 agent.task.get

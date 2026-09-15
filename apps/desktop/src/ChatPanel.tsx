@@ -1,6 +1,7 @@
 import {
   Archive,
   Bot,
+  BookOpen,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -27,7 +28,6 @@ import type {
   AgentToolConfirmationRequest,
   AgentTaskPendingConfirmationInfo,
   AgentProtectedUiHandoff,
-  MediaSubmissionConfirmationRequest,
   AdapterDescriptor,
   AdapterParameters,
   AdapterParameterProperty,
@@ -76,11 +76,9 @@ interface ChatPanelProps {
   onConfirmSchemaProposal?: (adapterKey: string, version: number) => void;
   onRejectSchemaProposal?: (adapterKey: string, version: number) => void;
   confirmation?: AgentToolConfirmationRequest | AgentTaskPendingConfirmationInfo;
-  mediaSubmissionConfirmation?: MediaSubmissionConfirmationRequest;
   activeVideoTaskCount?: number;
   onConfirmAgentAction?: (approved: boolean) => void;
   onOpenProtectedUi?: (handoff: AgentProtectedUiHandoff) => void;
-  onConfirmMediaSubmission?: (approved: boolean) => void;
   onOpenTaskLog?: () => void;
   onContinueAgentTask?: () => void;
   onClose?: () => void;
@@ -114,6 +112,9 @@ interface ChatPanelProps {
   mediaReferenceImageInputs?: string[];
   onSelectMediaModel?: (selection: MediaModelSelectionDecision) => void;
   onCancelMediaModelSelection?: () => void;
+  /** Selected novel chapters stay in context for every following turn. */
+  selectedChapterCount?: number;
+  onClearSelectedChapters?: () => void;
   agentParameterRequest?: {
     prompt: string;
     capability: 'image' | 'video';
@@ -147,11 +148,9 @@ export function ChatPanel({
   generation,
   agentTask,
   confirmation,
-  mediaSubmissionConfirmation,
   activeVideoTaskCount = 0,
   onConfirmAgentAction,
   onOpenProtectedUi,
-  onConfirmMediaSubmission,
   onConfirmSchemaProposal,
   onRejectSchemaProposal,
   onOpenTaskLog,
@@ -186,32 +185,32 @@ export function ChatPanel({
   mediaReferenceImageInputs,
   onSelectMediaModel,
   onCancelMediaModelSelection,
+  selectedChapterCount,
+  onClearSelectedChapters,
   agentParameterRequest,
   onSubmitAgentParameters,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
   const fileInputId = 'chat-attachment-input';
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const displayedConfirmation =
-    mediaSubmissionConfirmation ?? confirmation ?? agentTask?.pendingConfirmation;
-  const isMediaSubmission = Boolean(displayedConfirmation && 'jobId' in displayedConfirmation);
-  const protectedHandoff =
-    displayedConfirmation && !('jobId' in displayedConfirmation)
-      ? displayedConfirmation.protectedUi
-      : undefined;
+  /**
+   * Paid media submissions never render here. `media-confirmation.tsx` owns that
+   * review surface so every paid path shows the same frozen draft; this in-session
+   * card is only for Agent tool confirmations.
+   */
+  const displayedConfirmation = confirmation ?? agentTask?.pendingConfirmation;
+  const protectedHandoff = displayedConfirmation?.protectedUi;
   const confirmationExpired = Boolean(
     displayedConfirmation &&
     'status' in displayedConfirmation &&
     displayedConfirmation.status === 'expired',
   );
-  const confirmationIsActionable = isMediaSubmission
-    ? Boolean(mediaSubmissionConfirmation && onConfirmMediaSubmission)
-    : Boolean(
-        !confirmationExpired &&
-        confirmation &&
-        'confirmationToken' in confirmation &&
-        onConfirmAgentAction,
-      );
+  const confirmationIsActionable = Boolean(
+    !confirmationExpired &&
+    confirmation &&
+    'confirmationToken' in confirmation &&
+    onConfirmAgentAction,
+  );
   return (
     <section className="chat-panel panel-border" aria-label="项目 AI 助手">
       <div className="panel-heading">
@@ -382,6 +381,17 @@ export function ChatPanel({
             </div>
           </details>
         )}
+        {selectedChapterCount ? (
+          <div className="chapter-context-chip" role="status">
+            <BookOpen size={13} />
+            <span>已加入 {selectedChapterCount} 个章节，后续消息都按短剧任务处理</span>
+            {onClearSelectedChapters && (
+              <button type="button" onClick={onClearSelectedChapters}>
+                清除
+              </button>
+            )}
+          </div>
+        ) : null}
       </div>
       <div className="message-list">
         {messages.length === 0 ? (
@@ -549,44 +559,19 @@ export function ChatPanel({
       {agentTask && <AgentActivityPanel detail={agentTask} />}
       {displayedConfirmation && (
         <div className="agent-confirmation" role="alert">
-          <strong>
-            需要确认：
-            {'jobId' in displayedConfirmation
-              ? `提交${displayedConfirmation.kind === 'image' ? '图片' : '视频'}生成任务`
-              : displayedConfirmation.summary}
-          </strong>
-          {'jobId' in displayedConfirmation ? (
-            <>
-              <span>
-                {displayedConfirmation.providerName} / {displayedConfirmation.modelName}
-              </span>
-              <small>草稿版本 v{displayedConfirmation.draftVersion}</small>
-              <dl className="agent-confirmation-parameters">
-                {displayedConfirmation.parameterSummary.map(({ key, value }) => (
-                  <div key={key}>
-                    <dt>{key}</dt>
-                    <dd>{value}</dd>
-                  </div>
-                ))}
-              </dl>
-              <small>{displayedConfirmation.costNotice.summary}</small>
-            </>
-          ) : (
-            <>
-              <small>风险等级：{displayedConfirmation.riskLevel}</small>
-              {displayedConfirmation.affectedEntities.length > 0 && (
-                <ul className="agent-confirmation-entities" aria-label="受影响对象">
-                  {displayedConfirmation.affectedEntities.map((entity) => (
-                    <li key={`${entity.type}:${entity.id}`}>
-                      {entity.label || entity.id} <small>({entity.type})</small>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {displayedConfirmation.protectedUi && (
-                <small>{displayedConfirmation.protectedUi.reason}</small>
-              )}
-            </>
+          <strong>需要确认：{displayedConfirmation.summary}</strong>
+          <small>风险等级：{displayedConfirmation.riskLevel}</small>
+          {displayedConfirmation.affectedEntities.length > 0 && (
+            <ul className="agent-confirmation-entities" aria-label="受影响对象">
+              {displayedConfirmation.affectedEntities.map((entity) => (
+                <li key={`${entity.type}:${entity.id}`}>
+                  {entity.label || entity.id} <small>({entity.type})</small>
+                </li>
+              ))}
+            </ul>
+          )}
+          {displayedConfirmation.protectedUi && (
+            <small>{displayedConfirmation.protectedUi.reason}</small>
           )}
           <small>确认有效期至 {new Date(displayedConfirmation.expiresAt).toLocaleString()}</small>
           {confirmationIsActionable ? (
@@ -595,33 +580,25 @@ export function ChatPanel({
                 type="button"
                 className="button primary"
                 onClick={() => {
-                  if (isMediaSubmission) {
-                    onConfirmMediaSubmission?.(true);
-                    return;
-                  }
                   if (protectedHandoff) {
                     onOpenProtectedUi?.(protectedHandoff);
                   }
                   onConfirmAgentAction?.(true);
                 }}
               >
-                {!isMediaSubmission && protectedHandoff ? '在受保护页面继续' : '批准'}
+                {protectedHandoff ? '在受保护页面继续' : '批准'}
               </button>
               <button
                 type="button"
                 className="button secondary"
-                onClick={() =>
-                  isMediaSubmission
-                    ? onConfirmMediaSubmission?.(false)
-                    : onConfirmAgentAction?.(false)
-                }
+                onClick={() => onConfirmAgentAction?.(false)}
               >
                 拒绝
               </button>
             </div>
           ) : (
             <>
-              {!isMediaSubmission && protectedHandoff && onOpenProtectedUi && (
+              {protectedHandoff && onOpenProtectedUi && (
                 <button
                   type="button"
                   className="button secondary"

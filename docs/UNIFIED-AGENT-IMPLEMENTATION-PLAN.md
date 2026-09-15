@@ -156,7 +156,7 @@
 - [x] 提供回滚到上一 schema 版本的接口。
 - [x] 未确认 schema 在统一查询结果中明确标记，统一 Agent 生成仍拒绝缺失 schema。
 
-阶段 A 只读子阶段已完成：新增 `model.catalog.list`、`model.catalog.get` 和 `adapter.schema.get` IPC 查询，返回模型能力、来源、schema 状态、适配器和必填字段；普通会话支持通过自然语言查询模型/schema 摘要。写入、审计和回滚仍属于阶段 A 后续子阶段。
+阶段 A 只读子阶段已完成：新增 `model.catalog.list`、`model.catalog.get` 和 `adapter.schema.get` IPC 查询，返回模型能力、来源、schema 状态、适配器和必填字段。对话中的模型/schema 摘要改由 LLM 通过受控只读工具读取：`settings.get` 始终可用，`adapter.schema.get` 在识别的 schema 检查意图下授权。Desktop 原先用 `isModelSchemaQuery` 正则抢先拦截这类提问并直接返回文本，绕过了模型和 Agent 循环，该旁路已删除。写入、审计和回滚仍属于阶段 A 后续子阶段。
 
 阶段 A 写入基础设施已开始：应用数据库 schema v4 新增 `adapter_schemas` 和 `adapter_schema_audits` 表及仓储层，已覆盖 schema 状态、来源、版本、变更前后 JSON 和操作者信息；面向 Agent 的提议、确认和回滚 IPC 仍待下一步接入。
 

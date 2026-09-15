@@ -66,6 +66,7 @@ import { useDocumentWorkspace } from './use-document-workspace';
 import { useConversationWorkspace } from './use-conversation-workspace';
 import { useAssetWorkspace } from './use-asset-workspace';
 import { useProductionState } from './use-production-state';
+import { MediaSubmissionConfirmationDialog } from './media-confirmation';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { MaintenanceDialog } from './MaintenanceDialog';
@@ -101,7 +102,7 @@ import { generationStatusLabel } from './generation-feedback';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'novel' | 'characters' | 'shots' | 'assets' | 'tasks';
+type WorkspaceView = 'documents' | 'novel' | 'shots' | 'assets' | 'tasks';
 type NavigationMode = 'project' | 'production';
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
 
@@ -128,18 +129,6 @@ function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
   } catch {
     // The task log remains the durable notification surface when OS notifications are unavailable.
   }
-}
-
-function mediaConfirmationMessage(confirmation: MediaSubmissionConfirmationRequest): string {
-  const parameters = confirmation.parameterSummary
-    .map(({ key, value }) => `${key}: ${value}`)
-    .join('\n');
-  return [
-    `${confirmation.providerName} / ${confirmation.modelName}`,
-    `草稿版本：v${confirmation.draftVersion}`,
-    parameters ? `参数：\n${parameters}` : '参数：无',
-    confirmation.costNotice.summary,
-  ].join('\n');
 }
 
 function snapshotEntityId(snapshot: DetachedPanelSnapshot): string | undefined {
@@ -414,6 +403,52 @@ function documentStateLabel(state: DocumentVersionInfo['state'] | 'new'): string
   }
 }
 
+/**
+ * The document workspace merges the former "project documents" (outline/plan)
+ * and "characters and scenes" (character/scene) pages into one list with a kind
+ * filter. The other stored kinds deliberately stay in their own workspaces:
+ * an imported novel chapter is a `note` document bound to `novel_chapters`, and
+ * a `storyboard` document hangs off a shot, so listing them here would both
+ * flood the list with chapters and duplicate the shot workspace.
+ */
+const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
+  outline: '大纲',
+  plan: '计划',
+  character: '角色',
+  scene: '场景',
+  storyboard: '分镜',
+  note: '笔记',
+};
+
+const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan', 'character', 'scene'];
+
+/**
+ * The editor keeps every kind selectable: an Agent-created draft is written as
+ * `note`, and reclassifying it here is what moves it into the workspace list.
+ */
+const DOCUMENT_KIND_ORDER: DocumentKind[] = [
+  'outline',
+  'plan',
+  'character',
+  'scene',
+  'storyboard',
+  'note',
+];
+
+const DOCUMENT_KIND_FILTERS: Array<{ id: 'all' | DocumentKind; label: string }> = [
+  { id: 'all', label: '全部' },
+  ...WORKSPACE_DOCUMENT_KINDS.map((kind) => ({ id: kind, label: DOCUMENT_KIND_LABELS[kind] })),
+];
+
+/** Only workspace kinds are listed; everything else lives in its own workspace. */
+function isWorkspaceDocument(summary: DocumentSummary): boolean {
+  return WORKSPACE_DOCUMENT_KINDS.includes(summary.kind);
+}
+
+function matchesDocumentFilter(summary: DocumentSummary, filter: 'all' | DocumentKind): boolean {
+  return filter === 'all' || summary.kind === filter;
+}
+
 export function mergeGenerationMessage(
   messages: ChatMessageInfo[],
   selectedConversationId: string | undefined,
@@ -546,13 +581,6 @@ function readVideoPreviewAsDataUrl(file: File): Promise<string> {
   });
 }
 
-function isModelSchemaQuery(prompt: string): boolean {
-  return (
-    /(模型|参数|schema|适配器)/iu.test(prompt) &&
-    /(查看|查询|支持|有哪些|列出|告诉我)/u.test(prompt)
-  );
-}
-
 export function App() {
   const [health, setHealth] = useState<HealthResult>();
   const [windowMaximized, setWindowMaximized] = useState(false);
@@ -575,6 +603,7 @@ export function App() {
   const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
 
   const [view, setView] = useState<WorkspaceView>('documents');
+  const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
   const [detachedPanels, setDetachedPanels] = useState<Partial<Record<WorkspacePanelId, string>>>(
     {},
   );
@@ -632,9 +661,24 @@ export function App() {
   const [agentConfirmation, setAgentConfirmation] =
     useState<import('@ai-video/contracts').AgentToolConfirmationRequest>();
   const confirmationResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
-  const [mediaSubmissionConfirmation, setMediaSubmissionConfirmation] =
-    useState<import('@ai-video/contracts').MediaSubmissionConfirmationRequest>();
-  const mediaSubmissionResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  /**
+   * Every paid submission — composer, Agent stream or production panel — is
+   * approved through this one modal, so the frozen draft, parameters and cost
+   * notice cannot drift between code paths.
+   */
+  const [paidSubmissionApproval, setPaidSubmissionApproval] =
+    useState<MediaSubmissionConfirmationRequest>();
+  const paidSubmissionResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const requestMediaSubmissionApproval = (confirmation: MediaSubmissionConfirmationRequest) =>
+    new Promise<boolean>((resolve) => {
+      paidSubmissionResolverRef.current?.(false);
+      setPaidSubmissionApproval(confirmation);
+      paidSubmissionResolverRef.current = (approved) => {
+        paidSubmissionResolverRef.current = undefined;
+        setPaidSubmissionApproval(undefined);
+        resolve(approved);
+      };
+    });
   const mediaSelectionResolverRef = useRef<
     ((selection: MediaModelSelectionDecision | undefined) => void) | undefined
   >(undefined);
@@ -707,7 +751,6 @@ export function App() {
     contentMessage,
     documentCloseConfirmation,
     documentEditorWritable,
-    documentDirty,
     setDocuments,
     setDocumentKind,
     setDocumentTitle,
@@ -719,9 +762,9 @@ export function App() {
     newDocument,
     importMarkdownDocument,
     saveDocument,
-    submitDocumentReview,
     requestDocumentChanges,
     publishDocument,
+    saveAndPublishDocument,
     restoreVersion,
     openCreatedDocument,
     requestCloseDocument,
@@ -942,7 +985,7 @@ export function App() {
 
   const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
     confirmationResolverRef.current?.(false);
-    mediaSubmissionResolverRef.current?.(false);
+    paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
     activeMediaInputsRef.current = collectReferenceImageInputs(chatAttachments);
     setChatAttachments([]);
@@ -1022,7 +1065,7 @@ export function App() {
         );
         if (!isGenerationActive(next)) {
           confirmationResolverRef.current?.(false);
-          mediaSubmissionResolverRef.current?.(false);
+          paidSubmissionResolverRef.current?.(false);
           mediaSelectionResolverRef.current?.(undefined);
           activeMediaInputsRef.current = [];
           setChatMessage(readableGenerationError(next.error) ?? '生成完成');
@@ -1052,15 +1095,7 @@ export function App() {
         });
       },
       onMediaSubmission(request) {
-        mediaSubmissionResolverRef.current?.(false);
-        setMediaSubmissionConfirmation(request);
-        return new Promise<boolean>((resolve) => {
-          mediaSubmissionResolverRef.current = (approved) => {
-            mediaSubmissionResolverRef.current = undefined;
-            setMediaSubmissionConfirmation(undefined);
-            resolve(approved);
-          };
-        });
+        return requestMediaSubmissionApproval(request);
       },
     });
     nativeLlmRun.current = run;
@@ -1083,7 +1118,7 @@ export function App() {
         stopAgentTaskEventPolling();
         if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
           confirmationResolverRef.current?.(false);
-          mediaSubmissionResolverRef.current?.(false);
+          paidSubmissionResolverRef.current?.(false);
           mediaSelectionResolverRef.current?.(undefined);
           activeMediaInputsRef.current = [];
           nativeLlmRun.current = undefined;
@@ -1093,7 +1128,7 @@ export function App() {
 
   const cancelNativeLlmRun = async () => {
     confirmationResolverRef.current?.(false);
-    mediaSubmissionResolverRef.current?.(false);
+    paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
     activeMediaInputsRef.current = [];
     const run = nativeLlmRun.current;
@@ -1283,7 +1318,7 @@ export function App() {
     () => () => {
       void nativeLlmRun.current?.cancel();
       confirmationResolverRef.current?.(false);
-      mediaSubmissionResolverRef.current?.(false);
+      paidSubmissionResolverRef.current?.(false);
       mediaSelectionResolverRef.current?.(undefined);
     },
     [],
@@ -1674,24 +1709,6 @@ export function App() {
       : '';
     const promptForAgent = prompt.includes('[附件：') ? prompt : `${prompt}${attachmentContext}`;
     setComposer('');
-    if (isModelSchemaQuery(prompt)) {
-      try {
-        const capability = inferAgentCapability(prompt);
-        const catalog = await callWorker('model.catalog.list', {
-          capability: capability === 'image' || capability === 'video' ? capability : undefined,
-        });
-        const summary = catalog.models
-          .map(
-            (item) =>
-              `${item.providerName} / ${item.modelName}: ${item.schemaStatus === 'confirmed' ? `${item.adapters.length} 个适配器，必填 ${item.missingRequired.join('、') || '无'}` : 'schema 尚未配置'}`,
-          )
-          .join('\n');
-        setChatMessage(summary || '当前没有找到匹配的模型或参数 schema。');
-      } catch (reason) {
-        setChatMessage(reason instanceof Error ? reason.message : '模型目录查询失败');
-      }
-      return;
-    }
     if (
       (selectedLlmProfile || llmProfiles.length > 0) &&
       (modelSelection || (selectedLlmProfile && selectedLlmModel) || llmProfiles.length > 0)
@@ -1819,7 +1836,7 @@ export function App() {
             });
             if (!pending.confirmation)
               throw new Error('Image submission confirmation is unavailable.');
-            if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+            if (!(await requestMediaSubmissionApproval(pending.confirmation))) {
               await callWorker('media.task.cancel', { jobId: unified.job.id });
               return;
             }
@@ -1844,7 +1861,7 @@ export function App() {
             });
             if (!pending.confirmation)
               throw new Error('Video submission confirmation is unavailable.');
-            if (!window.confirm(mediaConfirmationMessage(pending.confirmation))) {
+            if (!(await requestMediaSubmissionApproval(pending.confirmation))) {
               await callWorker('media.task.cancel', { jobId: unified.job.id });
               return;
             }
@@ -1980,7 +1997,7 @@ export function App() {
     if (!current || !isGenerationActive(current)) return;
     const agentTaskId = agentTask?.task.id;
     confirmationResolverRef.current?.(false);
-    mediaSubmissionResolverRef.current?.(false);
+    paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
     generationPollVersion.current += 1;
     if (current.executionMode === 'native') {
@@ -2313,9 +2330,44 @@ export function App() {
       };
     });
 
+  /** Detached-window counterpart of `saveAndPublishDocument`. */
+  const saveAndPublishDetachedDocument = (label: string) =>
+    withDetachedDocumentBusy(label, async (snapshot) => {
+      if (!snapshot.documentId) throw new Error('请先在独立窗口中创建文档草稿');
+      if (snapshot.state === 'in_review') throw new Error('审核中的版本不可编辑');
+      const saved = await callWorker('document.draft.save', {
+        documentId: snapshot.documentId,
+        kind: snapshot.kind as DocumentKind,
+        title: snapshot.title,
+        contentMarkdown: snapshot.content,
+        expectedDocumentRowVersion: snapshot.rowVersion,
+      });
+      const result = await callWorker('document.selfPublish', {
+        documentId: saved.id,
+        documentVersionId: saved.currentVersionId,
+        expectedDocumentRowVersion: saved.rowVersion,
+        expectedPublishedVersionId: saved.publishedVersionId,
+      });
+      const history = await callWorker('document.versions', { documentId: saved.id });
+      setDocuments(await callWorker('document.list', {}));
+      syncMainDocumentIfSelected(result.document, history);
+      return {
+        ...snapshot,
+        title: result.document.title,
+        content: result.document.currentVersion?.contentMarkdown ?? snapshot.content,
+        state: result.document.currentVersion?.state ?? 'published',
+        versions: history,
+        currentVersionId: result.document.currentVersionId,
+        publishedVersionId: result.document.publishedVersionId,
+        rowVersion: result.document.rowVersion,
+        busy: false,
+        statusMessage: `已发布权威版本 v${result.publication.publicationNo}`,
+      };
+    });
+
   const updateDetachedDocumentReview = (
     label: string,
-    action: 'submit' | 'requestChanges' | 'publish' | 'restore',
+    action: 'requestChanges' | 'publish' | 'restore',
     versionId?: string,
   ) =>
     withDetachedDocumentBusy(label, async (snapshot) => {
@@ -2344,13 +2396,7 @@ export function App() {
           statusMessage: `已从历史版本恢复为 v${restored.currentVersion?.version ?? '-'}`,
         };
       }
-      if (action === 'submit') {
-        await callWorker('document.review.submit', {
-          documentId: snapshot.documentId,
-          documentVersionId: snapshot.currentVersionId,
-          expectedDocumentRowVersion: snapshot.rowVersion,
-        });
-      } else if (action === 'requestChanges') {
+      if (action === 'requestChanges') {
         await callWorker('document.review.requestChanges', {
           documentId: snapshot.documentId,
           documentVersionId: snapshot.currentVersionId,
@@ -2393,7 +2439,7 @@ export function App() {
         publishedVersionId: refreshed.publishedVersionId,
         rowVersion: refreshed.rowVersion,
         busy: false,
-        statusMessage: action === 'submit' ? '已提交审核' : '已退回修改，可继续编辑后重新提交审核',
+        statusMessage: '已退回修改，可继续编辑后重新发布',
       };
     });
 
@@ -2434,10 +2480,10 @@ export function App() {
         void pushDetachedSnapshot(label, { ...snapshot, content: action.value, statusMessage: '' });
       } else if (action.type === 'document-save') {
         void saveDetachedDocument(label);
+      } else if (action.type === 'document-save-publish') {
+        void saveAndPublishDetachedDocument(label);
       } else if (action.type === 'document-restore') {
         void updateDetachedDocumentReview(label, 'restore', action.versionId);
-      } else if (action.type === 'document-submit-review') {
-        void updateDetachedDocumentReview(label, 'submit');
       } else if (action.type === 'document-request-changes') {
         void updateDetachedDocumentReview(label, 'requestChanges');
       } else if (action.type === 'document-publish') {
@@ -2588,7 +2634,6 @@ export function App() {
       generation={generation}
       agentTask={agentTask}
       confirmation={agentConfirmation}
-      mediaSubmissionConfirmation={mediaSubmissionConfirmation}
       activeVideoTaskCount={projectTasks?.activeCount ?? 0}
       agentModelSelection={agentModelSelection}
       mediaModelSelection={agentMediaSelection}
@@ -2610,9 +2655,13 @@ export function App() {
       }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
       onOpenProtectedUi={openAgentProtectedUi}
-      onConfirmMediaSubmission={(approved) => mediaSubmissionResolverRef.current?.(approved)}
       onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
       onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
+      selectedChapterCount={episodeChapterIds.length}
+      onClearSelectedChapters={() => {
+        setEpisodeChapterIds([]);
+        setChatMessage('已清除章节上下文，后续消息按项目文档任务处理。');
+      }}
       onConfirmSchemaProposal={(adapterKey, version) => {
         void confirmSchemaProposal(adapterKey, version);
       }}
@@ -2739,18 +2788,27 @@ export function App() {
     />
   );
 
-  const projectDocuments = documents.filter(
-    (item) => item.kind === 'outline' || item.kind === 'plan',
-  );
-  const characterSceneDocuments = documents.filter(
-    (item) => item.kind === 'character' || item.kind === 'scene',
+  // The open document stays listed even when it does not match the active
+  // filter, so a task-log-opened note or storyboard draft is never edited from
+  // a hidden row.
+  const visibleDocuments = documents.filter(
+    (item) =>
+      (isWorkspaceDocument(item) && matchesDocumentFilter(item, documentKindFilter)) ||
+      item.id === document?.id,
   );
 
-  const renderDocumentToolbar = (
-    eyebrow: string,
-    fallbackTitle: string,
-    stayView?: WorkspaceView,
-  ) => (
+  /**
+   * A new document adopts the active kind filter so that it lands in the list
+   * the user is looking at. With no filter it defaults to `outline`, the
+   * primary project-document kind, rather than a `note` that the merged list
+   * would not show.
+   */
+  const newDocumentOfActiveKind = () => {
+    newDocument();
+    setDocumentKind(documentKindFilter === 'all' ? 'outline' : documentKindFilter);
+  };
+
+  const renderDocumentToolbar = (eyebrow: string, fallbackTitle: string) => (
     <div className="workspace-toolbar">
       <div>
         <span className="eyebrow">{eyebrow}</span>
@@ -2762,11 +2820,7 @@ export function App() {
           type="button"
           aria-label="导入 Markdown"
           title="导入 Markdown"
-          onClick={() =>
-            void importMarkdownDocument().then(() => {
-              if (stayView) setView(stayView);
-            })
-          }
+          onClick={() => void importMarkdownDocument()}
           disabled={!writable || contentBusy}
         >
           <FileUp size={15} />
@@ -2775,10 +2829,7 @@ export function App() {
         <button
           className="button secondary"
           type="button"
-          onClick={() => {
-            newDocument();
-            if (stayView) setView(stayView);
-          }}
+          onClick={newDocumentOfActiveKind}
           disabled={!writable}
         >
           <FilePlus2 size={15} />
@@ -2787,23 +2838,21 @@ export function App() {
         <button
           className="button primary"
           type="button"
+          onClick={() => void saveAndPublishDocument()}
+          disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
+          title="保存当前内容并直接发布为权威版本"
+        >
+          <Save size={15} />
+          保存并发布
+        </button>
+        <button
+          className="button secondary"
+          type="button"
           onClick={() => void saveDocument()}
           disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
         >
-          <Save size={15} />
           保存草稿
         </button>
-        {document?.currentVersion &&
-          ['draft', 'changes_requested'].includes(document.currentVersion.state) && (
-            <button
-              className="button secondary"
-              type="button"
-              onClick={() => void submitDocumentReview()}
-              disabled={!documentEditorWritable || contentBusy || documentDirty}
-            >
-              提交审核
-            </button>
-          )}
         {document?.currentVersion?.state === 'in_review' && (
           <>
             <button
@@ -2820,7 +2869,7 @@ export function App() {
               onClick={() => void publishDocument()}
               disabled={!writable || contentBusy}
             >
-              发布权威版本
+              发布
             </button>
           </>
         )}
@@ -2848,11 +2897,9 @@ export function App() {
             disabled={!documentEditorWritable}
             aria-label="文档类型"
           >
-            {(
-              ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'] as DocumentKind[]
-            ).map((kind) => (
+            {DOCUMENT_KIND_ORDER.map((kind) => (
               <option key={kind} value={kind}>
-                {kind}
+                {DOCUMENT_KIND_LABELS[kind]}
               </option>
             ))}
           </select>
@@ -2890,11 +2937,6 @@ export function App() {
       )}
     </div>
   );
-
-  const openCharacterSceneDocument = async (item: DocumentSummary) => {
-    await openDocumentById(item.id);
-    setView('characters');
-  };
 
   return (
     <div className="app-shell" data-left-open={leftOpen} data-navigation-mode={navigationMode}>
@@ -3085,6 +3127,13 @@ export function App() {
         </div>
       )}
 
+      {paidSubmissionApproval && (
+        <MediaSubmissionConfirmationDialog
+          confirmation={paidSubmissionApproval}
+          onDecide={(approved) => paidSubmissionResolverRef.current?.(approved)}
+        />
+      )}
+
       <ResizableAppLayout
         projectId={project?.id}
         sidebarOpen={leftOpen}
@@ -3137,26 +3186,6 @@ export function App() {
                 <Clapperboard size={16} />
                 <span>场次与镜头</span>
                 <span className="count">{shots.length}</span>
-              </button>
-              <button
-                className={`nav-item ${
-                  navigationMode === 'project' &&
-                  (view === 'characters' ||
-                    (view === 'documents' &&
-                      document?.kind &&
-                      (document.kind === 'character' || document.kind === 'scene')))
-                    ? 'active'
-                    : ''
-                }`}
-                type="button"
-                onClick={() => {
-                  setNavigationMode('project');
-                  setView('characters');
-                }}
-              >
-                <Aperture size={16} />
-                <span>角色与场景</span>
-                <span className="count">{characterSceneDocuments.length}</span>
               </button>
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'assets' ? 'active' : ''}`}
@@ -3320,11 +3349,23 @@ export function App() {
                 </span>
               </div>
               {health && (
-                <small>
-                  Worker {health.workerVersion} · PID {health.pid}
-                </small>
+                <>
+                  <small>Worker {health.workerVersion}</small>
+                  <details className="runtime-diagnostics">
+                    <summary>诊断详情</summary>
+                    <small>PID {health.pid}</small>
+                    {sqlite && (
+                      <small>
+                        SQLite {sqlite.sqliteVersion} · {sqlite.journalMode.toUpperCase()}
+                      </small>
+                    )}
+                    <small>
+                      {health.platform} · {health.arch} · Node {health.nodeVersion}
+                    </small>
+                  </details>
+                </>
               )}
-              {sqlite && (
+              {!health && sqlite && (
                 <small>
                   SQLite {sqlite.sqliteVersion} · {sqlite.journalMode.toUpperCase()}
                 </small>
@@ -3397,28 +3438,45 @@ export function App() {
                           className="icon-button subtle"
                           type="button"
                           title="新建文档"
-                          onClick={() => {
-                            newDocument();
-                            setDocumentKind('outline');
-                          }}
+                          onClick={newDocumentOfActiveKind}
                           disabled={!writable}
                         >
                           <FilePlus2 size={14} />
                         </button>
                       </div>
-                      {projectDocuments.map((item) => (
+                      <div className="document-kind-filters" role="group" aria-label="文档类型筛选">
+                        {DOCUMENT_KIND_FILTERS.map((filter) => (
+                          <button
+                            className={documentKindFilter === filter.id ? 'active' : ''}
+                            type="button"
+                            key={filter.id}
+                            aria-pressed={documentKindFilter === filter.id}
+                            onClick={() => setDocumentKindFilter(filter.id)}
+                          >
+                            {filter.label}
+                          </button>
+                        ))}
+                      </div>
+                      {visibleDocuments.map((item) => (
                         <button
-                          className={`tree-item ${document?.id === item.id ? 'selected' : ''}`}
+                          className={`tree-item with-kind ${document?.id === item.id ? 'selected' : ''}`}
                           type="button"
                           key={item.id}
                           onClick={() => void selectDocument(item)}
                         >
                           <FileText size={13} />
                           <span>{item.title}</span>
+                          <small className="tree-item-kind">
+                            {DOCUMENT_KIND_LABELS[item.kind]}
+                          </small>
                         </button>
                       ))}
-                      {projectDocuments.length === 0 && (
-                        <small className="tree-empty">暂无正式资料</small>
+                      {visibleDocuments.length === 0 && (
+                        <small className="tree-empty">
+                          {documentKindFilter === 'all'
+                            ? '暂无文档'
+                            : `暂无${DOCUMENT_KIND_LABELS[documentKindFilter]}类型文档`}
+                        </small>
                       )}
                       <div className="tree-heading nested">
                         <span>约束条件</span>
@@ -3442,43 +3500,6 @@ export function App() {
                       )}
                     </aside>
                     <div className="directory-pane">{renderDocumentEditor()}</div>
-                  </div>
-                ) : (
-                  <EmptyWorkspace />
-                )}
-              </>
-            ) : view === 'characters' ? (
-              <>
-                {renderDocumentToolbar('角色与场景', '角色与场景', 'characters')}
-                {project ? (
-                  <div className="directory-layout">
-                    <aside className="directory-index" aria-label="角色与场景目录">
-                      <div className="tree-heading">
-                        <span>角色与场景</span>
-                      </div>
-                      {characterSceneDocuments.map((item) => (
-                        <button
-                          className={`tree-item ${document?.id === item.id ? 'selected' : ''}`}
-                          type="button"
-                          key={item.id}
-                          onClick={() => void openCharacterSceneDocument(item)}
-                        >
-                          <FileText size={13} />
-                          <span>{item.title}</span>
-                        </button>
-                      ))}
-                      {characterSceneDocuments.length === 0 && (
-                        <small className="tree-empty">暂无角色与场景文档</small>
-                      )}
-                    </aside>
-                    <div className="directory-pane">
-                      {document?.kind &&
-                      (document.kind === 'character' || document.kind === 'scene') ? (
-                        renderDocumentEditor()
-                      ) : (
-                        <EmptyWorkspace title="请选择角色或场景文档" />
-                      )}
-                    </div>
                   </div>
                 ) : (
                   <EmptyWorkspace />

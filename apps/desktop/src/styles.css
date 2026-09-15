@@ -1724,6 +1724,31 @@ button {
   border-top: 1px solid var(--border-subtle);
 }
 
+/* Runtime versions are diagnostic detail; keep the rail focused on tasks. */
+.runtime-diagnostics {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.runtime-diagnostics summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.runtime-diagnostics summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-diagnostics summary:hover {
+  color: var(--text-default);
+}
+
+.runtime-diagnostics small {
+  display: block;
+  margin-top: 3px;
+  word-break: break-all;
+}
+
 .content-tree {
   min-height: 0;
   overflow: auto;
@@ -1784,6 +1809,43 @@ button {
   display: block;
   padding: 6px 7px;
   color: #686e72;
+  font-size: 10px;
+}
+
+.document-kind-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 2px 7px 7px;
+}
+
+.document-kind-filters button {
+  height: 22px;
+  padding: 0 8px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  background: transparent;
+  font-size: 10px;
+}
+
+.document-kind-filters button:hover {
+  color: var(--text-default);
+  border-color: var(--border-default);
+}
+
+.document-kind-filters button.active {
+  color: var(--accent);
+  border-color: var(--accent-deep);
+  background: var(--accent-panel);
+}
+
+.tree-item.with-kind {
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+}
+
+.tree-item-kind {
+  color: var(--text-faint);
   font-size: 10px;
 }
 
@@ -2010,6 +2072,10 @@ button {
     top: 0;
     flex: 0 0 100%;
     background: var(--rail-bg);
+  }
+
+  .directory-index .document-kind-filters {
+    flex: 0 0 100%;
   }
 
   .directory-index .tree-item {
@@ -4932,6 +4998,39 @@ button {
   white-space: nowrap;
 }
 
+.chapter-context-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  color: var(--accent-soft);
+  border: 1px solid var(--accent-deep);
+  border-radius: 4px;
+  background: var(--accent-panel);
+  font-size: 9px;
+}
+
+.chapter-context-chip span {
+  min-width: 0;
+  flex: 1;
+}
+
+.chapter-context-chip button {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 0 7px;
+  color: var(--accent-soft);
+  border: 1px solid var(--accent-deep);
+  border-radius: 3px;
+  background: transparent;
+  font-size: 9px;
+}
+
+.chapter-context-chip button:hover {
+  color: var(--text-primary);
+  background: var(--control-hover-bg);
+}
+
 .message-list {
   display: flex;
   flex: 1;
@@ -5465,6 +5564,23 @@ button {
   border-radius: 6px;
   background: var(--surface-bg);
   box-shadow: 0 18px 55px var(--overlay-shadow);
+}
+
+/* Shares the in-session card markup, so only the modal shell differs. */
+.media-confirmation-dialog {
+  width: min(520px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-bg);
+  box-shadow: 0 18px 55px var(--overlay-shadow);
+}
+
+.media-confirmation-dialog .agent-confirmation {
+  margin: 0;
+  border: none;
+  background: transparent;
 }
 
 .document-close-dialog h2 {

@@ -223,70 +223,6 @@ describe('ChatPanel attempt metadata', () => {
     expect(onSelect).toHaveBeenCalledWith('profile', 'model');
   });
 
-  it('shows the frozen media draft version and parameters before paid submission', () => {
-    const conversation: ConversationInfo = {
-      id: 'conversation',
-      projectId: 'project',
-      scopeType: 'project',
-      title: '媒体确认',
-      createdAt: '2026-09-07T00:00:00.000Z',
-      updatedAt: '2026-09-07T00:00:00.000Z',
-    };
-    const onConfirm = vi.fn();
-    render(
-      <ChatPanel
-        scopeType="project"
-        scopeAvailable
-        writable
-        conversations={[conversation]}
-        conversation={conversation}
-        messages={[]}
-        composer=""
-        statusMessage=""
-        legacyLlmConfigured={false}
-        llmProfiles={[]}
-        llmModels={[]}
-        selectedLlmProfileId=""
-        selectedLlmModelId=""
-        mediaSubmissionConfirmation={{
-          confirmationToken: 'one-time-token',
-          jobId: 'media-job',
-          kind: 'video',
-          draftVersion: 1,
-          providerName: '媒体供应商',
-          modelName: '视频模型',
-          adapterKey: 'TEXT_TO_VIDEO:test:model:v1',
-          parameterSummary: [
-            { key: 'duration', value: '5' },
-            { key: 'prompt', value: '雨夜的城市街道' },
-          ],
-          costNotice: { required: true, summary: '本次提交可能产生费用。' },
-          expiresAt: '2999-01-01T00:00:00.000Z',
-        }}
-        onConfirmMediaSubmission={onConfirm}
-        onSelectConversation={vi.fn()}
-        onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
-        onRetryGeneration={vi.fn()}
-        onLlmProfileChange={vi.fn()}
-        onLlmModelChange={vi.fn()}
-        onOpenProviderSettings={vi.fn()}
-        onComposerChange={vi.fn()}
-        onCancelGeneration={vi.fn()}
-        onSendMessage={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText('草稿版本 v1')).toBeInTheDocument();
-    expect(screen.getByText('duration')).toBeInTheDocument();
-    expect(screen.getByText('雨夜的城市街道')).toBeInTheDocument();
-    expect(screen.getByText('本次提交可能产生费用。')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '批准' }));
-    fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
-    expect(onConfirm).toHaveBeenNthCalledWith(1, true);
-    expect(onConfirm).toHaveBeenNthCalledWith(2, false);
-  });
-
   it('keeps media model selection separate and submits validated parameters', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
@@ -1161,5 +1097,54 @@ describe('ChatPanel attempt metadata', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '恢复会话' }));
     expect(onRestoreConversation).toHaveBeenCalledWith('conversation');
+  });
+
+  it('surfaces the sticky chapter context and clears it on request', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '短剧会话',
+      createdAt: '2026-09-15T00:00:00.000Z',
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    };
+    const onClearSelectedChapters = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        selectedChapterCount={2}
+        onClearSelectedChapters={onClearSelectedChapters}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onPromoteMessage={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    // Selected chapters turn every following turn into a short-drama task, so
+    // the state has to stay visible after the chapter workspace is left.
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '已加入 2 个章节，后续消息都按短剧任务处理',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '清除' }));
+    expect(onClearSelectedChapters).toHaveBeenCalledOnce();
   });
 });

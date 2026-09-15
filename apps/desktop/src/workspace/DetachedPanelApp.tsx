@@ -7,7 +7,6 @@ import {
   FileUp,
   RotateCcw,
   Save,
-  Send,
   Undo2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
@@ -147,18 +146,9 @@ function DetachedDocumentPanel({
   snapshot: DetachedDocumentSnapshot;
   onAction: (action: DetachedPanelAction) => void;
 }) {
-  const currentVersion = snapshot.versions.find(
-    (version) => version.id === snapshot.currentVersionId,
-  );
   const editorWritable =
     snapshot.writable &&
     ['draft', 'changes_requested', 'published', 'new'].includes(snapshot.state);
-  const dirty = Boolean(
-    snapshot.title.trim() &&
-    (!currentVersion ||
-      currentVersion.titleSnapshot !== snapshot.title ||
-      currentVersion.contentMarkdown !== snapshot.content),
-  );
 
   return (
     <section className="detached-document-panel">
@@ -190,24 +180,21 @@ function DetachedDocumentPanel({
           <button
             className="button primary"
             type="button"
-            onClick={() => onAction({ panelId: 'document', type: 'document-save' })}
+            title="保存当前内容并直接发布为权威版本"
+            onClick={() => onAction({ panelId: 'document', type: 'document-save-publish' })}
             disabled={!editorWritable || snapshot.busy || !snapshot.title.trim()}
           >
             <Save size={15} />
+            保存并发布
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => onAction({ panelId: 'document', type: 'document-save' })}
+            disabled={!editorWritable || snapshot.busy || !snapshot.title.trim()}
+          >
             保存草稿
           </button>
-          {['draft', 'changes_requested'].includes(snapshot.state) && (
-            <button
-              className="button secondary"
-              type="button"
-              title="提交审核"
-              onClick={() => onAction({ panelId: 'document', type: 'document-submit-review' })}
-              disabled={!editorWritable || snapshot.busy || dirty}
-            >
-              <Send size={15} />
-              提交审核
-            </button>
-          )}
           {snapshot.state === 'in_review' && (
             <>
               <button
@@ -223,12 +210,12 @@ function DetachedDocumentPanel({
               <button
                 className="button primary"
                 type="button"
-                title="发布权威版本"
+                title="发布当前审核通过的版本"
                 onClick={() => onAction({ panelId: 'document', type: 'document-publish' })}
                 disabled={!snapshot.writable || snapshot.busy}
               >
                 <CheckCircle2 size={15} />
-                发布权威版本
+                发布
               </button>
             </>
           )}

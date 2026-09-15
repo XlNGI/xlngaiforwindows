@@ -79,13 +79,22 @@ describe('DetachedPanelApp', () => {
       eventApi.listeners.get('workspace-panel-snapshot')?.({ payload: envelope });
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存并发布' }));
     expect(eventApi.emitTo).toHaveBeenCalledWith('main', 'workspace-panel-action', {
       label: 'workspace-document-project-document',
       projectId: 'project',
       entityId: 'document',
       sequence: 1,
-      payload: { panelId: 'document', type: 'document-submit-review' },
+      payload: { panelId: 'document', type: 'document-save-publish' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+    expect(eventApi.emitTo).toHaveBeenCalledWith('main', 'workspace-panel-action', {
+      label: 'workspace-document-project-document',
+      projectId: 'project',
+      entityId: 'document',
+      sequence: 2,
+      payload: { panelId: 'document', type: 'document-save' },
     });
 
     fireEvent.change(screen.getByDisplayValue('Outline'), { target: { value: 'Outline 2' } });
@@ -93,19 +102,26 @@ describe('DetachedPanelApp', () => {
       label: 'workspace-document-project-document',
       projectId: 'project',
       entityId: 'document',
-      sequence: 2,
+      sequence: 3,
       payload: { panelId: 'document', type: 'document-title', value: 'Outline 2' },
     });
     expect(screen.queryByLabelText('类型')).not.toBeInTheDocument();
 
-    expect(screen.getByRole('button', { name: '提交审核' })).toBeDisabled();
+    // A busy panel blocks both save paths instead of queueing a second write.
+    act(() => {
+      eventApi.listeners.get('workspace-panel-snapshot')?.({
+        payload: { ...envelope, sequence: 2, payload: { ...snapshot, busy: true } },
+      });
+    });
+    expect(screen.getByRole('button', { name: '保存并发布' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: '附加' }));
     expect(eventApi.emitTo).toHaveBeenCalledWith('main', 'workspace-panel-action', {
       label: 'workspace-document-project-document',
       projectId: 'project',
       entityId: 'document',
-      sequence: 3,
+      sequence: 4,
       payload: { panelId: 'document', type: 'attach' },
     });
     expect(windowApi.close).toHaveBeenCalledOnce();
