@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { BarChart3, Database, Moon, Palette, Server, Settings2, Sun, X } from 'lucide-react';
+import { BarChart3, Database, Moon, Server, Settings2, Sun, X } from 'lucide-react';
 import { ProviderConnectionsView } from './settings/ProviderConnectionsView';
 import { UsageDashboard } from './settings/UsageDashboard';
 import { THEME_OPTIONS, useTheme, type ThemeId } from './theme';
@@ -31,7 +31,6 @@ export function SettingsCenter({
   const themeIcons: Record<ThemeId, typeof Moon> = {
     dark: Moon,
     light: Sun,
-    midnight: Palette,
   };
 
   return (

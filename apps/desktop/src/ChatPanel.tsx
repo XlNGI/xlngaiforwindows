@@ -202,11 +202,9 @@ export function ChatPanel({
   const fileInputId = 'chat-attachment-input';
   const fileInputRef = useRef<HTMLInputElement>(null);
   /**
-   * The model, provider and research-mode selects used to occupy three rows
-   * at the top of every conversation. They are configuration, not conversation
-   * content, so they stay collapsed behind one summary row and only open on
-   * demand. The summary always names the active model so the user never has to
-   * expand to know which one is answering.
+   * Model, provider and research-mode controls are configuration, not
+   * conversation content. They live inside the composer as quiet chips so the
+   * chat remains focused on messages.
    */
   const [modelControlsOpen, setModelControlsOpen] = useState(false);
   /**
@@ -237,8 +235,7 @@ export function ChatPanel({
       : researchMode === 'network_disabled'
         ? '禁止联网'
         : undefined;
-  const generationLocked =
-    generation?.status === 'prepared' || generation?.status === 'streaming';
+  const generationLocked = generation?.status === 'prepared' || generation?.status === 'streaming';
   /**
    * Paid media submissions never render here. `media-confirmation.tsx` owns that
    * review surface so every paid path shows the same frozen draft; this in-session
@@ -375,76 +372,13 @@ export function ChatPanel({
           )}
         </div>
       </div>
-      <div className="llm-context-bar">
-        <button
-          className="llm-model-summary"
-          type="button"
-          aria-expanded={modelControlsOpen}
-          aria-controls="chat-model-controls"
-          aria-label="模型与供应商设置"
-          onClick={() => setModelControlsOpen((open) => !open)}
-        >
-          <SlidersHorizontal size={14} />
-          <span className="llm-model-summary-name">
-            {llmStatus?.configured || activeModelName
-              ? (activeModelName ?? '未选择模型')
-              : '尚未配置 LLM 连接'}
-          </span>
-          {activeProfileName && <small>{activeProfileName}</small>}
-          {researchModeLabel && <small className="llm-model-summary-flag">{researchModeLabel}</small>}
-          {llmStatus?.configurationSource === 'environment' && (
-            <small className="llm-model-summary-flag">旧版环境变量配置</small>
-          )}
-          {modelControlsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
+      <div className="llm-context-bar composer-inline-controls">
         {legacyLlmConfigured && (
           <div className="legacy-llm-notice">
             <span>OPENAI_API_KEY 旧版入口仍可用，重新录入后可迁移到 Windows 安全存储。</span>
             <button type="button" onClick={onOpenProviderSettings}>
               迁移到供应商设置
             </button>
-          </div>
-        )}
-        {modelControlsOpen && llmProfiles.length > 0 && (
-          <div className="llm-provider-selectors" id="chat-model-controls">
-            <select
-              aria-label="LLM 供应商连接"
-              value={selectedLlmProfileId}
-              disabled={generationLocked}
-              onChange={(event) => onLlmProfileChange(event.target.value)}
-            >
-              {llmProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="LLM 模型"
-              value={selectedLlmModelId}
-              disabled={generationLocked}
-              onChange={(event) => onLlmModelChange(event.target.value)}
-            >
-              {llmModels
-                .filter((model) => model.providerProfileId === selectedLlmProfileId)
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.displayName}
-                  </option>
-                ))}
-            </select>
-            {onResearchModeChange && (
-              <select
-                aria-label="Agent 研究模式"
-                value={researchMode}
-                disabled={generationLocked}
-                onChange={(event) => onResearchModeChange(event.target.value as AgentResearchMode)}
-              >
-                <option value="auto">研究：自动</option>
-                <option value="project_only">研究：仅项目资料</option>
-                <option value="network_disabled">研究：禁止联网</option>
-              </select>
-            )}
           </div>
         )}
         {contextPreview && (
@@ -772,6 +706,71 @@ export function ChatPanel({
           onAddAttachments(event.dataTransfer.files);
         }}
       >
+        <button
+          className="llm-model-summary"
+          type="button"
+          aria-expanded={modelControlsOpen}
+          aria-controls="chat-model-controls"
+          aria-label="模型与供应商设置"
+          onClick={() => setModelControlsOpen((open) => !open)}
+        >
+          <SlidersHorizontal size={13} />
+          <span className="llm-model-summary-name">
+            {llmStatus?.configured || activeModelName
+              ? (activeModelName ?? '未选择模型')
+              : '尚未配置 LLM 连接'}
+          </span>
+          {activeProfileName && <small>{activeProfileName}</small>}
+          {researchModeLabel && (
+            <small className="llm-model-summary-flag">{researchModeLabel}</small>
+          )}
+          {llmStatus?.configurationSource === 'environment' && (
+            <small className="llm-model-summary-flag">旧版环境变量配置</small>
+          )}
+          {modelControlsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+        {modelControlsOpen && llmProfiles.length > 0 && (
+          <div className="llm-provider-selectors" id="chat-model-controls">
+            <select
+              aria-label="LLM 供应商连接"
+              value={selectedLlmProfileId}
+              disabled={generationLocked}
+              onChange={(event) => onLlmProfileChange(event.target.value)}
+            >
+              {llmProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="LLM 模型"
+              value={selectedLlmModelId}
+              disabled={generationLocked}
+              onChange={(event) => onLlmModelChange(event.target.value)}
+            >
+              {llmModels
+                .filter((model) => model.providerProfileId === selectedLlmProfileId)
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.displayName}
+                  </option>
+                ))}
+            </select>
+            {onResearchModeChange && (
+              <select
+                aria-label="Agent 研究模式"
+                value={researchMode}
+                disabled={generationLocked}
+                onChange={(event) => onResearchModeChange(event.target.value as AgentResearchMode)}
+              >
+                <option value="auto">研究：自动</option>
+                <option value="project_only">研究：仅项目资料</option>
+                <option value="network_disabled">研究：禁止联网</option>
+              </select>
+            )}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="chat-attachments" aria-label="已添加附件">
             {attachments.map((attachment) => (
@@ -935,8 +934,8 @@ function AgentActivityPanel({ detail }: { detail: AgentTaskDetail }) {
         <span>{agentPhaseLabels[detail.task.phase]}</span>
         {latestStep && (
           <span>
-            Provider 步骤 {latestStep.ordinal + 1} · {agentStepStatusLabels[latestStep.status]} · 工具{' '}
-            {latestStep.toolCallCount} 次
+            Provider 步骤 {latestStep.ordinal + 1} · {agentStepStatusLabels[latestStep.status]} ·
+            工具 {latestStep.toolCallCount} 次
           </span>
         )}
       </div>
@@ -958,7 +957,9 @@ function AgentActivityPanel({ detail }: { detail: AgentTaskDetail }) {
       ) : (
         <p className="agent-activity-empty">正在准备项目上下文和工具…</p>
       )}
-      {detail.task.errorMessage && <p className="agent-activity-error">{detail.task.errorMessage}</p>}
+      {detail.task.errorMessage && (
+        <p className="agent-activity-error">{detail.task.errorMessage}</p>
+      )}
     </section>
   );
 }

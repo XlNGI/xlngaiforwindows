@@ -7,8 +7,8 @@ function ThemeProbe() {
   return (
     <div>
       <span data-testid="theme">{theme}</span>
-      <button type="button" onClick={() => setTheme('midnight')}>
-        午夜
+      <button type="button" onClick={() => setTheme('light')}>
+        浅色
       </button>
     </div>
   );
@@ -35,12 +35,12 @@ describe('theme provider', () => {
     expect(document.documentElement.dataset.theme).toBe('dark');
 
     act(() => {
-      screen.getByRole('button', { name: '午夜' }).click();
+      screen.getByRole('button', { name: '浅色' }).click();
     });
 
-    expect(screen.getByTestId('theme')).toHaveTextContent('midnight');
-    expect(document.documentElement.dataset.theme).toBe('midnight');
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('midnight');
+    expect(screen.getByTestId('theme')).toHaveTextContent('light');
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
   });
 
   it('restores a stored theme on startup', () => {

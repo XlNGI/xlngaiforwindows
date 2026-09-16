@@ -12,12 +12,11 @@ import {
 export const THEME_STORAGE_KEY = 'ai-video.ui-theme';
 const THEME_CHANNEL_NAME = 'ai-video.ui-theme';
 
-export type ThemeId = 'dark' | 'light' | 'midnight';
+export type ThemeId = 'dark' | 'light';
 
 export const THEME_OPTIONS: Array<{ id: ThemeId; label: string }> = [
   { id: 'dark', label: '深色' },
   { id: 'light', label: '浅色' },
-  { id: 'midnight', label: '午夜' },
 ];
 
 interface ThemeContextValue {
@@ -28,13 +27,17 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 function isThemeId(value: string | null): value is ThemeId {
-  return value === 'dark' || value === 'light' || value === 'midnight';
+  return value === 'dark' || value === 'light';
 }
 
 export function readStoredTheme(): ThemeId {
   if (typeof window === 'undefined') return 'dark';
   const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-  return isThemeId(storedTheme) ? storedTheme : 'dark';
+  if (isThemeId(storedTheme)) return storedTheme;
+  if (storedTheme === 'midnight') {
+    window.localStorage.setItem(THEME_STORAGE_KEY, 'dark');
+  }
+  return 'dark';
 }
 
 export function applyTheme(theme: ThemeId): void {
