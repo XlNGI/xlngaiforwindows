@@ -291,6 +291,7 @@ function DetachedConversationPanel({
     <ChatPanel
       {...snapshot}
       onClose={() => void getCurrentWindow().close()}
+      showHeading={false}
       onSelectConversation={(conversation) =>
         onAction({
           panelId: 'conversation',

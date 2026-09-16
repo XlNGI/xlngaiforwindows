@@ -9,6 +9,7 @@ import {
   CircleCheck,
   Clapperboard,
   Copy,
+  Ellipsis,
   FilePlus2,
   FileText,
   FileUp,
@@ -18,9 +19,11 @@ import {
   Minus,
   PanelLeftClose,
   Plus,
+  Power,
   RotateCcw,
   Save,
   Settings2,
+  ShieldCheck,
   Square,
   WandSparkles,
   X,
@@ -595,6 +598,9 @@ export function App() {
   const [projectMessage, setProjectMessage] = useState('');
   const [projectBusy, setProjectBusy] = useState(false);
   const [startupLoaded, setStartupLoaded] = useState(false);
+  /** Inspect/backup/close are maintenance, not daily work, so they stay collapsed. */
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [providerSettingsRevision, setProviderSettingsRevision] = useState(0);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
@@ -1298,6 +1304,16 @@ export function App() {
     if (settingsOpen) return;
     void loadLlmCatalog();
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!projectMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!projectMenuRef.current?.contains(event.target as Node)) setProjectMenuOpen(false);
+    };
+    // `document` is the open DocumentDetail here, so the DOM must be reached via window.
+    window.document.addEventListener('pointerdown', handlePointerDown);
+    return () => window.document.removeEventListener('pointerdown', handlePointerDown);
+  }, [projectMenuOpen]);
 
   useEffect(() => {
     try {
@@ -2679,6 +2695,7 @@ export function App() {
       }}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
       showCloseAction={false}
+      showHeading={false}
       onSelectConversation={(selected) => void selectConversation(selected)}
       onCreateConversation={() => void createConversation()}
       onRenameConversation={(conversationId, title) =>
@@ -3224,42 +3241,73 @@ export function App() {
               {project ? (
                 <>
                   <div className="open-project-card">
-                    <strong>{project.name}</strong>
+                    <div className="open-project-title">
+                      <strong>{project.name}</strong>
+                      <div className="project-menu" ref={projectMenuRef}>
+                        <button
+                          className="project-menu-trigger"
+                          type="button"
+                          title="项目管理操作"
+                          aria-label="项目管理操作"
+                          aria-haspopup="menu"
+                          aria-expanded={projectMenuOpen}
+                          onClick={() => setProjectMenuOpen((open) => !open)}
+                        >
+                          <Ellipsis size={15} />
+                        </button>
+                        {projectMenuOpen && (
+                          <div className="project-menu-popup" role="menu" aria-label="项目管理操作">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setProjectMenuOpen(false);
+                                void runProjectAction(async () => {
+                                  const result = await callWorker('project.integrity', {});
+                                  return result.ok
+                                    ? `完整性检查通过 · Schema v${result.schemaVersion}`
+                                    : result.messages.join('; ');
+                                });
+                              }}
+                            >
+                              <ShieldCheck size={14} />
+                              <span>完整性检查</span>
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={!writable}
+                              onClick={() => {
+                                setProjectMenuOpen(false);
+                                void runProjectAction(
+                                  async () =>
+                                    `备份完成：${(await callWorker('project.backup', {})).path}`,
+                                );
+                              }}
+                            >
+                              <Save size={14} />
+                              <span>备份项目</span>
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setProjectMenuOpen(false);
+                                void closeProject();
+                              }}
+                            >
+                              <Power size={14} />
+                              <span>关闭项目</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                     <span title={project.rootPath}>{project.rootPath}</span>
                     <small>
                       {project.mode === 'read-write' ? '可写' : '只读'} · Schema v
                       {project.schemaVersion}
                     </small>
-                  </div>
-                  <div className="project-actions">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void runProjectAction(async () => {
-                          const result = await callWorker('project.integrity', {});
-                          return result.ok
-                            ? `完整性检查通过 · Schema v${result.schemaVersion}`
-                            : result.messages.join('; ');
-                        })
-                      }
-                    >
-                      检查
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void runProjectAction(
-                          async () => `备份完成：${(await callWorker('project.backup', {})).path}`,
-                        )
-                      }
-                      disabled={!writable}
-                    >
-                      <Save size={12} />
-                      备份
-                    </button>
-                    <button type="button" onClick={() => void closeProject()}>
-                      关闭
-                    </button>
                   </div>
                 </>
               ) : (

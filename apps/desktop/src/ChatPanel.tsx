@@ -5,12 +5,14 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Ellipsis,
   MessageSquarePlus,
   PanelRightClose,
   Paperclip,
   Pencil,
   RefreshCw,
   RotateCcw,
+  SlidersHorizontal,
   Square,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -83,6 +85,11 @@ interface ChatPanelProps {
   onContinueAgentTask?: () => void;
   onClose?: () => void;
   showCloseAction?: boolean;
+  /**
+   * Hosts that already render a panel title (docked pane tab, floating titlebar,
+   * detached window header) hide this heading so the panel is not labelled twice.
+   */
+  showHeading?: boolean;
   /** @deprecated Use onClose. Kept temporarily for component consumers outside the workspace host. */
   onCollapse?: () => void;
   onSelectConversation: (conversation: ConversationInfo) => void;
@@ -157,6 +164,7 @@ export function ChatPanel({
   onContinueAgentTask,
   onClose,
   showCloseAction = true,
+  showHeading = true,
   onCollapse,
   onSelectConversation,
   onCreateConversation,
@@ -194,6 +202,44 @@ export function ChatPanel({
   const fileInputId = 'chat-attachment-input';
   const fileInputRef = useRef<HTMLInputElement>(null);
   /**
+   * The model, provider and research-mode selects used to occupy three rows
+   * at the top of every conversation. They are configuration, not conversation
+   * content, so they stay collapsed behind one summary row and only open on
+   * demand. The summary always names the active model so the user never has to
+   * expand to know which one is answering.
+   */
+  const [modelControlsOpen, setModelControlsOpen] = useState(false);
+  /**
+   * Rename, archive and restore are infrequent, and they used to sit as three
+   * always-visible icon buttons next to the conversation selector. They now live
+   * behind one overflow trigger so the bar shows only what is used on every turn:
+   * the conversation picker and "new conversation".
+   */
+  const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
+  const conversationMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!conversationMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!conversationMenuRef.current?.contains(event.target as Node)) {
+        setConversationMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [conversationMenuOpen]);
+  const activeProfileName =
+    llmProfiles.find((profile) => profile.id === selectedLlmProfileId)?.name ?? llmStatus?.provider;
+  const activeModelName =
+    llmModels.find((model) => model.id === selectedLlmModelId)?.displayName ?? llmStatus?.model;
+  const researchModeLabel =
+    researchMode === 'project_only'
+      ? '仅项目资料'
+      : researchMode === 'network_disabled'
+        ? '禁止联网'
+        : undefined;
+  const generationLocked =
+    generation?.status === 'prepared' || generation?.status === 'streaming';
+  /**
    * Paid media submissions never render here. `media-confirmation.tsx` owns that
    * review surface so every paid path shows the same frozen draft; this in-session
    * card is only for Agent tool confirmations.
@@ -213,14 +259,16 @@ export function ChatPanel({
   );
   return (
     <section className="chat-panel panel-border" aria-label="项目 AI 助手">
-      <div className="panel-heading">
-        <span>项目 AI 助手</span>
-        {showCloseAction && close && (
-          <button className="icon-button subtle" type="button" title="关闭会话" onClick={close}>
-            <PanelRightClose size={16} />
-          </button>
-        )}
-      </div>
+      {showHeading && (
+        <div className="panel-heading">
+          <span>项目 AI 助手</span>
+          {showCloseAction && close && (
+            <button className="icon-button subtle" type="button" title="关闭会话" onClick={close}>
+              <PanelRightClose size={16} />
+            </button>
+          )}
+        </div>
+      )}
       <div className="conversation-bar">
         <select
           value={conversation?.id ?? ''}
@@ -255,66 +303,100 @@ export function ChatPanel({
         >
           <MessageSquarePlus size={16} />
         </button>
-        <button
-          className="icon-button subtle"
-          type="button"
-          title="重命名会话"
-          disabled={!writable || !conversation}
-          onClick={() => {
-            const current = conversation;
-            if (!current) return;
-            const title = window.prompt('新会话名称', current.title);
-            if (title?.trim()) onRenameConversation?.(current.id, title.trim());
-          }}
-        >
-          <Pencil size={14} />
-        </button>
-        <button
-          className="icon-button subtle"
-          type="button"
-          title="归档会话"
-          disabled={!writable || !conversation || Boolean(conversation.archivedAt)}
-          onClick={() => {
-            const current = conversation;
-            if (current) onArchiveConversation?.(current.id);
-          }}
-        >
-          <Archive size={14} />
-        </button>
-        <button
-          className="icon-button subtle"
-          type="button"
-          title="恢复会话"
-          disabled={!writable || !conversation || !conversation.archivedAt}
-          onClick={() => {
-            const current = conversation;
-            if (current) onRestoreConversation?.(current.id);
-          }}
-        >
-          <RotateCcw size={14} />
-        </button>
-        {canLoadMoreConversations && (
+        <div className="conversation-menu" ref={conversationMenuRef}>
           <button
             className="icon-button subtle"
             type="button"
-            title="加载更多会话"
-            onClick={onLoadMoreConversations}
+            title="更多会话操作"
+            aria-label="更多会话操作"
+            aria-haspopup="menu"
+            aria-expanded={conversationMenuOpen}
+            onClick={() => setConversationMenuOpen((open) => !open)}
           >
-            <ChevronDown size={14} />
+            <Ellipsis size={16} />
           </button>
-        )}
+          {conversationMenuOpen && (
+            <div className="conversation-menu-popup" role="menu" aria-label="会话操作">
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!writable || !conversation}
+                onClick={() => {
+                  const current = conversation;
+                  setConversationMenuOpen(false);
+                  if (!current) return;
+                  const title = window.prompt('新会话名称', current.title);
+                  if (title?.trim()) onRenameConversation?.(current.id, title.trim());
+                }}
+              >
+                <Pencil size={14} />
+                <span>重命名会话</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!writable || !conversation || Boolean(conversation.archivedAt)}
+                onClick={() => {
+                  const current = conversation;
+                  setConversationMenuOpen(false);
+                  if (current) onArchiveConversation?.(current.id);
+                }}
+              >
+                <Archive size={14} />
+                <span>归档会话</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!writable || !conversation || !conversation.archivedAt}
+                onClick={() => {
+                  const current = conversation;
+                  setConversationMenuOpen(false);
+                  if (current) onRestoreConversation?.(current.id);
+                }}
+              >
+                <RotateCcw size={14} />
+                <span>恢复会话</span>
+              </button>
+              {canLoadMoreConversations && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setConversationMenuOpen(false);
+                    onLoadMoreConversations?.();
+                  }}
+                >
+                  <ChevronDown size={14} />
+                  <span>加载更多会话</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       <div className="llm-context-bar">
-        <div className="llm-provider-status">
-          <span>{llmStatus?.provider ?? 'LLM'}</span>
-          <small>
-            {llmStatus?.configured
-              ? llmStatus.configurationSource === 'environment'
-                ? `旧版环境变量配置 · ${llmStatus.model}`
-                : llmStatus.model
+        <button
+          className="llm-model-summary"
+          type="button"
+          aria-expanded={modelControlsOpen}
+          aria-controls="chat-model-controls"
+          aria-label="模型与供应商设置"
+          onClick={() => setModelControlsOpen((open) => !open)}
+        >
+          <SlidersHorizontal size={14} />
+          <span className="llm-model-summary-name">
+            {llmStatus?.configured || activeModelName
+              ? (activeModelName ?? '未选择模型')
               : '尚未配置 LLM 连接'}
-          </small>
-        </div>
+          </span>
+          {activeProfileName && <small>{activeProfileName}</small>}
+          {researchModeLabel && <small className="llm-model-summary-flag">{researchModeLabel}</small>}
+          {llmStatus?.configurationSource === 'environment' && (
+            <small className="llm-model-summary-flag">旧版环境变量配置</small>
+          )}
+          {modelControlsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
         {legacyLlmConfigured && (
           <div className="legacy-llm-notice">
             <span>OPENAI_API_KEY 旧版入口仍可用，重新录入后可迁移到 Windows 安全存储。</span>
@@ -323,12 +405,12 @@ export function ChatPanel({
             </button>
           </div>
         )}
-        {llmProfiles.length > 0 && (
-          <div className="llm-provider-selectors">
+        {modelControlsOpen && llmProfiles.length > 0 && (
+          <div className="llm-provider-selectors" id="chat-model-controls">
             <select
               aria-label="LLM 供应商连接"
               value={selectedLlmProfileId}
-              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+              disabled={generationLocked}
               onChange={(event) => onLlmProfileChange(event.target.value)}
             >
               {llmProfiles.map((profile) => (
@@ -340,7 +422,7 @@ export function ChatPanel({
             <select
               aria-label="LLM 模型"
               value={selectedLlmModelId}
-              disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+              disabled={generationLocked}
               onChange={(event) => onLlmModelChange(event.target.value)}
             >
               {llmModels
@@ -355,7 +437,7 @@ export function ChatPanel({
               <select
                 aria-label="Agent 研究模式"
                 value={researchMode}
-                disabled={generation?.status === 'prepared' || generation?.status === 'streaming'}
+                disabled={generationLocked}
                 onChange={(event) => onResearchModeChange(event.target.value as AgentResearchMode)}
               >
                 <option value="auto">研究：自动</option>

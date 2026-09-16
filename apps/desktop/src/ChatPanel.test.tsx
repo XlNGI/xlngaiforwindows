@@ -1057,9 +1057,11 @@ describe('ChatPanel attempt metadata', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '归档会话' }));
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: '归档会话' }));
     expect(onArchiveConversation).toHaveBeenCalledWith('conversation');
-    fireEvent.click(screen.getByRole('button', { name: '加载更多会话' }));
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: '加载更多会话' }));
     expect(onLoadMoreConversations).toHaveBeenCalledTimes(1);
 
     const archived: ConversationInfo = { ...conversation, archivedAt: '2026-08-16T00:00:00.000Z' };
@@ -1095,7 +1097,8 @@ describe('ChatPanel attempt metadata', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '恢复会话' }));
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: '恢复会话' }));
     expect(onRestoreConversation).toHaveBeenCalledWith('conversation');
   });
 

@@ -197,6 +197,13 @@ vi.mock('./markdown-import-client', () => ({
 }));
 
 describe('App', () => {
+  /** Model/provider selects live behind the collapsed summary row. */
+  function selectLlm(profileId: string, modelId: string): void {
+    fireEvent.click(screen.getByRole('button', { name: '模型与供应商设置' }));
+    fireEvent.change(screen.getByLabelText('LLM 供应商连接'), { target: { value: profileId } });
+    fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: modelId } });
+  }
+
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
@@ -974,10 +981,7 @@ describe('App', () => {
 
     render(<App />);
     await screen.findByDisplayValue('Project conversation');
-    fireEvent.change(screen.getByLabelText('LLM 供应商连接'), {
-      target: { value: profile.id },
-    });
-    fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: model.id } });
+    selectLlm(profile.id, model.id);
     fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: '续写小说下一章' },
     });
@@ -1728,10 +1732,7 @@ describe('App', () => {
     });
     render(<App />);
     await screen.findByDisplayValue('付费提交');
-    fireEvent.change(screen.getByLabelText('LLM 供应商连接'), {
-      target: { value: profile.id },
-    });
-    fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: model.id } });
+    selectLlm(profile.id, model.id);
     fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: '生成一张角色图' },
     });

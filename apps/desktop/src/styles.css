@@ -434,6 +434,89 @@ button {
   min-width: 0;
 }
 
+.open-project-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.open-project-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Project maintenance runs rarely, so it hides behind one trigger instead of
+   three permanent buttons above the daily navigation. */
+.project-menu {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.project-menu-trigger {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.project-menu-trigger:hover,
+.project-menu-trigger:focus-visible,
+.project-menu-trigger[aria-expanded='true'] {
+  color: var(--text-primary);
+  border-color: var(--border-default);
+  background: var(--control-hover-bg);
+}
+
+.project-menu-popup {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  gap: 1px;
+  min-width: 152px;
+  padding: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  background: var(--surface-bg);
+  box-shadow: 0 12px 30px var(--overlay-shadow);
+}
+
+.project-menu-popup button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  text-align: left;
+  font-size: 11px;
+}
+
+.project-menu-popup button:hover,
+.project-menu-popup button:focus-visible {
+  color: var(--text-primary);
+  background: var(--control-hover-bg);
+}
+
+.project-menu-popup button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
 .open-project-card strong {
   font-size: 12px;
 }
@@ -1628,6 +1711,7 @@ button {
   border: 0;
   border-radius: 4px;
   background: transparent;
+  font-size: 12px;
   text-align: left;
 }
 
@@ -1673,6 +1757,7 @@ button {
   border: 0;
   border-radius: 4px;
   background: transparent;
+  font-size: 12px;
   text-align: left;
 }
 
@@ -4897,6 +4982,54 @@ button {
   margin: 0;
 }
 
+/* Conversation overflow: rename/archive/restore are rare, so they stay hidden
+   until asked for and the bar keeps only the picker and "new conversation". */
+.conversation-menu {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.conversation-menu-popup {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  gap: 1px;
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  background: var(--surface-bg);
+  box-shadow: 0 12px 30px var(--overlay-shadow);
+}
+
+.conversation-menu-popup button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  text-align: left;
+  font-size: 11px;
+}
+
+.conversation-menu-popup button:hover,
+.conversation-menu-popup button:focus-visible {
+  color: var(--text-primary);
+  background: var(--control-hover-bg);
+}
+
+.conversation-menu-popup button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
 .llm-context-bar {
   display: grid;
   gap: 6px;
@@ -4912,13 +5045,43 @@ button {
   gap: 8px;
 }
 
-.llm-provider-status {
-  min-width: 0;
+.llm-model-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding: 0 4px;
+  color: #b7bcc0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  text-align: left;
+  font-size: 10px;
 }
 
-.llm-provider-status span,
-.llm-provider-status small {
+.llm-model-summary:hover,
+.llm-model-summary:focus-visible {
+  color: #f0f1f2;
+  background: var(--control-hover-bg);
+}
+
+.llm-model-summary-name {
   min-width: 0;
+  overflow: hidden;
+  color: #c7cacf;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-model-summary small {
+  flex: 0 0 auto;
+}
+
+.llm-model-summary-flag {
+  padding: 1px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
 }
 
 .llm-provider-selectors {
