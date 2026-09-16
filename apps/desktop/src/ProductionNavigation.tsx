@@ -36,14 +36,24 @@ const groups: Array<{
   },
 ];
 
+/** Image and video capabilities never overlap, so one group owns any capability. */
+function groupOf(capability: GenerationCapability): 'image' | 'video' {
+  return capability.endsWith('_TO_IMAGE') ? 'image' : 'video';
+}
+
 export function ProductionNavigation({
   capability,
   onCapabilityChange,
   compact = false,
 }: ProductionNavigationProps) {
-  const [expanded, setExpanded] = useState<Record<'image' | 'video', boolean>>({
-    image: true,
-    video: true,
+  /*
+   * Both groups used to open at once, which put all six capabilities in the rail
+   * at all times. Only the active group opens now, so the rail shows the current
+   * production mode plus its siblings and collapses the unrelated group.
+   */
+  const [expanded, setExpanded] = useState<Record<'image' | 'video', boolean>>(() => {
+    const active = groupOf(capability);
+    return { image: active === 'image', video: active === 'video' };
   });
 
   const moveFocus = (event: KeyboardEvent<HTMLButtonElement>, direction: number) => {

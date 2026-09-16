@@ -11,22 +11,21 @@ describe('ProductionNavigation', () => {
       <ProductionNavigation capability="TEXT_TO_IMAGE" onCapabilityChange={onCapabilityChange} />,
     );
 
+    // Only the group that owns the active capability opens, so the rail stays short.
     expect(screen.getByRole('button', { name: '图片制作' })).toHaveAttribute(
       'aria-expanded',
       'true',
     );
     expect(screen.getByRole('button', { name: '视频制作' })).toHaveAttribute(
       'aria-expanded',
-      'true',
+      'false',
     );
-    for (const label of [
-      '文生图',
-      '参考生图',
-      '文生视频',
-      '图生视频',
-      '参考生视频',
-      '首尾帧生视频',
-    ]) {
+    for (const label of ['文生图', '参考生图']) {
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: '视频制作' }));
+    for (const label of ['文生视频', '图生视频', '参考生视频', '首尾帧生视频']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
     }
 
@@ -46,6 +45,6 @@ describe('ProductionNavigation', () => {
     const videoHeading = screen.getByRole('button', { name: '视频制作' });
     videoHeading.focus();
     fireEvent.keyDown(videoHeading, { key: 'ArrowDown' });
-    expect(screen.getByRole('button', { name: '文生视频' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: '图片制作' })).toHaveFocus();
   });
 });

@@ -197,6 +197,13 @@ vi.mock('./markdown-import-client', () => ({
 }));
 
 describe('App', () => {
+  /** Model/provider selects live behind the collapsed summary row. */
+  function selectLlm(profileId: string, modelId: string): void {
+    fireEvent.click(screen.getByRole('button', { name: '模型与供应商设置' }));
+    fireEvent.change(screen.getByLabelText('LLM 供应商连接'), { target: { value: profileId } });
+    fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: modelId } });
+  }
+
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
@@ -974,10 +981,7 @@ describe('App', () => {
 
     render(<App />);
     await screen.findByDisplayValue('Project conversation');
-    fireEvent.change(screen.getByLabelText('LLM 供应商连接'), {
-      target: { value: profile.id },
-    });
-    fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: model.id } });
+    selectLlm(profile.id, model.id);
     fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: '续写小说下一章' },
     });
@@ -1011,7 +1015,7 @@ describe('App', () => {
     ).toHaveLength(2);
   });
 
-  it('shows only outline/plan documents plus constraints on the project documents page', async () => {
+  it('lists workspace document kinds together and filters by kind', async () => {
     vi.mocked(callWorker).mockImplementation((method: string) => {
       if (method === 'health')
         return Promise.resolve({
@@ -1140,11 +1144,296 @@ describe('App', () => {
     render(<App />);
     expect(await screen.findByText('项目大纲')).toBeInTheDocument();
     expect(screen.getByText('项目计划')).toBeInTheDocument();
+    // Characters and scenes moved into this list instead of a second page.
+    expect(screen.getByText('角色设定')).toBeInTheDocument();
+    expect(screen.getByText('场景设定')).toBeInTheDocument();
+    // Novel chapters (kind note) and shot storyboards keep their own workspaces.
     expect(screen.queryByText('小说章节一')).not.toBeInTheDocument();
-    expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
-    expect(screen.queryByText('场景设定')).not.toBeInTheDocument();
     expect(screen.queryByText('第一集分镜')).not.toBeInTheDocument();
     expect(screen.getByText('所有镜头保持冷色调')).toBeInTheDocument();
+
+    const filters = screen.getByRole('group', { name: '文档类型筛选' });
+    expect(within(filters).getByRole('button', { name: '全部' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(within(filters).getByRole('button', { name: '角色' }));
+    expect(screen.getByText('角色设定')).toBeInTheDocument();
+    expect(screen.queryByText('项目大纲')).not.toBeInTheDocument();
+    expect(screen.queryByText('场景设定')).not.toBeInTheDocument();
+
+    fireEvent.click(within(filters).getByRole('button', { name: '场景' }));
+    expect(screen.getByText('场景设定')).toBeInTheDocument();
+    expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
+
+    fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
+    expect(screen.getByText('项目大纲')).toBeInTheDocument();
+    expect(screen.getByText('角色设定')).toBeInTheDocument();
+  });
+
+  it('publishes an edited document in one action without a separate review step', async () => {
+    vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Publish Project',
+          rootPath: 'D:\\Publish',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 4,
+        });
+      if (method === 'project.recent') return Promise.resolve([]);
+      if (method === 'document.list')
+        return Promise.resolve([
+          {
+            id: 'd-outline',
+            projectId: 'project',
+            kind: 'outline',
+            title: '项目大纲',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'document.get')
+        return Promise.resolve({
+          id: 'd-outline',
+          projectId: 'project',
+          kind: 'outline',
+          title: '项目大纲',
+          scopeType: 'project',
+          lifecycleStatus: 'active',
+          rowVersion: 0,
+          currentVersionId: 'v-1',
+          currentVersion: {
+            id: 'v-1',
+            documentId: 'd-outline',
+            version: 1,
+            state: 'draft',
+            contentMarkdown: '# 大纲',
+            authorType: 'user',
+            createdAt: 'now',
+          },
+          createdAt: 'now',
+          updatedAt: 'now',
+        });
+      if (method === 'document.versions') return Promise.resolve([]);
+      if (method === 'document.draft.save')
+        return Promise.resolve({
+          id: 'd-outline',
+          projectId: 'project',
+          kind: 'outline',
+          title: '项目大纲',
+          scopeType: 'project',
+          lifecycleStatus: 'active',
+          rowVersion: 1,
+          currentVersionId: 'v-2',
+          publishedVersionId: undefined,
+          currentVersion: {
+            id: 'v-2',
+            documentId: 'd-outline',
+            version: 2,
+            state: 'draft',
+            contentMarkdown: '# 大纲 v2',
+            authorType: 'user',
+            createdAt: 'now',
+          },
+          createdAt: 'now',
+          updatedAt: 'now',
+        });
+      if (method === 'document.selfPublish')
+        return Promise.resolve({
+          document: {
+            id: 'd-outline',
+            projectId: 'project',
+            kind: 'outline',
+            title: '项目大纲',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 2,
+            currentVersionId: 'v-2',
+            publishedVersionId: 'v-2',
+            currentVersion: {
+              id: 'v-2',
+              documentId: 'd-outline',
+              version: 2,
+              state: 'published',
+              contentMarkdown: '# 大纲 v2',
+              authorType: 'user',
+              createdAt: 'now',
+            },
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          publication: {
+            id: 'publication',
+            documentId: 'd-outline',
+            documentVersionId: 'v-2',
+            publicationNo: 1,
+            publishedAt: 'now',
+          },
+        });
+      if (method === 'scene.list') return Promise.resolve([]);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'constraint.list') return Promise.resolve([]);
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'provider.profile.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method + ' ' + JSON.stringify(params));
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByText('项目大纲'));
+    const editor = await screen.findByLabelText('文档内容');
+    fireEvent.change(editor, { target: { value: '# 大纲 v2' } });
+
+    // One click both saves the edit and publishes it as the authority version.
+    fireEvent.click(screen.getByRole('button', { name: '保存并发布' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('document.selfPublish', {
+        documentId: 'd-outline',
+        documentVersionId: 'v-2',
+        expectedDocumentRowVersion: 1,
+        expectedPublishedVersionId: undefined,
+      }),
+    );
+    expect(callWorker).not.toHaveBeenCalledWith('document.review.submit', expect.anything());
+    expect(await screen.findByText('已发布权威版本 v1')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '提交审核' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存草稿' })).toBeInTheDocument();
+  });
+
+  it('keeps an opened document listed when it does not match the active kind filter', async () => {
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Filter Project',
+          rootPath: 'D:\\Filter',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 4,
+        });
+      if (method === 'project.recent') return Promise.resolve([]);
+      if (method === 'document.list')
+        return Promise.resolve([
+          {
+            id: 'd-outline',
+            projectId: 'project',
+            kind: 'outline',
+            title: '项目大纲',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'd-character',
+            projectId: 'project',
+            kind: 'character',
+            title: '角色设定',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'document.get')
+        return Promise.resolve({
+          id: 'd-character',
+          projectId: 'project',
+          kind: 'character',
+          title: '角色设定',
+          scopeType: 'project',
+          lifecycleStatus: 'active',
+          rowVersion: 0,
+          createdAt: 'now',
+          updatedAt: 'now',
+          currentVersion: {
+            id: 'v-1',
+            version: 1,
+            state: 'draft',
+            contentMarkdown: '# 角色设定',
+            createdAt: 'now',
+          },
+          currentVersionId: 'v-1',
+        });
+      if (method === 'document.versions') return Promise.resolve([]);
+      if (method === 'scene.list') return Promise.resolve([]);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'constraint.list') return Promise.resolve([]);
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'provider.profile.list') return Promise.resolve([]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method);
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByText('角色设定'));
+    await waitFor(() => expect(screen.getByDisplayValue('角色设定')).toBeInTheDocument());
+
+    const filters = screen.getByRole('group', { name: '文档类型筛选' });
+    fireEvent.click(within(filters).getByRole('button', { name: '计划' }));
+
+    // Hidden by the filter, but still listed because it is the open document.
+    const directory = screen.getByRole('complementary', { name: '项目文档目录' });
+    expect(within(directory).queryByText('项目大纲')).not.toBeInTheDocument();
+    expect(within(directory).getByText('角色设定')).toBeInTheDocument();
   });
 
   it('shows and saves the shot storyboard document in the shot workspace', async () => {
@@ -1287,6 +1576,186 @@ describe('App', () => {
         title: '镜头一分镜',
         contentMarkdown: '# 分镜\n\n2. 中景。',
       }),
+    );
+  });
+
+  it('reviews a direct paid image submission on the shared confirmation card', async () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '付费提交',
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const profile = {
+      id: 'profile',
+      name: 'OpenAI',
+      category: 'llm' as const,
+      providerType: 'openai',
+      accessType: 'official' as const,
+      protocol: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: true,
+      connectionStatus: 'ready' as const,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const model = {
+      id: 'model',
+      providerProfileId: profile.id,
+      remoteModelId: 'gpt-test',
+      displayName: 'GPT Test',
+      capabilities: {
+        text: true,
+        vision: false,
+        streaming: true,
+        reasoning: false,
+        tools: true,
+        structuredOutput: false,
+        embeddings: false,
+        imageGeneration: false,
+        videoGeneration: false,
+      },
+      source: 'manual' as const,
+      enabled: true,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const imageJob = {
+      id: 'media-job',
+      adapterKey: 'TEXT_TO_IMAGE:test:model:v2',
+      status: 'pending' as const,
+      request: {},
+      results: [],
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const confirmation = {
+      confirmationToken: 'media-token',
+      jobId: imageJob.id,
+      kind: 'image' as const,
+      draftVersion: 3,
+      providerName: '媒体供应商',
+      modelName: '图片模型',
+      adapterKey: imageJob.adapterKey,
+      parameterSummary: [{ key: 'prompt', value: '雨夜的城市街道' }],
+      costNotice: { required: true as const, summary: '本次提交可能产生费用。' },
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Paid Project',
+          rootPath: 'D:\\Paid',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 4,
+        });
+      if (
+        method === 'project.recent' ||
+        method === 'document.list' ||
+        method === 'scene.list' ||
+        method === 'asset.list' ||
+        method === 'video.generate.list'
+      )
+        return Promise.resolve([]);
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'GPT Test',
+          configured: true,
+          configurationSource: 'managed',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'provider.profile.list') return Promise.resolve([profile]);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'conversation.list') return Promise.resolve({ items: [conversation] });
+      if (method === 'chat.message.list') return Promise.resolve({ items: [] });
+      if (method === 'context.preview')
+        return Promise.resolve({
+          version: 1,
+          scopeType: 'project',
+          scopeLabel: 'project',
+          estimatedTokens: 1,
+          budgetTokens: 1_000,
+          sources: [],
+        });
+      if (method === 'agent.run')
+        return Promise.resolve({
+          status: 'image_prepared' as const,
+          capability: 'image' as const,
+          job: imageJob,
+        });
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve({
+          kind: 'image' as const,
+          job: { ...imageJob, mediaState: 'awaiting_confirmation' as const },
+          confirmation,
+        });
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({ kind: 'image' as const, job: imageJob });
+      if (method === 'media.task.cancel')
+        return Promise.resolve({
+          kind: 'image' as const,
+          job: { ...imageJob, status: 'cancelled' as const },
+        });
+      if (method === 'conversation.modelPreference.set')
+        return Promise.resolve({
+          conversationId: conversation.id,
+          capability: 'text' as const,
+          providerProfileId: profile.id,
+          modelId: model.id,
+          confirmedAt: 'now',
+          updatedAt: 'now',
+        });
+      throw new Error('Unexpected method ' + method);
+    });
+    render(<App />);
+    await screen.findByDisplayValue('付费提交');
+    selectLlm(profile.id, model.id);
+    fireEvent.change(screen.getByLabelText('会话消息'), {
+      target: { value: '生成一张角色图' },
+    });
+    fireEvent.click(screen.getByTitle('发送消息'));
+
+    // The frozen draft is shown before the paid Provider call.
+    const card = await screen.findByRole('alert');
+    expect(card).toHaveTextContent('媒体供应商 / 图片模型');
+    expect(card).toHaveTextContent('草稿版本 v3');
+    expect(card).toHaveTextContent('雨夜的城市街道');
+    expect(card).toHaveTextContent('本次提交可能产生费用。');
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.confirmSubmission',
+      expect.anything(),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: imageJob.id }),
+    );
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.confirmSubmission',
+      expect.anything(),
     );
   });
 });

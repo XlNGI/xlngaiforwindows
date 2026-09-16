@@ -83,7 +83,7 @@
 - P1 已让普通问答、文档、研究、小说、短剧和媒体意图统一进入 Worker-owned Pi Runtime；`AI_VIDEO_PI_CONVERSATION_RUNTIME=false/0` 仅作为开发期 Legacy 回退开关。
 - P2 已用统一 Registry/Policy 接管 R0-R3、动态授权、一次性确认、项目隔离、拒绝审计和 Tool Result 红线。
 - P3 已接入 `media.image.prepare`、`media.video.prepare`、`media.task.get`、显式媒体模型选择、冻结 Provider/模型/Adapter 快照和受控本地输入。
-- P4 已接入 `media.generation.submit`、`media.task.cancel` 和 Worker-owned `MediaOrchestrationService`；确认前不请求 Provider，确认卡展示冻结草稿版本、参数摘要和费用提示。
+- P4 已接入 `media.generation.submit`、`media.task.cancel` 和 Worker-owned `MediaOrchestrationService`；确认前不请求 Provider。确认卡由 `ChatPanel` 会话内展示改为 Desktop 共享组件 `media-confirmation.tsx`，会话内、直接会话提交与制作面板三条路径渲染同一张卡片，均展示冻结草稿版本、参数摘要和费用提示，不再使用 `window.confirm` 纯文本摘要。
 - P5 已用 Worker-owned `ProjectTaskRuntime` 接管视频轮询；项目打开时恢复，项目/应用关闭时停止本地调度，并统一处理并发、全局间隔、指数退避、抖动、`Retry-After` 和项目 session 失效响应。
 - P6 已完成全系统业务工具覆盖：项目、会话、文档、小说、短剧、素材、模型 Schema、设置和维护工具均通过统一 Registry/Policy 接线；生产入口与 Agent 共用 Worker Service；通用任务计划支持依赖图、环检测、重复 operation 拒绝和 Tool Result 完成语义；Provider/model 选择 provenance 已冻结并持久化；高风险设置和受保护 UI 交接保持在 Worker/Native 边界内。
 - Native `provider.media.poll` 只向 Worker 返回有界规范化状态和受控临时文件；UniCompAPI 鉴权下载与 Vidu 公网签名输出下载均停留在 Native，原始 Provider 正文、签名 URL 和认证信息不跨边界。
