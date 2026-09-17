@@ -10,7 +10,6 @@ import {
   Undo2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { ChatMessageInfo } from '@ai-video/contracts';
 import { ChatPanel } from '../ChatPanel';
 import {
   DETACHED_PANEL_ACTION_EVENT,
@@ -280,13 +279,6 @@ function DetachedConversationPanel({
   snapshot: DetachedConversationSnapshot;
   onAction: (action: DetachedPanelAction) => void;
 }) {
-  const promote = (message: ChatMessageInfo, target: 'document' | 'memory' | 'constraint') =>
-    onAction({
-      panelId: 'conversation',
-      type: 'conversation-promote',
-      messageId: message.id,
-      target,
-    });
   return (
     <ChatPanel
       {...snapshot}
@@ -302,7 +294,6 @@ function DetachedConversationPanel({
       onCreateConversation={() =>
         onAction({ panelId: 'conversation', type: 'conversation-create' })
       }
-      onPromoteMessage={promote}
       onRetryGeneration={(messageId) =>
         onAction({ panelId: 'conversation', type: 'conversation-retry', messageId })
       }

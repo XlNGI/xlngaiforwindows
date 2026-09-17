@@ -88,12 +88,6 @@ export type DetachedPanelAction =
   | { panelId: 'document'; type: 'document-publish' }
   | { panelId: 'conversation'; type: 'conversation-select'; conversationId: string }
   | { panelId: 'conversation'; type: 'conversation-create' }
-  | {
-      panelId: 'conversation';
-      type: 'conversation-promote';
-      messageId: string;
-      target: 'document' | 'memory' | 'constraint';
-    }
   | { panelId: 'conversation'; type: 'conversation-retry'; messageId: string }
   | { panelId: 'conversation'; type: 'conversation-profile'; profileId: string }
   | { panelId: 'conversation'; type: 'conversation-model'; modelId: string }

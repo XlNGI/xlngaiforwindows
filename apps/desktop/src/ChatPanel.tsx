@@ -21,7 +21,6 @@ import type {
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
-  LlmAttemptInfo,
   LlmGenerationInfo,
   LlmStatusResult,
   ProviderModelInfo,
@@ -40,8 +39,6 @@ import type {
   MediaModelSelectionRequest,
   UnifiedAgentModelSelectionRequest,
 } from '@ai-video/contracts';
-
-type PromotionTarget = 'document' | 'memory' | 'constraint';
 
 export interface ChatAttachment {
   id: string;
@@ -101,7 +98,6 @@ interface ChatPanelProps {
   onRestoreConversation?: (conversationId: string) => void;
   canLoadMoreConversations?: boolean;
   onLoadMoreConversations?: () => void;
-  onPromoteMessage: (message: ChatMessageInfo, target: PromotionTarget) => void;
   onRetryGeneration: (assistantMessageId: string) => void;
   onLlmProfileChange: (profileId: string) => void;
   onLlmModelChange: (modelId: string) => void;
@@ -175,7 +171,6 @@ export function ChatPanel({
   onRestoreConversation,
   canLoadMoreConversations,
   onLoadMoreConversations,
-  onPromoteMessage,
   onRetryGeneration,
   onLlmProfileChange,
   onLlmModelChange,
@@ -437,43 +432,18 @@ export function ChatPanel({
                 </button>
               </header>
               <p>{message.content}</p>
-              {message.role === 'assistant' && message.attempt && (
-                <AttemptMetadata attempt={message.attempt} />
-              )}
-              {message.role === 'assistant' && (
-                <footer>
-                  <button
-                    type="button"
-                    onClick={() => onPromoteMessage(message, 'document')}
-                    disabled={!writable || message.status !== 'complete'}
-                  >
-                    保存为文档草稿
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onPromoteMessage(message, 'memory')}
-                    disabled={!writable || message.status !== 'complete'}
-                  >
-                    加入记忆
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onPromoteMessage(message, 'constraint')}
-                    disabled={!writable || message.status !== 'complete'}
-                  >
-                    添加约束
-                  </button>
-                  {message.status === 'failed' &&
-                    (generation?.assistantMessage.id !== message.id ||
-                      generation.retryable !== false) &&
-                    (llmStatus?.configured || llmProfiles.length > 0) && (
-                      <button type="button" onClick={() => onRetryGeneration(message.id)}>
-                        <RefreshCw size={11} />
-                        重试
-                      </button>
-                    )}
-                </footer>
-              )}
+              {message.role === 'assistant' &&
+                message.status === 'failed' &&
+                (generation?.assistantMessage.id !== message.id ||
+                  generation.retryable !== false) &&
+                (llmStatus?.configured || llmProfiles.length > 0) && (
+                  <footer>
+                    <button type="button" onClick={() => onRetryGeneration(message.id)}>
+                      <RefreshCw size={11} />
+                      重试
+                    </button>
+                  </footer>
+                )}
             </article>
           ))
         )}
@@ -962,111 +932,6 @@ function AgentActivityPanel({ detail }: { detail: AgentTaskDetail }) {
       )}
     </section>
   );
-}
-
-function AttemptMetadata({ attempt }: { attempt: LlmAttemptInfo }) {
-  const usage = attempt.usage;
-  const terminal = ['complete', 'failed', 'cancelled', 'interrupted'].includes(attempt.status);
-  return (
-    <div className="message-attempt-metadata">
-      <div className="message-usage-summary">
-        {usage ? (
-          <>
-            <span>输入 {formatTokenCount(usage.inputTokens)}</span>
-            <span>缓存 {formatTokenCount(usage.cachedInputTokens)}</span>
-            <span>输出 {formatTokenCount(usage.outputTokens)}</span>
-            {usage.reasoningTokens !== undefined && (
-              <span>推理 {formatTokenCount(usage.reasoningTokens)}</span>
-            )}
-          </>
-        ) : terminal ? (
-          <span>供应商未提供用量</span>
-        ) : (
-          <span>正在生成</span>
-        )}
-        <strong>
-          {attempt.currency && attempt.estimatedCost
-            ? `预计 ${attempt.currency} ${attempt.estimatedCost}`
-            : '费用未知'}
-        </strong>
-      </div>
-      <details className="message-attempt-details">
-        <summary>调用明细</summary>
-        <dl>
-          <div>
-            <dt>供应商</dt>
-            <dd>{attempt.providerName}</dd>
-          </div>
-          <div>
-            <dt>模型</dt>
-            <dd>{attempt.modelName}</dd>
-          </div>
-          <div>
-            <dt>协议</dt>
-            <dd>{attempt.protocol}</dd>
-          </div>
-          <div>
-            <dt>开始时间</dt>
-            <dd>{new Date(attempt.startedAt).toLocaleString()}</dd>
-          </div>
-          <div>
-            <dt>首 Token</dt>
-            <dd>{formatLatency(attempt.startedAt, attempt.firstTokenAt)}</dd>
-          </div>
-          <div>
-            <dt>总耗时</dt>
-            <dd>{formatLatency(attempt.startedAt, attempt.completedAt)}</dd>
-          </div>
-          {attempt.pricingSnapshot && (
-            <div>
-              <dt>价格快照</dt>
-              <dd>
-                {attempt.pricingSnapshot.currency} 输入 {attempt.pricingSnapshot.inputPrice}
-                {attempt.pricingSnapshot.cachedInputPrice
-                  ? ` / 缓存 ${attempt.pricingSnapshot.cachedInputPrice}`
-                  : ''}{' '}
-                / 输出 {attempt.pricingSnapshot.outputPrice}（每{' '}
-                {new Intl.NumberFormat().format(attempt.pricingSnapshot.unitTokens)} Token）
-              </dd>
-            </div>
-          )}
-          {attempt.providerReportedCost && (
-            <div>
-              <dt>供应商报告费用</dt>
-              <dd>
-                {attempt.providerReportedCost.currency
-                  ? `${attempt.providerReportedCost.currency} `
-                  : ''}
-                {attempt.providerReportedCost.amount}
-              </dd>
-            </div>
-          )}
-          {attempt.errorMessage && (
-            <div>
-              <dt>错误</dt>
-              <dd>
-                {attempt.errorCode ? `${attempt.errorCode}: ` : ''}
-                {attempt.errorMessage}
-              </dd>
-            </div>
-          )}
-        </dl>
-      </details>
-    </div>
-  );
-}
-
-function formatTokenCount(value: number | undefined): string {
-  return value === undefined ? '未知' : new Intl.NumberFormat().format(value);
-}
-
-function formatLatency(startAt: string, endAt: string | undefined): string {
-  if (!endAt) return '未知';
-  const milliseconds = new Date(endAt).valueOf() - new Date(startAt).valueOf();
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) return '未知';
-  return milliseconds < 1_000
-    ? `${milliseconds} ms`
-    : `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 2 : 1)} s`;
 }
 
 function MediaModelSelectionCard({

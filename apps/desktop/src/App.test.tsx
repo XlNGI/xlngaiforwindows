@@ -237,6 +237,8 @@ describe('App', () => {
     vi.mocked(openDialog).mockResolvedValue(null);
     windowApi.isMaximized.mockResolvedValue(false);
     windowApi.onResized.mockResolvedValue(() => undefined);
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
   });
 
   it('renders the M2 workspace areas and runtime health', async () => {
@@ -257,6 +259,67 @@ describe('App', () => {
     expect(windowApi.minimize).toHaveBeenCalledOnce();
     expect(windowApi.toggleMaximize).toHaveBeenCalledOnce();
     expect(windowApi.close).toHaveBeenCalledOnce();
+  });
+
+  it('toggles the conversation window from the topbar', () => {
+    const { container } = render(<App />);
+    const topbarActions = container.querySelector('.topbar-actions');
+    expect(topbarActions).not.toBeNull();
+    const toggle = within(topbarActions as HTMLElement).getByRole('button', { name: '收起会话' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
+    expect(
+      within(topbarActions as HTMLElement).getByRole('button', { name: '打开会话' }),
+    ).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(within(topbarActions as HTMLElement).getByRole('button', { name: '打开会话' }));
+
+    expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
+    expect(
+      within(topbarActions as HTMLElement).getByRole('button', { name: '收起会话' }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('opens an auto-hidden conversation as a floating window from the topbar', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: '文生图' }));
+
+    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
+    const toggle = within(container.querySelector('.topbar-actions') as HTMLElement).getByRole(
+      'button',
+      { name: '打开会话' },
+    );
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(toggle);
+
+    expect(container.querySelector('.floating-window-conversation')).toBeInTheDocument();
+    expect(
+      within(container.querySelector('.topbar-actions') as HTMLElement).getByRole('button', {
+        name: '收起会话',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(
+      within(container.querySelector('.topbar-actions') as HTMLElement).getByRole('button', {
+        name: '收起会话',
+      }),
+    );
+    expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(container.querySelector('.topbar-actions') as HTMLElement).getByRole('button', {
+        name: '打开会话',
+      }),
+    );
+    expect(container.querySelector('.floating-window-conversation')).toBeInTheDocument();
   });
 
   it('disables project actions until an absolute path is entered', () => {

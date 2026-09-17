@@ -75,6 +75,55 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function formatTokenCount(value: number | undefined): string {
+  return value === undefined ? '未知' : new Intl.NumberFormat().format(value);
+}
+
+function formatTaskCost(cost?: string, currency?: string): string {
+  if (!cost) return '费用未知';
+  return currency ? `${currency} ${cost}` : cost;
+}
+
+function TaskUsageFields({
+  inputTokens,
+  cachedInputTokens,
+  outputTokens,
+  reasoningTokens,
+  estimatedCost,
+  currency,
+}: {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  estimatedCost?: string;
+  currency?: string;
+}) {
+  const hasUsage =
+    inputTokens !== undefined ||
+    cachedInputTokens !== undefined ||
+    outputTokens !== undefined ||
+    reasoningTokens !== undefined;
+  return (
+    <>
+      {hasUsage && (
+        <div>
+          <dt>用量</dt>
+          <dd>
+            输入 {formatTokenCount(inputTokens)} · 缓存 {formatTokenCount(cachedInputTokens)} · 输出{' '}
+            {formatTokenCount(outputTokens)}
+            {reasoningTokens !== undefined ? ` · 推理 ${formatTokenCount(reasoningTokens)}` : ''}
+          </dd>
+        </div>
+      )}
+      <div>
+        <dt>费用</dt>
+        <dd>{formatTaskCost(estimatedCost, currency)}</dd>
+      </div>
+    </>
+  );
+}
+
 function statusText(value: string): string {
   const label = generationStatusLabel(value);
   return label === value ? value : `${label} (${value})`;
@@ -203,20 +252,22 @@ function AgentTaskDetailPanel({
             <dd>{[task.providerName, task.modelName].filter(Boolean).join(' · ')}</dd>
           </div>
         )}
-        {(task.inputTokens !== undefined || task.outputTokens !== undefined) && (
-          <div>
-            <dt>Token</dt>
-            <dd>
-              输入 {task.inputTokens ?? 0} · 输出 {task.outputTokens ?? 0}
-            </dd>
-          </div>
-        )}
-        {task.estimatedCost && (
-          <div>
-            <dt>费用</dt>
-            <dd>{task.estimatedCost}</dd>
-          </div>
-        )}
+        <TaskUsageFields
+          inputTokens={task.inputTokens}
+          cachedInputTokens={
+            providerSteps.some((step) => step.cachedInputTokens !== undefined)
+              ? providerSteps.reduce((sum, step) => sum + (step.cachedInputTokens ?? 0), 0)
+              : undefined
+          }
+          outputTokens={task.outputTokens}
+          reasoningTokens={providerSteps.reduce<number | undefined>(
+            (sum, step) =>
+              step.reasoningTokens === undefined ? sum : (sum ?? 0) + step.reasoningTokens,
+            undefined,
+          )}
+          estimatedCost={task.estimatedCost}
+          currency={providerSteps.find((step) => step.currency)?.currency}
+        />
       </dl>
 
       {(() => {
@@ -533,6 +584,11 @@ function MediaTaskDetailPanel({
           <dt>更新时间</dt>
           <dd>{formatDate(detail.updatedAt)}</dd>
         </div>
+        <TaskUsageFields
+          inputTokens={item.inputTokens}
+          outputTokens={item.outputTokens}
+          estimatedCost={item.estimatedCost}
+        />
         {!isImage && (
           <>
             <div>

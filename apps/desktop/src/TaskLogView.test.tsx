@@ -95,6 +95,7 @@ const agentDetail: AgentTaskDetail = {
       toolCallCount: 1,
       finishReason: 'tool_calls',
       inputTokens: 100,
+      cachedInputTokens: 0,
       outputTokens: 20,
       startedAt: '2026-08-16T01:00:00.000Z',
       completedAt: '2026-08-16T01:00:01.000Z',
@@ -245,7 +246,7 @@ describe('TaskLogView', () => {
     );
     expect(screen.getByText(/版本/)).toHaveTextContent('version-1');
     expect(screen.getByText('OpenAI · gpt-test')).toBeInTheDocument();
-    expect(screen.getByText('输入 100 · 输出 20')).toBeInTheDocument();
+    expect(screen.getByText('输入 100 · 缓存 0 · 输出 20')).toBeInTheDocument();
     expect(screen.getByText('0.0001')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Provider steps' })).toBeInTheDocument();
     expect(screen.getByText(/Step 1: .*complete/)).toBeInTheDocument();
@@ -258,6 +259,7 @@ describe('TaskLogView', () => {
     fireEvent.click(await screen.findByRole('button', { name: /文本生成图片/ }));
 
     expect(await screen.findByRole('heading', { name: '请求参数摘要' })).toBeInTheDocument();
+    expect(screen.getByText('费用未知')).toBeInTheDocument();
     expect(screen.getByText('image-job-1')).toBeInTheDocument();
     expect(screen.getByText('assets/images/generated.png')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Provider 生命周期' })).toBeInTheDocument();

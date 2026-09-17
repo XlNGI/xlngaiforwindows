@@ -24,23 +24,28 @@ function WorkspaceFixture({
     createDefaultWorkspaceLayout('project', { width: 1200, height: 800 }),
   );
   return (
-    <WorkspaceSurface
-      layout={layout}
-      dispatch={dispatch}
-      documentTitle="文档"
-      conversationContent={<div>会话内容</div>}
-      productionContent={<div>生产内容</div>}
-      productionOpen={productionOpen}
-      documentActive
-      onOpenConversation={() => undefined}
-      onOpenDocument={() => undefined}
-      onCloseDocument={() => dispatch({ type: 'close', panelId: 'document' })}
-      onDetachDocument={onDetachDocument}
-      onDetachConversation={onDetachConversation}
-      detachedPanels={detachedPanels}
-    >
-      {children}
-    </WorkspaceSurface>
+    <>
+      <button type="button" onClick={() => dispatch({ type: 'open', panelId: 'conversation' })}>
+        测试打开会话
+      </button>
+      <WorkspaceSurface
+        layout={layout}
+        dispatch={dispatch}
+        documentTitle="文档"
+        conversationContent={<div>会话内容</div>}
+        productionContent={<div>生产内容</div>}
+        productionOpen={productionOpen}
+        documentActive
+        onOpenConversation={() => undefined}
+        onOpenDocument={() => undefined}
+        onCloseDocument={() => dispatch({ type: 'close', panelId: 'document' })}
+        onDetachDocument={onDetachDocument}
+        onDetachConversation={onDetachConversation}
+        detachedPanels={detachedPanels}
+      >
+        {children}
+      </WorkspaceSurface>
+    </>
   );
 }
 
@@ -68,7 +73,39 @@ describe('WorkspaceSurface', () => {
 
     fireEvent.click(within(container).getByLabelText('关闭会话面板'));
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
-    expect(within(container).getByLabelText('打开项目会话')).toBeInTheDocument();
+  });
+
+  it('ignores a persisted 0% conversation layout and still opens a usable pane', () => {
+    window.localStorage.setItem(
+      'react-resizable-panels:ai-video.workspace-docks.v5:project:editor:conversation',
+      JSON.stringify({ editor: 100, conversation: 0 }),
+    );
+    const { container } = render(<WorkspaceFixture />);
+
+    expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
+  });
+
+  it('reopens the conversation after it has been closed', () => {
+    const { container } = render(<WorkspaceFixture />);
+
+    fireEvent.click(within(container).getByLabelText('关闭会话面板'));
+    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(container.querySelector('#conversation')).not.toBeInTheDocument();
+
+    fireEvent.click(within(container).getByRole('button', { name: '测试打开会话' }));
+    expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
+    expect(container.querySelector('#conversation')).toBeInTheDocument();
+  });
+
+  it('does not persist a 0% conversation layout when the pane is closed', () => {
+    const { container } = render(<WorkspaceFixture />);
+    fireEvent.click(within(container).getByLabelText('关闭会话面板'));
+
+    const persisted = Object.keys(window.localStorage)
+      .filter((key) => key.includes('workspace-docks.v5'))
+      .map((key) => window.localStorage.getItem(key));
+    expect(persisted.some((value) => value?.includes('"conversation":0'))).toBe(false);
+    expect(container.querySelector('#conversation')).not.toBeInTheDocument();
   });
 
   it('renders shared separators between adjacent docked pages', () => {
@@ -107,10 +144,7 @@ describe('WorkspaceSurface', () => {
     expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByTitle('显示已收起的项目会话'));
-
-    expect(container.querySelector('.floating-window-conversation')).toBeInTheDocument();
+    expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
   });
 
   it('shows production first in single-page mode and opens conversation on demand', () => {
@@ -119,10 +153,6 @@ describe('WorkspaceSurface', () => {
 
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
-
-    fireEvent.click(within(container).getByRole('button', { name: '打开项目会话' }));
-
-    expect(container.querySelector('.floating-window-conversation')).toBeInTheDocument();
   });
 
   it('reorders pages by dragging a page tab', async () => {

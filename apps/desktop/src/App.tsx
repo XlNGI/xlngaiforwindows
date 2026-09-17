@@ -16,6 +16,7 @@ import {
   FolderOpen,
   Image,
   ListChecks,
+  MessageSquare,
   Minus,
   PanelLeftClose,
   Plus,
@@ -85,6 +86,11 @@ import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
 import { ResizableAppLayout } from './workspace/ResizableAppLayout';
 import { useWorkspaceLayout } from './workspace/use-workspace-layout';
+import {
+  conversationWindowToggleAction,
+  conversationWindowToggleLabel,
+  isConversationWindowPresented,
+} from './workspace/conversation-window';
 import {
   DETACHED_PANEL_ACTION_EVENT,
   DETACHED_PANEL_READY_EVENT,
@@ -607,6 +613,10 @@ export function App() {
   const [providerSettingsFocusId, setProviderSettingsFocusId] = useState<string>();
   const [assetTrashRequest, setAssetTrashRequest] = useState(0);
   const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
+  const workspaceMainRef = useRef<HTMLElement>(null);
+  const [workspaceWidth, setWorkspaceWidth] = useState(() =>
+    typeof window === 'undefined' ? 1440 : window.innerWidth,
+  );
 
   const [view, setView] = useState<WorkspaceView>('documents');
   const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
@@ -720,6 +730,47 @@ export function App() {
   detachedPanelsRef.current = detachedPanels;
   const writable = project?.mode === 'read-write';
   const { layout: workspaceLayout, dispatch: workspaceDispatch } = useWorkspaceLayout(project?.id);
+  const conversationWindowOptions = {
+    panel: workspaceLayout.panels.conversation,
+    detached: Boolean(detachedPanels.conversation),
+    productionOpen: navigationMode === 'production',
+    viewportWidth: workspaceWidth,
+    activePanelId: workspaceLayout.activePanelId,
+  };
+  const conversationWindowPresented = isConversationWindowPresented(conversationWindowOptions);
+  const conversationToggleCopy = conversationWindowToggleLabel(conversationWindowOptions);
+
+  useEffect(() => {
+    const update = () => {
+      setWorkspaceWidth(workspaceMainRef.current?.clientWidth || window.innerWidth);
+    };
+    update();
+    const element = workspaceMainRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', update);
+      return () => window.removeEventListener('resize', update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const toggleConversationWindow = () => {
+    const action = conversationWindowToggleAction(conversationWindowOptions);
+    if (action === 'focus-detached') {
+      void focusDetachedPanelWindow(detachedPanels.conversation);
+      return;
+    }
+    if (action === 'close') {
+      workspaceDispatch({ type: 'close', panelId: 'conversation' });
+      return;
+    }
+    if (action === 'float') {
+      workspaceDispatch({ type: 'float', panelId: 'conversation' });
+      return;
+    }
+    workspaceDispatch({ type: 'open', panelId: 'conversation' });
+  };
 
   const syncDetachedPanelForEntity = (panelId: WorkspacePanelId, entityId?: string) => {
     const label = Object.values(detachedRegistryRef.current).find(
@@ -772,7 +823,6 @@ export function App() {
     publishDocument,
     saveAndPublishDocument,
     restoreVersion,
-    openCreatedDocument,
     requestCloseDocument,
     discardDocumentChanges,
     saveAndCloseDocument,
@@ -2107,31 +2157,6 @@ export function App() {
     }
   };
 
-  const promoteMessage = async (
-    message: ChatMessageInfo,
-    target: 'document' | 'memory' | 'constraint',
-  ) => {
-    try {
-      if (target === 'document') {
-        const created = await callWorker('agent.task.createDocumentDraft', {
-          messageId: message.id,
-          title: `会话产物 ${new Date().toLocaleDateString()}`,
-        });
-        await openCreatedDocument(created.document);
-        setChatMessage(`已创建草稿任务：${created.task.title}，请在编辑器审核后发布`);
-      } else if (target === 'memory') {
-        await callWorker('chat.message.toMemory', { messageId: message.id });
-      } else {
-        await callWorker('chat.message.toConstraint', { messageId: message.id });
-      }
-      if (target !== 'document') {
-        setChatMessage(target === 'memory' ? '已添加到项目记忆' : '已添加生产约束');
-      }
-    } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '操作失败');
-    }
-  };
-
   const openNovelDocument = async (documentId: string) => {
     await openDocumentById(documentId);
     const existingLabel = Object.values(detachedRegistryRef.current).find(
@@ -2525,9 +2550,6 @@ export function App() {
       if (selected) void selectConversation(selected);
     } else if (action.type === 'conversation-create') {
       void createConversation();
-    } else if (action.type === 'conversation-promote') {
-      const message = messages.find((item) => item.id === action.messageId);
-      if (message) void promoteMessage(message, action.target);
     } else if (action.type === 'conversation-retry') {
       void retryGeneration(action.messageId);
     } else if (action.type === 'conversation-profile') {
@@ -2705,7 +2727,6 @@ export function App() {
       onRestoreConversation={(conversationId) => void restoreConversation(conversationId)}
       canLoadMoreConversations={Boolean(conversationNextCursor)}
       onLoadMoreConversations={() => void loadMoreConversations()}
-      onPromoteMessage={(message, target) => void promoteMessage(message, target)}
       onRetryGeneration={(messageId) => void retryGeneration(messageId)}
       onLlmProfileChange={(profileId) => {
         setSelectedLlmProfileId(profileId);
@@ -3009,6 +3030,16 @@ export function App() {
             onClick={() => setProductionMenuOpen((open) => !open)}
           >
             <WandSparkles size={17} />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title={conversationToggleCopy.title}
+            aria-label={conversationToggleCopy.ariaLabel}
+            aria-pressed={conversationWindowPresented}
+            onClick={toggleConversationWindow}
+          >
+            <MessageSquare size={17} />
           </button>
         </div>
         <div className="window-controls" aria-label="窗口控制">
@@ -3434,7 +3465,7 @@ export function App() {
           </button>
         )}
 
-        <main className="workspace panel-border">
+        <main className="workspace panel-border" ref={workspaceMainRef}>
           <WorkspaceSurface
             layout={workspaceLayout}
             dispatch={workspaceDispatch}

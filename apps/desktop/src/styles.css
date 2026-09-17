@@ -279,6 +279,11 @@ button {
   background: var(--control-bg);
 }
 
+.icon-button[aria-pressed='true'] {
+  color: var(--text-primary);
+  background: var(--control-bg);
+}
+
 .panel-border {
   min-width: 0;
   min-height: 0;
@@ -5256,59 +5261,6 @@ button {
   margin: 0;
 }
 
-.message-attempt-metadata {
-  display: grid;
-  gap: 5px;
-  margin: 6px 0;
-  padding: 6px;
-  border: 1px solid #303639;
-  border-radius: 4px;
-  background: var(--panel-bg);
-}
-
-.message-usage-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  color: #92999d;
-  font-size: 8px;
-}
-
-.message-usage-summary strong {
-  margin-left: auto;
-  color: var(--accent-soft);
-  font-weight: 600;
-}
-
-.message-attempt-details summary {
-  color: #9ba1a5;
-  cursor: pointer;
-  font-size: 9px;
-}
-
-.message-attempt-details dl {
-  display: grid;
-  gap: 4px;
-  margin: 6px 0 0;
-}
-
-.message-attempt-details dl > div {
-  display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
-  gap: 6px;
-}
-
-.message-attempt-details dt {
-  color: #70777b;
-}
-
-.message-attempt-details dd {
-  min-width: 0;
-  margin: 0;
-  color: #b5babd;
-  overflow-wrap: anywhere;
-}
-
 @media (max-width: 900px) {
   .model-pricing-fields,
   .usage-filters {
@@ -5510,6 +5462,16 @@ button {
   min-height: 0;
   align-self: stretch;
   background: var(--app-bg);
+}
+
+.workspace-dock-group #conversation {
+  overflow: hidden !important;
+  min-width: 360px;
+}
+
+.workspace-conversation-panel {
+  overflow: hidden !important;
+  min-width: 0;
 }
 
 .workspace-docked-page {
@@ -5769,8 +5731,7 @@ button {
   min-width: 0;
 }
 
-.floating-window-actions button,
-.workspace-chat-launcher {
+.floating-window-actions button {
   display: grid;
   place-items: center;
   width: 28px;
@@ -5782,8 +5743,7 @@ button {
   background: transparent;
 }
 
-.floating-window-actions button:hover,
-.workspace-chat-launcher:hover {
+.floating-window-actions button:hover {
   color: #f1f3f4;
   border-color: var(--border-strong);
   background: #262b2e;
@@ -6076,17 +6036,6 @@ button {
   bottom: -5px;
   left: -5px;
   cursor: nesw-resize;
-}
-
-.workspace-chat-launcher {
-  position: absolute;
-  z-index: var(--workspace-z-dock);
-  right: 12px;
-  bottom: 12px;
-  width: 34px;
-  height: 34px;
-  border-color: #5c5134;
-  background: var(--accent-panel);
 }
 
 @media (max-width: 900px) {

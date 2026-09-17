@@ -79,7 +79,6 @@ describe('ChatPanel attempt metadata', () => {
         agentTask={agentTask}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -127,7 +126,6 @@ describe('ChatPanel attempt metadata', () => {
         onAddAttachments={onAdd}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -207,7 +205,6 @@ describe('ChatPanel attempt metadata', () => {
         onSelectAgentModel={onSelect}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -302,7 +299,6 @@ describe('ChatPanel attempt metadata', () => {
         onSelectAgentModel={onSelectAgent}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -372,7 +368,6 @@ describe('ChatPanel attempt metadata', () => {
         onConfirmAgentAction={onConfirm}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -440,7 +435,6 @@ describe('ChatPanel attempt metadata', () => {
         onOpenProtectedUi={onOpenProtectedUi}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -507,7 +501,6 @@ describe('ChatPanel attempt metadata', () => {
         onOpenTaskLog={onOpenTaskLog}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -585,7 +578,6 @@ describe('ChatPanel attempt metadata', () => {
         }}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -682,7 +674,6 @@ describe('ChatPanel attempt metadata', () => {
         onContinueAgentTask={onContinue}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -725,7 +716,6 @@ describe('ChatPanel attempt metadata', () => {
         selectedLlmModelId=""
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -794,7 +784,6 @@ describe('ChatPanel attempt metadata', () => {
         }}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -836,7 +825,6 @@ describe('ChatPanel attempt metadata', () => {
         onCollapse={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -882,7 +870,6 @@ describe('ChatPanel attempt metadata', () => {
         onCollapse={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -988,7 +975,6 @@ describe('ChatPanel attempt metadata', () => {
         onCollapse={vi.fn()}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -999,16 +985,15 @@ describe('ChatPanel attempt metadata', () => {
       />,
     );
 
-    expect(screen.getByText('输入 100')).toBeInTheDocument();
-    expect(screen.getByText('预计 USD 0.00059')).toBeInTheDocument();
-    expect(screen.getByText('供应商未提供用量')).toBeInTheDocument();
+    expect(screen.queryByText('输入 100')).not.toBeInTheDocument();
+    expect(screen.queryByText('预计 USD 0.00059')).not.toBeInTheDocument();
+    expect(screen.queryByText('调用明细')).not.toBeInTheDocument();
+    expect(screen.queryByText('保存为文档草稿')).not.toBeInTheDocument();
+    expect(screen.queryByText('加入记忆')).not.toBeInTheDocument();
+    expect(screen.queryByText('添加约束')).not.toBeInTheDocument();
     expect(screen.getByText(/旧版环境变量配置/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '迁移到供应商设置' }));
     expect(onOpenProviderSettings).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getAllByText('调用明细')[0]!);
-    expect(screen.getByText('250 ms')).toBeInTheDocument();
-    expect(screen.getByText(/USD 输入 1/)).toBeInTheDocument();
-    expect(screen.getByText('USD 0.00061')).toBeInTheDocument();
   });
 
   it('calls archive and restore callbacks for the selected conversation', () => {
@@ -1046,7 +1031,6 @@ describe('ChatPanel attempt metadata', () => {
         onCreateConversation={vi.fn()}
         onArchiveConversation={onArchiveConversation}
         onRestoreConversation={onRestoreConversation}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -1086,7 +1070,6 @@ describe('ChatPanel attempt metadata', () => {
         onCreateConversation={vi.fn()}
         onArchiveConversation={onArchiveConversation}
         onRestoreConversation={onRestoreConversation}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
@@ -1131,7 +1114,6 @@ describe('ChatPanel attempt metadata', () => {
         onClearSelectedChapters={onClearSelectedChapters}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
-        onPromoteMessage={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
