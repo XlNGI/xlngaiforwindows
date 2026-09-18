@@ -60,16 +60,33 @@ async function setup(attachments: LlmInputAttachment[] = []) {
     models: [
       { id: 'qwen-image' },
       { id: 'qwen-image-edit-2509' },
-      { id: 'doubao-seedance-2-0-260128' },
+      { id: 'vendor-hosted-video-model' },
     ],
   });
+  const bindings = {
+    'qwen-image': {
+      capabilities: { ...settings.listModels(profile.id)[0]!.capabilities, imageGeneration: true },
+      parameterTemplateKey: 'openai-compatible-image',
+    },
+    'qwen-image-edit-2509': {
+      capabilities: { ...settings.listModels(profile.id)[0]!.capabilities, imageEditing: true },
+      parameterTemplateKey: 'qwen-image-edit',
+    },
+    'vendor-hosted-video-model': {
+      capabilities: { ...settings.listModels(profile.id)[0]!.capabilities, videoGeneration: true },
+      parameterTemplateKey: 'openai-compatible-video',
+    },
+  } as const;
   for (const model of settings.listModels(profile.id)) {
+    const binding = bindings[model.remoteModelId as keyof typeof bindings];
+    if (!binding) throw new Error('missing template binding for ' + model.remoteModelId);
     settings.updateModel({
       profileId: profile.id,
       modelId: model.id,
       displayName: model.displayName,
-      capabilities: model.capabilities,
+      capabilities: binding.capabilities,
       enabled: true,
+      parameterTemplateKey: binding.parameterTemplateKey,
     });
   }
   const adapters = new AdapterService(projectsService);
@@ -109,6 +126,9 @@ describe('MediaPreparationService', () => {
     );
 
     expect(context.candidates.length).toBeGreaterThan(0);
+    expect(context.candidates.map((candidate) => candidate.remoteModelId)).toEqual([
+      'vendor-hosted-video-model',
+    ]);
     expect(
       context.candidates.every((candidate) => candidate.providerProfileId === profile.id),
     ).toBe(true);

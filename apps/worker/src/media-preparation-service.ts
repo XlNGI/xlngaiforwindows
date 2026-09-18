@@ -26,6 +26,7 @@ import type {
 } from '@ai-video/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { adapterBindsCatalogModel } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 import type { AdapterService } from './adapter-service.js';
 import type { AppSettingsService } from './app-settings-service.js';
@@ -311,8 +312,11 @@ export class MediaPreparationService {
         if (!model.enabled || model.unavailableAt || !modelSupportsKind(model, kind)) continue;
         const matching = adapters.filter(
           (adapter) =>
-            adapter.provider === profile.providerType &&
-            adapter.model === model.remoteModelId &&
+            adapterBindsCatalogModel(adapter, {
+              providerType: profile.providerType,
+              remoteModelId: model.remoteModelId,
+              parameterTemplateKey: model.parameterTemplateKey,
+            }) &&
             adapterSupportsInputs(adapter, kind, inputCount) &&
             this.settings.getAdapterSchemaRecord(adapter.key)?.status !== 'needs_confirmation',
         );

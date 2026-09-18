@@ -15,7 +15,11 @@ import type {
 } from '@ai-video/contracts';
 import type { JobRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
-import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
+import {
+  adapterBindsCatalogModel,
+  getAdapter,
+  validateAdapterParameters,
+} from '@ai-video/generation-adapters';
 import { rmSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import type { AppSettingsService } from './app-settings-service.js';
@@ -540,8 +544,11 @@ export class MediaOrchestrationService {
     const adapter = this.adapterResolver(adapterKey);
     if (
       !adapter ||
-      adapter.provider !== route.providerType ||
-      adapter.model !== model.remoteModelId ||
+      !adapterBindsCatalogModel(adapter, {
+        providerType: route.providerType,
+        remoteModelId: model.remoteModelId,
+        parameterTemplateKey: model.parameterTemplateKey,
+      }) ||
       (kind === 'image') !== adapter.capability.endsWith('TO_IMAGE')
     ) {
       throw new Error('The frozen media adapter is no longer compatible.');

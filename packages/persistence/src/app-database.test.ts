@@ -33,11 +33,11 @@ describe('app settings database', () => {
     const projectDatabase = openProjectDatabase(join(directory, 'project.sqlite'));
 
     expect(getAppSchemaVersion(appDatabase)).toBe(0);
-    expect(migrateAppDatabase(appDatabase)).toBe(4);
-    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 4 });
+    expect(migrateAppDatabase(appDatabase)).toBe(5);
+    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 5 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
     expect(migrateDatabase(projectDatabase)).toBe(38);
-    expect(getAppSchemaVersion(appDatabase)).toBe(4);
+    expect(getAppSchemaVersion(appDatabase)).toBe(5);
 
     const providerColumns = appDatabase
       .prepare("SELECT name FROM pragma_table_info('provider_profiles')")
@@ -78,7 +78,7 @@ describe('app settings database', () => {
         '2026-08-03T00:00:00.000Z',
       );
 
-    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(4);
+    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(5);
     expect(createAppRepositories(database).providerProfiles.list()).toMatchObject([
       { name: 'Existing Vidu', migrationSource: undefined },
     ]);

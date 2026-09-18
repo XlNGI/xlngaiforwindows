@@ -89,6 +89,7 @@ describe('modelMatchesUnifiedAgentRequest', () => {
     enabled: true,
     unavailableAt: null,
     remoteModelId: 'qwen-image-edit-2509',
+    parameterTemplateKey: 'qwen-image-edit',
     capabilities: {
       text: false,
       streaming: false,
@@ -109,7 +110,7 @@ describe('modelMatchesUnifiedAgentRequest', () => {
         [
           {
             provider: 'unicompapi',
-            model: baseModel.remoteModelId,
+            model: 'qwen-image-edit',
             capability: 'REFERENCE_TO_IMAGE',
           },
         ],
@@ -125,10 +126,11 @@ describe('modelMatchesUnifiedAgentRequest', () => {
         {
           ...baseModel,
           remoteModelId: 'qwen-image',
+          parameterTemplateKey: 'openai-compatible-image',
           capabilities: { ...baseModel.capabilities, imageEditing: false, imageGeneration: true },
         },
         'unicompapi',
-        [{ provider: 'unicompapi', model: 'qwen-image', capability: 'TEXT_TO_IMAGE' }],
+        [{ provider: 'unicompapi', model: 'openai-compatible-image', capability: 'TEXT_TO_IMAGE' }],
         true,
       ),
     ).toBe(false);

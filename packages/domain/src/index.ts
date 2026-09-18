@@ -678,6 +678,7 @@ export interface ProviderModelRecord {
   capabilitiesJson: string;
   source: ProviderModelSource;
   enabled: boolean;
+  parameterTemplateKey?: string;
   lastSyncedAt?: string;
   lastSeenAt?: string;
   unavailableAt?: string;

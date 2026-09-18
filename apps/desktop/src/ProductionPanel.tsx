@@ -265,6 +265,7 @@ export function ProductionPanel({
   const [selectedProfileId, setSelectedProfileId] = useState('');
   const [models, setModels] = useState<ProviderModelInfo[]>([]);
   const [adapterKey, setAdapterKey] = useState('');
+  const [catalogModelId, setCatalogModelId] = useState('');
   const [adapter, setAdapter] = useState<AdapterDescriptor>();
   const [parameters, setParameters] = useState<AdapterParameters>({});
   const [errors, setErrors] = useState<AdapterValidationError[]>([]);
@@ -420,7 +421,13 @@ export function ProductionPanel({
         if (!shotId) {
           return;
         }
-        const selectedModel = models.find((model) => model.remoteModelId === resolved.model);
+        const selectedModel =
+          models.find((model) => model.id === catalogModelId) ??
+          models.find((model) =>
+            selectedProfile?.providerType === 'unicompapi'
+              ? model.parameterTemplateKey === resolved.model
+              : model.remoteModelId === resolved.model,
+          );
         if (!selectedProfile || !selectedModel) {
           // Without a project draft the remembered form values are the only
           // thing standing between the user and an empty parameter form.
@@ -451,7 +458,7 @@ export function ProductionPanel({
     return () => {
       active = false;
     };
-  }, [adapterKey, catalog, models, projectId, selectedProfile, shotId]);
+  }, [adapterKey, catalog, catalogModelId, models, projectId, selectedProfile, shotId]);
 
   useEffect(() => {
     let active = true;
@@ -508,37 +515,52 @@ export function ProductionPanel({
     [catalog, effectiveCapability],
   );
   const modelOptions = useMemo(
-    () =>
-      capabilityAdapters.filter(
-        (item) =>
-          item.provider === selectedProfile?.providerType &&
-          models.some(
-            (model) =>
-              model.remoteModelId === item.model &&
-              model.enabled &&
-              !model.unavailableAt &&
-              (isVideoCapability(effectiveCapability)
-                ? model.capabilities.videoGeneration
-                : effectiveCapability === 'REFERENCE_TO_IMAGE'
-                  ? model.capabilities.imageEditing || model.capabilities.imageGeneration
-                  : model.capabilities.imageGeneration),
-          ),
-      ),
-    [capabilityAdapters, effectiveCapability, models, selectedProfile?.providerType],
+    () => {
+      if (!selectedProfile) return [];
+      return models.flatMap((model) => {
+        if (!model.enabled || model.unavailableAt) return [];
+        const supportsCapability = isVideoCapability(effectiveCapability)
+          ? model.capabilities.videoGeneration
+          : effectiveCapability === 'REFERENCE_TO_IMAGE'
+            ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration
+            : model.capabilities.imageGeneration;
+        if (!supportsCapability) return [];
+        return capabilityAdapters
+          .filter((adapter) =>
+            selectedProfile.providerType === 'unicompapi'
+              ? adapter.provider === 'unicompapi' && adapter.model === model.parameterTemplateKey
+              : adapter.provider === selectedProfile.providerType &&
+                adapter.model === model.remoteModelId,
+          )
+          .map((adapter) => ({
+            optionKey: `${model.id}::${adapter.key}`,
+            adapter,
+            model,
+          }));
+      });
+    },
+    [capabilityAdapters, effectiveCapability, models, selectedProfile],
   );
-  const selectedModel = models.find((model) => model.remoteModelId === adapter?.model);
+  const selectedModel =
+    modelOptions.find((item) => item.model.id === catalogModelId && item.adapter.key === adapterKey)
+      ?.model ?? models.find((model) => model.id === catalogModelId);
 
   useEffect(() => {
-    const nextAdapterKey = modelOptions.some((item) => item.key === adapterKey)
-      ? adapterKey
-      : (modelOptions[0]?.key ?? '');
+    const current = modelOptions.find(
+      (item) => item.model.id === catalogModelId && item.adapter.key === adapterKey,
+    );
+    const next = current ?? modelOptions[0];
+    const nextAdapterKey = next?.adapter.key ?? '';
+    const nextModelId = next?.model.id ?? '';
     if (nextAdapterKey !== adapterKey) setAdapterKey(nextAdapterKey);
-  }, [adapterKey, modelOptions]);
+    if (nextModelId !== catalogModelId) setCatalogModelId(nextModelId);
+  }, [adapterKey, catalogModelId, modelOptions]);
 
   const chooseProfile = (profileId: string) => {
     setSelectedProfileId(profileId);
     setModels([]);
     setAdapterKey('');
+    setCatalogModelId('');
     setGenerationStatus('');
     try {
       const stored = JSON.parse(
@@ -967,14 +989,18 @@ export function ProductionPanel({
                   <label htmlFor="model">模型</label>
                   <select
                     id="model"
-                    value={adapterKey}
-                    onChange={(event) => setAdapterKey(event.target.value)}
+                    value={catalogModelId && adapterKey ? `${catalogModelId}::${adapterKey}` : ''}
+                    onChange={(event) => {
+                      const [nextModelId, ...adapterParts] = event.target.value.split('::');
+                      setCatalogModelId(nextModelId ?? '');
+                      setAdapterKey(adapterParts.join('::'));
+                    }}
                     disabled={modelOptions.length === 0 || busy}
                   >
                     {modelOptions.length === 0 && <option value="">没有已启用的兼容模型</option>}
                     {modelOptions.map((item) => (
-                      <option key={item.key} value={item.key}>
-                        {item.modelLabel}
+                      <option key={item.optionKey} value={item.optionKey}>
+                        {item.model.displayName}
                       </option>
                     ))}
                   </select>

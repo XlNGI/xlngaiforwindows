@@ -134,6 +134,7 @@ export interface ProviderModelInfo {
   capabilities: ProviderModelCapabilities;
   source: ProviderModelSource;
   enabled: boolean;
+  parameterTemplateKey?: string;
   lastSyncedAt?: string;
   lastSeenAt?: string;
   unavailableAt?: string;
@@ -322,6 +323,7 @@ export interface ProviderModelCreateParams {
   displayName?: string;
   capabilities: ProviderModelCapabilities;
   enabled?: boolean;
+  parameterTemplateKey?: string;
 }
 
 export interface ProviderModelUpdateParams {
@@ -330,6 +332,71 @@ export interface ProviderModelUpdateParams {
   displayName: string;
   capabilities: ProviderModelCapabilities;
   enabled: boolean;
+  parameterTemplateKey?: string | null;
+}
+
+export type UniCompApiMediaTemplateKey =
+  | 'openai-compatible-image'
+  | 'qwen-image-edit'
+  | 'openai-compatible-video'
+  | 'vidu-compatible-reference'
+  | 'vidu-compatible-start-end';
+
+export interface MediaParameterTemplateInfo {
+  key: UniCompApiMediaTemplateKey;
+  label: string;
+  description: string;
+  provider: 'unicompapi';
+  capabilities: GenerationCapability[];
+}
+
+export const UNICOMPAPI_MEDIA_TEMPLATES: readonly MediaParameterTemplateInfo[] = [
+  {
+    key: 'openai-compatible-image',
+    label: 'OpenAI 兼容生图',
+    description: 'POST /v1/images/generations 通用字段',
+    provider: 'unicompapi',
+    capabilities: ['TEXT_TO_IMAGE'],
+  },
+  {
+    key: 'qwen-image-edit',
+    label: 'Qwen 图编投影',
+    description: '华为云平铺 image 字段的图编模板',
+    provider: 'unicompapi',
+    capabilities: ['REFERENCE_TO_IMAGE'],
+  },
+  {
+    key: 'openai-compatible-video',
+    label: 'OpenAI 兼容生视频',
+    description: 'POST /v1/videos 通用字段，文生/图生共用',
+    provider: 'unicompapi',
+    capabilities: ['TEXT_TO_VIDEO', 'IMAGE_TO_VIDEO'],
+  },
+  {
+    key: 'vidu-compatible-reference',
+    label: 'Vidu 兼容参考视频',
+    description: '参考生视频 images[] 合同',
+    provider: 'unicompapi',
+    capabilities: ['REFERENCE_TO_VIDEO'],
+  },
+  {
+    key: 'vidu-compatible-start-end',
+    label: 'Vidu 兼容首尾帧',
+    description: '首尾帧视频 images[] 合同',
+    provider: 'unicompapi',
+    capabilities: ['START_END_TO_VIDEO'],
+  },
+];
+
+export function isUniCompApiMediaTemplateKey(value: string): value is UniCompApiMediaTemplateKey {
+  return UNICOMPAPI_MEDIA_TEMPLATES.some((template) => template.key === value);
+}
+
+export function uniCompApiTemplateAdapterKey(
+  capability: GenerationCapability,
+  templateKey: UniCompApiMediaTemplateKey,
+): string {
+  return `${capability}:unicompapi:${templateKey}:v1`;
 }
 
 export interface ProjectCreateParams {

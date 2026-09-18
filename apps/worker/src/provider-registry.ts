@@ -21,45 +21,15 @@ export class AgentProviderCapabilityError extends Error {
 }
 
 export type ProviderToolLoopRoute = {
-  id: 'openai-responses-official-v1' | 'unicompapi-chat-completions-gpt-5.6-sol-v1';
-  providerType: 'openai' | 'unicompapi';
-  accessType: 'official';
+  id: 'openai-responses-v1' | 'openai-chat-completions-v1';
+  providerType: string;
+  accessType: 'official' | 'custom';
   protocol: 'openai-responses' | 'openai-chat-completions';
-  baseUrl: 'https://api.openai.com/v1' | 'https://unicompapi.com/v1';
+  baseUrl: string;
   toolCallFormat: 'responses-function-call' | 'chat-completions-tool-calls';
   toolResultFormat: 'responses-function-call-output' | 'chat-completions-tool-message';
-  verifiedAt: '2026-08-17' | '2026-08-18';
 };
 
-const VERIFIED_AGENT_TOOL_LOOP_ROUTE: ProviderToolLoopRoute = {
-  id: 'openai-responses-official-v1',
-  providerType: 'openai',
-  accessType: 'official',
-  protocol: 'openai-responses',
-  baseUrl: 'https://api.openai.com/v1',
-  toolCallFormat: 'responses-function-call',
-  toolResultFormat: 'responses-function-call-output',
-  verifiedAt: '2026-08-17',
-};
-
-const VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE: ProviderToolLoopRoute = {
-  id: 'unicompapi-chat-completions-gpt-5.6-sol-v1',
-  providerType: 'unicompapi',
-  accessType: 'official',
-  protocol: 'openai-chat-completions',
-  baseUrl: 'https://unicompapi.com/v1',
-  toolCallFormat: 'chat-completions-tool-calls',
-  toolResultFormat: 'chat-completions-tool-message',
-  verifiedAt: '2026-08-18',
-};
-
-const OPENAI_RESPONSES_AGENT_MODEL_ALLOWLIST = [
-  /^(?:gpt-4o|gpt-4\.1)(?:-|$)/,
-  /^gpt-5(?:[-.].*)?$/,
-  /^o[134](?:-|$)/,
-] as const;
-
-const UNICOMPAPI_CHAT_COMPLETIONS_AGENT_MODEL_ALLOWLIST = [/^gpt-5\.6(?:-|$)/] as const;
 const RETIRED_UNICOMPAPI_AGENT_MODELS = new Set(['gpt-5.6-sol']);
 
 const OFFICIAL_PROVIDER_DEFINITIONS: readonly ProviderDefinitionInfo[] = [
@@ -221,101 +191,53 @@ export function isRetiredAgentModel(providerType: string, remoteModelId: string)
 }
 
 function inferUniCompApiCapabilities(modelId: string): ProviderModelCapabilities {
+  const capabilities = emptyModelCapabilities();
   if (/^gpt-5\.6(?:-|$)/.test(modelId)) {
-    const capabilities = emptyModelCapabilities();
     capabilities.text = true;
     capabilities.streaming = true;
     capabilities.tools = true;
     capabilities.vision = true;
-    return capabilities;
   }
-  const capabilities = emptyModelCapabilities();
-  const features = new Set(UNICOMPAPI_MODEL_FEATURES[modelId] ?? []);
-  capabilities.text = features.has('text_chat');
-  capabilities.streaming = capabilities.text;
-  capabilities.reasoning = features.has('text_reasoning');
-  capabilities.tools = features.has('tools');
-  capabilities.vision = features.has('vision');
-  capabilities.imageGeneration = features.has('text_to_image');
-  capabilities.imageEditing = features.has('image_edit');
-  capabilities.videoGeneration = features.has('text_to_video') || features.has('image_to_video');
   return capabilities;
 }
-
-const UNICOMPAPI_MODEL_FEATURES: Record<string, readonly string[]> = {
-  'deepseek-r1-0528': ['text_chat', 'text_reasoning'],
-  'deepseek-v3': ['text_chat', 'text_reasoning'],
-  'deepseek-v3.2': ['text_chat', 'text_reasoning'],
-  'deepseek-v3.2-exp': ['text_chat', 'text_reasoning'],
-  'deepseek-v4-flash': ['text_chat', 'text_reasoning'],
-  'deepseek-v4-pro': ['text_chat', 'text_reasoning'],
-  'doubao-seedance-2-0-260128': ['text_to_video', 'image_to_video'],
-  'doubao-seedance-2-0-fast-260128': ['text_to_video', 'image_to_video'],
-  'doubao-seedream-5-0-260128': ['text_to_image'],
-  'glm-4.6': ['text_chat', 'text_reasoning'],
-  'glm-4.7': ['text_chat', 'text_reasoning'],
-  'glm-5': ['text_chat', 'text_reasoning'],
-  'glm-5.1': ['text_chat', 'text_reasoning'],
-  'glm-5.2': ['text_chat', 'text_reasoning'],
-  'happyhorse-1.0-i2v': ['image_to_video'],
-  'happyhorse-1.0-r2v': [],
-  'happyhorse-1.0-t2v': ['text_to_video'],
-  'happyhorse-1.0-video-edit': [],
-  'happyhorse-1.1-i2v': ['image_to_video'],
-  'happyhorse-1.1-r2v': [],
-  'happyhorse-1.1-t2v': ['text_to_video'],
-  'kimi-k2.6': ['text_chat'],
-  'kling-v3-turbo': ['text_to_video', 'image_to_video'],
-  'qwen-image': ['text_to_image'],
-  'qwen-image-edit-2509': ['image_edit'],
-  'qwen3-235b-a22b': ['text_chat', 'text_reasoning'],
-  'qwen3-32b': ['text_chat', 'text_reasoning'],
-  viduq3: ['image_to_video'],
-  'viduq3-mix': ['image_to_video'],
-  'viduq3-pro': ['text_to_video'],
-  'viduq3-turbo': ['text_to_video', 'image_to_video'],
-};
 
 export function hasAnyModelCapability(capabilities: ProviderModelCapabilities): boolean {
   return Object.values(capabilities).some(Boolean);
 }
 
 /**
- * Resolves the independently verified transport gate for Agent tool loops.
- * Model capabilities are intentionally checked separately so a manually
- * labelled model can never grant an unverified provider route access.
+ * Resolves the protocol gate for Agent tool loops.
+ * User-enabled text/streaming/tools capabilities are the model allowlist.
  */
 export function resolveAgentToolLoopRoute(
   profile: ProviderProfileInfo,
   model: ProviderModelInfo,
 ): ProviderToolLoopRoute | undefined {
-  if (
-    profile.providerType !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.providerType ||
-    profile.accessType !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.accessType ||
-    profile.protocol !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.protocol ||
-    profile.baseUrl !== VERIFIED_AGENT_TOOL_LOOP_ROUTE.baseUrl ||
-    model.providerProfileId !== profile.id
-  ) {
-    if (
-      profile.providerType === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.providerType &&
-      profile.accessType === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.accessType &&
-      profile.protocol === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.protocol &&
-      profile.baseUrl === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.baseUrl &&
-      model.providerProfileId === profile.id &&
-      !isRetiredAgentModel(profile.providerType, model.remoteModelId) &&
-      UNICOMPAPI_CHAT_COMPLETIONS_AGENT_MODEL_ALLOWLIST.some((pattern) =>
-        pattern.test(model.remoteModelId.trim().toLowerCase()),
-      )
-    ) {
-      return VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE;
-    }
-    return undefined;
+  if (model.providerProfileId !== profile.id) return undefined;
+  if (isRetiredAgentModel(profile.providerType, model.remoteModelId)) return undefined;
+  if (profile.protocol === 'openai-responses') {
+    return {
+      id: 'openai-responses-v1',
+      providerType: profile.providerType,
+      accessType: profile.accessType,
+      protocol: 'openai-responses',
+      baseUrl: profile.baseUrl,
+      toolCallFormat: 'responses-function-call',
+      toolResultFormat: 'responses-function-call-output',
+    };
   }
-  return OPENAI_RESPONSES_AGENT_MODEL_ALLOWLIST.some((pattern) =>
-    pattern.test(model.remoteModelId.trim().toLowerCase()),
-  )
-    ? VERIFIED_AGENT_TOOL_LOOP_ROUTE
-    : undefined;
+  if (profile.protocol === 'openai-chat-completions') {
+    return {
+      id: 'openai-chat-completions-v1',
+      providerType: profile.providerType,
+      accessType: profile.accessType,
+      protocol: 'openai-chat-completions',
+      baseUrl: profile.baseUrl,
+      toolCallFormat: 'chat-completions-tool-calls',
+      toolResultFormat: 'chat-completions-tool-message',
+    };
+  }
+  return undefined;
 }
 
 export function assertAgentToolLoopSelection(

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AgentProviderCapabilityError,
   assertAgentToolLoopSelection,
   hasAnyModelCapability,
   inferKnownModelCapabilities,
@@ -106,32 +105,20 @@ describe('provider registry', () => {
     expect(inferKnownModelCapabilities('openai', 'text-embedding-3-large').embeddings).toBe(true);
   });
 
-  it('infers conservative UniCompAPI capabilities and leaves unknown models disabled', () => {
-    expect(inferKnownModelCapabilities('unicompapi', 'qwen-image')).toMatchObject({
-      imageGeneration: true,
+  it('keeps UniCompAPI first-insert hints tiny and does not catalog unknown IDs', () => {
+    expect(inferKnownModelCapabilities('unicompapi', 'qwen-image')).toEqual({
       text: false,
-    });
-    expect(inferKnownModelCapabilities('unicompapi', 'qwen-image-edit-2509')).toMatchObject({
-      imageEditing: true,
+      vision: false,
+      streaming: false,
+      reasoning: false,
+      tools: false,
+      structuredOutput: false,
+      embeddings: false,
       imageGeneration: false,
-    });
-    expect(inferKnownModelCapabilities('unicompapi', 'doubao-seedance-2-0-260128')).toMatchObject({
-      videoGeneration: true,
-      text: false,
-    });
-    expect(inferKnownModelCapabilities('unicompapi', 'gpt-5.6-sol')).toMatchObject({
-      text: true,
-      streaming: true,
-      tools: true,
-      vision: true,
+      imageEditing: false,
+      videoGeneration: false,
     });
     expect(inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra')).toMatchObject({
-      text: true,
-      streaming: true,
-      tools: true,
-      vision: true,
-    });
-    expect(inferKnownModelCapabilities('unicompapi', 'gpt-5.6-luna')).toMatchObject({
       text: true,
       streaming: true,
       tools: true,
@@ -159,13 +146,13 @@ describe('provider registry', () => {
       inferKnownModelCapabilities('openai', 'gpt-5'),
     );
     expect(assertAgentToolLoopSelection(selectedProfile, selectedModel)).toMatchObject({
-      id: 'openai-responses-official-v1',
+      id: 'openai-responses-v1',
       toolCallFormat: 'responses-function-call',
       toolResultFormat: 'responses-function-call-output',
     });
   });
 
-  it('rejects manually labelled models on unverified Chat Completions routes', () => {
+  it('opens UniCompAPI Chat Completions Agent models when the user enables tools', () => {
     const selectedProfile = profile({
       id: 'unicomp-profile',
       name: 'UniCompAPI',
@@ -181,18 +168,14 @@ describe('provider registry', () => {
       streaming: true,
       tools: true,
     });
-    expect(() => assertAgentToolLoopSelection(selectedProfile, selectedModel)).toThrow(
-      'verification gate',
-    );
-    try {
-      assertAgentToolLoopSelection(selectedProfile, selectedModel);
-    } catch (error) {
-      expect(error).toBeInstanceOf(AgentProviderCapabilityError);
-      expect(error).toMatchObject({ code: 'PROVIDER_TOOL_LOOP_REQUIRED' });
-    }
+    expect(assertAgentToolLoopSelection(selectedProfile, selectedModel)).toMatchObject({
+      id: 'openai-chat-completions-v1',
+      protocol: 'openai-chat-completions',
+      toolCallFormat: 'chat-completions-tool-calls',
+    });
   });
 
-  it('opens verified UniCompAPI GPT-5.6 Chat Completions models except the retired Sol channel', () => {
+  it('opens UniCompAPI Chat Completions models except the retired Sol channel', () => {
     const selectedProfile = profile({
       id: 'unicomp-profile',
       name: 'UniCompAPI',
@@ -208,22 +191,23 @@ describe('provider registry', () => {
       inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra'),
     );
     expect(assertAgentToolLoopSelection(selectedProfile, terra)).toMatchObject({
-      id: 'unicompapi-chat-completions-gpt-5.6-sol-v1',
+      id: 'openai-chat-completions-v1',
       protocol: 'openai-chat-completions',
       toolCallFormat: 'chat-completions-tool-calls',
       toolResultFormat: 'chat-completions-tool-message',
-      verifiedAt: '2026-08-18',
     });
     expect(
       assertAgentToolLoopSelection(
         selectedProfile,
         model(
           selectedProfile.id,
-          'gpt-5.6-luna',
-          inferKnownModelCapabilities('unicompapi', 'gpt-5.6-luna'),
+          'deepseek-v4-pro',
+          {
+            ...inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra'),
+          },
         ),
       ),
-    ).toMatchObject({ id: 'unicompapi-chat-completions-gpt-5.6-sol-v1' });
+    ).toMatchObject({ id: 'openai-chat-completions-v1' });
 
     const retired = model(
       selectedProfile.id,
@@ -235,35 +219,42 @@ describe('provider registry', () => {
     );
   });
 
-  it('rejects custom Responses endpoints even when the model advertises tools', () => {
-    const selectedProfile = profile({
+  it('opens custom NewAPI Chat Completions and Responses when tools are enabled', () => {
+    const chatProfile = profile({
+      providerType: 'relay',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://relay.example/v1',
+    });
+    const responsesProfile = profile({
       providerType: 'relay',
       accessType: 'custom',
       baseUrl: 'https://relay.example/v1',
     });
     const selectedModel = model(
-      selectedProfile.id,
-      'gpt-5',
-      inferKnownModelCapabilities('openai', 'gpt-5'),
+      chatProfile.id,
+      'vendor-experimental-model',
+      {
+        ...inferKnownModelCapabilities('openai', 'gpt-5'),
+        text: true,
+        streaming: true,
+        tools: true,
+      },
     );
 
-    expect(() => assertAgentToolLoopSelection(selectedProfile, selectedModel)).toThrow(
-      'verification gate',
-    );
-  });
-
-  it('rejects models outside the verified Responses allowlist', () => {
-    const selectedProfile = profile();
-    const selectedModel = model(selectedProfile.id, 'vendor-experimental-model', {
-      ...inferKnownModelCapabilities('openai', 'gpt-5'),
-      text: true,
-      streaming: true,
-      tools: true,
+    expect(assertAgentToolLoopSelection(chatProfile, selectedModel)).toMatchObject({
+      id: 'openai-chat-completions-v1',
+      accessType: 'custom',
     });
-
-    expect(() => assertAgentToolLoopSelection(selectedProfile, selectedModel)).toThrow(
-      'verification gate',
-    );
+    expect(
+      assertAgentToolLoopSelection(
+        responsesProfile,
+        { ...selectedModel, providerProfileId: responsesProfile.id },
+      ),
+    ).toMatchObject({
+      id: 'openai-responses-v1',
+      accessType: 'custom',
+    });
   });
 
   it('reports the model gate before route verification', () => {

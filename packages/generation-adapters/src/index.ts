@@ -1,16 +1,20 @@
 import type { ErrorObject, ValidateFunction } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
-import type {
-  AdapterCatalogResult,
-  AdapterDescriptor,
-  AdapterParameterSchema,
-  AdapterParameterProperty,
-  AdapterParameters,
-  AdapterResolveParams,
-  AdapterValidationError,
-  AdapterValidationResult,
-  GenerationCapability,
+import {
+  UNICOMPAPI_MEDIA_TEMPLATES,
+  isUniCompApiMediaTemplateKey,
+  uniCompApiTemplateAdapterKey,
+  type AdapterCatalogResult,
+  type AdapterDescriptor,
+  type AdapterParameterSchema,
+  type AdapterParameterProperty,
+  type AdapterParameters,
+  type AdapterResolveParams,
+  type AdapterValidationError,
+  type AdapterValidationResult,
+  type GenerationCapability,
+  type UniCompApiMediaTemplateKey,
 } from '@ai-video/contracts';
 
 const schemaUri = 'https://json-schema.org/draft/2020-12/schema' as const;
@@ -673,44 +677,22 @@ const generatedReferenceVideoAdapters = [
 
 const adapters: AdapterDescriptor[] = [...baseAdapters, ...generatedReferenceVideoAdapters];
 
-const UNICOMPAPI_MEDIA_MODELS: readonly {
-  model: string;
-  textToImage?: boolean;
-  imageEdit?: boolean;
-  textToVideo?: boolean;
-  imageToVideo?: boolean;
-  referenceToVideo?: boolean;
-  startEndToVideo?: boolean;
-}[] = [
-  { model: 'doubao-seedream-5-0-260128', textToImage: true },
-  { model: 'qwen-image', textToImage: true },
-  { model: 'qwen-image-edit-2509', imageEdit: true },
-  { model: 'doubao-seedance-2-0-260128', textToVideo: true, imageToVideo: true },
-  { model: 'doubao-seedance-2-0-fast-260128', textToVideo: true, imageToVideo: true },
-  { model: 'happyhorse-1.0-i2v', imageToVideo: true },
-  { model: 'happyhorse-1.0-t2v', textToVideo: true },
-  { model: 'happyhorse-1.1-i2v', imageToVideo: true },
-  { model: 'happyhorse-1.1-t2v', textToVideo: true },
-  { model: 'kling-v3-turbo', textToVideo: true, imageToVideo: true },
-  { model: 'viduq3', imageToVideo: true, referenceToVideo: true },
-  { model: 'viduq3-mix', imageToVideo: true },
-  { model: 'viduq3-pro', textToVideo: true, startEndToVideo: true },
-  { model: 'viduq3-turbo', textToVideo: true, imageToVideo: true },
-];
+const UNICOMPAPI_TEMPLATE_LABELS: Record<UniCompApiMediaTemplateKey, string> = {
+  'openai-compatible-image': 'OpenAI 兼容生图',
+  'qwen-image-edit': 'Qwen 图编投影',
+  'openai-compatible-video': 'OpenAI 兼容生视频',
+  'vidu-compatible-reference': 'Vidu 兼容参考视频',
+  'vidu-compatible-start-end': 'Vidu 兼容首尾帧',
+};
 
-const unicompTextToImageSchema = (model: string): AdapterParameterSchema => ({
+const unicompTextToImageSchema: AdapterParameterSchema = {
   $schema: schemaUri,
   type: 'object',
   additionalProperties: false,
-  required: model === 'qwen-image' ? ['prompt', 'size'] : ['prompt'],
+  required: ['prompt'],
   properties: {
     prompt: { type: 'string', title: '提示词', minLength: 1, maxLength: 5000 },
-    size: {
-      type: 'string',
-      title: '尺寸',
-      maxLength: 32,
-      ...(model === 'qwen-image' ? { default: '1024x1024' } : {}),
-    },
+    size: { type: 'string', title: '尺寸', maxLength: 32 },
     n: { type: 'integer', title: '数量', minimum: 1, maximum: 4, default: 1 },
     response_format: {
       type: 'string',
@@ -720,7 +702,7 @@ const unicompTextToImageSchema = (model: string): AdapterParameterSchema => ({
     },
     watermark: { type: 'boolean', title: '添加水印' },
   },
-});
+};
 
 const unicompImageEditSchema: AdapterParameterSchema = {
   $schema: schemaUri,
@@ -774,97 +756,95 @@ const unicompVideoSchema = (imageRequired: boolean): AdapterParameterSchema => (
   },
 });
 
-function unicompApiAdapters(): AdapterDescriptor[] {
+function unicompTemplateCommon(templateKey: UniCompApiMediaTemplateKey) {
+  return {
+    provider: 'unicompapi',
+    providerLabel: 'UniCompAPI',
+    model: templateKey,
+    modelLabel: UNICOMPAPI_TEMPLATE_LABELS[templateKey],
+    apiVersion: 'v1',
+    schemaVersion: 1,
+    documentationUrl: 'https://unicompapi.com',
+    credentialProvider: 'unicompapi',
+  } as const;
+}
+
+function unicompApiTemplateAdapters(): AdapterDescriptor[] {
   const result: AdapterDescriptor[] = [];
-  for (const model of UNICOMPAPI_MEDIA_MODELS) {
-    const common = {
-      provider: 'unicompapi',
-      providerLabel: 'UniCompAPI',
-      model: model.model,
-      modelLabel: model.model,
-      apiVersion: 'v1',
-      schemaVersion: 1,
-      documentationUrl: 'https://unicompapi.com',
-      credentialProvider: 'unicompapi',
-    } as const;
-    if (model.textToImage) {
-      result.push({
-        ...common,
-        key: `TEXT_TO_IMAGE:unicompapi:${model.model}:v1`,
-        capability: 'TEXT_TO_IMAGE',
-        capabilityLabel: '文生图',
-        endpoint: 'https://unicompapi.com/v1/images/generations',
-        parameterSchema: unicompTextToImageSchema(model.model),
-        uiSchema: {
-          fields: [
-            { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
-            { key: 'size', control: 'text', group: 'basic', order: 20 },
-            { key: 'n', control: 'number', group: 'basic', order: 30 },
-            { key: 'response_format', control: 'select', group: 'advanced', order: 40 },
-            { key: 'watermark', control: 'toggle', group: 'advanced', order: 50 },
-          ],
-        },
-      });
-    }
-    if (model.imageEdit) {
-      result.push({
-        ...common,
-        key: `REFERENCE_TO_IMAGE:unicompapi:${model.model}:v1`,
-        capability: 'REFERENCE_TO_IMAGE',
-        capabilityLabel: '图片编辑',
-        endpoint: 'https://unicompapi.com/v1/images/generations',
-        parameterSchema: unicompImageEditSchema,
-        uiSchema: {
-          fields: [
-            {
-              key: 'images',
-              control: 'url-list',
-              group: 'basic',
-              order: 10,
-              placeholder: '输入一张图片 URL 或选择本地图片',
-            },
-            { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
-            { key: 'size', control: 'text', group: 'basic', order: 30 },
-          ],
-        },
-      });
-    }
-    if (model.textToVideo) {
-      result.push(unicompVideoAdapter(common, model.model, 'TEXT_TO_VIDEO', false));
-    }
-    if (model.imageToVideo) {
-      result.push(unicompVideoAdapter(common, model.model, 'IMAGE_TO_VIDEO', true));
-    }
-    if (model.referenceToVideo) {
-      result.push(
-        unicompViduCompatibleVideoAdapter(
-          common,
-          model.model,
-          'REFERENCE_TO_VIDEO',
-          'REFERENCE_TO_VIDEO:vidu:viduq3:v2',
-        ),
-      );
-    }
-    if (model.startEndToVideo) {
-      result.push(
-        unicompViduCompatibleVideoAdapter(
-          common,
-          model.model,
-          'START_END_TO_VIDEO',
-          'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
-        ),
-      );
+  for (const template of UNICOMPAPI_MEDIA_TEMPLATES) {
+    const common = unicompTemplateCommon(template.key);
+    for (const capability of template.capabilities) {
+      if (capability === 'TEXT_TO_IMAGE') {
+        result.push({
+          ...common,
+          key: uniCompApiTemplateAdapterKey(capability, template.key),
+          capability,
+          capabilityLabel: '文生图',
+          endpoint: 'https://unicompapi.com/v1/images/generations',
+          parameterSchema: unicompTextToImageSchema,
+          uiSchema: {
+            fields: [
+              { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+              { key: 'size', control: 'text', group: 'basic', order: 20 },
+              { key: 'n', control: 'number', group: 'basic', order: 30 },
+              { key: 'response_format', control: 'select', group: 'advanced', order: 40 },
+              { key: 'watermark', control: 'toggle', group: 'advanced', order: 50 },
+            ],
+          },
+        });
+      } else if (capability === 'REFERENCE_TO_IMAGE') {
+        result.push({
+          ...common,
+          key: uniCompApiTemplateAdapterKey(capability, template.key),
+          capability,
+          capabilityLabel: '图片编辑',
+          endpoint: 'https://unicompapi.com/v1/images/generations',
+          parameterSchema: unicompImageEditSchema,
+          uiSchema: {
+            fields: [
+              {
+                key: 'images',
+                control: 'url-list',
+                group: 'basic',
+                order: 10,
+                placeholder: '输入一张图片 URL 或选择本地图片',
+              },
+              { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
+              { key: 'size', control: 'text', group: 'basic', order: 30 },
+            ],
+          },
+        });
+      } else if (capability === 'TEXT_TO_VIDEO' || capability === 'IMAGE_TO_VIDEO') {
+        result.push(
+          unicompVideoAdapter(common, template.key, capability, capability === 'IMAGE_TO_VIDEO'),
+        );
+      } else if (capability === 'REFERENCE_TO_VIDEO') {
+        result.push(
+          unicompViduCompatibleVideoAdapter(
+            common,
+            template.key,
+            capability,
+            'REFERENCE_TO_VIDEO:vidu:viduq3:v2',
+          ),
+        );
+      } else if (capability === 'START_END_TO_VIDEO') {
+        result.push(
+          unicompViduCompatibleVideoAdapter(
+            common,
+            template.key,
+            capability,
+            'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
+          ),
+        );
+      }
     }
   }
   return result;
 }
 
 function unicompViduCompatibleVideoAdapter(
-  common: Omit<
-    AdapterDescriptor,
-    'key' | 'capability' | 'capabilityLabel' | 'endpoint' | 'parameterSchema' | 'uiSchema'
-  >,
-  model: string,
+  common: ReturnType<typeof unicompTemplateCommon>,
+  templateKey: UniCompApiMediaTemplateKey,
   capability: 'REFERENCE_TO_VIDEO' | 'START_END_TO_VIDEO',
   viduAdapterKey: string,
 ): AdapterDescriptor {
@@ -872,7 +852,7 @@ function unicompViduCompatibleVideoAdapter(
   if (!viduAdapter) throw new Error(`Vidu-compatible adapter ${viduAdapterKey} was not found.`);
   return {
     ...common,
-    key: `${capability}:unicompapi:${model}:v1`,
+    key: uniCompApiTemplateAdapterKey(capability, templateKey),
     capability,
     capabilityLabel: viduAdapter.capabilityLabel,
     endpoint: 'https://unicompapi.com/v1/videos',
@@ -882,17 +862,14 @@ function unicompViduCompatibleVideoAdapter(
 }
 
 function unicompVideoAdapter(
-  common: Omit<
-    AdapterDescriptor,
-    'key' | 'capability' | 'capabilityLabel' | 'endpoint' | 'parameterSchema' | 'uiSchema'
-  >,
-  model: string,
+  common: ReturnType<typeof unicompTemplateCommon>,
+  templateKey: UniCompApiMediaTemplateKey,
   capability: 'TEXT_TO_VIDEO' | 'IMAGE_TO_VIDEO',
   imageRequired: boolean,
 ): AdapterDescriptor {
   return {
     ...common,
-    key: `${capability}:unicompapi:${model}:v1`,
+    key: uniCompApiTemplateAdapterKey(capability, templateKey),
     capability,
     capabilityLabel: capability === 'TEXT_TO_VIDEO' ? '文生视频' : '图生视频',
     endpoint: 'https://unicompapi.com/v1/videos',
@@ -922,9 +899,68 @@ function unicompVideoAdapter(
   };
 }
 
+const UNICOMPAPI_CAPABILITY_TEMPLATES: Partial<Record<GenerationCapability, UniCompApiMediaTemplateKey>> = {
+  TEXT_TO_IMAGE: 'openai-compatible-image',
+  REFERENCE_TO_IMAGE: 'qwen-image-edit',
+  TEXT_TO_VIDEO: 'openai-compatible-video',
+  IMAGE_TO_VIDEO: 'openai-compatible-video',
+  REFERENCE_TO_VIDEO: 'vidu-compatible-reference',
+  START_END_TO_VIDEO: 'vidu-compatible-start-end',
+};
+
+function parseUniCompAdapterKey(
+  adapterKey: string,
+): { capability: GenerationCapability; token: string } | undefined {
+  const parts = adapterKey.split(':');
+  if (parts.length !== 4 || parts[1] !== 'unicompapi' || parts[3] !== 'v1') return undefined;
+  const capability = parts[0] as GenerationCapability;
+  const token = parts[2] ?? '';
+  if (!UNICOMPAPI_CAPABILITY_TEMPLATES[capability] || !token) return undefined;
+  if (token.trim() !== token || token.length > 256 || [...token].some((value) => value.charCodeAt(0) < 32)) {
+    return undefined;
+  }
+  return { capability, token };
+}
+
+function historicalUniCompAdapter(adapterKey: string): AdapterDescriptor | undefined {
+  const parsed = parseUniCompAdapterKey(adapterKey);
+  if (!parsed || isUniCompApiMediaTemplateKey(parsed.token)) return undefined;
+  const templateKey = UNICOMPAPI_CAPABILITY_TEMPLATES[parsed.capability];
+  if (!templateKey) return undefined;
+  const template = unicompAdapters.find(
+    (adapter) => adapter.capability === parsed.capability && adapter.model === templateKey,
+  );
+  if (!template) return undefined;
+  return {
+    ...template,
+    key: adapterKey,
+    model: parsed.token,
+    modelLabel: parsed.token,
+  };
+}
+
+export function adapterBindsCatalogModel(
+  adapter: Pick<AdapterDescriptor, 'provider' | 'model'>,
+  selection: {
+    providerType: string;
+    remoteModelId: string;
+    parameterTemplateKey?: string;
+  },
+): boolean {
+  if (adapter.provider !== selection.providerType) return false;
+  if (selection.providerType === 'unicompapi') {
+    return Boolean(selection.parameterTemplateKey) && adapter.model === selection.parameterTemplateKey;
+  }
+  return adapter.model === selection.remoteModelId;
+}
+
+export function listUniCompMediaTemplateAdapters(): AdapterDescriptor[] {
+  return unicompAdapters.map((adapter) => structuredClone(adapter));
+}
+
 function legacyVideoAdapter(currentKey: string, legacyKey: string): AdapterDescriptor {
   const current = adapters.find((adapter) => adapter.key === currentKey);
-  if (!current) throw new Error(`Current adapter for legacy key ${legacyKey} was not found.`);
+  if (!current) throw new Error('Current adapter for legacy key ' + legacyKey + ' was not found.');
   return {
     ...current,
     key: legacyKey,
@@ -937,7 +973,8 @@ const legacyAdapters: AdapterDescriptor[] = [
   legacyVideoAdapter('REFERENCE_TO_VIDEO:vidu:viduq3:v2', 'IMAGE_TO_VIDEO:vidu:viduq3:v2'),
   legacyVideoAdapter('START_END_TO_VIDEO:vidu:viduq3-pro:v2', 'IMAGE_TO_VIDEO:vidu:viduq3-pro:v2'),
 ];
-const unicompAdapters = unicompApiAdapters();
+
+const unicompAdapters = unicompApiTemplateAdapters();
 const catalogAdapters = [...adapters, ...unicompAdapters];
 const lookupAdapters = [...catalogAdapters, ...legacyAdapters];
 const keySet = new Set(lookupAdapters.map((adapter) => adapter.key));
@@ -992,7 +1029,10 @@ export function getAdapterCatalog(): AdapterCatalogResult {
 }
 
 export function getAdapter(adapterKey: string): AdapterDescriptor | undefined {
-  return effectiveLookupAdapters().find((adapter) => adapter.key === adapterKey);
+  return (
+    effectiveLookupAdapters().find((adapter) => adapter.key === adapterKey) ??
+    historicalUniCompAdapter(adapterKey)
+  );
 }
 
 export function resolveAdapter(selection: AdapterResolveParams): AdapterDescriptor {

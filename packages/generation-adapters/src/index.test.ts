@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  adapterBindsCatalogModel,
   extractVideoCost,
   getAdapter,
   getAdapterCatalog,
@@ -271,32 +272,33 @@ describe('adapter registry', () => {
     ).toBe(false);
   });
 
-  it('publishes only explicitly contracted UniCompAPI media adapters', () => {
+  it('publishes UniCompAPI schema templates instead of per-model adapters', () => {
     const catalog = getAdapterCatalog();
     expect(
       catalog.adapters.find(
-        (adapter) => adapter.key === 'TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1',
+        (adapter) => adapter.key === 'TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1',
       ),
     ).toMatchObject({
       provider: 'unicompapi',
-      model: 'doubao-seedream-5-0-260128',
+      model: 'openai-compatible-image',
       endpoint: 'https://unicompapi.com/v1/images/generations',
     });
     expect(
       catalog.adapters.find(
-        (adapter) => adapter.key === 'REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1',
+        (adapter) => adapter.key === 'REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit:v1',
       ),
     ).toMatchObject({ endpoint: 'https://unicompapi.com/v1/images/generations' });
-    expect(catalog.adapters.some((adapter) => adapter.model === 'happyhorse-1.0-video-edit')).toBe(
+    expect(catalog.adapters.some((adapter) => adapter.key.includes('unicompapi:qwen-image:v1'))).toBe(
       false,
     );
+    expect(catalog.adapters.some((adapter) => adapter.model === 'kling-v3-turbo')).toBe(false);
     expect(() =>
       resolveAdapter({ capability: 'TEXT_TO_VIDEO', provider: 'unicompapi', model: 'qwen-image' }),
     ).toThrow('No adapter matches');
   });
 
-  it('validates UniCompAPI reference input and rejects undeclared request fields', () => {
-    const key = 'IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1';
+  it('validates UniCompAPI template input and rejects undeclared request fields', () => {
+    const key = 'IMAGE_TO_VIDEO:unicompapi:openai-compatible-video:v1';
     expect(
       validateAdapterParameters(key, {
         images: ['https://example.com/reference.png'],
@@ -312,19 +314,35 @@ describe('adapter registry', () => {
       }),
     ).toMatchObject({ valid: false });
     expect(
-      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:qwen-image:v1', {
+      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1', {
         prompt: 'frame',
         apiKey: 'must-not-persist',
       }),
     ).toMatchObject({ valid: false });
   });
 
-  it('publishes Vidu-compatible UniCompAPI reference and start-end video adapters', () => {
-    const referenceKey = 'REFERENCE_TO_VIDEO:unicompapi:viduq3:v1';
-    const startEndKey = 'START_END_TO_VIDEO:unicompapi:viduq3-pro:v1';
+  it('keeps historical UniCompAPI adapter keys readable without cataloging them', () => {
+    const historical = 'TEXT_TO_IMAGE:unicompapi:qwen-image:v1';
+    expect(getAdapter(historical)).toMatchObject({
+      key: historical,
+      provider: 'unicompapi',
+      model: 'qwen-image',
+      endpoint: 'https://unicompapi.com/v1/images/generations',
+    });
+    expect(getAdapterCatalog().adapters.some((adapter) => adapter.key === historical)).toBe(false);
+    expect(
+      validateAdapterParameters(historical, {
+        prompt: 'frame',
+      }),
+    ).toMatchObject({ valid: true });
+  });
+
+  it('publishes Vidu-compatible UniCompAPI reference and start-end video templates', () => {
+    const referenceKey = 'REFERENCE_TO_VIDEO:unicompapi:vidu-compatible-reference:v1';
+    const startEndKey = 'START_END_TO_VIDEO:unicompapi:vidu-compatible-start-end:v1';
     expect(getAdapter(referenceKey)).toMatchObject({
       provider: 'unicompapi',
-      model: 'viduq3',
+      model: 'vidu-compatible-reference',
       endpoint: 'https://unicompapi.com/v1/videos',
     });
     expect(
@@ -355,23 +373,20 @@ describe('adapter registry', () => {
     ).toMatchObject({ valid: false });
   });
 
-  it('requires a defaulted size only for the qwen-image model family', () => {
-    const qwen = getAdapter('TEXT_TO_IMAGE:unicompapi:qwen-image:v1');
-    const seedream = getAdapter('TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1');
-    expect(qwen?.parameterSchema.required).toContain('size');
-    expect(qwen?.parameterSchema.properties.size?.default).toBe('1024x1024');
-    expect(seedream?.parameterSchema.required).not.toContain('size');
-    expect(seedream?.parameterSchema.properties.size?.default).toBeUndefined();
+  it('binds UniCompAPI catalog rows to templates instead of remote model IDs', () => {
+    const image = getAdapter('TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1')!;
     expect(
-      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:qwen-image:v1', {
-        prompt: 'frame',
+      adapterBindsCatalogModel(image, {
+        providerType: 'unicompapi',
+        remoteModelId: 'vendor-minimax-video',
+        parameterTemplateKey: 'openai-compatible-image',
       }),
-    ).toMatchObject({ valid: false });
+    ).toBe(true);
     expect(
-      validateAdapterParameters('TEXT_TO_IMAGE:unicompapi:qwen-image:v1', {
-        prompt: 'frame',
-        size: '1024x1024',
+      adapterBindsCatalogModel(image, {
+        providerType: 'unicompapi',
+        remoteModelId: 'qwen-image',
       }),
-    ).toMatchObject({ valid: true });
+    ).toBe(false);
   });
 });

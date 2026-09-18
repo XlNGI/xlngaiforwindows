@@ -146,14 +146,16 @@ class SqliteProviderModelRepository implements ProviderModelRepository {
       .prepare(
         `INSERT INTO provider_models
          (id, provider_profile_id, remote_model_id, display_name, capabilities_json,
-          source, enabled, last_synced_at, last_seen_at, unavailable_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          source, enabled, parameter_template_key, last_synced_at, last_seen_at, unavailable_at,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            remote_model_id = excluded.remote_model_id,
            display_name = excluded.display_name,
            capabilities_json = excluded.capabilities_json,
            source = excluded.source,
            enabled = excluded.enabled,
+           parameter_template_key = excluded.parameter_template_key,
            last_synced_at = excluded.last_synced_at,
            last_seen_at = excluded.last_seen_at,
            unavailable_at = excluded.unavailable_at,
@@ -167,6 +169,7 @@ class SqliteProviderModelRepository implements ProviderModelRepository {
         record.capabilitiesJson,
         record.source,
         record.enabled ? 1 : 0,
+        record.parameterTemplateKey ?? null,
         record.lastSyncedAt ?? null,
         record.lastSeenAt ?? null,
         record.unavailableAt ?? null,
@@ -209,6 +212,7 @@ interface ProviderModelRow {
   capabilities_json: string;
   source: ProviderModelRecord['source'];
   enabled: number;
+  parameter_template_key: string | null;
   last_synced_at: string | null;
   last_seen_at: string | null;
   unavailable_at: string | null;
@@ -225,6 +229,7 @@ function mapProviderModel(row: ProviderModelRow): ProviderModelRecord {
     capabilitiesJson: row.capabilities_json,
     source: row.source,
     enabled: row.enabled === 1,
+    parameterTemplateKey: row.parameter_template_key ?? undefined,
     lastSyncedAt: row.last_synced_at ?? undefined,
     lastSeenAt: row.last_seen_at ?? undefined,
     unavailableAt: row.unavailable_at ?? undefined,

@@ -1392,6 +1392,27 @@ button {
   margin: 0;
 }
 
+.model-template-field {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  color: #9fa5a9;
+  font-size: 9px;
+}
+
+.model-template-field select {
+  min-height: 28px;
+  padding: 0 8px;
+  color: #d7dcde;
+  border: 1px solid #383e41;
+  border-radius: 8px;
+  background: var(--control-hover-bg);
+}
+
+.model-template-field small {
+  color: #7f868a;
+}
+
 .model-role-editor {
   padding-top: 8px;
   border-top: 1px solid #343a3d;

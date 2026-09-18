@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CircleDollarSign, Plus, RefreshCw, TriangleAlert } from 'lucide-react';
-import type {
-  ModelPricingInfo,
-  ModelPricingUpdateParams,
-  ProviderDefaultInfo,
-  ProviderDefaultRole,
-  ProviderDefaultUpdateParams,
-  ProviderModelCapabilities,
-  ProviderModelCreateParams,
-  ProviderModelInfo,
-  ProviderModelUpdateParams,
-  ProviderProfileInfo,
+import {
+  UNICOMPAPI_MEDIA_TEMPLATES,
+  type ModelPricingInfo,
+  type ModelPricingUpdateParams,
+  type ProviderDefaultInfo,
+  type ProviderDefaultRole,
+  type ProviderDefaultUpdateParams,
+  type ProviderModelCapabilities,
+  type ProviderModelCreateParams,
+  type ProviderModelInfo,
+  type ProviderModelUpdateParams,
+  type ProviderProfileInfo,
 } from '@ai-video/contracts';
 
 const capabilityOptions: Array<{ key: keyof ProviderModelCapabilities; label: string }> = [
@@ -242,6 +243,34 @@ export function ModelManagementView({
                 disabled={busy}
                 onChange={(capabilities) => void update(model, { capabilities })}
               />
+              {profile.providerType === 'unicompapi' && (
+                <label className="model-template-field">
+                  参数模板
+                  <select
+                    aria-label={`${model.remoteModelId} 参数模板`}
+                    value={model.parameterTemplateKey ?? ''}
+                    disabled={busy}
+                    onChange={(event) =>
+                      void update(model, {
+                        parameterTemplateKey: event.target.value || null,
+                      })
+                    }
+                  >
+                    <option value="">未绑定，不能进入制作</option>
+                    {UNICOMPAPI_MEDIA_TEMPLATES.map((template) => (
+                      <option key={template.key} value={template.key}>
+                        {template.label}
+                      </option>
+                    ))}
+                  </select>
+                  <small>
+                    {model.parameterTemplateKey
+                      ? (UNICOMPAPI_MEDIA_TEMPLATES.find((item) => item.key === model.parameterTemplateKey)
+                          ?.description ?? '已绑定模板')
+                      : '媒体模型需要绑定模板后才能进入制作候选'}
+                  </small>
+                </label>
+              )}
               <ModelRoleEditor
                 profileId={profile.id}
                 model={model}

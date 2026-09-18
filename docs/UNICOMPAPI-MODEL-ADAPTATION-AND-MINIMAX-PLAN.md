@@ -2,18 +2,18 @@
 
 版本：1.1  
 日期：2026-09-18  
-状态：待实施  
+状态：P0-P4 自动化门禁已通过；真实 UniComp 冒烟待用户凭据复验  
 适用范围：Desktop、Worker、Contracts、Generation Adapters、Provider Native Bridge
 
 > 本文档是后续实施的单一事实来源。已确认决策实施中不得临时改成「按供应商家族 / 按全球同名映射 / 把 UniComp 模型表再抄进代码」方案。
 
 ## 1. 执行状态
 
-- [ ] P0 删多余适配：去掉过时硬编码目录，改以 UniComp `/v1/models` 同步结果为准
-- [ ] P1 LLM：Agent 走协议 + 启用；同步不再覆盖能力；Sol 下架收口
-- [ ] P2 媒体模板：少量协议/模板替代 per-model UniComp adapter；原生按模板校验字段，不再维护模型 ID 数组
-- [ ] P3 MiniMax：给 UniComp 同步到的 MiniMax 绑视频模板；不新增官方 MiniMax 卡片
-- [ ] P4 验收：自动化门禁 + UniComp 真实冒烟
+- [x] P0 删多余适配：去掉过时硬编码目录，改以 UniComp `/v1/models` 同步结果为准
+- [x] P1 LLM：Agent 走协议 + 启用；同步不再覆盖能力；Sol 下架收口
+- [x] P2 媒体模板：少量协议/模板替代 per-model UniComp adapter；原生按模板校验字段，不再维护模型 ID 数组
+- [x] P3 MiniMax：UniComp 托管 MiniMax 共用通用视频模板，不新增官方 MiniMax 卡片或模型 ID 数组
+- [x] P4 验收：自动化门禁已通过（generation-adapters / worker / desktop / persistence / cargo test）。真实 UniComp 冒烟仍需用户凭据
 
 ## 2. 文档目的
 

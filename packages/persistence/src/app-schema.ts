@@ -1,4 +1,4 @@
-export const CURRENT_APP_SCHEMA_VERSION = 4;
+export const CURRENT_APP_SCHEMA_VERSION = 5;
 
 export const APP_MIGRATION_V1 = `
 CREATE TABLE app_schema_migrations (
@@ -128,4 +128,9 @@ CREATE TABLE adapter_schema_audits (
 );
 
 CREATE INDEX idx_adapter_schema_audits_key ON adapter_schema_audits(adapter_key, version DESC, created_at DESC);
+`;
+
+export const APP_MIGRATION_V5 = `
+ALTER TABLE provider_models ADD COLUMN parameter_template_key TEXT
+  CHECK (parameter_template_key IS NULL OR length(trim(parameter_template_key)) > 0);
 `;

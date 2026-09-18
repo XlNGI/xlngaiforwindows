@@ -237,7 +237,7 @@ describe('AppSettingsService', () => {
     service.close();
   });
 
-  it('refreshes known remote capabilities when the controlled catalog gains tools', async () => {
+  it('preserves user capability checkboxes across UniCompAPI synchronization', async () => {
     const service = await createService();
     const profile = service.createProfile({
       name: 'UniCompAPI',
@@ -250,25 +250,67 @@ describe('AppSettingsService', () => {
     const first = service.completeConnectionTest({
       profileId: profile.id,
       status: 'ready',
-      models: [{ id: 'gpt-5.6-terra' }],
+      models: [{ id: 'gpt-5.6-terra' }, { id: 'vendor-experimental-model' }],
     });
-    const model = first.models[0]!;
-    expect(model.capabilities.tools).toBe(true);
+    const terra = first.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')!;
+    const unknown = first.models.find((item) => item.remoteModelId === 'vendor-experimental-model')!;
+    expect(terra.enabled).toBe(false);
+    expect(terra.capabilities.tools).toBe(true);
+    expect(unknown.enabled).toBe(false);
+    expect(unknown.capabilities).toMatchObject({ text: false, tools: false, imageGeneration: false });
 
     service.updateModel({
       profileId: profile.id,
-      modelId: model.id,
-      displayName: model.displayName,
+      modelId: terra.id,
+      displayName: terra.displayName,
       capabilities: { ...emptyModelCapabilities(), text: true, streaming: true },
       enabled: false,
     });
     const refreshed = service.completeConnectionTest({
       profileId: profile.id,
       status: 'ready',
-      models: [{ id: 'gpt-5.6-terra' }],
+      models: [{ id: 'gpt-5.6-terra' }, { id: 'vendor-experimental-model' }],
     });
-    expect(refreshed.models[0]?.capabilities.tools).toBe(true);
-    expect(refreshed.models[0]?.enabled).toBe(false);
+    expect(refreshed.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')?.capabilities.tools).toBe(
+      false,
+    );
+    expect(refreshed.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')?.enabled).toBe(false);
+    service.close();
+  });
+
+  it('binds a UniCompAPI media template without copying remote model IDs into adapters', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'UniCompAPI',
+      category: 'multi',
+      providerType: 'unicompapi',
+      accessType: 'official',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    });
+    const synced = service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'vendor-hosted-video-model' }],
+    });
+    const model = synced.models[0]!;
+    const updated = service.updateModel({
+      profileId: profile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: { ...emptyModelCapabilities(), videoGeneration: true },
+      enabled: true,
+      parameterTemplateKey: 'openai-compatible-video',
+    });
+    expect(updated.parameterTemplateKey).toBe('openai-compatible-video');
+    expect(updated.remoteModelId).toBe('vendor-hosted-video-model');
+    const resynced = service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'vendor-hosted-video-model' }],
+    });
+    expect(resynced.models[0]?.parameterTemplateKey).toBe('openai-compatible-video');
+    expect(resynced.models[0]?.capabilities.videoGeneration).toBe(true);
     service.close();
   });
 

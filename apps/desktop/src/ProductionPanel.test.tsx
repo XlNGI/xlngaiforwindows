@@ -576,11 +576,11 @@ describe('ProductionPanel', () => {
     };
     const unicompDescriptor: AdapterDescriptor = {
       ...descriptor,
-      key: 'TEXT_TO_IMAGE:unicompapi:qwen-image:v1',
+      key: 'TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1',
       provider: 'unicompapi',
       providerLabel: 'UniCompAPI',
-      model: 'qwen-image',
-      modelLabel: 'qwen-image',
+      model: 'openai-compatible-image',
+      modelLabel: 'OpenAI 兼容生图',
       apiVersion: 'v1',
       endpoint: 'https://unicompapi.com/v1/images/generations',
       credentialProvider: 'unicompapi',
@@ -591,6 +591,7 @@ describe('ProductionPanel', () => {
       providerProfileId: unicompProfile.id,
       remoteModelId: 'qwen-image',
       displayName: 'Qwen Image',
+      parameterTemplateKey: 'openai-compatible-image',
     };
     const mixedCatalog: AdapterCatalogResult = {
       ...catalog,
@@ -626,13 +627,13 @@ describe('ProductionPanel', () => {
     expect(screen.getByRole('option', { name: 'UniCompAPI A · UniCompAPI' })).toBeInTheDocument();
 
     fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
-    expect(await screen.findByRole('option', { name: 'qwen-image' })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Qwen Image' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Vidu Q2' })).not.toBeInTheDocument();
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
         capability: 'TEXT_TO_IMAGE',
         provider: 'unicompapi',
-        model: 'qwen-image',
+        model: 'openai-compatible-image',
         apiVersion: 'v1',
       }),
     );
@@ -650,11 +651,11 @@ describe('ProductionPanel', () => {
     };
     const unicompDescriptor: AdapterDescriptor = {
       ...descriptor,
-      key: 'TEXT_TO_IMAGE:unicompapi:qwen-image:v1',
+      key: 'TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1',
       provider: 'unicompapi',
       providerLabel: 'UniCompAPI',
-      model: 'qwen-image',
-      modelLabel: 'qwen-image',
+      model: 'openai-compatible-image',
+      modelLabel: 'OpenAI 兼容生图',
       apiVersion: 'v1',
       endpoint: 'https://unicompapi.com/v1/images/generations',
       credentialProvider: 'unicompapi',
@@ -665,6 +666,7 @@ describe('ProductionPanel', () => {
       providerProfileId: unicompProfile.id,
       remoteModelId: 'qwen-image',
       displayName: 'qwen-image',
+      parameterTemplateKey: 'openai-compatible-image',
     };
     const mixedCatalog: AdapterCatalogResult = {
       ...catalog,
@@ -735,7 +737,8 @@ describe('ProductionPanel', () => {
     );
     expect(await screen.findByText(`${providerProfile.name} · Vidu · API v2`)).toBeInTheDocument();
 
-    fireEvent.change(model, { target: { value: v3.key } });
+    const v3OptionKey = '21111111-1111-4111-8111-111111111112::' + v3.key;
+    fireEvent.change(model, { target: { value: v3OptionKey } });
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
@@ -745,7 +748,7 @@ describe('ProductionPanel', () => {
         apiVersion: 'v3',
       }),
     );
-    expect(model).toHaveValue(v3.key);
+    expect(model).toHaveValue(v3OptionKey);
     expect(await screen.findByText(`${providerProfile.name} · Vidu · API v3`)).toBeInTheDocument();
   });
 

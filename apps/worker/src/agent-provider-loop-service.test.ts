@@ -93,15 +93,16 @@ async function setupMedia(ready = true) {
     settings.completeConnectionTest({
       profileId: profile.id,
       status: 'ready',
-      models: [{ id: 'doubao-seedance-2-0-260128' }],
+      models: [{ id: 'vendor-hosted-video-model' }],
     });
     for (const model of settings.listModels(profile.id)) {
       settings.updateModel({
         profileId: profile.id,
         modelId: model.id,
         displayName: model.displayName,
-        capabilities: model.capabilities,
+        capabilities: { ...model.capabilities, videoGeneration: true },
         enabled: true,
+        parameterTemplateKey: 'openai-compatible-video',
       });
     }
   }

@@ -121,7 +121,7 @@ describe('VideoGenerationService', () => {
     ).toMatchObject({ status: 'pending', adapterKey: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2' });
     expect(
       service.prepare({
-        adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+        adapterKey: 'TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1',
         parameters: { prompt: 'slow camera move', duration: 5, ratio: '16:9' },
         providerRegion: 'unicompapi',
         providerProfileId: '11111111-1111-4111-8111-111111111111',
@@ -129,7 +129,7 @@ describe('VideoGenerationService', () => {
       }),
     ).toMatchObject({
       status: 'pending',
-      adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1',
       metadata: { providerRegion: 'unicompapi', modelId: 'kling-v3-turbo' },
     });
   });
@@ -225,7 +225,7 @@ describe('VideoGenerationService', () => {
   it('keeps UniCompAPI unknown video states active while other providers fail closed', async () => {
     const { service } = await setup();
     const unicompJob = service.prepare({
-      adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1',
       parameters: { prompt: 'slow camera move', duration: 5, ratio: '16:9' },
       providerRegion: 'unicompapi',
       providerProfileId: '11111111-1111-4111-8111-111111111111',
@@ -360,7 +360,7 @@ describe('VideoGenerationService', () => {
       new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0]),
     );
     const job = service.prepare({
-      adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1',
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1',
       parameters: { prompt: 'camera push', duration: 5 },
       providerRegion: 'unicompapi',
       providerProfileId: '11111111-1111-4111-8111-111111111111',

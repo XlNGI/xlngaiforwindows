@@ -38,6 +38,7 @@ import type {
   ProviderRuntimeProfile,
   RemoteProviderModelInfo,
 } from '@ai-video/contracts';
+import { isUniCompApiMediaTemplateKey } from '@ai-video/contracts';
 import { createAppRepositories, migrateAppDatabase, openAppDatabase } from '@ai-video/persistence';
 import {
   hasAnyModelCapability,
@@ -468,13 +469,7 @@ export class AppSettingsService {
     const profile = this.requireActiveProfile(profileId);
     return this.repositories()
       .providerModels.listByProfile(profile.id)
-      .map((record) => {
-        const model = toModelInfo(record);
-        if (record.source === 'manual') return model;
-        const inferred = inferKnownModelCapabilities(profile.providerType, model.remoteModelId);
-        if (!hasAnyModelCapability(inferred)) return model;
-        return { ...model, capabilities: inferred };
-      });
+      .map((record) => toModelInfo(record));
   }
 
   createManualModel(params: ProviderModelCreateParams): ProviderModelInfo {
@@ -493,6 +488,10 @@ export class AppSettingsService {
         'Select at least one model capability before enabling the model.',
       );
     }
+    const parameterTemplateKey = normalizeParameterTemplateKey(
+      profile.providerType,
+      params.parameterTemplateKey,
+    );
     const now = this.now();
     const model = {
       id: randomUUID(),
@@ -502,6 +501,7 @@ export class AppSettingsService {
       capabilitiesJson: JSON.stringify(capabilities),
       source: 'manual' as const,
       enabled,
+      parameterTemplateKey,
       createdAt: now,
       updatedAt: now,
     };
@@ -527,11 +527,16 @@ export class AppSettingsService {
         'A remotely unavailable model cannot be enabled until it appears in synchronization again.',
       );
     }
+    const parameterTemplateKey =
+      params.parameterTemplateKey === undefined
+        ? model.parameterTemplateKey
+        : normalizeParameterTemplateKey(profile.providerType, params.parameterTemplateKey);
     const updated = {
       ...model,
       displayName: normalizeModelName(params.displayName),
       capabilitiesJson: JSON.stringify(capabilities),
       enabled: params.enabled,
+      parameterTemplateKey,
       updatedAt: this.now(),
     };
     repositories.providerModels.save(updated);
@@ -738,15 +743,14 @@ export class AppSettingsService {
         remoteModelId: remote.id,
         displayName: remote.displayName ?? existing?.displayName ?? remote.id,
         capabilitiesJson:
-          existing?.source === 'manual'
-            ? (existing.capabilitiesJson ??
-              JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)))
-            : JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)),
+          existing?.capabilitiesJson ??
+          JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)),
         source:
           existing?.source === 'manual' || existing?.source === 'built-in'
             ? existing.source
             : 'remote',
         enabled: existing?.enabled ?? false,
+        parameterTemplateKey: existing?.parameterTemplateKey,
         lastSyncedAt: now,
         lastSeenAt: now,
         unavailableAt: undefined,
@@ -953,6 +957,7 @@ function toModelInfo(record: {
   capabilitiesJson: string;
   source: ProviderModelInfo['source'];
   enabled: boolean;
+  parameterTemplateKey?: string;
   lastSyncedAt?: string;
   lastSeenAt?: string;
   unavailableAt?: string;
@@ -966,6 +971,18 @@ function toModelInfo(record: {
       JSON.parse(capabilitiesJson) as ProviderModelCapabilities,
     ),
   };
+}
+
+function normalizeParameterTemplateKey(
+  providerType: string,
+  value: string | null | undefined,
+): string | undefined {
+  if (value === null || value === undefined || value.trim() === '') return undefined;
+  const normalized = value.trim();
+  if (providerType !== 'unicompapi' || !isUniCompApiMediaTemplateKey(normalized)) {
+    throw new ProviderProfileValidationError('Parameter template is not supported for this model.');
+  }
+  return normalized;
 }
 
 function normalizeErrorCode(value: string | undefined): string | undefined {

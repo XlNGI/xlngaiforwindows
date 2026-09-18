@@ -153,7 +153,11 @@ import { MediaOrchestrationService } from './media-orchestration-service.js';
 import { ProjectTaskRuntime } from './project-task-runtime.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
-import { getAdapter, setAdapterOverrides } from '@ai-video/generation-adapters';
+import {
+  adapterBindsCatalogModel,
+  getAdapter,
+  setAdapterOverrides,
+} from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 
 const WORKER_VERSION = '0.1.0';
@@ -222,7 +226,13 @@ function resolveMediaSelectionForRequest(
     .catalog()
     .adapters.find((candidate) => candidate.key === adapterKey);
   if (!adapter) throw new AdapterNotFoundError(`Adapter ${adapterKey} was not found.`);
-  if (adapter.provider !== profile.providerType || adapter.model !== model.remoteModelId) {
+  if (
+    !adapterBindsCatalogModel(adapter, {
+      providerType: profile.providerType,
+      remoteModelId: model.remoteModelId,
+      parameterTemplateKey: model.parameterTemplateKey,
+    })
+  ) {
     throw new ProviderProfileValidationError(
       'The selected provider, model, and adapter do not match.',
     );
@@ -375,6 +385,7 @@ export function modelMatchesUnifiedAgentRequest(
     enabled: boolean;
     unavailableAt?: string | null;
     remoteModelId: string;
+    parameterTemplateKey?: string;
     capabilities: {
       text: boolean;
       streaming: boolean;
@@ -398,8 +409,11 @@ export function modelMatchesUnifiedAgentRequest(
 
   const providerSupportsReference = adapters.some(
     (adapter) =>
-      adapter.provider === providerType &&
-      adapter.model === model.remoteModelId &&
+      adapterBindsCatalogModel(adapter, {
+        providerType,
+        remoteModelId: model.remoteModelId,
+        parameterTemplateKey: model.parameterTemplateKey,
+      }) &&
       (capability === 'image'
         ? adapter.capability === 'REFERENCE_TO_IMAGE'
         : adapter.capability === 'IMAGE_TO_VIDEO' || adapter.capability === 'REFERENCE_TO_VIDEO'),
@@ -411,11 +425,19 @@ export function modelMatchesUnifiedAgentRequest(
 
 function adapterMatchesCapability(
   adapter: { provider: string; model: string; capability: string },
-  providerType: string,
-  remoteModelId: string,
+  profile: { providerType: string },
+  model: { remoteModelId: string; parameterTemplateKey?: string },
   capability: UnifiedAgentCapability | undefined,
 ): boolean {
-  if (adapter.provider !== providerType || adapter.model !== remoteModelId) return false;
+  if (
+    !adapterBindsCatalogModel(adapter, {
+      providerType: profile.providerType,
+      remoteModelId: model.remoteModelId,
+      parameterTemplateKey: model.parameterTemplateKey,
+    })
+  ) {
+    return false;
+  }
   if (!capability || capability === 'auto') return true;
   if (capability === 'image') return adapter.capability.endsWith('TO_IMAGE');
   if (capability === 'video') return adapter.capability.endsWith('TO_VIDEO');
@@ -429,13 +451,16 @@ function toModelSchemaInfo(
   capability?: UnifiedAgentCapability,
 ): UnifiedAgentModelSchemaInfo {
   const matchingAdapters = adapters.filter((adapter) =>
-    adapterMatchesCapability(adapter, profile.providerType, model.remoteModelId, capability),
+    adapterMatchesCapability(adapter, profile, model, capability),
   );
   const persistedForModel = appSettingsService.listAdapterSchemaRecords().flatMap((record) => {
     try {
       const descriptor = JSON.parse(record.descriptorJson) as AdapterDescriptor;
-      return descriptor.provider === profile.providerType &&
-        descriptor.model === model.remoteModelId
+      return adapterBindsCatalogModel(descriptor, {
+        providerType: profile.providerType,
+        remoteModelId: model.remoteModelId,
+        parameterTemplateKey: model.parameterTemplateKey,
+      })
         ? [record]
         : [];
     } catch {
@@ -1383,9 +1408,23 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               // Catalog/model-selection validation remains useful before a project is open.
             }
           }
-          const requestedProviderProfileId =
+          let requestedProviderProfileId =
             agentParams.providerProfileId ?? storedPreference?.providerProfileId;
-          const requestedModelId = agentParams.modelId ?? storedPreference?.modelId;
+          let requestedModelId = agentParams.modelId ?? storedPreference?.modelId;
+          if (!requestedProviderProfileId || !requestedModelId) {
+            const preferredTerra = storedPreference
+              ? undefined
+              : candidates.find(
+                  (candidate) =>
+                    candidate.remoteModelId === 'gpt-5.6-terra' &&
+                    profiles.find((item) => item.id === candidate.providerProfileId)
+                      ?.providerType === 'unicompapi',
+                );
+            if (preferredTerra) {
+              requestedProviderProfileId = preferredTerra.providerProfileId;
+              requestedModelId = preferredTerra.modelId;
+            }
+          }
 
           if (!requestedProviderProfileId || !requestedModelId) {
             result = {

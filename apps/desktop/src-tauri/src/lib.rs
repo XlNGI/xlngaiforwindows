@@ -124,29 +124,6 @@ const V2_VIDEO_FIELDS: &[&str] = &[
     "seed",
 ];
 
-const UNICOMPAPI_TEXT_TO_IMAGE_MODELS: &[&str] = &["doubao-seedream-5-0-260128", "qwen-image"];
-const UNICOMPAPI_IMAGE_EDIT_MODELS: &[&str] = &["qwen-image-edit-2509"];
-const UNICOMPAPI_TEXT_TO_VIDEO_MODELS: &[&str] = &[
-    "doubao-seedance-2-0-260128",
-    "doubao-seedance-2-0-fast-260128",
-    "happyhorse-1.0-t2v",
-    "happyhorse-1.1-t2v",
-    "kling-v3-turbo",
-    "viduq3-pro",
-    "viduq3-turbo",
-];
-const UNICOMPAPI_IMAGE_TO_VIDEO_MODELS: &[&str] = &[
-    "doubao-seedance-2-0-260128",
-    "doubao-seedance-2-0-fast-260128",
-    "happyhorse-1.0-i2v",
-    "happyhorse-1.1-i2v",
-    "kling-v3-turbo",
-    "viduq3",
-    "viduq3-mix",
-    "viduq3-turbo",
-];
-const UNICOMPAPI_REFERENCE_TO_VIDEO_MODELS: &[&str] = &["viduq3", "viduq3-ad", "viduq3-mix"];
-const UNICOMPAPI_START_END_TO_VIDEO_MODELS: &[&str] = &["viduq3-pro"];
 const UNICOMPAPI_IMAGE_FIELDS: &[&str] = &["prompt", "size", "n", "response_format", "watermark"];
 const UNICOMPAPI_IMAGE_EDIT_FIELDS: &[&str] = &["images", "prompt", "size", "response_format"];
 const UNICOMPAPI_VIDEO_FIELDS: &[&str] = &[
@@ -161,37 +138,94 @@ const UNICOMPAPI_VIDEO_FIELDS: &[&str] = &[
     "watermark",
 ];
 
-fn unicompapi_adapter_parts(adapter_key: &str) -> Result<(&str, &str), String> {
+fn unicompapi_capability_template(capability: &str) -> Option<&'static str> {
+    match capability {
+        "TEXT_TO_IMAGE" => Some("openai-compatible-image"),
+        "REFERENCE_TO_IMAGE" => Some("qwen-image-edit"),
+        "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" => Some("openai-compatible-video"),
+        "REFERENCE_TO_VIDEO" => Some("vidu-compatible-reference"),
+        "START_END_TO_VIDEO" => Some("vidu-compatible-start-end"),
+        _ => None,
+    }
+}
+
+fn unicompapi_template_capabilities(template: &str) -> Option<&'static [&'static str]> {
+    match template {
+        "openai-compatible-image" => Some(&["TEXT_TO_IMAGE"]),
+        "qwen-image-edit" => Some(&["REFERENCE_TO_IMAGE"]),
+        "openai-compatible-video" => Some(&["TEXT_TO_VIDEO", "IMAGE_TO_VIDEO"]),
+        "vidu-compatible-reference" => Some(&["REFERENCE_TO_VIDEO"]),
+        "vidu-compatible-start-end" => Some(&["START_END_TO_VIDEO"]),
+        _ => None,
+    }
+}
+
+struct UniCompAdapterParts<'a> {
+    capability: &'a str,
+    token: &'a str,
+    template: Option<&'a str>,
+}
+
+fn parse_unicompapi_adapter_key(adapter_key: &str) -> Result<UniCompAdapterParts<'_>, String> {
     let parts = adapter_key.split(':').collect::<Vec<_>>();
     if parts.len() != 4 || parts[1] != "unicompapi" || parts[3] != "v1" {
         return Err("UniCompAPI adapter key is invalid".to_string());
     }
     let capability = parts[0];
-    let model = parts[2];
-    if model.is_empty()
-        || model.len() > 256
-        || model.trim() != model
-        || model.chars().any(char::is_control)
+    let token = parts[2];
+    if token.is_empty()
+        || token.len() > 256
+        || token.trim() != token
+        || token.chars().any(char::is_control)
     {
-        return Err("UniCompAPI adapter model ID is invalid".to_string());
+        return Err("UniCompAPI adapter token is invalid".to_string());
     }
-    let models = match capability {
-        "TEXT_TO_IMAGE" => UNICOMPAPI_TEXT_TO_IMAGE_MODELS,
-        "REFERENCE_TO_IMAGE" => UNICOMPAPI_IMAGE_EDIT_MODELS,
-        "TEXT_TO_VIDEO" => UNICOMPAPI_TEXT_TO_VIDEO_MODELS,
-        "IMAGE_TO_VIDEO" => UNICOMPAPI_IMAGE_TO_VIDEO_MODELS,
-        "REFERENCE_TO_VIDEO" => UNICOMPAPI_REFERENCE_TO_VIDEO_MODELS,
-        "START_END_TO_VIDEO" => UNICOMPAPI_START_END_TO_VIDEO_MODELS,
-        _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
-    };
-    if !models.contains(&model) {
-        return Err("UniCompAPI model is not registered for this capability".to_string());
+    if unicompapi_capability_template(capability).is_none() {
+        return Err("UniCompAPI adapter capability is not supported".to_string());
     }
-    Ok((capability, model))
+    if let Some(supported) = unicompapi_template_capabilities(token) {
+        if !supported.contains(&capability) {
+            return Err("UniCompAPI template is not registered for this capability".to_string());
+        }
+        return Ok(UniCompAdapterParts {
+            capability,
+            token,
+            template: Some(token),
+        });
+    }
+    Ok(UniCompAdapterParts {
+        capability,
+        token,
+        template: None,
+    })
+}
+
+fn unicompapi_adapter_parts(adapter_key: &str) -> Result<(&str, &str), String> {
+    let parsed = parse_unicompapi_adapter_key(adapter_key)?;
+    Ok((parsed.capability, parsed.token))
 }
 
 fn unicompapi_adapter_model(adapter_key: &str) -> Result<&str, String> {
-    unicompapi_adapter_parts(adapter_key).map(|(_, model)| model)
+    unicompapi_adapter_parts(adapter_key).map(|(_, token)| token)
+}
+
+fn unicompapi_submit_template<'a>(adapter_key: &'a str) -> Result<(&'a str, &'a str), String> {
+    let parsed = parse_unicompapi_adapter_key(adapter_key)?;
+    let template = parsed
+        .template
+        .ok_or_else(|| "UniCompAPI adapter must use a registered parameter template".to_string())?;
+    Ok((parsed.capability, template))
+}
+
+fn validate_unicompapi_remote_model_id(remote_model_id: &str) -> Result<(), String> {
+    if remote_model_id.is_empty()
+        || remote_model_id.len() > 256
+        || remote_model_id.trim() != remote_model_id
+        || remote_model_id.chars().any(char::is_control)
+    {
+        return Err("UniCompAPI remote model ID is invalid".to_string());
+    }
+    Ok(())
 }
 
 fn provider_region_target(provider_region: &str) -> Result<(&'static str, &'static str), String> {
@@ -294,6 +328,7 @@ fn provider_target(adapter_key: &str, provider_region: &str) -> Result<ProviderT
 struct MediaCredentialSelection {
     credential_subject: String,
     provider_region: String,
+    remote_model_id: String,
 }
 
 fn resolve_media_selection(
@@ -360,8 +395,16 @@ fn resolve_media_selection(
             );
         }
     }
+    let unicomp_parts = if provider_type == "unicompapi" {
+        Some(parse_unicompapi_adapter_key(adapter_key)?)
+    } else {
+        None
+    };
     let adapter_model = if provider_type == "unicompapi" {
-        unicompapi_adapter_model(adapter_key)?
+        unicomp_parts
+            .as_ref()
+            .map(|parts| parts.token)
+            .unwrap_or_default()
     } else {
         provider_target(adapter_key, region)?.model
     };
@@ -381,12 +424,8 @@ fn resolve_media_selection(
     } else {
         "imageGeneration"
     };
-    let matching_model = models.iter().any(|model| {
-        model
-            .get("remoteModelId")
-            .and_then(serde_json::Value::as_str)
-            == Some(adapter_model)
-            && model.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+    let matching_model = models.iter().find(|model| {
+        model.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
             && model
                 .get("unavailableAt")
                 .is_none_or(serde_json::Value::is_null)
@@ -394,13 +433,37 @@ fn resolve_media_selection(
                 .pointer(&format!("/capabilities/{required_capability}"))
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
+            && if let Some(parts) = unicomp_parts.as_ref() {
+                if let Some(template) = parts.template {
+                    model
+                        .get("parameterTemplateKey")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(template)
+                } else {
+                    model
+                        .get("remoteModelId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(parts.token)
+                }
+            } else {
+                model
+                    .get("remoteModelId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(adapter_model)
+            }
     });
-    if !matching_model {
-        return Err("Selected provider profile has no enabled model for this adapter".to_string());
-    }
+    let remote_model_id = matching_model
+        .and_then(|model| {
+            model
+                .get("remoteModelId")
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or("Selected provider profile has no enabled model for this adapter")?;
     Ok(MediaCredentialSelection {
         credential_subject: normalized_profile_id,
         provider_region: region.to_string(),
+        remote_model_id: remote_model_id.to_string(),
     })
 }
 
@@ -475,10 +538,15 @@ fn validate_payload_fields(
     Ok(())
 }
 
-fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<Vec<u8>, String> {
-    let (capability, model) = unicompapi_adapter_parts(adapter_key)?;
+fn unicompapi_payload(
+    adapter_key: &str,
+    payload: serde_json::Value,
+    remote_model_id: &str,
+) -> Result<Vec<u8>, String> {
+    validate_unicompapi_remote_model_id(remote_model_id)?;
+    let (capability, _template) = unicompapi_submit_template(adapter_key)?;
     if capability == "REFERENCE_TO_IMAGE" {
-        return unicompapi_qwen_image_edit_payload(model, payload);
+        return unicompapi_qwen_image_edit_payload(remote_model_id, payload);
     }
     let mut object = payload
         .as_object()
@@ -492,16 +560,6 @@ fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<V
         _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
     };
     validate_payload_fields(&object, allowed_fields)?;
-
-    if capability == "TEXT_TO_IMAGE"
-        && model == "qwen-image"
-        && !object
-            .get("size")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Err("UniCompAPI qwen-image requires a size".to_string());
-    }
 
     if capability == "TEXT_TO_VIDEO" && object.contains_key("images") {
         return Err("UniCompAPI text-to-video does not accept an input image".to_string());
@@ -546,7 +604,7 @@ fn unicompapi_payload(adapter_key: &str, payload: serde_json::Value) -> Result<V
     }
     object.insert(
         "model".to_string(),
-        serde_json::Value::String(model.to_string()),
+        serde_json::Value::String(remote_model_id.to_string()),
     );
     let encoded = serde_json::to_vec(&object)
         .map_err(|error| format!("Unable to serialize provider payload: {error}"))?;
@@ -1266,6 +1324,7 @@ async fn provider_submit(
             &selection.provider_region,
             &selection.credential_subject,
             payload,
+            &selection.remote_model_id,
         )
     })
     .await
@@ -1292,6 +1351,7 @@ async fn provider_submit_task(
             &selection.provider_region,
             &selection.credential_subject,
             payload,
+            &selection.remote_model_id,
         )
     })
     .await
@@ -1303,10 +1363,11 @@ fn provider_submit_task_blocking(
     provider_region: &str,
     credential_subject: &str,
     payload: serde_json::Value,
+    remote_model_id: &str,
 ) -> Result<ProviderTaskSubmitResponse, String> {
     ensure_video_adapter(adapter_key)?;
     if provider_region == "unicompapi" {
-        let body = unicompapi_payload(adapter_key, payload)?;
+        let body = unicompapi_payload(adapter_key, payload, remote_model_id)?;
         let secret = credential_read(credential_subject)?;
         let response = request_unicompapi_json(&secret, "POST", "/v1/videos", Some(&body))?;
         if response.status < 200 || response.status >= 300 {
@@ -1589,20 +1650,21 @@ fn provider_submit_blocking(
     provider_region: &str,
     credential_subject: &str,
     payload: serde_json::Value,
+    remote_model_id: &str,
 ) -> Result<ProviderHttpResponse, String> {
     if ensure_video_adapter(adapter_key).is_ok() {
         return Err("Video adapters must use the asynchronous provider task bridge".to_string());
     }
     if provider_region == "unicompapi" {
-        let (capability, _) = unicompapi_adapter_parts(adapter_key)?;
+        let (capability, _) = unicompapi_submit_template(adapter_key)?;
         let secret = credential_read(credential_subject)?;
         let mut response = match capability {
             "TEXT_TO_IMAGE" => {
-                let body = unicompapi_payload(adapter_key, payload)?;
+                let body = unicompapi_payload(adapter_key, payload, remote_model_id)?;
                 request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))
             }
             "REFERENCE_TO_IMAGE" => {
-                let body = unicompapi_payload(adapter_key, payload)?;
+                let body = unicompapi_payload(adapter_key, payload, remote_model_id)?;
                 request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))
             }
             _ => Err("UniCompAPI adapter must use the matching media bridge".to_string()),
@@ -2196,12 +2258,14 @@ fn provider_media_submit_blocking(
     let mut parameters = params["parameters"].clone();
     resolve_controlled_media_inputs(&mut parameters, params.get("inputs"))?;
     let kind = params["kind"].as_str().unwrap_or_default();
+    let remote_model_id = params["remoteModelId"].as_str().unwrap_or_default();
     if kind == "image" {
         let mut response = provider_submit_blocking(
             adapter_key,
             provider_region,
             provider_profile_id,
             parameters,
+            remote_model_id,
         )
         .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
         externalize_embedded_images(&mut response)
@@ -2214,6 +2278,7 @@ fn provider_media_submit_blocking(
         provider_region,
         provider_profile_id,
         parameters,
+        remote_model_id,
     )
     .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
     serde_json::to_value(response)
@@ -3640,7 +3705,7 @@ mod tests {
                         "models": [
                             { "id": "qwen-image", "displayName": "Qwen Image" },
                             { "id": "qwen-image-edit-2509", "displayName": "Qwen Image Edit" },
-                            { "id": "kling-v3-turbo", "displayName": "Kling v3 Turbo" },
+                            { "id": "vendor-hosted-video-model", "displayName": "Hosted Video" },
                             { "id": "vendor-experimental-model", "displayName": "Experimental" }
                         ]
                     }
@@ -3661,18 +3726,68 @@ mod tests {
                 .values()
                 .all(|value| value.as_bool() == Some(false)));
             assert!(resolve_media_selection(
-                "TEXT_TO_IMAGE:unicompapi:qwen-image:v1",
+                "TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1",
                 Some(profile_id),
                 None,
                 &state
             )
             .is_err());
 
-            for remote_model_id in ["qwen-image", "qwen-image-edit-2509", "kling-v3-turbo"] {
+            let bindings = [
+                (
+                    "qwen-image",
+                    "openai-compatible-image",
+                    json!({
+                        "text": false,
+                        "vision": false,
+                        "streaming": false,
+                        "reasoning": false,
+                        "tools": false,
+                        "structuredOutput": false,
+                        "embeddings": false,
+                        "imageGeneration": true,
+                        "imageEditing": false,
+                        "videoGeneration": false
+                    }),
+                ),
+                (
+                    "qwen-image-edit-2509",
+                    "qwen-image-edit",
+                    json!({
+                        "text": false,
+                        "vision": false,
+                        "streaming": false,
+                        "reasoning": false,
+                        "tools": false,
+                        "structuredOutput": false,
+                        "embeddings": false,
+                        "imageGeneration": false,
+                        "imageEditing": true,
+                        "videoGeneration": false
+                    }),
+                ),
+                (
+                    "vendor-hosted-video-model",
+                    "openai-compatible-video",
+                    json!({
+                        "text": false,
+                        "vision": false,
+                        "streaming": false,
+                        "reasoning": false,
+                        "tools": false,
+                        "structuredOutput": false,
+                        "embeddings": false,
+                        "imageGeneration": false,
+                        "imageEditing": false,
+                        "videoGeneration": true
+                    }),
+                ),
+            ];
+            for (remote_model_id, template, capabilities) in bindings {
                 let model = models
                     .iter()
                     .find(|model| model["remoteModelId"] == remote_model_id)
-                    .expect("known model should be synchronized");
+                    .expect("synced model should be present");
                 let updated = state
                     .request(&json!({
                         "id": format!("rust-unicompapi-enable-{remote_model_id}"),
@@ -3682,26 +3797,61 @@ mod tests {
                             "profileId": profile_id,
                             "modelId": model["id"],
                             "displayName": model["displayName"],
-                            "capabilities": model["capabilities"],
-                            "enabled": true
+                            "capabilities": capabilities,
+                            "enabled": true,
+                            "parameterTemplateKey": template
                         }
                     }))
                     .expect("model update response should be valid");
                 assert_eq!(updated["ok"], true);
             }
 
-            for adapter_key in [
+            let image = resolve_media_selection(
+                "TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1",
+                Some(profile_id),
+                None,
+                &state,
+            )
+            .expect("bound image template should resolve");
+            assert_eq!(image.credential_subject, profile_id);
+            assert_eq!(image.provider_region, "unicompapi");
+            assert_eq!(image.remote_model_id, "qwen-image");
+
+            let edit = resolve_media_selection(
+                "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit:v1",
+                Some(profile_id),
+                None,
+                &state,
+            )
+            .expect("bound image-edit template should resolve");
+            assert_eq!(edit.remote_model_id, "qwen-image-edit-2509");
+
+            let video = resolve_media_selection(
+                "TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1",
+                Some(profile_id),
+                None,
+                &state,
+            )
+            .expect("newly synced video ID should resolve after template binding");
+            assert_eq!(video.remote_model_id, "vendor-hosted-video-model");
+            let image_to_video = resolve_media_selection(
+                "IMAGE_TO_VIDEO:unicompapi:openai-compatible-video:v1",
+                Some(profile_id),
+                None,
+                &state,
+            )
+            .expect("generic video template should also bind image-to-video");
+            assert_eq!(image_to_video.remote_model_id, "vendor-hosted-video-model");
+
+            let historical = resolve_media_selection(
                 "TEXT_TO_IMAGE:unicompapi:qwen-image:v1",
-                "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
-                "TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
-                "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
-            ] {
-                let selection =
-                    resolve_media_selection(adapter_key, Some(profile_id), None, &state)
-                        .expect("enabled exact-capability model should resolve");
-                assert_eq!(selection.credential_subject, profile_id);
-                assert_eq!(selection.provider_region, "unicompapi");
-            }
+                Some(profile_id),
+                None,
+                &state,
+            )
+            .expect("historical UniComp adapter keys should still resolve by remote model ID");
+            assert_eq!(historical.remote_model_id, "qwen-image");
+
             assert!(resolve_media_selection(
                 "TEXT_TO_VIDEO:unicompapi:qwen-image:v1",
                 Some(profile_id),
@@ -3873,15 +4023,16 @@ mod tests {
     }
 
     #[test]
-    fn unicompapi_bridge_preserves_exact_registered_model_ids() {
-        let adapter_key = "TEXT_TO_IMAGE:unicompapi:doubao-seedream-5-0-260128:v1";
+    fn unicompapi_bridge_injects_catalog_remote_model_ids() {
+        let adapter_key = "TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1";
         assert_eq!(
-            unicompapi_adapter_model(adapter_key).expect("registered model should resolve"),
-            "doubao-seedream-5-0-260128"
+            unicompapi_adapter_model(adapter_key).expect("registered template should resolve"),
+            "openai-compatible-image"
         );
         let body = unicompapi_payload(
             adapter_key,
             json!({"prompt": "frame", "size": "1024x1024", "n": 1}),
+            "doubao-seedream-5-0-260128",
         )
         .expect("image request should serialize");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
@@ -3892,17 +4043,22 @@ mod tests {
     }
 
     #[test]
-    fn unicompapi_qwen_image_requires_size_at_the_native_boundary() {
-        let adapter_key = "TEXT_TO_IMAGE:unicompapi:qwen-image:v1";
-        assert!(unicompapi_payload(adapter_key, json!({"prompt": "frame"})).is_err());
-        let body = unicompapi_payload(
-            adapter_key,
-            json!({"prompt": "frame", "size": "1024x1024", "n": 1}),
-        )
-        .expect("qwen image request with size should serialize");
+    fn unicompapi_generic_image_template_allows_optional_size() {
+        let adapter_key = "TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1";
+        let body = unicompapi_payload(adapter_key, json!({"prompt": "frame"}), "qwen-image")
+            .expect("generic image template should not require size");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(parsed["model"], "qwen-image");
-        assert_eq!(parsed["size"], "1024x1024");
+        assert!(parsed.get("size").is_none());
+        let with_size = unicompapi_payload(
+            adapter_key,
+            json!({"prompt": "frame", "size": "1024x1024", "n": 1}),
+            "qwen-image",
+        )
+        .expect("generic image request with size should serialize");
+        let parsed_size: serde_json::Value =
+            serde_json::from_slice(&with_size).expect("valid JSON");
+        assert_eq!(parsed_size["size"], "1024x1024");
     }
 
     #[test]
@@ -3981,13 +4137,14 @@ mod tests {
     fn unicompapi_bridge_projects_one_reference_image() {
         let image = "data:image/png;base64,iVBORw0KGgo=";
         let edit = unicompapi_payload(
-            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
+            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit:v1",
             json!({
                 "images": [image],
                 "prompt": "remove the sign",
                 "size": "1024x1024",
                 "response_format": "b64_json"
             }),
+            "qwen-image-edit-2509",
         )
         .expect("image edit request should serialize as ModelArts MaaS JSON");
         let parsed_edit: serde_json::Value =
@@ -4000,21 +4157,22 @@ mod tests {
         assert!(parsed_edit.get("input").is_none());
 
         let video = unicompapi_payload(
-            "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
+            "IMAGE_TO_VIDEO:unicompapi:openai-compatible-video:v1",
             json!({"images": [image], "prompt": "camera push", "duration": 5}),
+            "vendor-hosted-video-model",
         )
         .expect("image-to-video request should serialize");
         let parsed_video: serde_json::Value =
             serde_json::from_slice(&video).expect("valid video JSON");
         assert_eq!(parsed_video["image"], image);
-        assert_eq!(parsed_video["model"], "kling-v3-turbo");
+        assert_eq!(parsed_video["model"], "vendor-hosted-video-model");
         assert!(parsed_video.get("images").is_none());
     }
 
     #[test]
     fn unicompapi_bridge_preserves_vidu_compatible_video_images_and_fields() {
         let reference = unicompapi_payload(
-            "REFERENCE_TO_VIDEO:unicompapi:viduq3:v1",
+            "REFERENCE_TO_VIDEO:unicompapi:vidu-compatible-reference:v1",
             json!({
                 "images": ["https://example.com/one.png", "https://example.com/two.png"],
                 "prompt": "camera circles the character",
@@ -4025,6 +4183,7 @@ mod tests {
                 "seed": 42,
                 "off_peak": false
             }),
+            "viduq3",
         )
         .expect("reference-to-video request should preserve Vidu fields");
         let parsed_reference: serde_json::Value =
@@ -4036,7 +4195,7 @@ mod tests {
         assert!(parsed_reference.get("image").is_none());
 
         let start_end = unicompapi_payload(
-            "START_END_TO_VIDEO:unicompapi:viduq3-pro:v1",
+            "START_END_TO_VIDEO:unicompapi:vidu-compatible-start-end:v1",
             json!({
                 "images": ["https://example.com/start.png", "https://example.com/end.png"],
                 "prompt": "slow camera move",
@@ -4045,6 +4204,7 @@ mod tests {
                 "resolution": "720p",
                 "audio": true
             }),
+            "viduq3-pro",
         )
         .expect("start-end request should preserve ordered Vidu fields");
         let parsed_start_end: serde_json::Value =
@@ -4056,23 +4216,27 @@ mod tests {
         );
         assert_eq!(parsed_start_end["images"][1], "https://example.com/end.png");
         assert!(unicompapi_payload(
-            "START_END_TO_VIDEO:unicompapi:viduq3-pro:v1",
-            json!({"images": ["https://example.com/start.png"], "duration": 5})
+            "START_END_TO_VIDEO:unicompapi:vidu-compatible-start-end:v1",
+            json!({"images": ["https://example.com/start.png"], "duration": 5}),
+            "viduq3-pro",
         )
         .is_err());
     }
 
     #[test]
     fn unicompapi_qwen_image_edit_rejects_invalid_images_and_fields() {
-        let adapter_key = "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1";
+        let adapter_key = "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit:v1";
+        let remote_model_id = "qwen-image-edit-2509";
         assert!(unicompapi_payload(
             adapter_key,
-            json!({"images": ["http://example.invalid/image.png"], "prompt": "edit"})
+            json!({"images": ["http://example.invalid/image.png"], "prompt": "edit"}),
+            remote_model_id,
         )
         .is_err());
         assert!(unicompapi_payload(
             adapter_key,
-            json!({"images": ["data:image/png;base64,bm90LXBuZw=="], "prompt": "edit"})
+            json!({"images": ["data:image/png;base64,bm90LXBuZw=="], "prompt": "edit"}),
+            remote_model_id,
         )
         .is_err());
         assert!(unicompapi_payload(
@@ -4081,7 +4245,8 @@ mod tests {
                 "images": ["data:image/png;base64,iVBORw0KGgo="],
                 "prompt": "edit",
                 "apiKey": "must-not-leave-webview"
-            })
+            }),
+            remote_model_id,
         )
         .is_err());
         assert!(unicompapi_payload(
@@ -4090,26 +4255,30 @@ mod tests {
                 "images": ["data:image/png;base64,iVBORw0KGgo="],
                 "prompt": "edit",
                 "response_format": "url"
-            })
+            }),
+            remote_model_id,
         )
         .is_err());
         let remote = unicompapi_payload(
             adapter_key,
             json!({"images": ["https://example.com/image.png"], "prompt": "edit"}),
+            remote_model_id,
         )
         .expect("public HTTPS images should be preserved");
         let parsed: serde_json::Value = serde_json::from_slice(&remote).expect("valid JSON");
         assert_eq!(parsed["image"], "https://example.com/image.png");
+        assert_eq!(parsed["model"], remote_model_id);
     }
 
     #[test]
     fn unicompapi_qwen_image_edit_accepts_trimmed_data_url_headers() {
         let remote = unicompapi_payload(
-            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit-2509:v1",
+            "REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit:v1",
             json!({
                 "images": ["  DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=  "],
                 "prompt": "edit"
             }),
+            "qwen-image-edit-2509",
         )
         .expect("trimmed/case-insensitive image data URL should be accepted");
         let parsed: serde_json::Value = serde_json::from_slice(&remote).expect("valid JSON");
@@ -4117,25 +4286,38 @@ mod tests {
     }
 
     #[test]
-    fn unicompapi_bridge_rejects_unknown_models_and_adapter_injection() {
-        assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:unknown:v1").is_err());
+    fn unicompapi_bridge_rejects_unknown_templates_and_adapter_injection() {
+        assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:unknown:v1").is_ok());
         assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:evil:qwen-image:v1").is_err());
         assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:qwen-image:v1:extra").is_err());
-        assert!(unicompapi_adapter_model("TEXT_TO_VIDEO:unicompapi:qwen-image:v1").is_err());
+        assert!(unicompapi_adapter_model("TEXT_TO_VIDEO:unicompapi:qwen-image:v1").is_ok());
         assert!(unicompapi_adapter_model("TEXT_TO_IMAGE:unicompapi:qwen-image\n:v1").is_err());
+        assert!(
+            unicompapi_adapter_model("TEXT_TO_VIDEO:unicompapi:openai-compatible-image:v1")
+                .is_err()
+        );
         assert!(unicompapi_payload(
-            "TEXT_TO_IMAGE:unicompapi:qwen-image:v1",
-            json!({"prompt": "frame", "apiKey": "secret"})
+            "TEXT_TO_IMAGE:unicompapi:unknown:v1",
+            json!({"prompt": "frame"}),
+            "unknown",
         )
         .is_err());
         assert!(unicompapi_payload(
-            "IMAGE_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
-            json!({"images": ["one", "two"], "prompt": "frame"})
+            "TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1",
+            json!({"prompt": "frame", "apiKey": "secret"}),
+            "qwen-image",
         )
         .is_err());
         assert!(unicompapi_payload(
-            "TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1",
-            json!({"images": ["https://example.com/frame.png"], "prompt": "frame"})
+            "IMAGE_TO_VIDEO:unicompapi:openai-compatible-video:v1",
+            json!({"images": ["one", "two"], "prompt": "frame"}),
+            "vendor-hosted-video-model",
+        )
+        .is_err());
+        assert!(unicompapi_payload(
+            "TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1",
+            json!({"images": ["https://example.com/frame.png"], "prompt": "frame"}),
+            "vendor-hosted-video-model",
         )
         .is_err());
     }
