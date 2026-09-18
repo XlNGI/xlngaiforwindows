@@ -112,6 +112,13 @@ import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
 type WorkspaceView = 'documents' | 'novel' | 'shots' | 'assets' | 'tasks';
+const WORKSPACE_VIEW_TITLES: Record<WorkspaceView, string> = {
+  documents: '项目文档',
+  novel: '小说章节',
+  shots: '场次与镜头',
+  assets: '素材库',
+  tasks: '任务日志',
+};
 type NavigationMode = 'project' | 'production';
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
 
@@ -788,13 +795,26 @@ export function App() {
     });
   };
 
+  const openDocumentWorkspace = () => {
+    setView('documents');
+    workspaceDispatch({ type: 'open', panelId: 'document' });
+  };
+
+  const openProjectView = (nextView: WorkspaceView) => {
+    setNavigationMode('project');
+    if (nextView === 'documents' && detachedPanels.document) {
+      setView('documents');
+      void focusDetachedPanelWindow(detachedPanels.document);
+      return;
+    }
+    setView(nextView);
+    workspaceDispatch({ type: 'open', panelId: 'document' });
+  };
+
   const docs = useDocumentWorkspace({
     writable,
     syncDetachedPanel: (entityId) => syncDetachedPanelForEntity('document', entityId),
-    openDocumentWorkspace: () => {
-      setView('documents');
-      workspaceDispatch({ type: 'open', panelId: 'document' });
-    },
+    openDocumentWorkspace,
     closeDocumentPanel: () => workspaceDispatch({ type: 'close', panelId: 'document' }),
   });
   const {
@@ -829,6 +849,14 @@ export function App() {
     syncMainDocumentIfSelected,
     reset: resetDocumentWorkspace,
   } = docs;
+
+  const requestCloseEditor = () => {
+    if (view === 'documents') {
+      requestCloseDocument();
+      return;
+    }
+    workspaceDispatch({ type: 'close', panelId: 'document' });
+  };
 
   const assetWorkspace = useAssetWorkspace({
     scenes,
@@ -3203,10 +3231,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'novel' ? 'active' : ''}`}
                 type="button"
-                onClick={() => {
-                  setNavigationMode('project');
-                  setView('novel');
-                }}
+                onClick={() => openProjectView('novel')}
               >
                 <BookOpen size={16} />
                 <span>小说章节</span>
@@ -3214,10 +3239,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'documents' ? 'active' : ''}`}
                 type="button"
-                onClick={() => {
-                  setNavigationMode('project');
-                  setView('documents');
-                }}
+                onClick={() => openProjectView('documents')}
               >
                 <FileText size={16} />
                 <span>项目文档</span>
@@ -3226,10 +3248,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'shots' ? 'active' : ''}`}
                 type="button"
-                onClick={() => {
-                  setNavigationMode('project');
-                  setView('shots');
-                }}
+                onClick={() => openProjectView('shots')}
               >
                 <Clapperboard size={16} />
                 <span>场次与镜头</span>
@@ -3238,10 +3257,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'assets' ? 'active' : ''}`}
                 type="button"
-                onClick={() => {
-                  setNavigationMode('project');
-                  setView('assets');
-                }}
+                onClick={() => openProjectView('assets')}
               >
                 <Image size={16} />
                 <span>素材库</span>
@@ -3250,10 +3266,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'tasks' ? 'active' : ''}`}
                 type="button"
-                onClick={() => {
-                  setNavigationMode('project');
-                  setView('tasks');
-                }}
+                onClick={() => openProjectView('tasks')}
               >
                 <ListChecks size={16} />
                 <span>任务日志</span>
@@ -3470,6 +3483,7 @@ export function App() {
             layout={workspaceLayout}
             dispatch={workspaceDispatch}
             documentTitle={document?.title ?? documentTitle}
+            editorTitle={WORKSPACE_VIEW_TITLES[view]}
             conversationContent={conversationPanel}
             productionContent={productionPanel}
             productionOpen={navigationMode === 'production'}
@@ -3477,13 +3491,11 @@ export function App() {
             detachedPanels={detachedPanels}
             onOpenConversation={() => void focusDetachedPanelWindow(detachedPanels.conversation)}
             onOpenDocument={() => {
-              if (detachedPanels.document) {
+              if (view === 'documents' && detachedPanels.document) {
                 void focusDetachedPanelWindow(detachedPanels.document);
-              } else {
-                setView('documents');
               }
             }}
-            onCloseDocument={requestCloseDocument}
+            onCloseDocument={requestCloseEditor}
             onDetachDocument={() => void detachPanel('document')}
             onDetachConversation={() => void detachPanel('conversation')}
           >

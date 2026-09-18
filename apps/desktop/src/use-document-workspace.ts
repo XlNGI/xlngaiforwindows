@@ -39,13 +39,11 @@ export function useDocumentWorkspace({
       ['draft', 'changes_requested', 'published'].includes(
         document.currentVersion?.state ?? 'draft',
       ));
-  const documentDirty = Boolean(
-    documentTitle.trim() &&
-    (!document ||
-      document.title !== documentTitle ||
+  const documentDirty = document
+    ? document.title !== documentTitle ||
       document.kind !== documentKind ||
-      (document.currentVersion?.contentMarkdown ?? '') !== documentContent),
-  );
+      (document.currentVersion?.contentMarkdown ?? '') !== documentContent
+    : Boolean(documentTitle.trim() || documentContent.trim());
 
   const applyDocument = async (nextDocument: DocumentDetail, openPanel = false): Promise<void> => {
     setDocument(nextDocument);
@@ -170,6 +168,7 @@ export function useDocumentWorkspace({
       return true;
     } catch (reason) {
       setContentMessage(reason instanceof Error ? reason.message : '保存失败');
+      return false;
     } finally {
       setContentBusy(false);
     }
