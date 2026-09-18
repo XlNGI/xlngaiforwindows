@@ -125,6 +125,18 @@ describe('provider registry', () => {
       tools: true,
       vision: true,
     });
+    expect(inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra')).toMatchObject({
+      text: true,
+      streaming: true,
+      tools: true,
+      vision: true,
+    });
+    expect(inferKnownModelCapabilities('unicompapi', 'gpt-5.6-luna')).toMatchObject({
+      text: true,
+      streaming: true,
+      tools: true,
+      vision: true,
+    });
     expect(inferKnownModelCapabilities('unicompapi', 'vendor-experimental-model')).toEqual({
       text: false,
       vision: false,
@@ -180,7 +192,7 @@ describe('provider registry', () => {
     }
   });
 
-  it('opens only the verified UniCompAPI Chat Completions model', () => {
+  it('opens verified UniCompAPI GPT-5.6 Chat Completions models except the retired Sol channel', () => {
     const selectedProfile = profile({
       id: 'unicomp-profile',
       name: 'UniCompAPI',
@@ -190,24 +202,35 @@ describe('provider registry', () => {
       protocol: 'openai-chat-completions',
       baseUrl: 'https://unicompapi.com/v1',
     });
-    const selectedModel = model(
+    const terra = model(
       selectedProfile.id,
-      'gpt-5.6-sol',
-      inferKnownModelCapabilities('unicompapi', 'gpt-5.6-sol'),
+      'gpt-5.6-terra',
+      inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra'),
     );
-    expect(assertAgentToolLoopSelection(selectedProfile, selectedModel)).toMatchObject({
+    expect(assertAgentToolLoopSelection(selectedProfile, terra)).toMatchObject({
       id: 'unicompapi-chat-completions-gpt-5.6-sol-v1',
       protocol: 'openai-chat-completions',
       toolCallFormat: 'chat-completions-tool-calls',
       toolResultFormat: 'chat-completions-tool-message',
       verifiedAt: '2026-08-18',
     });
+    expect(
+      assertAgentToolLoopSelection(
+        selectedProfile,
+        model(
+          selectedProfile.id,
+          'gpt-5.6-luna',
+          inferKnownModelCapabilities('unicompapi', 'gpt-5.6-luna'),
+        ),
+      ),
+    ).toMatchObject({ id: 'unicompapi-chat-completions-gpt-5.6-sol-v1' });
 
-    const otherModel = model(selectedProfile.id, 'gpt-5.6-terra', {
-      ...inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra'),
-      tools: true,
-    });
-    expect(() => assertAgentToolLoopSelection(selectedProfile, otherModel)).toThrow(
+    const retired = model(
+      selectedProfile.id,
+      'gpt-5.6-sol',
+      inferKnownModelCapabilities('unicompapi', 'gpt-5.6-sol'),
+    );
+    expect(() => assertAgentToolLoopSelection(selectedProfile, retired)).toThrow(
       'verification gate',
     );
   });

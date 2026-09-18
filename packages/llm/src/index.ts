@@ -71,7 +71,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
   constructor(options: OpenAIProviderOptions = {}) {
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '');
-    this.model = options.model ?? 'gpt-5.6-sol';
+    this.model = options.model ?? 'gpt-5.6-terra';
     this.fetcher = options.fetch ?? fetch;
     this.totalTimeoutMs = positiveTimeout(options.totalTimeoutMs, 120_000);
     this.firstByteTimeoutMs = positiveTimeout(options.firstByteTimeoutMs, 30_000);

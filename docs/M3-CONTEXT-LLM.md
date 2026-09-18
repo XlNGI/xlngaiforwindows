@@ -32,7 +32,7 @@ SQLite Schema v2 为正式文档增加 `scope_type` 和 `scope_id`。从 Schema 
 
 首个 Provider 使用 OpenAI Responses API 和 SSE 流式响应：
 
-- 默认模型：`gpt-5.6-sol`
+- 默认模型：`gpt-5.6-terra`
 - 推理配置：`reasoning.effort = none`
 - 请求存储：`store = false`
 - 密钥来源：仅 `OPENAI_API_KEY`
@@ -45,7 +45,7 @@ PowerShell 启动示例：
 
 ```powershell
 $env:OPENAI_API_KEY = "your-key"
-# 可选：$env:OPENAI_MODEL = "gpt-5.6-sol"
+# 可选：$env:OPENAI_MODEL = "gpt-5.6-terra"
 # 可选：$env:OPENAI_BASE_URL = "https://api.openai.com/v1"
 pnpm dev:desktop
 ```

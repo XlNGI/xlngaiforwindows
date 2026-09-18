@@ -220,6 +220,50 @@ describe('ChatPanel attempt metadata', () => {
     expect(onSelect).toHaveBeenCalledWith('profile', 'model');
   });
 
+  it('explains when the current Agent model has been retired', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentModelSelection={{
+          prompt: '写一份大纲',
+          capability: 'text',
+          reason: 'model_unavailable',
+          models: [],
+        }}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/当前会话模型已下架或不可用/)).toBeInTheDocument();
+  });
+
   it('keeps media model selection separate and submits validated parameters', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',

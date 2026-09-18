@@ -59,6 +59,9 @@ const OPENAI_RESPONSES_AGENT_MODEL_ALLOWLIST = [
   /^o[134](?:-|$)/,
 ] as const;
 
+const UNICOMPAPI_CHAT_COMPLETIONS_AGENT_MODEL_ALLOWLIST = [/^gpt-5\.6(?:-|$)/] as const;
+const RETIRED_UNICOMPAPI_AGENT_MODELS = new Set(['gpt-5.6-sol']);
+
 const OFFICIAL_PROVIDER_DEFINITIONS: readonly ProviderDefinitionInfo[] = [
   {
     id: 'openai',
@@ -210,7 +213,22 @@ export function inferKnownModelCapabilities(
   return capabilities;
 }
 
+export function isRetiredAgentModel(providerType: string, remoteModelId: string): boolean {
+  return (
+    providerType === 'unicompapi' &&
+    RETIRED_UNICOMPAPI_AGENT_MODELS.has(remoteModelId.trim().toLowerCase())
+  );
+}
+
 function inferUniCompApiCapabilities(modelId: string): ProviderModelCapabilities {
+  if (/^gpt-5\.6(?:-|$)/.test(modelId)) {
+    const capabilities = emptyModelCapabilities();
+    capabilities.text = true;
+    capabilities.streaming = true;
+    capabilities.tools = true;
+    capabilities.vision = true;
+    return capabilities;
+  }
   const capabilities = emptyModelCapabilities();
   const features = new Set(UNICOMPAPI_MODEL_FEATURES[modelId] ?? []);
   capabilities.text = features.has('text_chat');
@@ -239,9 +257,6 @@ const UNICOMPAPI_MODEL_FEATURES: Record<string, readonly string[]> = {
   'glm-5': ['text_chat', 'text_reasoning'],
   'glm-5.1': ['text_chat', 'text_reasoning'],
   'glm-5.2': ['text_chat', 'text_reasoning'],
-  'gpt-5.6-luna': ['text_chat'],
-  'gpt-5.6-sol': ['text_chat', 'tools', 'vision'],
-  'gpt-5.6-terra': ['text_chat'],
   'happyhorse-1.0-i2v': ['image_to_video'],
   'happyhorse-1.0-r2v': [],
   'happyhorse-1.0-t2v': ['text_to_video'],
@@ -287,7 +302,10 @@ export function resolveAgentToolLoopRoute(
       profile.protocol === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.protocol &&
       profile.baseUrl === VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE.baseUrl &&
       model.providerProfileId === profile.id &&
-      model.remoteModelId.trim().toLowerCase() === 'gpt-5.6-sol'
+      !isRetiredAgentModel(profile.providerType, model.remoteModelId) &&
+      UNICOMPAPI_CHAT_COMPLETIONS_AGENT_MODEL_ALLOWLIST.some((pattern) =>
+        pattern.test(model.remoteModelId.trim().toLowerCase()),
+      )
     ) {
       return VERIFIED_UNICOMPAPI_TOOL_LOOP_ROUTE;
     }

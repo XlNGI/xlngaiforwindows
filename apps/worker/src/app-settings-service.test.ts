@@ -250,7 +250,7 @@ describe('AppSettingsService', () => {
     const first = service.completeConnectionTest({
       profileId: profile.id,
       status: 'ready',
-      models: [{ id: 'gpt-5.6-sol' }],
+      models: [{ id: 'gpt-5.6-terra' }],
     });
     const model = first.models[0]!;
     expect(model.capabilities.tools).toBe(true);
@@ -265,7 +265,7 @@ describe('AppSettingsService', () => {
     const refreshed = service.completeConnectionTest({
       profileId: profile.id,
       status: 'ready',
-      models: [{ id: 'gpt-5.6-sol' }],
+      models: [{ id: 'gpt-5.6-terra' }],
     });
     expect(refreshed.models[0]?.capabilities.tools).toBe(true);
     expect(refreshed.models[0]?.enabled).toBe(false);
