@@ -975,7 +975,7 @@ describe('App', () => {
     const createdDocument = {
       id: 'document-created-by-agent',
       projectId: 'project',
-      kind: 'note' as const,
+      kind: 'character' as const,
       title: 'Agent 人工验收样本',
       scopeType: 'project' as const,
       currentVersionId: 'version-created-by-agent',
@@ -1124,6 +1124,11 @@ describe('App', () => {
     expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);
     expect(await screen.findByDisplayValue(createdDocument.title)).toBeInTheDocument();
     expect(await screen.findByDisplayValue('Agent 桌面人工测试成功')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('group', { name: '文档类型筛选' })).getByRole('button', {
+        name: '角色',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.list'),
     ).toHaveLength(2);

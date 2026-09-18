@@ -31,6 +31,7 @@ import type {
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
+import { inferDocumentKindFromDraft } from './document-kind.js';
 import {
   ResearchError,
   ResearchService,
@@ -1980,7 +1981,12 @@ export class AgentProviderLoopService {
             taskId: task.id,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
-            kind: (args.documentKind ?? 'note') as DocumentDetail['kind'],
+            kind:
+              (args.documentKind as DocumentDetail['kind'] | undefined) ??
+              inferDocumentKindFromDraft(
+                String(args.title ?? ''),
+                String(args.contentMarkdown ?? ''),
+              ),
             scopeType: task.scope_type,
             scopeId: task.scope_id ?? undefined,
             sourceMessageId: task.user_message_id ?? undefined,

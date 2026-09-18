@@ -439,8 +439,9 @@ const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
 const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan', 'character', 'scene'];
 
 /**
- * The editor keeps every kind selectable: an Agent-created draft is written as
- * `note`, and reclassifying it here is what moves it into the workspace list.
+ * The editor keeps every kind selectable so a leftover Agent `note` can be
+ * reclassified into the workspace list. New Agent drafts infer outline/plan/
+ * character/scene from the title when the model omits documentKind.
  */
 const DOCUMENT_KIND_ORDER: DocumentKind[] = [
   'outline',
@@ -1094,7 +1095,15 @@ export function App() {
         .then((nextDocuments) => {
           if (generationPollOwner.current.projectId === projectId) {
             setDocuments(nextDocuments);
-            const createdDocument = nextDocuments.find((item) => !previousDocumentIds.has(item.id));
+            const created = nextDocuments.filter((item) => !previousDocumentIds.has(item.id));
+            const createdWorkspace = created.filter(isWorkspaceDocument);
+            const createdWorkspaceDocument = createdWorkspace[0];
+            if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
+              setDocumentKindFilter(createdWorkspaceDocument.kind);
+            } else if (createdWorkspace.length > 1) {
+              setDocumentKindFilter('all');
+            }
+            const createdDocument = createdWorkspaceDocument ?? created[0];
             if (createdDocument) void openDocumentById(createdDocument.id);
           }
         })
