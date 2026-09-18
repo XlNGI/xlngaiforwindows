@@ -242,9 +242,12 @@ describe('App', () => {
   });
 
   it('renders the M2 workspace areas and runtime health', async () => {
-    render(<App />);
-    expect(screen.getByText('项目文档')).toBeInTheDocument();
+    const { container } = render(<App />);
+    const projectNav = screen.getByRole('navigation', { name: '项目导航' });
+    expect(within(projectNav).getByText('项目文档')).toBeInTheDocument();
     expect(screen.getByText('文档编辑器')).toBeInTheDocument();
+    expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent('项目文档');
+    expect(container.querySelector('[data-pane-id="conversation"]')).toHaveTextContent('会话');
     expect(screen.getAllByText('项目 AI 助手').length).toBeGreaterThan(0);
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
   });
@@ -284,6 +287,54 @@ describe('App', () => {
       within(topbarActions as HTMLElement).getByRole('button', { name: '收起会话' }),
     ).toHaveAttribute('aria-pressed', 'true');
   });
+
+  it.each([
+    {
+      nav: /项目文档/,
+      heading: '文档编辑器',
+      close: '关闭文档面板',
+    },
+    {
+      nav: '小说章节',
+      heading: '小说工作区',
+      close: '关闭小说章节',
+    },
+    {
+      nav: /场次与镜头/,
+      heading: '镜头工作区',
+      close: '关闭场次与镜头',
+    },
+    {
+      nav: /素材库/,
+      heading: '请打开一个项目',
+      close: '关闭素材库',
+    },
+    {
+      nav: '任务日志',
+      heading: '项目执行记录',
+      close: '关闭任务日志',
+    },
+  ])(
+    'closes the $heading page and reopens it from project navigation',
+    ({ nav, heading, close }) => {
+      const { container } = render(<App />);
+      const projectNav = screen.getByRole('navigation', { name: '项目导航' });
+      fireEvent.click(within(projectNav).getByRole('button', { name: nav }));
+      const editorPage = () => container.querySelector('.workspace-editor-page');
+      expect(editorPage()).toBeInTheDocument();
+      expect(editorPage()).toHaveTextContent(heading);
+
+      fireEvent.click(screen.getByLabelText(close));
+
+      expect(editorPage()).not.toBeInTheDocument();
+      expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
+
+      fireEvent.click(within(projectNav).getByRole('button', { name: nav }));
+
+      expect(editorPage()).toBeInTheDocument();
+      expect(editorPage()).toHaveTextContent(heading);
+    },
+  );
 
   it('opens an auto-hidden conversation as a floating window from the topbar', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
@@ -924,7 +975,7 @@ describe('App', () => {
     const createdDocument = {
       id: 'document-created-by-agent',
       projectId: 'project',
-      kind: 'note' as const,
+      kind: 'character' as const,
       title: 'Agent 人工验收样本',
       scopeType: 'project' as const,
       currentVersionId: 'version-created-by-agent',
@@ -1073,6 +1124,11 @@ describe('App', () => {
     expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);
     expect(await screen.findByDisplayValue(createdDocument.title)).toBeInTheDocument();
     expect(await screen.findByDisplayValue('Agent 桌面人工测试成功')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('group', { name: '文档类型筛选' })).getByRole('button', {
+        name: '角色',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.list'),
     ).toHaveLength(2);

@@ -13,6 +13,7 @@ import { TaskPlanService } from './task-plan-service.js';
 import { createRepositories } from '@ai-video/persistence';
 import type { AgentToolCallRecord } from '@ai-video/domain';
 import { hashAgentToolArguments, unifiedAgentToolRegistry } from './agent-tool-registry.js';
+import { inferDocumentKindFromDraft } from './document-kind.js';
 
 export interface PiToolIdentity {
   taskId: string;
@@ -258,7 +259,7 @@ export class DomainToolGateway {
           taskId: this.identity.taskId,
           title,
           contentMarkdown,
-          kind: documentKindFor(kind, args.documentKind),
+          kind: documentKindFor(kind, args.documentKind, title, contentMarkdown),
           scopeType: task.scope_type,
           scopeId: task.scope_id ?? undefined,
           sourceMessageId: task.user_message_id ?? this.identity.userMessageId,
@@ -315,11 +316,13 @@ function requiredString(value: unknown, name: string, maximum: number): string {
 function documentKindFor(
   kind: ConversationDeliverableKind,
   requested: unknown,
+  title: string,
+  contentMarkdown: string,
 ): 'outline' | 'plan' | 'character' | 'scene' | 'storyboard' | 'note' {
   if (kind === 'episode-outline') return 'plan';
   if (kind === 'character-prompts') return 'character';
   if (kind === 'scene-prompts') return 'scene';
-  if (requested === undefined) return 'note';
+  if (requested === undefined) return inferDocumentKindFromDraft(title, contentMarkdown);
   if (
     requested === 'outline' ||
     requested === 'plan' ||

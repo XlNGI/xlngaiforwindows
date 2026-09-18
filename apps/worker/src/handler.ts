@@ -124,7 +124,11 @@ import {
   AppSettingsService,
   ProviderProfileValidationError,
 } from './app-settings-service.js';
-import { AgentProviderCapabilityError, assertAgentToolLoopSelection } from './provider-registry.js';
+import {
+  AgentProviderCapabilityError,
+  assertAgentToolLoopSelection,
+  isRetiredAgentModel,
+} from './provider-registry.js';
 import { UsageService } from './usage-service.js';
 import { RequestValidationError, validateSessionRequestParams } from './request-validation.js';
 import { executeInfrastructureCommand } from './worker-commands.js';
@@ -1410,14 +1414,20 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             let reason: 'model_unavailable' | 'capability_mismatch' | 'agent_tools_required' =
               'model_unavailable';
             if (requestedProfile && requestedModel) {
-              try {
-                assertAgentToolLoopSelection(requestedProfile, requestedModel);
-                reason =
-                  hasImageAttachment && requestedModel.capabilities.vision !== true
-                    ? 'capability_mismatch'
-                    : 'model_unavailable';
-              } catch {
-                reason = 'agent_tools_required';
+              if (
+                isRetiredAgentModel(requestedProfile.providerType, requestedModel.remoteModelId)
+              ) {
+                reason = 'model_unavailable';
+              } else {
+                try {
+                  assertAgentToolLoopSelection(requestedProfile, requestedModel);
+                  reason =
+                    hasImageAttachment && requestedModel.capabilities.vision !== true
+                      ? 'capability_mismatch'
+                      : 'model_unavailable';
+                } catch {
+                  reason = 'agent_tools_required';
+                }
               }
             }
             result = {

@@ -5524,35 +5524,36 @@ button {
 
 .workspace-pane-header {
   display: flex;
-  flex: 0 0 40px;
+  flex: 0 0 36px;
   align-items: center;
   min-width: 0;
-  border-bottom: 0;
+  padding: 0 4px 0 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
   background: transparent;
 }
 
 .workspace-pane-tab {
   display: flex;
   align-items: center;
-  align-self: flex-end;
-  gap: 6px;
+  flex: 1 1 auto;
+  gap: 7px;
   min-width: 0;
-  max-width: min(280px, 100%);
-  height: 32px;
-  margin-top: 8px;
-  padding: 0 11px;
+  height: 28px;
+  margin: 0;
+  padding: 0 8px;
   overflow: hidden;
-  color: var(--text-strong);
+  color: var(--text-secondary);
   border: 0;
-  border-bottom: 0;
-  border-radius: 999px;
-  background: var(--control-bg);
-  font-size: 11px;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: grab;
 }
 
 .workspace-pane-tab:hover {
   color: var(--text-primary);
-  background: var(--control-hover-bg);
+  background: color-mix(in srgb, var(--control-bg) 88%, transparent);
 }
 
 .workspace-pane-tab span {

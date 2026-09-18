@@ -1,11 +1,13 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useReducer, type ReactNode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultWorkspaceLayout, workspaceReducer } from './workspace-reducer';
 import { WorkspaceSurface } from './WorkspaceSurface';
 
 interface WorkspaceFixtureProps {
   productionOpen?: boolean;
+  documentActive?: boolean;
+  editorTitle?: string;
   detachedPanels?: Partial<Record<'document' | 'conversation', string>>;
   children?: ReactNode;
   onDetachDocument?: () => void;
@@ -14,6 +16,8 @@ interface WorkspaceFixtureProps {
 
 function WorkspaceFixture({
   productionOpen = false,
+  documentActive = true,
+  editorTitle,
   detachedPanels = {},
   children = <div>文档内容</div>,
   onDetachDocument = () => undefined,
@@ -35,7 +39,8 @@ function WorkspaceFixture({
         conversationContent={<div>会话内容</div>}
         productionContent={<div>生产内容</div>}
         productionOpen={productionOpen}
-        documentActive
+        documentActive={documentActive}
+        editorTitle={editorTitle}
         onOpenConversation={() => undefined}
         onOpenDocument={() => undefined}
         onCloseDocument={() => dispatch({ type: 'close', panelId: 'document' })}
@@ -50,6 +55,8 @@ function WorkspaceFixture({
 }
 
 describe('WorkspaceSurface', () => {
+  afterEach(() => cleanup());
+
   beforeEach(() => {
     window.localStorage?.clear();
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
@@ -73,6 +80,59 @@ describe('WorkspaceSurface', () => {
 
     fireEvent.click(within(container).getByLabelText('关闭会话面板'));
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+  });
+
+  it('closes a non-document project page from the pane header', () => {
+    const { container } = render(
+      <WorkspaceFixture documentActive={false} editorTitle="场次与镜头">
+        <div>镜头工作区</div>
+      </WorkspaceFixture>,
+    );
+
+    expect(container.querySelector('.workspace-base-content')).toHaveTextContent('镜头工作区');
+    fireEvent.click(within(container).getByLabelText('关闭场次与镜头'));
+    expect(container.querySelector('.workspace-editor-page')).not.toBeInTheDocument();
+  });
+
+  it('keeps a non-document page visible while the document is in a system window', () => {
+    const { container } = render(
+      <WorkspaceFixture
+        documentActive={false}
+        editorTitle="素材库"
+        detachedPanels={{ document: 'document-window' }}
+      >
+        <div>素材库内容</div>
+      </WorkspaceFixture>,
+    );
+
+    expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-base-content')).toHaveTextContent('素材库内容');
+    expect(within(container).queryByLabelText('文档在独立窗口打开')).not.toBeInTheDocument();
+  });
+
+  it('keeps a reopen placeholder when the document is the last docked page', () => {
+    const { container } = render(<WorkspaceFixture />);
+
+    fireEvent.click(within(container).getByLabelText('关闭会话面板'));
+    fireEvent.click(within(container).getByLabelText('关闭文档面板'));
+
+    expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-closed-panel')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-base-content')).not.toBeInTheDocument();
+    expect(within(container).getByRole('button', { name: '打开文档编辑器' })).toBeInTheDocument();
+  });
+
+  it('keeps a reopen placeholder when a non-document page is the last docked page', () => {
+    const { container } = render(
+      <WorkspaceFixture documentActive={false} editorTitle="小说章节" />,
+    );
+
+    fireEvent.click(within(container).getByLabelText('关闭会话面板'));
+    fireEvent.click(within(container).getByLabelText('关闭小说章节'));
+
+    expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-closed-panel')).toBeInTheDocument();
+    expect(within(container).getByRole('button', { name: '打开小说章节' })).toBeInTheDocument();
   });
 
   it('ignores a persisted 0% conversation layout and still opens a usable pane', () => {

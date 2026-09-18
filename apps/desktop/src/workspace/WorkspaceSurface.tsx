@@ -41,6 +41,7 @@ interface WorkspaceSurfaceProps {
   layout: WorkspaceLayoutState;
   dispatch: Dispatch<WorkspaceAction>;
   documentTitle: string;
+  editorTitle?: string;
   conversationContent: ReactNode;
   productionContent: ReactNode;
   productionOpen: boolean;
@@ -66,6 +67,7 @@ export function WorkspaceSurface({
   layout,
   dispatch,
   documentTitle,
+  editorTitle,
   conversationContent,
   productionContent,
   productionOpen,
@@ -104,9 +106,11 @@ export function WorkspaceSurface({
     activePanelId: layout.activePanelId,
   };
   const narrow = isWorkspaceNarrow(viewport.width);
-  const documentDocked =
-    !documentActive ||
-    (documentPanel.open && documentPanel.mode === 'docked' && !detachedPanels.document);
+  const resolvedEditorTitle = editorTitle || documentTitle || '文档';
+  const editorDetached = documentActive && Boolean(detachedPanels.document);
+  const documentDocked = documentActive
+    ? documentPanel.open && documentPanel.mode === 'docked' && !editorDetached
+    : documentPanel.open;
   const conversationAutoHidden = isConversationAutoHidden(conversationWindowOptions);
   const showDocumentFloating =
     documentActive &&
@@ -345,7 +349,7 @@ export function WorkspaceSurface({
   };
 
   const paneTitle = (paneId: WorkspacePaneId) => {
-    if (paneId === 'editor') return documentTitle || '文档';
+    if (paneId === 'editor') return (documentActive && documentTitle) || resolvedEditorTitle;
     if (paneId === 'conversation') return '会话';
     return '生产参数';
   };
@@ -360,6 +364,7 @@ export function WorkspaceSurface({
           type="button"
           data-pane-id={paneId}
           className={`workspace-pane-tab ${draggingPane === paneId ? 'is-dragging ' : ''}${dropBefore ? 'drop-before ' : ''}${dropAfter ? 'drop-after' : ''}`}
+          title={paneTitle(paneId)}
           onPointerDown={(event) => startPaneDrag(paneId, event)}
           onClick={(event) => {
             if (suppressTabClickRef.current) {
@@ -380,7 +385,7 @@ export function WorkspaceSurface({
           <span>{paneTitle(paneId)}</span>
         </button>
         <div className="workspace-pane-actions">
-          {paneId === 'editor' && (
+          {paneId === 'editor' && documentActive && (
             <button
               type="button"
               title="文档在独立窗口打开"
@@ -405,8 +410,8 @@ export function WorkspaceSurface({
           {paneId === 'editor' && (
             <button
               type="button"
-              title="关闭文档面板"
-              aria-label="关闭文档面板"
+              title={documentActive ? '关闭文档面板' : `关闭${resolvedEditorTitle}`}
+              aria-label={documentActive ? '关闭文档面板' : `关闭${resolvedEditorTitle}`}
               onClick={onCloseDocument}
             >
               <X size={15} />
@@ -439,10 +444,14 @@ export function WorkspaceSurface({
           <section className="workspace-docked-page workspace-editor-page">
             {renderPaneHeader(paneId, index)}
             {documentDocked && <div className="workspace-base-content">{children}</div>}
-            {documentActive && !documentDocked && (
+            {!documentDocked && (
               <div className="workspace-closed-panel">
                 <button type="button" onClick={openDocument}>
-                  {detachedPanels.document ? '显示独立文档窗口' : '打开文档编辑器'}
+                  {editorDetached
+                    ? '显示独立文档窗口'
+                    : documentActive
+                      ? '打开文档编辑器'
+                      : `打开${resolvedEditorTitle}`}
                 </button>
               </div>
             )}
@@ -494,7 +503,7 @@ export function WorkspaceSurface({
   };
 
   const openDocument = () => {
-    if (detachedPanels.document) {
+    if (editorDetached) {
       onOpenDocument();
       return;
     }

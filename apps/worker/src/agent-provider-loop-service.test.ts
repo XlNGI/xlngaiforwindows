@@ -2480,6 +2480,42 @@ describe('AgentProviderLoopService', () => {
     expect(workflow.getDocument(parsed.documentId).kind).toBe('character');
   });
 
+  it('infers documentKind from the draft title when the model omits it', async () => {
+    const { conversation, generations, loop, workflow } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '把前三章的人物做成提示词',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '把前三章的人物做成提示词',
+      '角色提示词',
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_inferred_kind',
+      calls: [
+        {
+          id: 'call_inferred_kind',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: '前三章人物提示词',
+            contentMarkdown: '# 林澈\n灯塔守望员。',
+          }),
+        },
+      ],
+    });
+    const parsed = JSON.parse(result.continuation!.outputs[0]!.output) as { documentId: string };
+    expect(workflow.getDocument(parsed.documentId).kind).toBe('character');
+  });
+
   it('exposes bounded system queries and only grants an explicitly requested reversible write', async () => {
     const { conversation, generations, project, workflow } = await setup();
     const loop = createSystemLoop(project, workflow);

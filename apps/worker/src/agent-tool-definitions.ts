@@ -93,7 +93,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.create_draft',
     description:
-      'Create one reviewable Markdown document draft for the current project. documentKind is optional and controls which workspace shows the document (character/scene appears in the characters and scenes workspace).',
+      'Create one reviewable Markdown document draft for the current project. Always set documentKind so the draft appears on the matching project-document page: outline=大纲, plan=计划, character=角色, scene=场景. Omit it only for private notes. Character/scene prompt documents belong here; actual 场次/镜头 must use novel.episode.submit_structure.',
     parameters: {
       type: 'object',
       additionalProperties: false,
