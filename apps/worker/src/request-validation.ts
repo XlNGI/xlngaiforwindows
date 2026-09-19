@@ -944,6 +944,7 @@ export function validateSessionRequestParams(
     case 'image.generate.prepare':
       rejectUnknown(params, [
         'shotId',
+        'sourceDocumentId',
         'adapterKey',
         'parameters',
         'providerProfileId',
@@ -953,6 +954,7 @@ export function validateSessionRequestParams(
         'costNoticeAcknowledged',
       ]);
       optionalId(params, 'shotId');
+      optionalId(params, 'sourceDocumentId');
       requireString(params, 'adapterKey', 200);
       requireObject(params.parameters, 'parameters');
       requireId(params, 'providerProfileId');

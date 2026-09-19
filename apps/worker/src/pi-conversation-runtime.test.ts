@@ -8,7 +8,7 @@ import type {
   LlmGenerationRuntimeRequest,
   LlmToolDefinition,
 } from '@ai-video/contracts';
-import { PiConversationRuntime } from './pi-conversation-runtime.js';
+import { appendAssistantText, PiConversationRuntime, type AssistantTextAccumulator } from './pi-conversation-runtime.js';
 import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js';
 import type { DomainToolGateway, PiToolIdentity } from './domain-tool-gateway.js';
 
@@ -598,7 +598,7 @@ describe('PiConversationRuntime', () => {
     expect(runtime.confirm(identity.generationId, confirmation.confirmationToken, true)).toBe(true);
     await runtime.wait(identity.generationId);
 
-    expect(runtime.get(identity.generationId)).toEqual({ active: false, confirmation: undefined });
+    expect(runtime.get(identity.generationId)).toMatchObject({ active: false });
     expect(providerTools.confirmTool).toHaveBeenCalledWith({
       ...identity,
       confirmationToken: confirmation.confirmationToken,
@@ -806,5 +806,39 @@ describe('PiConversationRuntime', () => {
     expect(generation.cancel).toHaveBeenCalledWith(identity.generationId);
     expect(generation.failNative).not.toHaveBeenCalled();
     expect(generation.complete).not.toHaveBeenCalled();
+  });
+});
+
+describe('appendAssistantText', () => {
+  it('does not duplicate a completed turn when responseId arrives after streaming', () => {
+    const accumulator: AssistantTextAccumulator = { aggregate: '', segment: '' };
+    appendAssistantText(accumulator, fauxAssistantMessage('I will search the library.'));
+    appendAssistantText(
+      accumulator,
+      fauxAssistantMessage('I will search the library.', { responseId: 'resp-1' }),
+    );
+    expect(accumulator.aggregate).toBe('I will search the library.');
+    expect(accumulator.responseId).toBe('resp-1');
+  });
+
+  it('keeps later tool-round text without replaying the previous paragraph', () => {
+    const accumulator: AssistantTextAccumulator = { aggregate: '', segment: '' };
+    appendAssistantText(accumulator, fauxAssistantMessage('I will search the library.'));
+    appendAssistantText(
+      accumulator,
+      fauxAssistantMessage('I will search the library.', { responseId: 'resp-1' }),
+    );
+    appendAssistantText(
+      accumulator,
+      fauxAssistantMessage('\n\nI will search the library.', { responseId: 'resp-1' }),
+    );
+    appendAssistantText(accumulator, fauxAssistantMessage('Search hit 3 results.'));
+    appendAssistantText(
+      accumulator,
+      fauxAssistantMessage('Search hit 3 results.', { responseId: 'resp-2' }),
+    );
+    expect(accumulator.aggregate).toBe(
+      'I will search the library.\n\nSearch hit 3 results.',
+    );
   });
 });

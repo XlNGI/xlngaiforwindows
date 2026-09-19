@@ -10,6 +10,7 @@ import type {
   AgentTaskEventsParams,
   AgentTaskEventsResult,
   AgentTaskInfo,
+  AgentLibrarySourceInfo,
   AgentTaskPendingConfirmationInfo,
   AgentTaskPendingSchemaConfirmationInfo,
   AgentProtectedUiHandoff,
@@ -36,7 +37,11 @@ import type {
   DocumentWorkflowAuditActorType,
   OpenProject,
 } from '@ai-video/domain';
-import { createRepositories, rebuildNovelRagChunks } from '@ai-video/persistence';
+import {
+  createRepositories,
+  rebuildLibraryChunksForDocument,
+  rebuildNovelRagChunks,
+} from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 const LOCAL_USER = 'local-user';
@@ -984,6 +989,7 @@ export class DocumentWorkflowService {
       createdAt: now,
     });
     this.touchProject(database, project, now);
+    rebuildLibraryChunksForDocument(database, project.id, document.id, now);
     return {
       document: this.getDocumentInProject(database, project, document.id),
       publication: toPublication(
@@ -1555,6 +1561,7 @@ export class DocumentWorkflowService {
         documents,
         providerSteps,
         researchSources,
+        librarySources: librarySourcesFromToolCalls(database, task.id),
       };
     });
   }
@@ -2152,6 +2159,7 @@ export class DocumentWorkflowService {
       contentMarkdown: params.contentMarkdown,
       now,
     });
+    rebuildLibraryChunksForDocument(database, project.id, documentId, now);
     return this.getDocumentInProject(database, project, documentId);
   }
 
@@ -2588,4 +2596,82 @@ function isProtectedConfirmationOperation(operation: string): boolean {
     operation === 'settings.apply_update' ||
     operation === 'maintenance.diagnostics.prepare'
   );
+}
+
+function librarySourcesFromToolCalls(
+  database: Database.Database,
+  taskId: string,
+): AgentLibrarySourceInfo[] {
+  const rows = database
+    .prepare(
+      `SELECT tool_name, result_summary_json FROM agent_tool_calls
+       WHERE task_id = ? AND tool_name IN ('library.search', 'library.read') AND status = 'succeeded'
+       ORDER BY created_at, id`,
+    )
+    .all(taskId) as Array<{
+    tool_name: 'library.search' | 'library.read';
+    result_summary_json: string | null;
+  }>;
+  const sources: AgentLibrarySourceInfo[] = [];
+  for (const row of rows) {
+    if (!row.result_summary_json) continue;
+    try {
+      const parsed = JSON.parse(row.result_summary_json) as {
+        citationLabel?: string;
+        title?: string;
+        sourceType?: string;
+        sourceId?: string;
+        versionId?: string;
+        status?: string;
+        sourceStatus?: string;
+        kind?: string;
+        sources?: Array<{
+          citationLabel?: string;
+          title?: string;
+          sourceType?: string;
+          sourceId?: string;
+          versionId?: string;
+          status?: string;
+          sourceStatus?: string;
+          kind?: string;
+        }>;
+      };
+      const items = parsed.sources ?? [parsed];
+      for (const item of items) {
+        const status = asLibrarySourceStatus(item.sourceStatus ?? item.status);
+        if (!item.citationLabel || !item.title || !item.sourceType || !item.sourceId || !status)
+          continue;
+        sources.push({
+          citationLabel: item.citationLabel,
+          title: item.title,
+          sourceType: item.sourceType as AgentLibrarySourceInfo['sourceType'],
+          sourceId: item.sourceId,
+          versionId: item.versionId,
+          status,
+          kind: item.kind,
+          toolName: row.tool_name,
+        });
+      }
+    } catch {
+      // Keep the task log available even if a tool summary is malformed.
+    }
+  }
+  return sources;
+}
+
+function asLibrarySourceStatus(
+  value: string | undefined,
+): AgentLibrarySourceInfo['status'] | undefined {
+  switch (value) {
+    case 'draft':
+    case 'published':
+    case 'conversation':
+    case 'memory':
+    case 'constraint':
+    case 'active':
+    case 'trash':
+      return value;
+    default:
+      return undefined;
+  }
 }

@@ -1036,7 +1036,11 @@ describe('AgentProviderLoopService', () => {
       'project_only',
     );
     generations.configureAgentTools(prepared.stream, agent.tools);
-    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.chapter.submit_draft']);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'novel.chapter.submit_draft',
+      'library.search',
+      'library.read',
+    ]);
     loop.startProviderStep(prepared.stream);
     const tool = agent.tools[0]!;
     const result = await loop.executeTools({
@@ -1090,7 +1094,11 @@ describe('AgentProviderLoopService', () => {
       'project_only',
     );
     generations.configureAgentTools(prepared.stream, agent.tools);
-    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.adaptation.submit_proposal']);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'novel.adaptation.submit_proposal',
+      'library.search',
+      'library.read',
+    ]);
     loop.startProviderStep(prepared.stream);
     const result = await loop.executeTools({
       ...prepared.stream,
@@ -1162,6 +1170,8 @@ describe('AgentProviderLoopService', () => {
     generations.configureAgentTools(prepared.stream, agent.tools);
     expect(agent.tools.map((tool) => tool.name)).toEqual([
       'document.create_draft',
+      'library.search',
+      'library.read',
       'research.search',
       'research.fetch',
     ]);
@@ -1341,6 +1351,8 @@ describe('AgentProviderLoopService', () => {
     expect(result.continuation?.outputs).toHaveLength(2);
     expect(result.tools?.map((tool) => tool.name)).toEqual([
       'document.create_draft',
+      'library.search',
+      'library.read',
       'research.search',
       'research.fetch',
     ]);
@@ -1361,6 +1373,171 @@ describe('AgentProviderLoopService', () => {
           )
           .get(),
       ).toEqual({ count: 2 });
+    });
+  });
+
+  it('reuses the same library authorization across sequential Provider tool calls', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    new ContentService(project).saveDocument({
+      kind: 'character',
+      title: 'City gate hero',
+      contentMarkdown: 'The hero waits at the city gate before dawn.',
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Find the city gate draft.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Find the city gate draft.');
+    const searchTool = agent.tools.find((tool) => tool.name === 'library.search')!;
+    const readTool = agent.tools.find((tool) => tool.name === 'library.read')!;
+    loop.startProviderStep(prepared.stream);
+
+    const first = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_library_search_1',
+      calls: [
+        {
+          id: 'call_library_search_1',
+          name: 'library.search',
+          authorizationHandle: searchTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ query: 'city gate' }),
+        },
+      ],
+    });
+    const firstOutput = JSON.parse(first.continuation!.outputs[0]!.output) as {
+      status: string;
+      sources: Array<{ sourceHandle: string; title: string }>;
+    };
+    expect(firstOutput.status).not.toBe('failed');
+    expect(firstOutput.sources[0]?.title).toBe('City gate hero');
+    expect(first.tools?.find((tool) => tool.name === 'library.search')?.authorizationHandle).toBe(
+      searchTool.authorizationHandle,
+    );
+
+    const second = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_library_search_2',
+      calls: [
+        {
+          id: 'call_library_search_2',
+          name: 'library.search',
+          authorizationHandle: searchTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ query: 'city gate' }),
+        },
+      ],
+    });
+    const secondOutput = JSON.parse(second.continuation!.outputs[0]!.output) as {
+      status: string;
+      errorCode?: string;
+      sources: Array<{ title: string }>;
+    };
+    expect(secondOutput.status).toBe('searched');
+    expect(secondOutput.errorCode).toBeUndefined();
+    expect(secondOutput.sources.map((source) => source.title)).toContain('City gate hero');
+
+    const read = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_library_read',
+      calls: [
+        {
+          id: 'call_library_read',
+          name: 'library.read',
+          authorizationHandle: readTool.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            sourceHandle: firstOutput.sources[0]!.sourceHandle,
+          }),
+        },
+      ],
+    });
+    expect(read.continuation!.outputs[0]!.output).toContain('city gate');
+    project.access(false, (database) => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM llm_provider_steps').get()).toEqual({
+        count: 1,
+      });
+      expect(
+        database
+          .prepare(
+            `SELECT status FROM llm_provider_steps WHERE status IN ('prepared', 'in_flight')`,
+          )
+          .get(),
+      ).toEqual({ status: 'in_flight' });
+      expect(
+        database
+          .prepare(
+            `SELECT used_call_count FROM agent_tool_authorizations
+             WHERE allowed_operation = 'library.search'`,
+          )
+          .get(),
+      ).toEqual({ used_call_count: 2 });
+    });
+  });
+
+  it('reuses the same research authorization across sequential Provider tool calls', async () => {
+    const research = new ResearchService({
+      searchEndpoint: 'https://search.test/',
+      lookup: () => Promise.resolve([{ address: '93.184.216.34', family: 4 }]),
+      fetch: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              Heading: 'Sequential source',
+              AbstractURL: 'https://source.test/sequential',
+              AbstractText: 'Sequential evidence.',
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          ),
+        ),
+    });
+    const { conversation, generations, loop, project } = await setup(
+      'openai-responses',
+      research,
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Look up sequential evidence.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Look up sequential evidence.');
+    const searchTool = agent.tools.find((tool) => tool.name === 'research.search')!;
+    loop.startProviderStep(prepared.stream);
+
+    const first = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_research_search_1',
+      calls: [
+        {
+          id: 'call_research_search_1',
+          name: 'research.search',
+          authorizationHandle: searchTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ query: 'sequential evidence', limit: 3 }),
+        },
+      ],
+    });
+    expect(JSON.parse(first.continuation!.outputs[0]!.output).sources).toHaveLength(1);
+
+    const second = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_research_search_2',
+      calls: [
+        {
+          id: 'call_research_search_2',
+          name: 'research.search',
+          authorizationHandle: searchTool.authorizationHandle,
+          argumentsJson: JSON.stringify({ query: 'sequential evidence', limit: 3 }),
+        },
+      ],
+    });
+    expect(JSON.parse(second.continuation!.outputs[0]!.output).sources).toHaveLength(1);
+    expect(second.tools?.find((tool) => tool.name === 'research.fetch')?.authorizationHandle).toBe(
+      agent.tools.find((tool) => tool.name === 'research.fetch')?.authorizationHandle,
+    );
+    project.access(false, (database) => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM llm_provider_steps').get()).toEqual({
+        count: 1,
+      });
     });
   });
 
@@ -1431,6 +1608,8 @@ describe('AgentProviderLoopService', () => {
     expect(sourceHandles).toHaveLength(9);
     expect(searched.tools?.map((tool) => tool.name)).toEqual([
       'document.create_draft',
+      'library.search',
+      'library.read',
       'research.fetch',
     ]);
 
@@ -1472,7 +1651,11 @@ describe('AgentProviderLoopService', () => {
         (output) => output.status === 'failed' && output.errorCode === 'RESEARCH_BUDGET_EXCEEDED',
       ),
     ).toHaveLength(2);
-    expect(exhausted.tools?.map((tool) => tool.name)).toEqual(['document.create_draft']);
+    expect(exhausted.tools?.map((tool) => tool.name)).toEqual([
+      'document.create_draft',
+      'library.search',
+      'library.read',
+    ]);
 
     loop.startProviderStep(prepared.stream);
     const createTool = exhausted.tools?.[0];
@@ -1548,7 +1731,11 @@ describe('AgentProviderLoopService', () => {
       'project_only',
     );
 
-    expect(agent.tools.map((tool) => tool.name)).toEqual(['document.create_draft']);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'document.create_draft',
+      'library.search',
+      'library.read',
+    ]);
   });
 
   it('persists authorization, executes a restricted draft tool, and prepares continuation', async () => {
@@ -1915,7 +2102,13 @@ describe('AgentProviderLoopService', () => {
       approved: true,
     });
     expect(confirmed.continuation?.outputs[0]?.output).toContain('archived');
-    expect(confirmed.tools?.map((tool) => tool.name)).toEqual(['document.archive']);
+    expect(confirmed.tools?.map((tool) => tool.name)).toEqual([
+      'document.archive',
+      'library.search',
+      'library.read',
+      'research.search',
+      'research.fetch',
+    ]);
     expect(workflow.getDocument(document.id).lifecycleStatus).toBe('archived');
     expect(workflow.getTask({ taskId: agent.taskId }).pendingConfirmation).toBeUndefined();
     expect(() =>
@@ -2050,7 +2243,11 @@ describe('AgentProviderLoopService', () => {
       'project_only',
     );
     generations.configureAgentTools(prepared.stream, agent.tools);
-    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.episode.submit_draft']);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'novel.episode.submit_draft',
+      'library.search',
+      'library.read',
+    ]);
     loop.startProviderStep(prepared.stream);
     const result = await loop.executeTools({
       ...prepared.stream,
@@ -2125,7 +2322,11 @@ describe('AgentProviderLoopService', () => {
       'project_only',
     );
     generations.configureAgentTools(prepared.stream, agent.tools);
-    expect(agent.tools.map((tool) => tool.name)).toEqual(['novel.episode.submit_structure']);
+    expect(agent.tools.map((tool) => tool.name)).toEqual([
+      'novel.episode.submit_structure',
+      'library.search',
+      'library.read',
+    ]);
     loop.startProviderStep(prepared.stream);
     const result = await loop.executeTools({
       ...prepared.stream,
@@ -2542,6 +2743,8 @@ describe('AgentProviderLoopService', () => {
       'maintenance.status',
       'media.task.get',
       'conversation.rename',
+      'library.search',
+      'library.read',
       'research.search',
       'research.fetch',
     ]);

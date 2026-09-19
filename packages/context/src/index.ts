@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export type ContextScopeType = 'project' | 'scene' | 'shot';
-export type ContextSourceType = 'document' | 'memory' | 'constraint' | 'conversation';
+export type ContextSourceType = 'document' | 'memory' | 'constraint' | 'conversation' | 'catalog';
 
 export interface ContextScope {
   type: ContextScopeType;
@@ -31,6 +31,17 @@ export interface ContextSourceReference extends ContextSourceInput {
   summaryCacheKey?: string;
 }
 
+export interface LibraryCatalogEntry {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  versionId?: string;
+  status: string;
+  kind?: string;
+  title: string;
+  updatedAt: string;
+}
+
 export interface ProductionContext {
   version: 1;
   projectId: string;
@@ -38,6 +49,7 @@ export interface ProductionContext {
   scope: ContextScope;
   systemInstruction: string;
   sources: ContextSourceReference[];
+  catalog: LibraryCatalogEntry[];
   estimatedTokens: number;
   budgetTokens: number;
   rendered: string;
@@ -69,6 +81,7 @@ export interface CompileContextInput {
   projectName: string;
   scope: ContextScope;
   sources: ContextSourceInput[];
+  catalog?: LibraryCatalogEntry[];
   budgetTokens?: number;
   summaries?: Record<string, string>;
   systemInstruction?: string;
@@ -76,10 +89,11 @@ export interface CompileContextInput {
 
 export class ContextBudgetError extends Error {}
 
-const systemInstruction = `你是 AI 短剧项目的导演与创作助手。
-只使用本次上下文中明确列出的正式资料、记忆、生产约束和相关会话。
-不要臆测未提供的其他场次或镜头内容，不要替用户填写或提交生产 API 参数。
-输出应清晰、可复制，并在存在冲突时优先遵守生产约束。`;
+const systemInstruction = `你是本软件的工作助理。你可以查询和操作当前项目中的资料、会话、任务、素材，以及部分系统设置。
+项目内容不会自动全部进入上下文；需要时调用 library.search / library.read。
+草稿和已发布文档是同一对象的不同状态。草稿代表用户当前想法，引用时必须保持草稿标记，不能当作已发布权威。
+密钥、连接配置和高风险设置必须交给受保护界面，不能在对话中接收或回传。
+不要替用户填写或提交生产 API 参数。`;
 
 export function sourceSummaryKey(source: ContextSourceInput): string {
   return createHash('sha256')
@@ -177,6 +191,7 @@ export function compileProductionContext(input: CompileContextInput): Production
     scope: input.scope,
     systemInstruction: instruction,
     sources: references,
+    catalog: input.catalog ?? [],
     estimatedTokens: estimateTokenCount(`${instruction}${rendered}`),
     budgetTokens,
     rendered,

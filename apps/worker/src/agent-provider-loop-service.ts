@@ -28,6 +28,7 @@ import type {
   MediaSubmissionResult,
   MediaTaskCancelParams,
 } from '@ai-video/contracts';
+import { rebuildLibraryChunksForAdaptation } from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -38,6 +39,7 @@ import {
   type ResearchFetchResult,
   type ResearchSearchResult,
 } from './research-service.js';
+import { LibraryError, LibrarySearchService } from './library-search-service.js';
 import { registerResearchCache } from './research-cache.js';
 import {
   AgentToolPolicyError,
@@ -64,13 +66,18 @@ const DOCUMENT_TOOL_CALL_RESERVE = 1;
 const RESEARCH_SEARCH_CALL_LIMIT = 3;
 const RESEARCH_FETCH_CALL_LIMIT = 8;
 const RESEARCH_STEP_CALL_LIMIT = 8;
+const LIBRARY_SEARCH_CALL_LIMIT = 8;
+const LIBRARY_READ_CALL_LIMIT = 16;
+const LIBRARY_STEP_CALL_LIMIT = 8;
 
 type ResearchOperation = 'research.search' | 'research.fetch';
+type LibraryOperation = 'library.search' | 'library.read';
 type SchemaOperation =
   'adapter.schema.get' | 'adapter.schema.propose' | 'adapter.schema.audit.list';
 type AgentToolOperation =
   | AgentDocumentOperation
   | ResearchOperation
+  | LibraryOperation
   | SchemaOperation
   | SystemAgentToolOperation
   | MediaPrepareToolOperation
@@ -235,6 +242,7 @@ type ResearchExecutionOutcome =
 
 export class AgentProviderLoopService {
   private readonly researchCancellations = new Map<string, AbortController>();
+  private readonly openStepHandles = new Map<string, Map<AgentToolOperation, string>>();
 
   constructor(
     private readonly projects: ProjectService,
@@ -246,6 +254,7 @@ export class AgentProviderLoopService {
     private readonly systemTools?: AgentSystemToolService,
     private readonly media?: MediaPreparationService,
     private readonly mediaSubmission?: AgentMediaSubmissionExecutor,
+    private readonly library: LibrarySearchService = new LibrarySearchService(projects),
   ) {}
 
   cancelGeneration(generationId: string): boolean {
@@ -605,6 +614,12 @@ export class AgentProviderLoopService {
     }
     if (params.calls.some((call) => isSchemaOperation(call.name))) {
       throw new Error('Schema inspection tools must run in a separate Provider step.');
+    }
+    if (params.calls.every((call) => isLibraryOperation(call.name))) {
+      return this.executeLibraryTools(params);
+    }
+    if (params.calls.some((call) => isLibraryOperation(call.name))) {
+      throw new Error('Library and document mutation tools must run in separate Provider steps.');
     }
     if (params.calls.every((call) => isResearchOperation(call.name))) {
       return this.executeResearchTools(params);
@@ -1621,37 +1636,51 @@ export class AgentProviderLoopService {
             .run(output, now, toolCallId);
           outputs.push({ callId: call.id, output });
         }
-        this.completeStep(
-          database,
-          step,
-          params.providerResponseId,
-          params.calls.length,
-          params.usage,
-          now,
-          'tool_calls',
-          JSON.stringify({
-            version: 1,
-            callIds: params.calls.map((call) => call.id),
-            system: true,
-          }),
+        const readonlySystemStep = params.calls.every(
+          (call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel',
         );
-        const primaryAuthorization = firstPrimaryAuthorization(database, task.id);
-        const nextStep = this.createStep(
-          database,
-          project.id,
-          params,
-          task.id,
-          step.ordinal + 1,
-          now,
-          authorizationSpecsForTask(
+        if (!readonlySystemStep) {
+          this.completeStep(
             database,
+            step,
+            params.providerResponseId,
+            params.calls.length,
+            params.usage,
+            now,
+            'tool_calls',
+            JSON.stringify({
+              version: 1,
+              callIds: params.calls.map((call) => call.id),
+              system: true,
+            }),
+          );
+          const primaryAuthorization = firstPrimaryAuthorization(database, task.id);
+          const nextStep = this.createStep(
+            database,
+            project.id,
+            params,
             task.id,
-            primaryAuthorization,
-            researchModeFromSnapshot(task.request_snapshot_json),
-            true,
-            this.media !== undefined,
-          ),
-        );
+            step.ordinal + 1,
+            now,
+            authorizationSpecsForTask(
+              database,
+              task.id,
+              primaryAuthorization,
+              researchModeFromSnapshot(task.request_snapshot_json),
+              true,
+              this.media !== undefined,
+            ),
+          );
+          return {
+            continuation: createToolContinuation(
+              activeGeneration.protocol,
+              params.providerResponseId,
+              params.calls,
+              outputs,
+            ),
+            tools: this.toolsForStep(nextStep.authorizationHandles),
+          };
+        }
         return {
           continuation: createToolContinuation(
             activeGeneration.protocol,
@@ -1659,7 +1688,13 @@ export class AgentProviderLoopService {
             params.calls,
             outputs,
           ),
-          tools: this.toolsForStep(nextStep.authorizationHandles),
+          tools: this.remainingToolsForOpenStep(
+            database,
+            task,
+            step.id,
+            true,
+            this.media !== undefined,
+          ),
         };
       })(),
     );
@@ -2190,6 +2225,7 @@ export class AgentProviderLoopService {
               task.id,
               now,
             );
+          rebuildLibraryChunksForAdaptation(database, project.id, proposalId, now);
           result = JSON.stringify({
             status: 'adaptation_proposal_submitted',
             proposalId,
@@ -2318,6 +2354,183 @@ export class AgentProviderLoopService {
             params.providerResponseId,
             params.calls,
             [{ callId: call.id, output: result }],
+          ),
+        };
+      })(),
+    );
+  }
+
+  private executeLibraryTools(
+    params: AgentGenerationExecuteToolsParams,
+  ): AgentGenerationExecuteToolsResult {
+    if (params.calls.length < 1 || params.calls.length > LIBRARY_STEP_CALL_LIMIT) {
+      throw new Error('A library Provider step must contain between one and eight calls.');
+    }
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        if (!params.providerResponseId.trim()) throw new Error('Provider response ID is required.');
+        const activeGeneration = this.requireActiveGeneration(database, project.id, params);
+        const task = this.requireTask(database, project.id, params.generationId);
+        const step = this.requireOpenStep(database, params.attemptId);
+        const now = new Date().toISOString();
+        const outputs: LlmToolOutput[] = [];
+        const seenIds = new Set<string>();
+        const budget = libraryBudget(database, task.id);
+        for (const [ordinal, call] of params.calls.entries()) {
+          if (!isLibraryOperation(call.name)) {
+            throw new Error('Only read-only library tools may be parallelized in this step.');
+          }
+          if (seenIds.has(call.id)) throw new Error('Provider tool call ID is duplicated.');
+          seenIds.add(call.id);
+          const authorization = this.requireAuthorization(database, task, step, call, params, true);
+          const toolArguments = parseLibraryToolArguments(call.name, call.argumentsJson);
+          const toolCallId = randomUUID();
+          const operationRemaining =
+            call.name === 'library.search' ? budget.searchRemaining : budget.readRemaining;
+          const canExecute =
+            budget.taskRemaining > 0 &&
+            operationRemaining > 0 &&
+            authorization.used_call_count < authorization.max_call_uses;
+          let output: LlmToolOutput;
+          let resultSummary: Record<string, unknown>;
+          let status: 'succeeded' | 'failed' = 'succeeded';
+          let errorCode: string | null = null;
+          let errorMessage: string | null = null;
+          if (!canExecute) {
+            const failure = libraryBudgetFailure(call.name);
+            status = 'failed';
+            errorCode = failure.error.code;
+            errorMessage = failure.error.message;
+            resultSummary = {
+              status: 'failed',
+              errorCode: failure.error.code,
+              retryable: failure.error.retryable,
+            };
+            output = {
+              callId: call.id,
+              output: unifiedAgentToolRegistry.serializeResult({
+                status: 'failed',
+                errorCode: failure.error.code,
+                message: failure.error.message,
+                retryable: failure.error.retryable,
+              }),
+            };
+          } else {
+            this.reserveExecution(database, authorization, task.id, now, 'model_running');
+            budget.taskRemaining -= 1;
+            if (call.name === 'library.search') budget.searchRemaining -= 1;
+            else budget.readRemaining -= 1;
+            try {
+              const result =
+                toolArguments.operation === 'library.search'
+                  ? this.library.search({
+                      taskId: task.id,
+                      attemptId: params.attemptId,
+                      query: toolArguments.query,
+                      sourceTypes: toolArguments.sourceTypes,
+                      status: toolArguments.status,
+                      kind: toolArguments.kind,
+                      scopeType: toolArguments.scopeType,
+                      scopeId: toolArguments.scopeId,
+                      includeArchived: toolArguments.includeArchived,
+                      limit: toolArguments.limit,
+                    })
+                  : this.library.read({
+                      taskId: task.id,
+                      attemptId: params.attemptId,
+                      sourceHandle: toolArguments.sourceHandle,
+                      maxChars: toolArguments.maxChars,
+                    });
+              resultSummary = summarizeLibraryResult(result);
+              output = {
+                callId: call.id,
+                output:
+                  'content' in result && typeof result.content === 'string'
+                    ? unifiedAgentToolRegistry.serializeResultWithBoundedText(
+                        result,
+                        'content',
+                        result.content,
+                      )
+                    : unifiedAgentToolRegistry.serializeResult(result),
+              };
+            } catch (error) {
+              const code = error instanceof LibraryError ? error.code : 'LIBRARY_SEARCH_FAILED';
+              const message = (
+                error instanceof Error ? error.message : 'Project library search failed.'
+              )
+                .replace(/[\r\n\0]+/g, ' ')
+                .slice(0, 500);
+              const retryable = error instanceof LibraryError ? error.retryable : false;
+              status = 'failed';
+              errorCode = code;
+              errorMessage = message;
+              resultSummary = { status: 'failed', errorCode: code, retryable };
+              output = {
+                callId: call.id,
+                output: unifiedAgentToolRegistry.serializeResult({
+                  status: 'failed',
+                  errorCode: code,
+                  message,
+                  retryable,
+                }),
+              };
+            }
+          }
+          database
+            .prepare(
+              `INSERT INTO agent_tool_calls
+               (id, project_id, task_id, generation_id, attempt_id, authorization_id,
+                provider_step_id, provider_call_id, tool_ordinal, tool_name,
+                normalized_arguments_hash, arguments_summary_json, result_summary_json, status,
+                error_code, error_message, created_at, started_at, completed_at, version,
+                redaction_state)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'native')`,
+            )
+            .run(
+              toolCallId,
+              project.id,
+              task.id,
+              params.generationId,
+              params.attemptId,
+              authorization.id,
+              step.id,
+              call.id,
+              ordinal,
+              call.name,
+              hash(call.argumentsJson),
+              JSON.stringify(libraryArgumentsSummary(toolArguments)),
+              JSON.stringify(resultSummary),
+              status,
+              errorCode,
+              errorMessage,
+              now,
+              now,
+              now,
+            );
+          outputs.push(output);
+        }
+
+        this.appendEvent(
+          database,
+          project.id,
+          task.id,
+          'agent.library.completed',
+          `项目检索完成 ${outputs.length} 次调用。`,
+          now,
+        );
+        return {
+          continuation: createToolContinuation(
+            activeGeneration.protocol,
+            params.providerResponseId,
+            params.calls,
+            outputs,
+          ),
+          tools: this.remainingToolsForOpenStep(
+            database,
+            task,
+            step.id,
+            this.systemTools !== undefined,
+            this.media !== undefined,
           ),
         };
       })(),
@@ -2553,39 +2766,13 @@ export class AgentProviderLoopService {
                 : unifiedAgentToolRegistry.serializeResult(providerResult),
           });
         }
-        this.completeStep(
+        const tools = this.remainingToolsForOpenStep(
           database,
-          step,
-          params.providerResponseId,
-          params.calls.length,
-          params.usage,
-          now,
-          'tool_calls',
-          JSON.stringify({
-            version: 2,
-            previousResponseIdHash: hash(params.providerResponseId),
-            callIds: params.calls.map((call) => call.id),
-            research: true,
-          }),
+          task,
+          step.id,
+          this.systemTools !== undefined,
+          this.media !== undefined,
         );
-        const primaryAuthorization = firstPrimaryAuthorization(database, task.id);
-        const nextStep = this.createStep(
-          database,
-          project.id,
-          params,
-          task.id,
-          step.ordinal + 1,
-          now,
-          authorizationSpecsForTask(
-            database,
-            task.id,
-            primaryAuthorization,
-            staged.researchMode,
-            this.systemTools !== undefined,
-            this.media !== undefined,
-          ),
-        );
-        const tools = this.toolsForStep(nextStep.authorizationHandles);
         this.appendEvent(
           database,
           project.id,
@@ -2869,30 +3056,21 @@ export class AgentProviderLoopService {
           task.id,
           ordinal,
           now,
-          this.systemTools
-            ? authorizationSpecsForTask(
-                database,
-                task.id,
-                {
-                  operation: confirmation.operation,
-                  targetDocumentId: confirmation.targetDocumentId,
-                  scopeType: confirmation.scopeType,
-                  scopeId: confirmation.scopeId,
-                  baseVersionId: confirmation.baseVersionId,
-                  expectedDocumentRowVersion: confirmation.expectedDocumentRowVersion,
-                },
-                researchModeFromSnapshot(task.request_snapshot_json),
-                true,
-                this.media !== undefined,
-              )
-            : {
-                operation: confirmation.operation,
-                targetDocumentId: confirmation.targetDocumentId,
-                scopeType: confirmation.scopeType,
-                scopeId: confirmation.scopeId,
-                baseVersionId: confirmation.baseVersionId,
-                expectedDocumentRowVersion: confirmation.expectedDocumentRowVersion,
-              },
+          authorizationSpecsForTask(
+            database,
+            task.id,
+            {
+              operation: confirmation.operation,
+              targetDocumentId: confirmation.targetDocumentId,
+              scopeType: confirmation.scopeType,
+              scopeId: confirmation.scopeId,
+              baseVersionId: confirmation.baseVersionId,
+              expectedDocumentRowVersion: confirmation.expectedDocumentRowVersion,
+            },
+            researchModeFromSnapshot(task.request_snapshot_json),
+            this.systemTools !== undefined,
+            this.media !== undefined,
+          ),
         );
         return {
           continuation: createToolContinuation(
@@ -2977,6 +3155,12 @@ export class AgentProviderLoopService {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const now = new Date().toISOString();
+        const openSteps = database
+          .prepare(
+            `SELECT id FROM llm_provider_steps
+             WHERE generation_id = ? AND status IN ('prepared', 'in_flight')`,
+          )
+          .all(generationId) as Array<{ id: string }>;
         const tasks = database
           .prepare(
             `SELECT tasks.id FROM agent_tasks tasks
@@ -3031,6 +3215,7 @@ export class AgentProviderLoopService {
             now,
           );
         }
+        for (const openStep of openSteps) this.openStepHandles.delete(openStep.id);
         return tasks.length;
       })(),
     );
@@ -3124,11 +3309,40 @@ export class AgentProviderLoopService {
       );
       authorizationHandles.set(authorization.operation, handle);
     }
+    this.openStepHandles.set(stepId, authorizationHandles);
     return { stepId, authorizationHandles };
   }
 
   private toolsForStep(handles: ReadonlyMap<AgentToolOperation, string>): LlmToolDefinition[] {
     return unifiedAgentToolRegistry.authorizedDefinitions(handles);
+  }
+
+  private remainingToolsForOpenStep(
+    database: Database.Database,
+    task: AgentTaskRow,
+    stepId: string,
+    includeSystemTools: boolean,
+    includeMedia: boolean,
+  ): LlmToolDefinition[] {
+    const handles = this.openStepHandles.get(stepId);
+    if (!handles) {
+      throw new Error('Open Provider step is missing its authorization handles.');
+    }
+    const remaining = new Set(
+      authorizationSpecsForTask(
+        database,
+        task.id,
+        firstPrimaryAuthorization(database, task.id),
+        researchModeFromSnapshot(task.request_snapshot_json),
+        includeSystemTools,
+        includeMedia,
+      ).map((spec) => spec.operation),
+    );
+    const usable = new Map<AgentToolOperation, string>();
+    for (const [operation, handle] of handles) {
+      if (remaining.has(operation)) usable.set(operation, handle);
+    }
+    return this.toolsForStep(usable);
   }
 
   private requireAuthorization(
@@ -3457,6 +3671,7 @@ export class AgentProviderLoopService {
         now,
         step.id,
       );
+    this.openStepHandles.delete(step.id);
   }
 
   private auditPolicyRejection(identity: LlmGenerationIdentity, error: AgentToolPolicyError): void {
@@ -3975,6 +4190,29 @@ function authorizationSpecsForTask(
         ]
       : []),
   ];
+  if (!primary.operation.startsWith('adapter.schema')) {
+    const library = libraryBudget(database, taskId);
+    if (library.taskRemaining > 0 && library.searchRemaining > 0) {
+      authorizations.push({
+        operation: 'library.search',
+        maxCallUses: Math.min(
+          LIBRARY_STEP_CALL_LIMIT,
+          library.taskRemaining,
+          library.searchRemaining,
+        ),
+      });
+    }
+    if (library.taskRemaining > 0 && library.readRemaining > 0) {
+      authorizations.push({
+        operation: 'library.read',
+        maxCallUses: Math.min(
+          LIBRARY_STEP_CALL_LIMIT,
+          library.taskRemaining,
+          library.readRemaining,
+        ),
+      });
+    }
+  }
   // Schema inspection is a standalone, explicitly selected Agent task. Keep
   // it out of ordinary document/research steps so the model cannot mix a
   // read-only adapter lookup into a mutation step and grants remain
@@ -4062,6 +4300,7 @@ function firstPrimaryAuthorization(database: Database.Database, taskId: string):
   const row = rows.find(
     (candidate) =>
       !isResearchOperation(candidate.operation) &&
+      !isLibraryOperation(candidate.operation) &&
       !isSystemOperation(candidate.operation) &&
       !isMediaPrepareOperation(candidate.operation),
   );
@@ -4188,6 +4427,10 @@ function researchModeFromSnapshot(value: string | undefined): AgentResearchMode 
 
 function isResearchOperation(value: string): value is ResearchOperation {
   return value === 'research.search' || value === 'research.fetch';
+}
+
+function isLibraryOperation(value: string): value is LibraryOperation {
+  return value === 'library.search' || value === 'library.read';
 }
 
 function isSchemaOperation(value: string): value is SchemaOperation {
@@ -4713,4 +4956,201 @@ function normalizeTitle(value: string): string {
 
 function hash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+type LibraryToolArguments =
+  | {
+      operation: 'library.search';
+      query: string;
+      sourceTypes?: string[];
+      status?: string;
+      kind?: string;
+      scopeType?: string;
+      scopeId?: string;
+      includeArchived?: boolean;
+      limit?: number;
+    }
+  | { operation: 'library.read'; sourceHandle: string; maxChars?: number };
+
+function parseLibraryToolArguments(
+  operation: LibraryOperation,
+  value: string,
+): LibraryToolArguments {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('Library tool arguments are not valid JSON.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Library tool arguments must be an object.');
+  }
+  const record = parsed as Record<string, unknown>;
+  if (operation === 'library.search') {
+    const allowed = new Set([
+      'query',
+      'sourceTypes',
+      'status',
+      'kind',
+      'scopeType',
+      'scopeId',
+      'includeArchived',
+      'limit',
+    ]);
+    if (Object.keys(record).some((key) => !allowed.has(key))) {
+      throw new Error('Library search arguments contain unsupported fields.');
+    }
+    if (typeof record.query !== 'string') throw new Error('Library search query is required.');
+    const query = record.query
+      .normalize('NFC')
+      .replace(/[\0\r\n\t]+/g, ' ')
+      .trim();
+    if (!query || query.length > 200) throw new Error('Library search query is invalid.');
+    const sourceTypes = Array.isArray(record.sourceTypes)
+      ? record.sourceTypes.filter((item): item is string => typeof item === 'string')
+      : undefined;
+    return {
+      operation,
+      query,
+      sourceTypes,
+      status: typeof record.status === 'string' ? record.status : undefined,
+      kind: typeof record.kind === 'string' ? record.kind : undefined,
+      scopeType: typeof record.scopeType === 'string' ? record.scopeType : undefined,
+      scopeId: typeof record.scopeId === 'string' ? record.scopeId : undefined,
+      includeArchived:
+        typeof record.includeArchived === 'boolean' ? record.includeArchived : undefined,
+      limit: optionalBoundedInteger(record.limit, 1, 20),
+    };
+  }
+  if (Object.keys(record).some((key) => !['sourceHandle', 'maxChars'].includes(key))) {
+    throw new Error('Library read arguments contain unsupported fields.');
+  }
+  if (typeof record.sourceHandle !== 'string' || !record.sourceHandle.trim()) {
+    throw new Error('Library sourceHandle is required.');
+  }
+  const sourceHandle = record.sourceHandle.trim();
+  if (sourceHandle.length > 128) throw new Error('Library sourceHandle is invalid.');
+  return {
+    operation,
+    sourceHandle,
+    maxChars: optionalBoundedInteger(record.maxChars, 1, 20_000),
+  };
+}
+
+function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<string, unknown> {
+  if (argumentsValue.operation === 'library.search') {
+    return {
+      operation: argumentsValue.operation,
+      queryHash: hash(argumentsValue.query),
+      queryLength: argumentsValue.query.length,
+      sourceTypes: argumentsValue.sourceTypes,
+      status: argumentsValue.status,
+      kind: argumentsValue.kind,
+      limit: argumentsValue.limit,
+    };
+  }
+  return {
+    operation: argumentsValue.operation,
+    sourceHandleHash: hash(argumentsValue.sourceHandle),
+    maxChars: argumentsValue.maxChars,
+  };
+}
+
+function summarizeLibraryResult(result: {
+  status: string;
+  queryHash?: string;
+  resultCount?: number;
+  sources?: Array<{
+    citationLabel: string;
+    title: string;
+    status: string;
+    sourceType: string;
+    sourceId: string;
+    versionId?: string;
+    kind?: string;
+  }>;
+  sourceHandle?: string;
+  citationLabel?: string;
+  title?: string;
+  sourceType?: string;
+  sourceId?: string;
+  versionId?: string;
+  sourceStatus?: string;
+  kind?: string;
+  truncated?: boolean;
+  characterCount?: number;
+}): Record<string, unknown> {
+  if (result.status === 'searched') {
+    return {
+      status: result.status,
+      queryHash: result.queryHash,
+      resultCount: result.resultCount,
+      sources: (result.sources ?? []).map((source) => ({
+        citationLabel: source.citationLabel,
+        title: source.title,
+        status: source.status,
+        sourceType: source.sourceType,
+        sourceId: source.sourceId,
+        versionId: source.versionId,
+        kind: source.kind,
+      })),
+    };
+  }
+  return {
+    status: result.status,
+    sourceHandleHash: result.sourceHandle ? hash(result.sourceHandle) : undefined,
+    citationLabel: result.citationLabel,
+    title: result.title,
+    sourceType: result.sourceType,
+    sourceId: result.sourceId,
+    versionId: result.versionId,
+    sourceStatus: result.sourceStatus,
+    kind: result.kind,
+    truncated: result.truncated,
+    characterCount: result.characterCount,
+  };
+}
+
+function libraryBudget(
+  database: Database.Database,
+  taskId: string,
+): { taskRemaining: number; searchRemaining: number; readRemaining: number } {
+  const task = database
+    .prepare('SELECT tool_call_limit, tool_call_count FROM agent_tasks WHERE id = ?')
+    .get(taskId) as { tool_call_limit: number; tool_call_count: number } | undefined;
+  if (!task) throw new Error('Agent task was not found while calculating library budget.');
+  const rows = database
+    .prepare(
+      `SELECT allowed_operation AS operation, COALESCE(SUM(used_call_count), 0) AS used
+       FROM agent_tool_authorizations
+       WHERE task_id = ? AND allowed_operation IN ('library.search', 'library.read')
+       GROUP BY allowed_operation`,
+    )
+    .all(taskId) as Array<{ operation: LibraryOperation; used: number }>;
+  const used = new Map(rows.map((row) => [row.operation, row.used]));
+  return {
+    taskRemaining: Math.max(
+      0,
+      task.tool_call_limit - task.tool_call_count - DOCUMENT_TOOL_CALL_RESERVE,
+    ),
+    searchRemaining: Math.max(0, LIBRARY_SEARCH_CALL_LIMIT - (used.get('library.search') ?? 0)),
+    readRemaining: Math.max(0, LIBRARY_READ_CALL_LIMIT - (used.get('library.read') ?? 0)),
+  };
+}
+
+function libraryBudgetFailure(operation: LibraryOperation): {
+  ok: false;
+  error: { code: string; message: string; retryable: boolean };
+} {
+  return {
+    ok: false,
+    error: {
+      code: 'LIBRARY_BUDGET_EXCEEDED',
+      message:
+        operation === 'library.search'
+          ? 'Library search budget has been exhausted.'
+          : 'Library read budget has been exhausted.',
+      retryable: false,
+    },
+  };
 }

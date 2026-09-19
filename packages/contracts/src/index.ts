@@ -1240,6 +1240,7 @@ export interface AgentTaskDetail {
   documents: AgentTaskDocumentArtifact[];
   providerSteps: AgentProviderStepInfo[];
   researchSources: AgentResearchSourceInfo[];
+  librarySources?: AgentLibrarySourceInfo[];
 }
 
 export interface AgentTaskPendingSchemaConfirmationInfo {
@@ -1619,9 +1620,96 @@ export interface CreatedArtifact {
   id: string;
 }
 
+export type LibrarySourceType =
+  | 'document'
+  | 'novel-chapter'
+  | 'novel-reference'
+  | 'memory'
+  | 'constraint'
+  | 'conversation'
+  | 'scene'
+  | 'shot'
+  | 'storyboard'
+  | 'asset'
+  | 'change-set'
+  | 'adaptation'
+  | 'media-task';
+
+export type LibrarySourceStatus =
+  'draft' | 'published' | 'conversation' | 'memory' | 'constraint' | 'active' | 'trash';
+
+/** Ordinary assistant sessions retrieve on demand; episode generation freezes confirmed chapters. */
+export type AssistantRecallMode = 'on-demand' | 'episode-frozen-scope';
+
+export type LibraryErrorCode =
+  | 'LIBRARY_SEARCH_FAILED'
+  | 'LIBRARY_HANDLE_INVALID'
+  | 'LIBRARY_BUDGET_EXCEEDED'
+  | 'LIBRARY_READ_BLOCKED';
+
+export interface LibraryCatalogItem {
+  id: string;
+  sourceType: LibrarySourceType;
+  sourceId: string;
+  versionId?: string;
+  status: LibrarySourceStatus;
+  kind?: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface LibrarySearchSource {
+  sourceHandle: string;
+  sourceType: LibrarySourceType;
+  sourceId: string;
+  versionId?: string;
+  status: LibrarySourceStatus;
+  kind?: string;
+  title: string;
+  snippet: string;
+  citationLabel: string;
+  updatedAt: string;
+}
+
+export interface LibrarySearchResult {
+  status: 'searched';
+  queryHash: string;
+  resultCount: number;
+  truncated: boolean;
+  sources: LibrarySearchSource[];
+}
+
+export interface LibraryReadResult {
+  status: 'read';
+  sourceHandle: string;
+  sourceType: LibrarySourceType;
+  sourceId: string;
+  versionId?: string;
+  sourceStatus: LibrarySourceStatus;
+  kind?: string;
+  title: string;
+  content: string;
+  characterCount: number;
+  truncated: boolean;
+  citationLabel: string;
+  untrusted: false;
+  candidateNote?: string;
+}
+
+export interface AgentLibrarySourceInfo {
+  citationLabel: string;
+  title: string;
+  sourceType: LibrarySourceType;
+  sourceId: string;
+  versionId?: string;
+  status: LibrarySourceStatus;
+  kind?: string;
+  toolName: 'library.search' | 'library.read';
+}
+
 export interface ContextSourceInfo {
   id: string;
-  type: 'document' | 'memory' | 'constraint' | 'conversation';
+  type: 'document' | 'memory' | 'constraint' | 'conversation' | 'catalog';
   scopeType: ConversationScopeType;
   scopeId?: string;
   label: string;
@@ -1630,6 +1718,8 @@ export interface ContextSourceInfo {
   includedCharacters: number;
   originalCharacters: number;
   truncated: boolean;
+  status?: LibrarySourceStatus;
+  sourceType?: LibrarySourceType;
 }
 
 export interface ProductionContextInfo {
@@ -1640,6 +1730,7 @@ export interface ProductionContextInfo {
   estimatedTokens: number;
   budgetTokens: number;
   sources: ContextSourceInfo[];
+  catalog?: LibraryCatalogItem[];
 }
 
 export interface ContextPreviewParams {
@@ -2250,8 +2341,15 @@ export interface ConversationRuntimeGetParams {
   generationId: string;
 }
 
+export interface ConversationRuntimeLiveAction {
+  id: string;
+  toolName: string;
+  status: 'running' | 'succeeded' | 'failed';
+}
+
 export interface ConversationRuntimeGetResult {
   active: boolean;
+  liveActions?: ConversationRuntimeLiveAction[];
   confirmation?: AgentToolConfirmationRequest;
   mediaSelection?: MediaModelSelectionRequest;
   mediaSubmission?: MediaSubmissionConfirmationRequest;
@@ -2831,6 +2929,7 @@ export interface ImageGenerationJobInfo {
 
 export interface ImageGenerationPrepareParams {
   shotId?: string;
+  sourceDocumentId?: string;
   adapterKey: string;
   parameters: AdapterParameters;
   providerProfileId?: string;
@@ -2996,6 +3095,8 @@ export interface VideoGenerationJobParams {
 
 export interface AssetListParams {
   kind?: string;
+  sourceDocumentId?: string;
+  shotId?: string;
   keyword?: string;
   deleted?: 'active' | 'trash';
   createdFrom?: string;

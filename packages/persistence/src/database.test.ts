@@ -40,8 +40,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(38);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
+    expect(migrateDatabase(database)).toBe(39);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 39 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -161,6 +161,11 @@ describe('project database', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('novel_rag_chunks'),
     ).toMatchObject({ name: 'novel_rag_chunks' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('project_library_chunks'),
+    ).toMatchObject({ name: 'project_library_chunks' });
     database.close();
   });
 
@@ -178,6 +183,11 @@ describe('project database', () => {
       ALTER TABLE generation_jobs DROP COLUMN submission_confirmation_token_hash;
       ALTER TABLE generation_jobs DROP COLUMN submission_idempotency_key;
       ALTER TABLE generation_jobs DROP COLUMN media_state;
+      DROP TRIGGER IF EXISTS project_library_chunks_ai;
+      DROP TRIGGER IF EXISTS project_library_chunks_ad;
+      DROP TRIGGER IF EXISTS project_library_chunks_au;
+      DROP TABLE IF EXISTS project_library_fts;
+      DROP TABLE IF EXISTS project_library_chunks;
       DELETE FROM schema_migrations WHERE version >= 37;
     `);
     database
@@ -208,7 +218,7 @@ describe('project database', () => {
       insertJob.run(`job-${status}`, status, legacySnapshot);
     }
 
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     const states = database
       .prepare('SELECT id, media_state AS mediaState FROM generation_jobs ORDER BY id')
       .all();
@@ -245,7 +255,7 @@ describe('project database', () => {
         .prepare('UPDATE generation_jobs SET submission_idempotency_key = ? WHERE id = ?')
         .run('same-attempt', 'job-pending'),
     ).toThrow();
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 39 });
     database.close();
   });
 
@@ -259,7 +269,12 @@ describe('project database', () => {
       DROP TRIGGER IF EXISTS agent_task_deliverable_status_transition;
       DROP TABLE agent_task_deliverables;
       DROP TABLE agent_task_plans;
-      DELETE FROM schema_migrations WHERE version = 38;
+      DROP TRIGGER IF EXISTS project_library_chunks_ai;
+      DROP TRIGGER IF EXISTS project_library_chunks_ad;
+      DROP TRIGGER IF EXISTS project_library_chunks_au;
+      DROP TABLE IF EXISTS project_library_fts;
+      DROP TABLE IF EXISTS project_library_chunks;
+      DELETE FROM schema_migrations WHERE version >= 38;
     `);
     database.exec(MIGRATION_V31);
     database
@@ -326,7 +341,7 @@ describe('project database', () => {
     );
 
     expect(getSchemaVersion(database)).toBe(37);
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     expect(
       database
         .prepare(
@@ -394,7 +409,7 @@ describe('project database', () => {
         updated_at: 'characters-updated',
       },
     ]);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 39 });
     database.close();
   });
 
@@ -529,6 +544,11 @@ describe('project database', () => {
       DROP TABLE agent_task_plans;
       DROP TRIGGER novel_rag_chunk_scope_match;
       DROP TABLE novel_rag_chunks;
+      DROP TRIGGER IF EXISTS project_library_chunks_ai;
+      DROP TRIGGER IF EXISTS project_library_chunks_ad;
+      DROP TRIGGER IF EXISTS project_library_chunks_au;
+      DROP TABLE IF EXISTS project_library_fts;
+      DROP TABLE IF EXISTS project_library_chunks;
     `);
     database.prepare('DELETE FROM schema_migrations WHERE version >= 30').run();
     const content = `${'雾港的雨落在石阶上。'.repeat(180)}\n\n${'灯塔照亮归航的船。'.repeat(180)}`;
@@ -570,7 +590,7 @@ describe('project database', () => {
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     const chunks = database
       .prepare(
         `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
@@ -584,6 +604,16 @@ describe('project database', () => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.every((chunk) => chunk.source_document_version_id === 'version')).toBe(true);
     expect(chunks.every((chunk) => chunk.content_length <= 2_200)).toBe(true);
+    const library = database
+      .prepare(
+        `SELECT source_type, status, title FROM project_library_chunks
+         WHERE source_id = ? ORDER BY ordinal`,
+      )
+      .all('chapter') as Array<{ source_type: string; status: string; title: string }>;
+    expect(library.length).toBeGreaterThan(1);
+    expect(library.every((chunk) => chunk.source_type === 'novel-chapter')).toBe(true);
+    expect(library.every((chunk) => chunk.status === 'draft')).toBe(true);
+    expect(library[0]?.title).toBe('第一章');
     database.close();
   });
 
@@ -810,7 +840,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -837,7 +867,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -899,7 +929,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -947,7 +977,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     expect(
       database
         .prepare(
@@ -1020,8 +1050,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(38);
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
+    expect(migrateDatabase(database)).toBe(39);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -1176,7 +1206,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(38);
+    expect(migrateDatabase(database)).toBe(39);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -1214,7 +1244,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 38 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 39 });
     database.close();
   });
 

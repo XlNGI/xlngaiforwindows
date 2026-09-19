@@ -268,7 +268,7 @@ manifest 不保存完整来源正文、完整 `systemInstruction`、完整上下
 Agent 先判断用户请求是否需要持久化副作用：
 
 - 不需要：继续普通 LLM generation；
-- 需要项目内资料：默认由 Worker 在模型调用前解析目标并编译上下文；只有用户明确要求浏览/搜索项目文档时才开放有界 `document.list/read`；
+- 需要项目内资料：普通助理会话改为按需调用 `library.search/read`；`document.list/read` 仍保留给显式文档工作流。Worker 不再把已发布文档、记忆或约束正文自动灌入普通会话；
 - 需要外部资料：当用户明确要求检索、请求依赖时效/事实核验，或模型判断基础上下文明显不足时，在 `auto` 研究模式下开放有界 `research.search/fetch`；用户选择“仅项目资料/禁止联网”时不得调用；
 - 需要创建文档：调用 `document.create_draft`；
 - 需要更新文档：调用 `document.update_draft`；目标文档和基础版本来自 Worker 可信执行信封，不由模型提供；

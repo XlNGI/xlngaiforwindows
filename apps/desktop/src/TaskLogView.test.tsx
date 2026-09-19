@@ -118,6 +118,18 @@ const agentDetail: AgentTaskDetail = {
       cacheStatus: 'present',
     },
   ],
+  librarySources: [
+    {
+      citationLabel: 'L2',
+      title: 'Chapter 1',
+      sourceType: 'novel-chapter',
+      sourceId: 'chapter-1',
+      versionId: 'chapter-version-1',
+      status: 'published',
+      kind: 'note',
+      toolName: 'library.search',
+    },
+  ],
 };
 
 const imageJob: ImageGenerationJobInfo = {
@@ -238,6 +250,9 @@ describe('TaskLogView', () => {
     expect(screen.getByText('已创建可审阅草稿。')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '研究来源' })).toBeInTheDocument();
     expect(screen.getByText('R1')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '项目检索来源' })).toBeInTheDocument();
+    expect(screen.getByText('L2')).toBeInTheDocument();
+    expect(screen.getByText('Chapter 1')).toBeInTheDocument();
     expect(screen.getByText('公开研究来源')).toBeInTheDocument();
     expect(screen.getByText('内容已截断')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /公开研究来源/ })).toHaveAttribute(

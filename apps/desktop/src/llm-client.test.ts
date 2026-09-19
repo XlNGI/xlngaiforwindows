@@ -24,7 +24,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 
 import { callWorker } from './worker-client';
-import { streamPreparedLlmGeneration } from './llm-client';
+import { coalesceVisibleDelta, streamPreparedLlmGeneration } from './llm-client';
 
 let requiresConfirmation = false;
 
@@ -96,6 +96,65 @@ function state(status: LlmGenerationInfo['status'], content: string): LlmGenerat
     },
   };
 }
+
+describe('coalesceVisibleDelta', () => {
+  it('keeps true incremental tokens', () => {
+    expect(coalesceVisibleDelta('你', '好')).toBe('好');
+  });
+
+  it('skips prefix and equal snapshots', () => {
+    expect(coalesceVisibleDelta('A\n\n', 'A\n\n')).toBeUndefined();
+    expect(coalesceVisibleDelta('A\n\n', 'A\n\nB\n\n')).toBe('B\n\n');
+  });
+
+  it('ignores leading-newline replays of already visible text', () => {
+    expect(coalesceVisibleDelta('A', '\n\nA')).toBeUndefined();
+    expect(coalesceVisibleDelta('A', '\n\nA\n\nB')).toBe('\n\nB');
+    expect(coalesceVisibleDelta('A\n\nB', '\n\nB')).toBeUndefined();
+  });
+
+  it('does not duplicate glm step text that is replayed after a paragraph break', () => {
+    let aggregate = '';
+    for (const incoming of [
+      '我先了解一下当前项目的文档情况。',
+      '\n\n我先了解一下当前项目的文档情况。',
+      '\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。',
+      '\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。',
+    ]) {
+      const fragment = coalesceVisibleDelta(aggregate, incoming);
+      if (fragment) aggregate += fragment;
+    }
+    expect(aggregate).toBe(
+      '我先了解一下当前项目的文档情况。\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。',
+    );
+  });
+
+  it('ignores whitespace-only deltas and token replays across tool rounds', () => {
+    expect(coalesceVisibleDelta('A', '\n\n')).toBeUndefined();
+    expect(coalesceVisibleDelta('', '\n\nA')).toBe('A');
+    let aggregate = '';
+    let streamVisible = '';
+    for (const incoming of ['I will search the library.']) {
+      streamVisible += incoming;
+      const fragment = coalesceVisibleDelta(aggregate, streamVisible);
+      if (fragment) aggregate += fragment;
+    }
+    streamVisible = '';
+    for (const incoming of ['\n\n', 'I', ' will search the library.']) {
+      streamVisible += incoming;
+      const fragment = coalesceVisibleDelta(aggregate, streamVisible);
+      if (fragment) aggregate += fragment;
+    }
+    expect(aggregate).toBe('I will search the library.');
+    streamVisible = '';
+    for (const incoming of ['\n\n', 'Search hit 3 results.']) {
+      streamVisible += incoming;
+      const fragment = coalesceVisibleDelta(aggregate, streamVisible);
+      if (fragment) aggregate += fragment;
+    }
+    expect(aggregate).toBe('I will search the library.\n\nSearch hit 3 results.');
+  });
+});
 
 describe('streamPreparedLlmGeneration', () => {
   beforeEach(() => {

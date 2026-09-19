@@ -2,6 +2,7 @@ import { emitTo } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type {
   AgentResearchMode,
+  AgentTaskDetail,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -70,6 +71,9 @@ export interface DetachedConversationSnapshot {
   researchMode?: AgentResearchMode;
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
+  agentTask?: AgentTaskDetail;
+  agentTasks?: AgentTaskDetail[];
+  liveAgentActions?: import('@ai-video/contracts').ConversationRuntimeLiveAction[];
 }
 
 export type DetachedPanelSnapshot = DetachedDocumentSnapshot | DetachedConversationSnapshot;

@@ -129,18 +129,27 @@ export class AgentProviderToolGateway {
       description: definition.description,
       parameters: definition.parameters,
       executionMode: unifiedAgentToolRegistry.executionMode(definition.name),
-      execute: async (toolCallId, args) => this.execute(toolCallId, definition, args),
+      execute: async (toolCallId, args) => this.execute(toolCallId, definition.name, args),
     } as AgentTool;
+  }
+
+  private liveDefinition(name: string): LlmToolDefinition {
+    const live = this.definitions.find((definition) => definition.name === name);
+    if (!live) {
+      throw new Error(`Worker tool ${name} is no longer authorized for this Provider step.`);
+    }
+    return live;
   }
 
   private async execute(
     toolCallId: string,
-    definition: LlmToolDefinition,
+    name: string,
     args: unknown,
   ): Promise<AgentToolResult<Record<string, unknown>>> {
     const context = this.calls.get(toolCallId);
     this.calls.delete(toolCallId);
     if (!context) throw new Error('Pi tool call is missing its Provider response context.');
+    const definition = this.liveDefinition(name);
     const stepId = this.planHooks?.begin(definition.name);
     const call = {
       id: toolCallId,
@@ -187,7 +196,9 @@ export class AgentProviderToolGateway {
       if (!execution.continuation) {
         throw new Error('Worker tool execution did not return a continuation result.');
       }
-      this.definitions = cloneDefinitions(execution.tools ?? []);
+      if (execution.tools) {
+        this.definitions = cloneDefinitions(execution.tools);
+      }
       const output = execution.continuation.outputs.find(
         (item) => item.callId === toolCallId,
       )?.output;

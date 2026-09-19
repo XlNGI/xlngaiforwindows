@@ -253,11 +253,17 @@ describe('AppSettingsService', () => {
       models: [{ id: 'gpt-5.6-terra' }, { id: 'vendor-experimental-model' }],
     });
     const terra = first.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')!;
-    const unknown = first.models.find((item) => item.remoteModelId === 'vendor-experimental-model')!;
+    const unknown = first.models.find(
+      (item) => item.remoteModelId === 'vendor-experimental-model',
+    )!;
     expect(terra.enabled).toBe(false);
     expect(terra.capabilities.tools).toBe(true);
     expect(unknown.enabled).toBe(false);
-    expect(unknown.capabilities).toMatchObject({ text: false, tools: false, imageGeneration: false });
+    expect(unknown.capabilities).toMatchObject({
+      text: false,
+      tools: false,
+      imageGeneration: false,
+    });
 
     service.updateModel({
       profileId: profile.id,
@@ -271,10 +277,12 @@ describe('AppSettingsService', () => {
       status: 'ready',
       models: [{ id: 'gpt-5.6-terra' }, { id: 'vendor-experimental-model' }],
     });
-    expect(refreshed.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')?.capabilities.tools).toBe(
+    expect(
+      refreshed.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')?.capabilities.tools,
+    ).toBe(false);
+    expect(refreshed.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')?.enabled).toBe(
       false,
     );
-    expect(refreshed.models.find((item) => item.remoteModelId === 'gpt-5.6-terra')?.enabled).toBe(false);
     service.close();
   });
 

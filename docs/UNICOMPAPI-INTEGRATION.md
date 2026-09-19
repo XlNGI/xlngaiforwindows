@@ -33,7 +33,7 @@ API Key 只保存在 Windows Credential Manager。请求发出去的 `model` 永
 运行时目录权威是 UniComp `GET /v1/models` 同步进 `(connectionId, remoteModelId)`。代码不再维护 UniComp 模型 ID 白名单。
 
 - LLM 只有 `openai-responses` / `openai-chat-completions` 两套协议。Agent 门禁是：协议属于上述之一、连接就绪、模型已启用且未下架、capabilities 含 text/streaming/tools。用户勾选即白名单，不再要求 5.6 家族。
-- `gpt-5.6-sol` 已退休。有可用模型时优先 `gpt-5.6-terra`；没有则让用户选，禁止静默切到其他供应商。
+- `gpt-5.6-sol` 已退休。不写死首选模型名；没有用户选择就弹出已启用且具备 tools 的目录模型，禁止静默切到其他供应商。
 - 媒体候选要求：官方 UniComp 连接、模型已启用、已绑参数模板、模板支持该能力。新任务使用模板 Adapter Key；历史 per-model Key 只读可展示和轮询。
 - Qwen 图编那种华为云平铺 `image` 投影是独立模板 `qwen-image-edit`，不按远程模型 ID 写死在路由里。
 
@@ -96,4 +96,4 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 - [x] 视频生成过程中重启应用，确认不会重复提交且能继续轮询（2026-08-11 用户进入最终验收阶段前确认视频流程均无异常）。
 - [x] 检查诊断包、应用数据库和项目数据库，确认没有 API Key、完整 Provider 响应或视频临时路径（两份 SQLite 完整性和外键检查通过；Base64、Bearer/API Key、`X-Amz-*` 签名参数及临时视频路径均为 0 命中；诊断清单 Hash 校验通过；临时视频文件数为 0）。
 
-2026-08-11 的真实凭据链路已通过，但 2026-09-18 起目录、Agent 门禁和媒体模板合同已改变。需要用户凭据重新同步后复验：Terra 或任一已启用 tools 模型跑一轮 Agent；一个旧媒体回归；若目录出现 MiniMax / Hailuo，启用并绑定 `openai-compatible-video` 后再提交。剩余发布门禁仍为 Windows 安装包正式签名。
+2026-08-11 的真实凭据链路已通过，但 2026-09-18 起目录、Agent 门禁和媒体模板合同已改变。需要用户凭据重新同步后复验：任一已启用 tools 模型跑一轮 Agent；一个旧媒体回归；若目录出现 MiniMax / Hailuo，启用并绑定 `openai-compatible-video` 后再提交。剩余发布门禁仍为 Windows 安装包正式签名。

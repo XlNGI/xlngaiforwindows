@@ -293,6 +293,83 @@ describe('AgentProviderToolGateway', () => {
     );
   });
 
+  it('uses the live authorization handle after Worker returns replacement tools', async () => {
+    const search = definition('library.search', 'handle-one');
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-1',
+        outputs: [{ callId: 'call-1', output: '{"status":"ok"}' }],
+      },
+      tools: [definition('library.search', 'handle-two')],
+    });
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [search],
+      vi.fn(),
+      vi.fn(),
+    );
+    const tool = gateway.tools()[0]!;
+
+    gateway.captureProviderCall('call-1', 'response-1');
+    await tool.execute('call-1', { query: 'first' });
+    gateway.captureProviderCall('call-2', 'response-2');
+    vi.mocked(worker.executeTools).mockResolvedValueOnce({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-2',
+        outputs: [{ callId: 'call-2', output: '{"status":"ok"}' }],
+      },
+    });
+    await tool.execute('call-2', { query: 'second' });
+
+    expect(worker.executeTools).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        calls: [
+          expect.objectContaining({
+            name: 'library.search',
+            authorizationHandle: 'handle-one',
+          }),
+        ],
+      }),
+    );
+    expect(worker.executeTools).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        calls: [
+          expect.objectContaining({
+            name: 'library.search',
+            authorizationHandle: 'handle-two',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('keeps current tools when Worker omits a replacement set', async () => {
+    const search = definition('library.search', 'handle-one');
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response-keep',
+        outputs: [{ callId: 'call-keep', output: '{"status":"ok"}' }],
+      },
+    });
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [search],
+      vi.fn(),
+      vi.fn(),
+    );
+
+    gateway.captureProviderCall('call-keep', 'response-keep');
+    await gateway.tools()[0]!.execute('call-keep', { query: 'keep' });
+    expect(gateway.currentDefinitions()).toEqual([search]);
+  });
+
   it('forwards provider-step and terminal lifecycle operations', () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(worker, identity, [], vi.fn(), vi.fn());

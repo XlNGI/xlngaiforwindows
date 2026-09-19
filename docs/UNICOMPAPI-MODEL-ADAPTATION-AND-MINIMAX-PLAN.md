@@ -40,7 +40,7 @@ UniComp 是自有中转站，和 NewAPI 本质都是 OpenAI 兼容协议。分�
 | LLM 适配器数量 | 只有两个：`openai-responses`、`openai-chat-completions` |
 | Agent 门禁 | 协议是上述之一 + 连接就绪 + 模型已启用 + 具备 text/streaming/tools。用户勾选即白名单 |
 | 下架模型 | `gpt-5.6-sol` 已下架，不得再作为 Agent 默认或推荐 |
-| 默认 LLM | 有可用模型时优先 `gpt-5.6-terra`；没有则让用户选，禁止静默切到其他供应商 |
+| 默认 LLM | 不写死首选模型名。没有用户选择就弹出目录里已启用且具备 tools 的模型，禁止静默切到其他供应商 |
 | 参数来源 | `/v1/models` 只给 ID（偶尔有展示名），**不给 JSON 参数表**。LLM 用协议字段；媒体用内置模板或用户确认的 `adapter_schemas` |
 | 同步 | 远程同步不得覆盖用户已保存的能力勾选；推断只用于首次插入，允许不完整 |
 | 故障 | 渠道没有 / 模型下架 → `model_unavailable` + 选择器。禁止静默 failover |
@@ -85,7 +85,7 @@ UniComp 是自有中转站，和 NewAPI 本质都是 OpenAI 兼容协议。分�
 | Agent 路由 | `resolveAgentToolLoopRoute` 把 UniComp 限制在 `gpt-5.6*`，并排除 Sol | 过时家族白名单；UniComp 新 LLM 进不来 |
 | 能力推断 | `inferUniCompApiCapabilities` 依赖过时 `UNICOMPAPI_MODEL_FEATURES` | 新模型同步后能力全空或被错误覆盖 |
 | 同步覆盖 | `synchronizeRemoteModels` / `listModels` 每次用推断覆盖 | 用户勾选会被冲掉 |
-| 默认模型 | `packages/llm/src/index.ts` 默认 `gpt-5.6-terra` | 保留；Sol 不得回潮 |
+| 默认模型 | `packages/llm/src/index.ts` 不再默认 `gpt-5.6-terra` | 无用户选择就弹出选择器；Sol 不得回潮 |
 
 LLM **不需要**按模型写 adapter。Chat Completions 已经能发。同步到什么 ID 就填什么 `model`。
 
@@ -193,7 +193,7 @@ LLM：协议 adapter × 2  ──►  Native Chat Completions / Responses
 改动：
 
 1. Agent 门禁改为：协议 ∈ {Responses, Chat Completions}，连接就绪，模型已启用且未下架，capabilities 含 text/streaming/tools。
-2. `gpt-5.6-sol` 继续退休；默认 LLM 保持 `gpt-5.6-terra`。
+2. `gpt-5.6-sol` 继续退休；不再把 `gpt-5.6-terra` 写成运行时首选。
 3. 同步保留已有 `capabilitiesJson`；推断只用于首次插入。`listModels` 不再覆盖远程模型勾选。
 4. 渠道没有 / 模型下架 → `model_unavailable`，打开选择器。
 5. 不同步维护 DeepSeek / GLM / Kimi / Qwen3 名单。这些模型若还在 UniComp 目录里，用户启用即可当 LLM；是否给 Agent 用看 tools 勾选。
@@ -252,7 +252,7 @@ P3 明确不做：官方 MiniMax 卡片、`api.minimax.io` 主机、官方 `/v1/
 
 - 覆盖：删除 per-model adapter 后的回归、协议门禁、同步不覆盖能力、未知 ID 可进目录、模板绑定后可提交、Sol 下架。
 - 更新 `docs/UNICOMPAPI-INTEGRATION.md`：目录以同步为准；去掉「已知模型白名单才有 Adapter」和「只有 5.6 才能 Agent」。
-- 真实 UniComp 冒烟：重新同步；Terra 或用户启用的 tools 模型跑一轮 Agent；一个旧媒体回归；一个 MiniMax（若目录里有）绑模板后提交。
+- 真实 UniComp 冒烟：重新同步；任一用户启用的 tools 模型跑一轮 Agent；一个旧媒体回归；一个 MiniMax（若目录里有）绑模板后提交。
 
 ## 9. 阶段顺序与依赖
 

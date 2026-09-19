@@ -121,7 +121,8 @@ describe('useDocumentWorkspace close', () => {
     vi.mocked(callWorker).mockImplementation((method: string) => {
       if (method === 'document.draft.save') return Promise.resolve(savedDocument);
       if (method === 'document.list') return Promise.resolve([savedDocument]);
-      if (method === 'document.versions') return Promise.resolve([savedDocument.currentVersion]);
+      if (method === 'document.versions')
+        return Promise.resolve(savedDocument.currentVersion ? [savedDocument.currentVersion] : []);
       throw new Error(`Unexpected method ${method}`);
     });
     const { result } = renderWorkspace();

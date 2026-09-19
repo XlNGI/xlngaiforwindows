@@ -781,8 +781,78 @@ export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
   },
 ];
 
+export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
+  {
+    name: 'library.search',
+    description:
+      'Search the current project library (drafts and published documents, novel chapters, memories, constraints, conversations, scenes, shots, and assets). Returns short snippets and source handles. Draft hits are labeled draft and are not published authority.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: {
+        query: { type: 'string', minLength: 1, maxLength: 200 },
+        sourceTypes: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: [
+              'document',
+              'novel-chapter',
+              'novel-reference',
+              'memory',
+              'constraint',
+              'conversation',
+              'scene',
+              'shot',
+              'storyboard',
+              'asset',
+              'change-set',
+              'adaptation',
+              'media-task',
+            ],
+          },
+        },
+        status: {
+          type: 'string',
+          enum: [
+            'draft',
+            'published',
+            'conversation',
+            'memory',
+            'constraint',
+            'active',
+            'trash',
+            'any',
+          ],
+        },
+        kind: { type: 'string', minLength: 1, maxLength: 64 },
+        scopeType: { type: 'string', enum: ['project', 'scene', 'shot'] },
+        scopeId: { type: 'string', minLength: 1, maxLength: 200 },
+        includeArchived: { type: 'boolean' },
+        limit: { type: 'integer', minimum: 1, maximum: 20 },
+      },
+    },
+  },
+  {
+    name: 'library.read',
+    description:
+      'Read one project library source returned by library.search. Default is a single chunk. Draft content is labeled candidate material, never published authority.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sourceHandle'],
+      properties: {
+        sourceHandle: { type: 'string', minLength: 1, maxLength: 128 },
+        maxChars: { type: 'integer', minimum: 1, maximum: 20_000 },
+      },
+    },
+  },
+];
+
 export const ALL_AGENT_TOOL_DEFINITIONS = [
   ...DOCUMENT_AGENT_TOOLS,
+  ...LIBRARY_AGENT_TOOLS,
   ...RESEARCH_AGENT_TOOLS,
   ...SCHEMA_AGENT_TOOLS,
   PLAN_AGENT_TOOL,
@@ -812,6 +882,8 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'novel.episode.submit_draft': writePolicy(),
   'novel.episode.submit_structure': writePolicy(),
   'novel.adaptation.submit_proposal': writePolicy(),
+  'library.search': readPolicy(),
+  'library.read': readPolicy(),
   'research.search': readPolicy(),
   'research.fetch': readPolicy(),
   'task.plan.submit': writePolicy(),

@@ -21,7 +21,6 @@ import {
   PanelLeftClose,
   Plus,
   Power,
-  RotateCcw,
   Save,
   Settings2,
   ShieldCheck,
@@ -29,10 +28,13 @@ import {
   WandSparkles,
   X,
   BookOpen,
+  Users,
 } from 'lucide-react';
 import type {
   AgentDocumentIntent,
   AgentDocumentOperation,
+  AgentLibrarySourceInfo,
+  AssetInfo,
   AgentResearchMode,
   ChatMessageInfo,
   ConstraintInfo,
@@ -62,6 +64,7 @@ import type {
   MediaSubmissionConfirmationRequest,
   AgentProtectedUiHandoff,
   VideoGenerationJobInfo,
+  ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -73,6 +76,9 @@ import { useProductionState } from './use-production-state';
 import { MediaSubmissionConfirmationDialog } from './media-confirmation';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
+import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
+import { ScriptWorkspace } from './ScriptWorkspace';
+import { ShotWorkspace, type ShotReferenceAssets } from './ShotWorkspace';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel, type ChatAttachment } from './ChatPanel';
 import { SettingsCenter } from './SettingsCenter';
@@ -111,10 +117,11 @@ import { generationStatusLabel } from './generation-feedback';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'novel' | 'shots' | 'assets' | 'tasks';
+type WorkspaceView = 'documents' | 'characters' | 'novel' | 'shots' | 'assets' | 'tasks';
 const WORKSPACE_VIEW_TITLES: Record<WorkspaceView, string> = {
-  documents: '项目文档',
-  novel: '小说章节',
+  documents: '剧本',
+  characters: '角色与场景',
+  novel: '小说',
   shots: '场次与镜头',
   assets: '素材库',
   tasks: '任务日志',
@@ -395,7 +402,29 @@ function readableGenerationError(error: string | undefined): string | undefined 
   if (/Out-of-order LLM stream content was rejected/i.test(error)) {
     return '生成流出现了延迟片段，已停止本次任务；请重新发送，工具调用不会重复提交。';
   }
+  const turnLimit = error.match(/Pi runtime exceeded the (\d+)-turn limit/i);
+  if (turnLimit) {
+    return `助手连续调用工具超过 ${turnLimit[1]} 轮，已停止。`;
+  }
+  if (/Provider generation failed/i.test(error) || /Provider generation was failed/i.test(error)) {
+    return '模型生成失败，助手任务已中止。';
+  }
+  if (
+    /Provider generation cancelled/i.test(error) ||
+    /Provider generation was cancelled/i.test(error)
+  ) {
+    return '本次生成已取消。';
+  }
   return error;
+}
+
+function upsertAgentTaskDetail(
+  current: import('@ai-video/contracts').AgentTaskDetail[],
+  detail: import('@ai-video/contracts').AgentTaskDetail,
+): import('@ai-video/contracts').AgentTaskDetail[] {
+  return [...current.filter((item) => item.task.id !== detail.task.id), detail].sort(
+    (left, right) => right.task.updatedAt.localeCompare(left.task.updatedAt),
+  );
 }
 
 function documentStateLabel(state: DocumentVersionInfo['state'] | 'new'): string {
@@ -420,12 +449,9 @@ function documentStateLabel(state: DocumentVersionInfo['state'] | 'new'): string
 }
 
 /**
- * The document workspace merges the former "project documents" (outline/plan)
- * and "characters and scenes" (character/scene) pages into one list with a kind
- * filter. The other stored kinds deliberately stay in their own workspaces:
- * an imported novel chapter is a `note` document bound to `novel_chapters`, and
- * a `storyboard` document hangs off a shot, so listing them here would both
- * flood the list with chapters and duplicate the shot workspace.
+ * Script pages list outline/plan. Character and scene prompts live on their
+ * own page. Novel chapters (`note` bound to `novel_chapters`) and shot
+ * storyboards stay in their own workspaces so they do not flood the script list.
  */
 const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
   outline: '大纲',
@@ -436,25 +462,11 @@ const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
   note: '笔记',
 };
 
-const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan', 'character', 'scene'];
-
-/**
- * The editor keeps every kind selectable so a leftover Agent `note` can be
- * reclassified into the workspace list. New Agent drafts infer outline/plan/
- * character/scene from the title when the model omits documentKind.
- */
-const DOCUMENT_KIND_ORDER: DocumentKind[] = [
-  'outline',
-  'plan',
-  'character',
-  'scene',
-  'storyboard',
-  'note',
-];
-
-const DOCUMENT_KIND_FILTERS: Array<{ id: 'all' | DocumentKind; label: string }> = [
-  { id: 'all', label: '全部' },
-  ...WORKSPACE_DOCUMENT_KINDS.map((kind) => ({ id: kind, label: DOCUMENT_KIND_LABELS[kind] })),
+const SCRIPT_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan'];
+const CHARACTER_DOCUMENT_KINDS: DocumentKind[] = ['character', 'scene'];
+const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = [
+  ...SCRIPT_DOCUMENT_KINDS,
+  ...CHARACTER_DOCUMENT_KINDS,
 ];
 
 /** Only workspace kinds are listed; everything else lives in its own workspace. */
@@ -682,6 +694,11 @@ export function App() {
   const [episodeChapterIds, setEpisodeChapterIds] = useState<string[]>([]);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const [agentTask, setAgentTask] = useState<import('@ai-video/contracts').AgentTaskDetail>();
+  const [conversationAgentTasks, setConversationAgentTasks] = useState<
+    import('@ai-video/contracts').AgentTaskDetail[]
+  >([]);
+  const [liveAgentActions, setLiveAgentActions] = useState<ConversationRuntimeLiveAction[]>([]);
+  const lastGenerationErrorRef = useRef<string | undefined>(undefined);
   const [agentConfirmation, setAgentConfirmation] =
     useState<import('@ai-video/contracts').AgentToolConfirmationRequest>();
   const confirmationResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
@@ -796,13 +813,19 @@ export function App() {
     });
   };
 
-  const openDocumentWorkspace = () => {
-    setView('documents');
+  const openDocumentWorkspace = (kind?: DocumentKind) => {
+    setView((current) => {
+      if (kind && CHARACTER_DOCUMENT_KINDS.includes(kind)) return 'characters';
+      if (kind && SCRIPT_DOCUMENT_KINDS.includes(kind)) return 'documents';
+      if (current === 'characters' || current === 'documents') return current;
+      return 'documents';
+    });
     workspaceDispatch({ type: 'open', panelId: 'document' });
   };
 
   const openProjectView = (nextView: WorkspaceView) => {
     setNavigationMode('project');
+    if (nextView !== view) setDocumentKindFilter('all');
     if (nextView === 'documents' && detachedPanels.document) {
       setView('documents');
       void focusDetachedPanelWindow(detachedPanels.document);
@@ -851,8 +874,44 @@ export function App() {
     reset: resetDocumentWorkspace,
   } = docs;
 
+  const openWorkspaceForDocumentKind = (kind: DocumentKind) => {
+    if (CHARACTER_DOCUMENT_KINDS.includes(kind)) openProjectView('characters');
+    else if (kind === 'storyboard') openProjectView('shots');
+    else openProjectView('documents');
+  };
+
+  const openLibrarySource = (source: AgentLibrarySourceInfo) => {
+    if (source.sourceType === 'novel-chapter') {
+      openProjectView('novel');
+      return;
+    }
+    if (
+      source.sourceType === 'document' ||
+      source.sourceType === 'storyboard' ||
+      source.sourceType === 'novel-reference'
+    ) {
+      if (source.kind) openWorkspaceForDocumentKind(source.kind as DocumentKind);
+      else if (source.sourceType === 'storyboard') openProjectView('shots');
+      else openProjectView('documents');
+      const item = documents.find((document) => document.id === source.sourceId);
+      if (item) void selectDocument(item);
+      else void openDocumentById(source.sourceId);
+      return;
+    }
+    if (source.sourceType === 'asset') {
+      setAssetLibrarySelectedId(source.sourceId);
+      openProjectView('assets');
+      return;
+    }
+    if (source.sourceType === 'scene' || source.sourceType === 'shot') {
+      openProjectView('shots');
+      return;
+    }
+    openProjectView('tasks');
+  };
+
   const requestCloseEditor = () => {
-    if (view === 'documents') {
+    if (view === 'documents' || view === 'characters') {
       requestCloseDocument();
       return;
     }
@@ -933,6 +992,37 @@ export function App() {
     productionMenuOpen,
     setProductionMenuOpen,
   } = productionWorkspace;
+  const [productionSeed, setProductionSeed] = useState<{
+    documentId?: string;
+    shotId?: string;
+    prompt: string;
+    assetKind?: 'character' | 'scene' | 'first-frame';
+    images?: string[];
+  }>();
+  const [linkedAssets, setLinkedAssets] = useState<AssetInfo[]>([]);
+
+  useEffect(() => {
+    if (view !== 'characters' || !document?.id) {
+      setLinkedAssets([]);
+      return;
+    }
+    const documentId = document.id;
+    let active = true;
+    void callWorker('asset.list', {
+      sourceDocumentId: documentId,
+      sort: 'created-desc',
+      limit: 60,
+    })
+      .then((items) => {
+        if (active) setLinkedAssets(items);
+      })
+      .catch(() => {
+        if (active) setLinkedAssets([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [view, document?.id, taskCompletionRevision, assets]);
 
   const closeSettings = () => {
     setSettingsOpen(false);
@@ -957,7 +1047,14 @@ export function App() {
         configured: true,
         configurationSource: 'managed',
       }
-    : llmStatus;
+    : llmProfiles.length > 0
+      ? {
+          provider: selectedLlmProfile?.name ?? llmProfiles[0]?.name ?? 'LLM',
+          model: '',
+          configured: false,
+          configurationSource: 'managed',
+        }
+      : llmStatus;
 
   const loadLlmCatalog = async () => {
     try {
@@ -985,15 +1082,18 @@ export function App() {
             model.capabilities.streaming &&
             model.capabilities.tools,
         );
-      const currentProfile = profiles.find((profile) => profile.id === selectedLlmProfileId);
+      const currentProfile =
+        profiles.find((profile) => profile.id === selectedLlmProfileId) ??
+        profiles.find((profile) => models.some((model) => model.providerProfileId === profile.id));
       const currentModel = models.find(
         (model) =>
           model.id === selectedLlmModelId && model.providerProfileId === currentProfile?.id,
       );
       setLlmProfiles(profiles);
       setLlmModels(models);
-      // Never replace a missing or non-tool historical selection silently.
-      setSelectedLlmProfileId(currentModel ? (currentProfile?.id ?? '') : '');
+      // Keep a ready profile so the model dropdown stays usable. Never silently
+      // substitute another model when the stored selection is missing.
+      setSelectedLlmProfileId(currentProfile?.id ?? '');
       setSelectedLlmModelId(currentModel?.id ?? '');
     } catch {
       setLlmProfiles([]);
@@ -1010,6 +1110,12 @@ export function App() {
       owner.projectId === run.identity.projectId &&
       owner.conversationId === run.identity.conversationId
     );
+  };
+
+  const rememberAgentTask = (detail: import('@ai-video/contracts').AgentTaskDetail | undefined) => {
+    setAgentTask(detail);
+    if (!detail) return;
+    setConversationAgentTasks((current) => upsertAgentTaskDetail(current, detail));
   };
 
   const stopAgentTaskEventPolling = () => {
@@ -1043,7 +1149,9 @@ export function App() {
           if (agentTaskEventPollRef.current !== poll) return;
           void callWorker('agent.task.get', { taskId })
             .then((detail) => {
-              if (agentTaskEventPollRef.current === poll) setAgentTask(detail);
+              const current = agentTaskEventPollRef.current;
+              if (current && current.taskId !== taskId) return;
+              rememberAgentTask(detail);
             })
             .catch(() => undefined);
           poll.afterSequence = result.nextSequence;
@@ -1052,10 +1160,10 @@ export function App() {
             setChatMessage(readableGenerationError(latest.summary) ?? latest.summary);
           }
           if (['completed', 'failed', 'cancelled'].includes(result.task.status)) {
-            if (result.task.errorMessage)
-              setChatMessage(
-                readableGenerationError(result.task.errorMessage) ?? result.task.errorMessage,
-              );
+            const failedMessage =
+              readableGenerationError(lastGenerationErrorRef.current) ??
+              readableGenerationError(result.task.errorMessage);
+            if (failedMessage) setChatMessage(failedMessage);
             stopAgentTaskEventPolling();
           }
         })
@@ -1079,6 +1187,8 @@ export function App() {
         ? prepared.agentTaskId
         : undefined;
     const isAgentGeneration = agentTaskId !== undefined;
+    lastGenerationErrorRef.current = undefined;
+    setLiveAgentActions([]);
     if (agentTaskId) {
       setAgentTask(undefined);
       startAgentTaskEventPolling(agentTaskId);
@@ -1099,8 +1209,10 @@ export function App() {
             const createdWorkspace = created.filter(isWorkspaceDocument);
             const createdWorkspaceDocument = createdWorkspace[0];
             if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
+              openWorkspaceForDocumentKind(createdWorkspaceDocument.kind);
               setDocumentKindFilter(createdWorkspaceDocument.kind);
             } else if (createdWorkspace.length > 1) {
+              openProjectView('documents');
               setDocumentKindFilter('all');
             }
             const createdDocument = createdWorkspaceDocument ?? created[0];
@@ -1132,6 +1244,10 @@ export function App() {
       return;
     }
     const run = streamPreparedLlmGeneration(prepared, {
+      onLiveActions(actions) {
+        if (!nativeRunIsCurrent(run)) return;
+        setLiveAgentActions(actions);
+      },
       onDelta(content) {
         if (!nativeRunIsCurrent(run)) return;
         const next: LlmGenerationInfo = {
@@ -1161,6 +1277,7 @@ export function App() {
           paidSubmissionResolverRef.current?.(false);
           mediaSelectionResolverRef.current?.(undefined);
           activeMediaInputsRef.current = [];
+          if (next.error) lastGenerationErrorRef.current = next.error;
           setChatMessage(readableGenerationError(next.error) ?? '生成完成');
           refreshAgentDocuments();
         }
@@ -1206,9 +1323,10 @@ export function App() {
           const detail = await callWorker('agent.task.get', { taskId: agentTaskId }).catch(
             () => undefined,
           );
-          if (detail && nativeRunIsCurrent(run)) setAgentTask(detail);
+          if (detail && nativeRunIsCurrent(run)) rememberAgentTask(detail);
         }
         stopAgentTaskEventPolling();
+        if (nativeRunIsCurrent(run)) setLiveAgentActions([]);
         if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
           confirmationResolverRef.current?.(false);
           paidSubmissionResolverRef.current?.(false);
@@ -1477,6 +1595,7 @@ export function App() {
           setGeneration(next);
           setMessages((current) => mergeGenerationMessage(current, conversationId, next));
           if (next.status !== 'streaming') {
+            if (next.error) lastGenerationErrorRef.current = next.error;
             setChatMessage(readableGenerationError(next.error) ?? '生成完成');
           }
         })
@@ -1504,31 +1623,39 @@ export function App() {
     if (!projectId || !conversationId) {
       stopAgentTaskEventPolling();
       setAgentTask(undefined);
+      setConversationAgentTasks([]);
       return;
     }
     let active = true;
     void Promise.resolve()
       .then(() => callWorker('agent.task.list', { limit: 50, conversationId }))
-      .then((tasks) => {
+      .then(async (tasks) => {
         if (!active) return;
-        const candidate = tasks
-          .filter((task) => ['queued', 'running', 'waiting_review', 'failed'].includes(task.status))
-          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-        if (!candidate) {
+        const byUpdated = [...tasks].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        const details = (
+          await Promise.all(
+            byUpdated
+              .slice(0, 20)
+              .map((task) =>
+                callWorker('agent.task.get', { taskId: task.id }).catch(() => undefined),
+              ),
+          )
+        ).filter((item): item is NonNullable<typeof item> => Boolean(item));
+        if (!active) return;
+        setConversationAgentTasks(details);
+        const live =
+          details.find((item) =>
+            ['queued', 'running', 'waiting_review'].includes(item.task.status),
+          ) ?? details[0];
+        if (!live) {
           stopAgentTaskEventPolling();
           setAgentTask(undefined);
           return;
         }
-        void Promise.resolve()
-          .then(() => callWorker('agent.task.get', { taskId: candidate.id }))
-          .then((detail) => {
-            if (!active) return;
-            setAgentTask(detail);
-            if (['queued', 'running'].includes(detail.task.status)) {
-              startAgentTaskEventPolling(detail.task.id);
-            }
-          })
-          .catch(() => undefined);
+        setAgentTask(live);
+        if (['queued', 'running'].includes(live.task.status)) {
+          startAgentTaskEventPolling(live.task.id);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -1767,6 +1894,30 @@ export function App() {
     setShot(created);
   };
 
+  const referenceImages = (refs: ShotReferenceAssets): string[] =>
+    [refs.characterAssetId, refs.sceneAssetId, refs.firstFrameAssetId]
+      .filter((id): id is string => Boolean(id))
+      .map((id) => `asset://${id}`);
+
+  const openShotProduction = async (mode: 'image' | 'video', refs: ShotReferenceAssets) => {
+    if (!shot) return;
+    if (shotPrompt !== (shot.prompt ?? '')) {
+      await saveShotPrompt();
+    }
+    const images = referenceImages(refs);
+    setProductionSeed({
+      shotId: shot.id,
+      prompt: shotPrompt.trim(),
+      assetKind: 'first-frame',
+      images,
+    });
+    if (mode === 'image') {
+      setProductionCapability(images.length > 0 ? 'REFERENCE_TO_IMAGE' : 'TEXT_TO_IMAGE');
+    } else {
+      setProductionCapability(images.length > 1 ? 'REFERENCE_TO_VIDEO' : 'IMAGE_TO_VIDEO');
+    }
+  };
+
   const saveShotPrompt = async () => {
     if (!shot) return;
     try {
@@ -1884,6 +2035,9 @@ export function App() {
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         });
+        if (unified.status !== 'needs_model_selection' && episodeChapterIds.length > 0) {
+          setEpisodeChapterIds([]);
+        }
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
@@ -2120,6 +2274,7 @@ export function App() {
         );
         if (detail) {
           setAgentTask((existing) => (existing?.task.id === agentTaskId ? detail : existing));
+          setConversationAgentTasks((current) => upsertAgentTaskDetail(current, detail));
         }
       }
       setChatMessage('生成已停止');
@@ -2140,7 +2295,7 @@ export function App() {
         reason: '用户在会话中确认 Schema 修改提议',
       });
       const detail = await callWorker('agent.task.get', { taskId: agentTask.task.id });
-      setAgentTask(detail);
+      rememberAgentTask(detail);
       setChatMessage('Schema 修改已确认并生效。');
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : 'Schema 修改确认失败');
@@ -2159,7 +2314,7 @@ export function App() {
         reason: '用户拒绝 Schema 修改提议并回滚上一版本',
       });
       const detail = await callWorker('agent.task.get', { taskId: agentTask.task.id });
-      setAgentTask(detail);
+      rememberAgentTask(detail);
       setChatMessage('Schema 提议已拒绝，已回滚到上一确认版本。');
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : 'Schema 提议回滚失败');
@@ -2331,6 +2486,9 @@ export function App() {
         researchMode,
         contextPreview,
         generation,
+        agentTask,
+        agentTasks: conversationAgentTasks,
+        liveAgentActions,
       }
     : undefined;
   const currentDetachedSnapshots = {
@@ -2647,6 +2805,8 @@ export function App() {
     chatMessage,
     generation?.generationId,
     generation?.status,
+    agentTask,
+    liveAgentActions,
     scopeType,
     selectedLlmProfileId,
     selectedLlmModelId,
@@ -2708,6 +2868,8 @@ export function App() {
       contextPreview={contextPreview}
       generation={generation}
       agentTask={agentTask}
+      agentTasks={conversationAgentTasks}
+      liveAgentActions={liveAgentActions}
       confirmation={agentConfirmation}
       activeVideoTaskCount={projectTasks?.activeCount ?? 0}
       agentModelSelection={agentModelSelection}
@@ -2735,8 +2897,9 @@ export function App() {
       selectedChapterCount={episodeChapterIds.length}
       onClearSelectedChapters={() => {
         setEpisodeChapterIds([]);
-        setChatMessage('已清除章节上下文，后续消息按项目文档任务处理。');
+        setChatMessage('已清除本集章节范围。');
       }}
+      onOpenLibrarySource={openLibrarySource}
       onConfirmSchemaProposal={(adapterKey, version) => {
         void confirmSchemaProposal(adapterKey, version);
       }}
@@ -2844,7 +3007,11 @@ export function App() {
       capability={productionCapability}
       projectId={project?.id}
       projectRootPath={project?.rootPath}
-      shotId={shot?.id}
+      shotId={productionSeed?.documentId ? undefined : (productionSeed?.shotId ?? shot?.id)}
+      sourceDocumentId={productionSeed?.documentId}
+      seedPrompt={productionSeed?.prompt}
+      seedImages={productionSeed?.images}
+      preferredAssetKind={productionSeed?.assetKind}
       writable={writable}
       assets={assets}
       videoJobs={projectTasks?.videoJobs ?? []}
@@ -2858,7 +3025,10 @@ export function App() {
         setView('assets');
       }}
       onOpenProviderSettings={() => openSettings('providers')}
-      onClose={() => setNavigationMode('project')}
+      onClose={() => {
+        setProductionSeed(undefined);
+        setNavigationMode('project');
+      }}
       providerSettingsRevision={providerSettingsRevision}
     />
   );
@@ -2866,9 +3036,10 @@ export function App() {
   // The open document stays listed even when it does not match the active
   // filter, so a task-log-opened note or storyboard draft is never edited from
   // a hidden row.
+  const workspaceKinds = view === 'characters' ? CHARACTER_DOCUMENT_KINDS : SCRIPT_DOCUMENT_KINDS;
   const visibleDocuments = documents.filter(
     (item) =>
-      (isWorkspaceDocument(item) && matchesDocumentFilter(item, documentKindFilter)) ||
+      (workspaceKinds.includes(item.kind) && matchesDocumentFilter(item, documentKindFilter)) ||
       item.id === document?.id,
   );
 
@@ -2880,36 +3051,52 @@ export function App() {
    */
   const newDocumentOfActiveKind = () => {
     newDocument();
-    setDocumentKind(documentKindFilter === 'all' ? 'outline' : documentKindFilter);
+    setDocumentKind(
+      documentKindFilter === 'all'
+        ? view === 'characters'
+          ? 'character'
+          : 'outline'
+        : documentKindFilter,
+    );
   };
 
-  const renderDocumentToolbar = (eyebrow: string, fallbackTitle: string) => (
-    <div className="workspace-toolbar">
+  const renderDocumentToolbar = (
+    eyebrow: string,
+    fallbackTitle: string,
+    options?: { compact?: boolean; showImport?: boolean; showNew?: boolean; showHeading?: boolean },
+  ) => (
+    <div className={`workspace-toolbar${options?.compact ? ' is-compact' : ''}`}>
       <div>
         <span className="eyebrow">{eyebrow}</span>
-        <h1>{document?.title ?? fallbackTitle}</h1>
+        {options?.showHeading === false ? null : (
+          <h1>{options?.compact ? fallbackTitle : (document?.title ?? fallbackTitle)}</h1>
+        )}
       </div>
       <div className="toolbar-actions">
-        <button
-          className="button secondary markdown-import-button"
-          type="button"
-          aria-label="导入 Markdown"
-          title="导入 Markdown"
-          onClick={() => void importMarkdownDocument()}
-          disabled={!writable || contentBusy}
-        >
-          <FileUp size={15} />
-          <span>导入 Markdown</span>
-        </button>
-        <button
-          className="button secondary"
-          type="button"
-          onClick={newDocumentOfActiveKind}
-          disabled={!writable}
-        >
-          <FilePlus2 size={15} />
-          新建
-        </button>
+        {options?.showImport === false ? null : (
+          <button
+            className="button secondary markdown-import-button"
+            type="button"
+            aria-label="导入 Markdown"
+            title="导入 Markdown"
+            onClick={() => void importMarkdownDocument()}
+            disabled={!writable || contentBusy}
+          >
+            <FileUp size={15} />
+            <span>导入 Markdown</span>
+          </button>
+        )}
+        {options?.showNew === false ? null : (
+          <button
+            className="button secondary"
+            type="button"
+            onClick={newDocumentOfActiveKind}
+            disabled={!writable}
+          >
+            <FilePlus2 size={15} />
+            新建
+          </button>
+        )}
         <button
           className="button primary"
           type="button"
@@ -2952,66 +3139,67 @@ export function App() {
     </div>
   );
 
-  const renderDocumentEditor = () => (
-    <div className="document-workspace">
-      <div className="document-fields">
-        <label className="title-field">
-          标题
-          <input
-            value={documentTitle}
-            onChange={(event) => setDocumentTitle(event.target.value)}
-            placeholder="输入文档标题"
-            readOnly={!documentEditorWritable}
-          />
-        </label>
-        <label className="kind-field">
-          类型
-          <select
-            value={documentKind}
-            onChange={(event) => setDocumentKind(event.target.value as DocumentKind)}
-            disabled={!documentEditorWritable}
-            aria-label="文档类型"
-          >
-            {DOCUMENT_KIND_ORDER.map((kind) => (
-              <option key={kind} value={kind}>
-                {DOCUMENT_KIND_LABELS[kind]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span
-          className={`document-state document-state-${document?.currentVersion?.state ?? 'new'}`}
-        >
-          {documentStateLabel(document?.currentVersion?.state ?? 'new')}
-        </span>
-      </div>
-      <textarea
-        className="markdown-editor"
-        aria-label="文档内容"
-        value={documentContent}
-        onChange={(event) => setDocumentContent(event.target.value)}
-        placeholder="使用 Markdown 编写项目内容…"
-        readOnly={!documentEditorWritable}
+  const openCharacterSceneImageProduction = async () => {
+    if (!documentContent.trim()) return;
+    let documentId = document?.id;
+    if (!documentId) {
+      if (!documentTitle.trim()) return;
+      const saved = await saveDocument();
+      if (!saved) return;
+      documentId = saved.id;
+    }
+    setProductionSeed({
+      documentId,
+      prompt: documentContent.trim(),
+      assetKind: documentKind === 'scene' ? 'scene' : 'character',
+    });
+    setProductionCapability('TEXT_TO_IMAGE');
+  };
+
+  const renderDocumentEditor = () =>
+    view === 'characters' ? (
+      <CharacterSceneWorkspace
+        title={documentTitle}
+        kind={documentKind === 'scene' ? 'scene' : 'character'}
+        content={documentContent}
+        stateLabel={documentStateLabel(document?.currentVersion?.state ?? 'new')}
+        stateKey={document?.currentVersion?.state ?? 'new'}
+        writable={documentEditorWritable && !contentBusy}
+        versions={versions}
+        currentVersionId={document?.currentVersionId}
+        message={contentMessage}
+        assets={linkedAssets}
+        onTitleChange={setDocumentTitle}
+        onKindChange={setDocumentKind}
+        onContentChange={setDocumentContent}
+        onRestoreVersion={(versionId) => void restoreVersion(versionId)}
+        onGenerate={() => {
+          void openCharacterSceneImageProduction();
+        }}
+        onOpenAsset={(assetId) => {
+          updateAssets(assets, assetId);
+          setAssetLibrarySelectedId(assetId);
+          setView('assets');
+        }}
       />
-      {contentMessage && <div className="inline-status">{contentMessage}</div>}
-      {versions.length > 0 && (
-        <div className="version-strip">
-          <span>历史版本</span>
-          {versions.map((version) => (
-            <button
-              type="button"
-              key={version.id}
-              title={new Date(version.createdAt).toLocaleString()}
-              onClick={() => void restoreVersion(version.id)}
-              disabled={!documentEditorWritable || version.id === document?.currentVersionId}
-            >
-              <RotateCcw size={12} />v{version.version}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+    ) : (
+      <ScriptWorkspace
+        title={documentTitle}
+        kind={documentKind}
+        content={documentContent}
+        stateLabel={documentStateLabel(document?.currentVersion?.state ?? 'new')}
+        stateKey={document?.currentVersion?.state ?? 'new'}
+        writable={documentEditorWritable && !contentBusy}
+        versions={versions}
+        currentVersionId={document?.currentVersionId}
+        message={contentMessage}
+        episodeChapterCount={episodeChapterIds.length}
+        onTitleChange={setDocumentTitle}
+        onKindChange={setDocumentKind}
+        onContentChange={setDocumentContent}
+        onRestoreVersion={(versionId) => void restoreVersion(versionId)}
+      />
+    );
 
   return (
     <div className="app-shell" data-left-open={leftOpen} data-navigation-mode={navigationMode}>
@@ -3131,6 +3319,7 @@ export function App() {
             compact
             capability={productionCapability}
             onCapabilityChange={(capability) => {
+              setProductionSeed(undefined);
               setProductionCapability(capability);
               setNavigationMode('production');
               setProductionMenuOpen(false);
@@ -3243,7 +3432,7 @@ export function App() {
                 onClick={() => openProjectView('novel')}
               >
                 <BookOpen size={16} />
-                <span>小说章节</span>
+                <span>小说</span>
               </button>
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'documents' ? 'active' : ''}`}
@@ -3251,8 +3440,21 @@ export function App() {
                 onClick={() => openProjectView('documents')}
               >
                 <FileText size={16} />
-                <span>项目文档</span>
-                <span className="count">{documents.length}</span>
+                <span>剧本</span>
+                <span className="count">
+                  {documents.filter((item) => SCRIPT_DOCUMENT_KINDS.includes(item.kind)).length}
+                </span>
+              </button>
+              <button
+                className={`nav-item ${navigationMode === 'project' && view === 'characters' ? 'active' : ''}`}
+                type="button"
+                onClick={() => openProjectView('characters')}
+              >
+                <Users size={16} />
+                <span>角色与场景</span>
+                <span className="count">
+                  {documents.filter((item) => CHARACTER_DOCUMENT_KINDS.includes(item.kind)).length}
+                </span>
               </button>
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'shots' ? 'active' : ''}`}
@@ -3285,6 +3487,7 @@ export function App() {
             <ProductionNavigation
               capability={productionCapability}
               onCapabilityChange={(capability) => {
+                setProductionSeed(undefined);
                 setProductionCapability(capability);
                 setNavigationMode('production');
               }}
@@ -3496,7 +3699,7 @@ export function App() {
             conversationContent={conversationPanel}
             productionContent={productionPanel}
             productionOpen={navigationMode === 'production'}
-            documentActive={view === 'documents'}
+            documentActive={view === 'documents' || view === 'characters'}
             detachedPanels={detachedPanels}
             onOpenConversation={() => void focusDetachedPanelWindow(detachedPanels.conversation)}
             onOpenDocument={() => {
@@ -3517,27 +3720,34 @@ export function App() {
                   setEpisodeChapterIds(chapterIds);
                   workspaceDispatch({ type: 'open', panelId: 'conversation' });
                   setChatMessage(
-                    `已将 ${chapterIds.length} 个章节加入当前项目助手上下文，请直接描述要生成或修改的内容。`,
+                    `已指定 ${chapterIds.length} 个章节作为本集范围。直接描述要生成的短剧内容，下次发送会冻结这些章节。`,
                   );
                 }}
               />
-            ) : view === 'documents' ? (
+            ) : view === 'documents' || view === 'characters' ? (
               <>
                 {renderDocumentToolbar(
                   document?.currentVersion?.state === 'published'
-                    ? '已发布项目资料'
-                    : '项目文档草稿',
-                  '文档编辑器',
+                    ? view === 'characters'
+                      ? '已发布角色/场景'
+                      : '已发布项目资料'
+                    : view === 'characters'
+                      ? '角色/场景提示词'
+                      : '剧本草稿',
+                  view === 'characters' ? '角色与场景' : '剧本编辑器',
+                  view === 'characters'
+                    ? { compact: true, showImport: false, showNew: false }
+                    : undefined,
                 )}
                 {project ? (
                   <div className="directory-layout">
                     <aside className="directory-index" aria-label="项目文档目录">
                       <div className="tree-heading">
-                        <span>文档</span>
+                        <span>{view === 'characters' ? '角色与场景' : '文档'}</span>
                         <button
                           className="icon-button subtle"
                           type="button"
-                          title="新建文档"
+                          title={view === 'characters' ? '新建角色或场景' : '新建文档'}
                           onClick={newDocumentOfActiveKind}
                           disabled={!writable}
                         >
@@ -3545,7 +3755,18 @@ export function App() {
                         </button>
                       </div>
                       <div className="document-kind-filters" role="group" aria-label="文档类型筛选">
-                        {DOCUMENT_KIND_FILTERS.map((filter) => (
+                        {(view === 'characters'
+                          ? [
+                              { id: 'all' as const, label: '全部' },
+                              { id: 'character' as const, label: '角色' },
+                              { id: 'scene' as const, label: '场景' },
+                            ]
+                          : [
+                              { id: 'all' as const, label: '全部' },
+                              { id: 'outline' as const, label: '大纲' },
+                              { id: 'plan' as const, label: '计划' },
+                            ]
+                        ).map((filter) => (
                           <button
                             className={documentKindFilter === filter.id ? 'active' : ''}
                             type="button"
@@ -3578,26 +3799,30 @@ export function App() {
                             : `暂无${DOCUMENT_KIND_LABELS[documentKindFilter]}类型文档`}
                         </small>
                       )}
-                      <div className="tree-heading nested">
-                        <span>约束条件</span>
-                      </div>
-                      {constraints.map((item) => (
-                        <div
-                          className="tree-item constraint-item"
-                          key={item.id}
-                          title={item.content}
-                        >
-                          <ListChecks size={13} />
-                          <span>
-                            {item.content.length > 40
-                              ? item.content.slice(0, 40) + '…'
-                              : item.content}
-                          </span>
-                        </div>
-                      ))}
-                      {constraints.length === 0 && (
-                        <small className="tree-empty">暂无约束，可在会话中提升为约束</small>
-                      )}
+                      {view === 'documents' ? (
+                        <>
+                          <div className="tree-heading nested">
+                            <span>约束条件</span>
+                          </div>
+                          {constraints.map((item) => (
+                            <div
+                              className="tree-item constraint-item"
+                              key={item.id}
+                              title={item.content}
+                            >
+                              <ListChecks size={13} />
+                              <span>
+                                {item.content.length > 40
+                                  ? item.content.slice(0, 40) + '…'
+                                  : item.content}
+                              </span>
+                            </div>
+                          ))}
+                          {constraints.length === 0 && (
+                            <small className="tree-empty">暂无约束，可在会话中提升为约束</small>
+                          )}
+                        </>
+                      ) : null}
                     </aside>
                     <div className="directory-pane">{renderDocumentEditor()}</div>
                   </div>
@@ -3682,78 +3907,28 @@ export function App() {
                     </aside>
                     <div className="directory-pane">
                       {shot ? (
-                        <div className="shot-workspace">
-                          <div className="shot-header">
-                            <Aperture size={26} />
-                            <div>
-                              <strong>{shot.title}</strong>
-                              <span>
-                                状态：{shot.status} · 镜头 #{shot.position + 1}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="shot-section">
-                            <h2>镜头提示词</h2>
-                            <p>
-                              用于生成本镜头图片/视频的提示词；可引用已发布角色/场景，如 [角色:林澈]
-                              [场景:旧码头]。
-                            </p>
-                            <textarea
-                              className="markdown-editor shot-prompt-editor"
-                              aria-label="镜头提示词"
-                              value={shotPrompt}
-                              onChange={(event) => setShotPrompt(event.target.value)}
-                              placeholder="输入镜头提示词…"
-                              readOnly={!writable}
-                            />
-                            <button
-                              className="button secondary"
-                              type="button"
-                              disabled={!writable}
-                              onClick={() => void saveShotPrompt()}
-                            >
-                              <Save size={13} /> 保存提示词
-                            </button>
-                          </div>
-                          <div className="shot-section">
-                            <h2>镜头内容</h2>
-                            <p>
-                              在项目会话中完善镜头描述，再通过明确操作保存为分镜文档。普通会话不会修改正式资料。
-                            </p>
-                          </div>
-                          <div className="shot-section">
-                            <h2>分镜文档</h2>
-                            <label className="title-field">
-                              分镜标题
-                              <input
-                                value={shotStoryboardTitle}
-                                onChange={(event) => setShotStoryboardTitle(event.target.value)}
-                                placeholder="输入分镜标题"
-                                readOnly={!writable || shotStoryboardBusy}
-                              />
-                            </label>
-                            <textarea
-                              className="markdown-editor"
-                              aria-label="分镜内容"
-                              value={shotStoryboardContent}
-                              onChange={(event) => setShotStoryboardContent(event.target.value)}
-                              placeholder="# 分镜&#10;&#10;1. 镜头描述…"
-                              readOnly={!writable || shotStoryboardBusy}
-                            />
-                            <div className="toolbar-actions">
-                              <button
-                                className="button primary"
-                                type="button"
-                                disabled={!writable || shotStoryboardBusy}
-                                onClick={() => void saveShotStoryboard()}
-                              >
-                                <Save size={13} />
-                                {shotStoryboard ? '保存分镜' : '新建分镜'}
-                              </button>
-                              {shotStoryboardBusy && <span className="inline-status">保存中…</span>}
-                            </div>
-                          </div>
-                        </div>
+                        <ShotWorkspace
+                          projectId={project.id}
+                          shotId={shot.id}
+                          shotTitle={shot.title}
+                          shotStatus={shot.status}
+                          shotPosition={shot.position}
+                          prompt={shotPrompt}
+                          writable={writable}
+                          assets={assets}
+                          documents={documents}
+                          storyboardTitle={shotStoryboardTitle}
+                          storyboardContent={shotStoryboardContent}
+                          storyboardBusy={shotStoryboardBusy}
+                          hasStoryboard={Boolean(shotStoryboard)}
+                          onPromptChange={setShotPrompt}
+                          onSavePrompt={() => void saveShotPrompt()}
+                          onGenerateImage={(refs) => void openShotProduction('image', refs)}
+                          onGenerateVideo={(refs) => void openShotProduction('video', refs)}
+                          onStoryboardTitleChange={setShotStoryboardTitle}
+                          onStoryboardContentChange={setShotStoryboardContent}
+                          onSaveStoryboard={() => void saveShotStoryboard()}
+                        />
                       ) : (
                         <EmptyWorkspace title={scene ? '还没有镜头' : '还没有场次'} />
                       )}
@@ -3770,6 +3945,7 @@ export function App() {
                 taskRevision={projectTasks?.revision}
                 onOpenDocument={(documentId) => void openDocumentById(documentId)}
                 onOpenConversation={(conversationId) => void openConversationById(conversationId)}
+                onOpenLibrarySource={openLibrarySource}
               />
             ) : project ? (
               <AssetLibraryView

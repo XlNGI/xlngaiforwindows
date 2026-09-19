@@ -265,8 +265,9 @@ export function ModelManagementView({
                   </select>
                   <small>
                     {model.parameterTemplateKey
-                      ? (UNICOMPAPI_MEDIA_TEMPLATES.find((item) => item.key === model.parameterTemplateKey)
-                          ?.description ?? '已绑定模板')
+                      ? (UNICOMPAPI_MEDIA_TEMPLATES.find(
+                          (item) => item.key === model.parameterTemplateKey,
+                        )?.description ?? '已绑定模板')
                       : '媒体模型需要绑定模板后才能进入制作候选'}
                   </small>
                 </label>

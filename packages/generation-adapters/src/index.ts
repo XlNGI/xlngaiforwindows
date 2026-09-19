@@ -899,7 +899,9 @@ function unicompVideoAdapter(
   };
 }
 
-const UNICOMPAPI_CAPABILITY_TEMPLATES: Partial<Record<GenerationCapability, UniCompApiMediaTemplateKey>> = {
+const UNICOMPAPI_CAPABILITY_TEMPLATES: Partial<
+  Record<GenerationCapability, UniCompApiMediaTemplateKey>
+> = {
   TEXT_TO_IMAGE: 'openai-compatible-image',
   REFERENCE_TO_IMAGE: 'qwen-image-edit',
   TEXT_TO_VIDEO: 'openai-compatible-video',
@@ -916,7 +918,11 @@ function parseUniCompAdapterKey(
   const capability = parts[0] as GenerationCapability;
   const token = parts[2] ?? '';
   if (!UNICOMPAPI_CAPABILITY_TEMPLATES[capability] || !token) return undefined;
-  if (token.trim() !== token || token.length > 256 || [...token].some((value) => value.charCodeAt(0) < 32)) {
+  if (
+    token.trim() !== token ||
+    token.length > 256 ||
+    [...token].some((value) => value.charCodeAt(0) < 32)
+  ) {
     return undefined;
   }
   return { capability, token };
@@ -949,7 +955,9 @@ export function adapterBindsCatalogModel(
 ): boolean {
   if (adapter.provider !== selection.providerType) return false;
   if (selection.providerType === 'unicompapi') {
-    return Boolean(selection.parameterTemplateKey) && adapter.model === selection.parameterTemplateKey;
+    return (
+      Boolean(selection.parameterTemplateKey) && adapter.model === selection.parameterTemplateKey
+    );
   }
   return adapter.model === selection.remoteModelId;
 }

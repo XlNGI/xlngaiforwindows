@@ -14,6 +14,7 @@ import {
   inferAgentDocumentIntent,
   inferConversationTaskMode,
   inferUnifiedAgentCapability,
+  resolveAgentRunWorkflow,
   modelMatchesUnifiedAgentRequest,
   parseRequest,
   resolveMediaProviderRegion,
@@ -55,18 +56,36 @@ describe('inferAgentDocumentIntent', () => {
   });
 });
 
-describe('inferConversationTaskMode', () => {
-  it('routes natural-language project requests without exposing a mode switch', () => {
-    expect(inferConversationTaskMode('续写小说下一章')).toBe('novel-writing');
+describe('resolveAgentRunWorkflow', () => {
+  it('does not block the model on novel-looking language', () => {
+    expect(resolveAgentRunWorkflow({ prompt: '续写小说下一章' })).toBe('document');
+    expect(resolveAgentRunWorkflow({ prompt: '根据小说第一章生成系统中对应的文档材料' })).toBe(
+      'document',
+    );
+    expect(resolveAgentRunWorkflow({ prompt: '根据项目资料写一份制作说明' })).toBe('document');
+    expect(inferConversationTaskMode('续写小说下一章')).toBe('document');
+  });
+
+  it('starts novel orchestration only when the client already supplied a novelIntent', () => {
+    expect(
+      resolveAgentRunWorkflow({
+        prompt: '续写小说下一章',
+        novelIntent: { action: 'continue_chapter', chapterId: 'chapter-1' },
+      }),
+    ).toBe('novel-writing');
+  });
+
+  it('treats selected chapters as explicit short-drama context', () => {
+    expect(
+      resolveAgentRunWorkflow({
+        prompt: '根据小说第一章生成系统中对应的文档材料',
+        selectedChapterIds: ['chapter-1'],
+      }),
+    ).toBe('short-drama');
     expect(inferConversationTaskMode('把选中的章节改编成短剧分镜', ['chapter-1'])).toBe(
       'short-drama',
     );
-    expect(inferConversationTaskMode('根据项目资料写一份制作说明')).toBe('document');
-  });
-
-  it('uses selected chapters as adaptation context for otherwise generic requests', () => {
     expect(inferConversationTaskMode('生成本集内容', ['chapter-1'])).toBe('short-drama');
-    expect(inferConversationTaskMode('续写小说', ['chapter-1'])).toBe('novel-writing');
   });
 });
 

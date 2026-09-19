@@ -8,6 +8,7 @@ import {
   type AgentTaskCreateDocumentDraftParams,
   type AgentGenerationPrepareParams,
   type AgentDocumentIntent,
+  type NovelWritingIntent,
   type UnifiedAgentRunParams,
   type UnifiedAgentCapability,
   type ConversationTaskMode,
@@ -316,26 +317,30 @@ export function inferAgentDocumentIntent(prompt: string): AgentDocumentIntent {
     : { operation: 'document.create_draft' };
 }
 
-/**
- * Selects the internal orchestration workflow for a project-wide Agent turn.
- * This is deliberately a hint: the Provider still chooses registered tools,
- * while the Worker freezes the resulting task scope and authorization. The
- * user never has to switch a conversation mode.
- */
+/** Compatibility wrapper around resolveAgentRunWorkflow. Prompt language is not a router. */
 export function inferConversationTaskMode(
   prompt: string,
   selectedChapterIds?: readonly string[],
 ): ConversationTaskMode {
-  const value = prompt.normalize('NFC').trim();
-  const novelLanguage =
-    /(?:小说|章节|续写|继续写|新建章节|创建章节|写一章|重写章节|改写章节)/u.test(value);
-  const shortDramaLanguage =
-    /(?:短剧|短视频剧|剧本|分镜|场次|镜头|本集|改编(?:成|为)?(?:短剧|剧本|分镜)?)/u.test(value);
+  return resolveAgentRunWorkflow({ prompt, selectedChapterIds });
+}
 
-  // An explicit novel-only instruction wins when no episode language is
-  // present (for example, “改写小说章节” should not become an episode).
-  if (novelLanguage && !shortDramaLanguage) return 'novel-writing';
-  if (shortDramaLanguage || (selectedChapterIds?.length ?? 0) > 0) return 'short-drama';
+/**
+ * Choose the Worker workflow for `agent.run`.
+ *
+ * The model sees authorized tools and picks among them. Language in the prompt
+ * is not a hard router and must not return pending_intent before the LLM runs.
+ * Novel-writing orchestration starts only when the client already supplied a
+ * novelIntent; selected chapters remain explicit short-drama context.
+ */
+export function resolveAgentRunWorkflow(input: {
+  prompt?: string;
+  novelIntent?: NovelWritingIntent;
+  selectedChapterIds?: readonly string[];
+}): ConversationTaskMode {
+  void input.prompt;
+  if (input.novelIntent) return 'novel-writing';
+  if ((input.selectedChapterIds?.length ?? 0) > 0) return 'short-drama';
   return 'document';
 }
 
@@ -1408,23 +1413,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               // Catalog/model-selection validation remains useful before a project is open.
             }
           }
-          let requestedProviderProfileId =
+          const requestedProviderProfileId =
             agentParams.providerProfileId ?? storedPreference?.providerProfileId;
-          let requestedModelId = agentParams.modelId ?? storedPreference?.modelId;
-          if (!requestedProviderProfileId || !requestedModelId) {
-            const preferredTerra = storedPreference
-              ? undefined
-              : candidates.find(
-                  (candidate) =>
-                    candidate.remoteModelId === 'gpt-5.6-terra' &&
-                    profiles.find((item) => item.id === candidate.providerProfileId)
-                      ?.providerType === 'unicompapi',
-                );
-            if (preferredTerra) {
-              requestedProviderProfileId = preferredTerra.providerProfileId;
-              requestedModelId = preferredTerra.modelId;
-            }
-          }
+          const requestedModelId = agentParams.modelId ?? storedPreference?.modelId;
 
           if (!requestedProviderProfileId || !requestedModelId) {
             result = {
@@ -1484,10 +1475,11 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             .listModels(selected.providerProfileId)
             .find((candidate) => candidate.id === selected.modelId);
           assertAgentToolLoopSelection(profile, model);
-          const requestedTaskMode = inferConversationTaskMode(
-            agentParams.prompt,
-            agentParams.selectedChapterIds,
-          );
+          const requestedTaskMode = resolveAgentRunWorkflow({
+            prompt: agentParams.prompt,
+            novelIntent: agentParams.novelIntent,
+            selectedChapterIds: agentParams.selectedChapterIds,
+          });
           const provenance = {
             source: storedPreference ? ('conversation-preference' as const) : ('request' as const),
             capability: 'text' as const,
@@ -2164,6 +2156,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'asset.list':
           result = imageGenerationService.listAssets({
             kind: typeof params.kind === 'string' ? params.kind : undefined,
+            sourceDocumentId:
+              typeof params.sourceDocumentId === 'string' ? params.sourceDocumentId : undefined,
+            shotId: typeof params.shotId === 'string' ? params.shotId : undefined,
             keyword: typeof params.keyword === 'string' ? params.keyword : undefined,
             deleted: params.deleted === 'trash' ? 'trash' : 'active',
             createdFrom: typeof params.createdFrom === 'string' ? params.createdFrom : undefined,

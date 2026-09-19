@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Archive,
   Bot,
   BookOpen,
@@ -14,8 +15,9 @@ import {
   RotateCcw,
   SlidersHorizontal,
   Square,
+  Terminal,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentResearchMode,
   ChatMessageInfo,
@@ -33,11 +35,13 @@ import type {
   AdapterParameters,
   AdapterParameterProperty,
   AgentTaskDetail,
-  AgentTaskPhase,
+  AgentLibrarySourceInfo,
+  ConversationRuntimeLiveAction,
   MediaModelCandidate,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
   UnifiedAgentModelSelectionRequest,
+  LibraryCatalogItem,
 } from '@ai-video/contracts';
 
 export interface ChatAttachment {
@@ -50,6 +54,35 @@ export interface ChatAttachment {
   /** Bounded still frame sent to vision models instead of the full video payload. */
   previewDataUrl?: string;
   text?: string;
+}
+
+const DEFAULT_CONVERSATION_TITLES = new Set(['', '新会话', '会话']);
+
+function isDefaultConversationTitle(title: string): boolean {
+  return DEFAULT_CONVERSATION_TITLES.has(title.trim());
+}
+
+function visibleLibraryCatalog(catalog: LibraryCatalogItem[]): LibraryCatalogItem[] {
+  const items: LibraryCatalogItem[] = [];
+  let untitledConversations = 0;
+  for (const item of catalog) {
+    if (item.sourceType === 'conversation' && isDefaultConversationTitle(item.title)) {
+      untitledConversations += 1;
+      continue;
+    }
+    items.push(item);
+  }
+  if (untitledConversations > 0) {
+    items.push({
+      id: 'catalog:conversations',
+      sourceType: 'conversation',
+      sourceId: 'conversations',
+      status: 'conversation',
+      title: untitledConversations === 1 ? '会话记录' : `会话记录 ${untitledConversations} 条`,
+      updatedAt: catalog.find((item) => item.sourceType === 'conversation')?.updatedAt ?? '',
+    });
+  }
+  return items;
 }
 
 interface ChatPanelProps {
@@ -72,6 +105,8 @@ interface ChatPanelProps {
   contextPreview?: ProductionContextInfo;
   generation?: LlmGenerationInfo;
   agentTask?: import('@ai-video/contracts').AgentTaskDetail;
+  agentTasks?: import('@ai-video/contracts').AgentTaskDetail[];
+  liveAgentActions?: ConversationRuntimeLiveAction[];
   onConfirmSchemaProposal?: (adapterKey: string, version: number) => void;
   onRejectSchemaProposal?: (adapterKey: string, version: number) => void;
   confirmation?: AgentToolConfirmationRequest | AgentTaskPendingConfirmationInfo;
@@ -115,9 +150,10 @@ interface ChatPanelProps {
   mediaReferenceImageInputs?: string[];
   onSelectMediaModel?: (selection: MediaModelSelectionDecision) => void;
   onCancelMediaModelSelection?: () => void;
-  /** Selected novel chapters stay in context for every following turn. */
+  /** One-shot episode chapter range for the next send only. */
   selectedChapterCount?: number;
   onClearSelectedChapters?: () => void;
+  onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
   agentParameterRequest?: {
     prompt: string;
     capability: 'image' | 'video';
@@ -150,6 +186,8 @@ export function ChatPanel({
   contextPreview,
   generation,
   agentTask,
+  agentTasks,
+  liveAgentActions = [],
   confirmation,
   activeVideoTaskCount = 0,
   onConfirmAgentAction,
@@ -190,10 +228,12 @@ export function ChatPanel({
   onCancelMediaModelSelection,
   selectedChapterCount,
   onClearSelectedChapters,
+  onOpenLibrarySource,
   agentParameterRequest,
   onSubmitAgentParameters,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
+  const catalogItems = visibleLibraryCatalog(contextPreview?.catalog ?? []);
   const fileInputId = 'chat-attachment-input';
   const fileInputRef = useRef<HTMLInputElement>(null);
   /**
@@ -220,10 +260,14 @@ export function ChatPanel({
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [conversationMenuOpen]);
+  const selectedProfile = llmProfiles.find((profile) => profile.id === selectedLlmProfileId);
+  const selectedModel = llmModels.find(
+    (model) => model.id === selectedLlmModelId && model.providerProfileId === selectedLlmProfileId,
+  );
   const activeProfileName =
-    llmProfiles.find((profile) => profile.id === selectedLlmProfileId)?.name ?? llmStatus?.provider;
+    selectedProfile?.name ?? (llmProfiles.length > 0 ? undefined : llmStatus?.provider);
   const activeModelName =
-    llmModels.find((model) => model.id === selectedLlmModelId)?.displayName ?? llmStatus?.model;
+    selectedModel?.displayName ?? (llmProfiles.length > 0 ? undefined : llmStatus?.model);
   const researchModeLabel =
     researchMode === 'project_only'
       ? '仅项目资料'
@@ -231,12 +275,45 @@ export function ChatPanel({
         ? '禁止联网'
         : undefined;
   const generationLocked = generation?.status === 'prepared' || generation?.status === 'streaming';
+  const messageListRef = useRef<HTMLDivElement>(null);
   /**
    * Paid media submissions never render here. `media-confirmation.tsx` owns that
    * review surface so every paid path shows the same frozen draft; this in-session
    * card is only for Agent tool confirmations.
    */
   const displayedConfirmation = confirmation ?? agentTask?.pendingConfirmation;
+  const mergedAgentTasks = useMemo(() => {
+    const byId = new Map((agentTasks ?? []).map((item) => [item.task.id, item]));
+    if (agentTask) byId.set(agentTask.task.id, agentTask);
+    return [...byId.values()];
+  }, [agentTask, agentTasks]);
+  const timelineByMessageId = useMemo(() => {
+    const map = new Map<string, AgentTaskDetail>();
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      const task = agentTaskForAssistantMessage(
+        message.id,
+        messages,
+        mergedAgentTasks,
+        generation,
+        agentTask,
+      );
+      if (task) map.set(message.id, task);
+    }
+    return map;
+  }, [agentTask, generation, mergedAgentTasks, messages]);
+  const unmatchedLiveTask =
+    agentTask &&
+    ![...timelineByMessageId.values()].some((item) => item.task.id === agentTask.task.id)
+      ? agentTask
+      : undefined;
+
+  useEffect(() => {
+    if (!generationLocked) return;
+    const list = messageListRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+  }, [generationLocked, generation?.assistantMessage.content, agentTask, liveAgentActions]);
   const protectedHandoff = displayedConfirmation?.protectedUi;
   const confirmationExpired = Boolean(
     displayedConfirmation &&
@@ -378,24 +455,31 @@ export function ChatPanel({
         )}
         {contextPreview && (
           <details>
-            <summary>
-              上下文 {contextPreview.sources.length} 项 · 约 {contextPreview.estimatedTokens} tokens
-            </summary>
+            <summary>资料目录 {catalogItems.length} 项</summary>
             <div className="context-source-list">
-              {contextPreview.sources.map((source) => (
-                <span key={`${source.type}-${source.id}`} title={source.scopeType}>
-                  {source.label}
-                  {source.version ? ` v${source.version}` : ''}
-                  {source.truncated ? ' · 已裁剪' : ''}
+              {catalogItems.map((item) => (
+                <span key={item.id} title={item.sourceType}>
+                  {item.title} ·{' '}
+                  {item.status === 'draft'
+                    ? '草稿'
+                    : item.status === 'published'
+                      ? '已发布'
+                      : item.status}
                 </span>
               ))}
+              {!contextPreview.catalog &&
+                contextPreview.sources.map((source) => (
+                  <span key={`${source.type}-${source.id}`} title={source.scopeType}>
+                    {source.label}
+                  </span>
+                ))}
             </div>
           </details>
         )}
         {selectedChapterCount ? (
           <div className="chapter-context-chip" role="status">
             <BookOpen size={13} />
-            <span>已加入 {selectedChapterCount} 个章节，后续消息都按短剧任务处理</span>
+            <span>下次发送将带上 {selectedChapterCount} 个章节作为本集范围</span>
             {onClearSelectedChapters && (
               <button type="button" onClick={onClearSelectedChapters}>
                 清除
@@ -404,51 +488,109 @@ export function ChatPanel({
           </div>
         ) : null}
       </div>
-      <div className="message-list">
+      <div className="message-list" ref={messageListRef}>
         {messages.length === 0 ? (
           <div className="chat-empty">
             <Bot size={22} />
             <strong>项目 AI 助手</strong>
-            <span>直接描述任务，助手会结合项目资料自动判断并执行。</span>
+            <span>直接描述任务。需要时会检索项目里的草稿和已发布资料。</span>
           </div>
         ) : (
           messages.map((message) => (
-            <article className={`message ${message.role}`} key={message.id}>
-              <header>
-                <span>
-                  {message.role === 'user'
-                    ? '你'
-                    : message.role === 'assistant'
-                      ? '助手'
-                      : message.role}
-                </span>
-                <button
-                  className="icon-button subtle"
-                  type="button"
-                  title="复制"
-                  onClick={() => void navigator.clipboard.writeText(message.content)}
-                >
-                  <Copy size={12} />
-                </button>
-              </header>
-              <p>{message.content}</p>
-              {message.role === 'assistant' &&
-                message.status === 'failed' &&
-                (generation?.assistantMessage.id !== message.id ||
-                  generation.retryable !== false) &&
-                (llmStatus?.configured || llmProfiles.length > 0) && (
-                  <footer>
-                    <button type="button" onClick={() => onRetryGeneration(message.id)}>
-                      <RefreshCw size={11} />
-                      重试
-                    </button>
-                  </footer>
-                )}
-            </article>
+            <Fragment key={message.id}>
+              {(() => {
+                const liveMessage =
+                  generationLocked && generation?.assistantMessage.id === message.id;
+                const timeline = timelineByMessageId.get(message.id);
+                if (!timeline || liveMessage) return null;
+                return (
+                  <AgentToolTimeline
+                    detail={timeline}
+                    generationStatus={
+                      generation?.assistantMessage.id === message.id ? generation.status : undefined
+                    }
+                    generationError={
+                      generation?.assistantMessage.id === message.id ? generation.error : undefined
+                    }
+                    onOpenLibrarySource={onOpenLibrarySource}
+                  />
+                );
+              })()}
+              <article className={`message ${message.role}`}>
+                <header>
+                  <span>
+                    {message.role === 'user'
+                      ? '你'
+                      : message.role === 'assistant'
+                        ? '助手'
+                        : message.role}
+                  </span>
+                  <button
+                    className="icon-button subtle"
+                    type="button"
+                    title="复制"
+                    onClick={() => void navigator.clipboard.writeText(message.content)}
+                  >
+                    <Copy size={12} />
+                  </button>
+                </header>
+                <p>{message.content}</p>
+                {message.role === 'assistant' &&
+                  message.status === 'failed' &&
+                  (generation?.assistantMessage.id !== message.id ||
+                    generation.retryable !== false) &&
+                  (llmStatus?.configured || llmProfiles.length > 0) && (
+                    <footer>
+                      {generation?.assistantMessage.id === message.id && statusMessage ? (
+                        <small className="chat-status">{statusMessage}</small>
+                      ) : null}
+                      <button type="button" onClick={() => onRetryGeneration(message.id)}>
+                        <RefreshCw size={11} />
+                        重试
+                      </button>
+                    </footer>
+                  )}
+              </article>
+              {(() => {
+                const liveMessage =
+                  generationLocked && generation?.assistantMessage.id === message.id;
+                const timeline = timelineByMessageId.get(message.id);
+                if (!liveMessage) return null;
+                return (
+                  <AgentToolTimeline
+                    detail={timeline}
+                    generationStatus={generation?.status}
+                    generationError={generation?.error}
+                    liveActions={liveAgentActions}
+                    runningPlaceholder
+                    onOpenLibrarySource={onOpenLibrarySource}
+                  />
+                );
+              })()}
+            </Fragment>
           ))
         )}
+        {unmatchedLiveTask ? (
+          <AgentToolTimeline
+            detail={unmatchedLiveTask}
+            generationStatus={generation?.status}
+            generationError={generation?.error}
+            liveActions={liveAgentActions}
+            runningPlaceholder={generationLocked}
+            onOpenLibrarySource={onOpenLibrarySource}
+          />
+        ) : generationLocked &&
+          !messages.some((item) => item.id === generation?.assistantMessage.id) ? (
+          <AgentToolTimeline
+            generationStatus={generation?.status}
+            liveActions={liveAgentActions}
+            runningPlaceholder
+          />
+        ) : null}
       </div>
-      {statusMessage && <small className="chat-status">{statusMessage}</small>}
+      {statusMessage && generation?.status !== 'failed' && (
+        <small className="chat-status">{statusMessage}</small>
+      )}
       {agentModelSelection && (
         <div
           className="agent-model-selection"
@@ -545,7 +687,6 @@ export function ChatPanel({
           )}
         </div>
       )}
-      {agentTask && <AgentActivityPanel detail={agentTask} />}
       {displayedConfirmation && (
         <div className="agent-confirmation" role="alert">
           <strong>需要确认：{displayedConfirmation.summary}</strong>
@@ -689,9 +830,11 @@ export function ChatPanel({
         >
           <SlidersHorizontal size={13} />
           <span className="llm-model-summary-name">
-            {llmStatus?.configured || activeModelName
-              ? (activeModelName ?? '未选择模型')
-              : '尚未配置 LLM 连接'}
+            {activeModelName
+              ? activeModelName
+              : llmProfiles.length > 0 || llmStatus?.configured
+                ? '未选择模型'
+                : '尚未配置 LLM 连接'}
           </span>
           {activeProfileName && <small>{activeProfileName}</small>}
           {researchModeLabel && (
@@ -722,6 +865,7 @@ export function ChatPanel({
               disabled={generationLocked}
               onChange={(event) => onLlmModelChange(event.target.value)}
             >
+              <option value="">{selectedLlmProfileId ? '请选择模型' : '请先选择供应商'}</option>
               {llmModels
                 .filter((model) => model.providerProfileId === selectedLlmProfileId)
                 .map((model) => (
@@ -772,7 +916,9 @@ export function ChatPanel({
         <textarea
           aria-label="会话消息"
           placeholder={
-            conversation ? '描述你要完成的任务，助手会自动读取项目资料并执行…' : '请先新建会话'
+            conversation
+              ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
+              : '请先新建会话'
           }
           rows={3}
           value={composer}
@@ -850,89 +996,320 @@ export function ChatPanel({
   );
 }
 
-const agentPhaseLabels: Record<AgentTaskPhase, string> = {
-  queued: '排队中',
-  intent_resolving: '理解任务',
-  context_compiling: '整理项目资料',
-  model_running: '模型处理中',
-  tool_validating: '校验工具调用',
-  waiting_confirmation: '等待确认',
-  artifact_persisting: '保存生成文件',
-  waiting_review: '等待审核',
-  recovering: '恢复任务',
-};
-
-const agentStatusLabels: Record<AgentTaskDetail['task']['status'], string> = {
-  queued: '排队中',
-  running: '执行中',
-  waiting_review: '等待审核',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-};
-
-const agentStepStatusLabels: Record<AgentTaskDetail['providerSteps'][number]['status'], string> = {
-  prepared: '已准备',
-  in_flight: '调用中',
-  complete: '已完成',
-  failed: '失败',
-  interrupted: '已中断',
-};
-
-function agentEventSummary(event: AgentTaskDetail['events'][number]): string {
-  const summaries: Record<string, string> = {
-    'agent.task.created': '已创建 Agent 任务',
-    'agent.novel.task.created': '已创建小说任务',
-    'agent.novel.task.started': '已开始执行创作任务',
-    'agent.tool.started': event.summary,
-    'agent.tool.succeeded': '工具调用已完成',
-    'agent.research.completed': '项目研究已完成',
-    'agent.media.selection.requested': '等待选择媒体模型',
-    'agent.task.completed': 'Agent 任务已完成',
-    'agent.task.interrupted': 'Agent 任务已中断',
-  };
-  return summaries[event.eventType] ?? event.summary;
+function toolNamesFromStartedSummary(summary: string): string[] {
+  const match = summary.match(/[：:](.+)$/);
+  const raw = (match?.[1] ?? summary).trim();
+  if (!raw) return [];
+  return raw
+    .split(/[、,，]/)
+    .map((name) => name.trim())
+    .filter(Boolean);
 }
 
-function AgentActivityPanel({ detail }: { detail: AgentTaskDetail }) {
-  const latestStep = detail.providerSteps.at(-1);
-  const recentEvents = detail.events.slice(-5);
+function agentToolActionLabel(name: string): string {
+  return AGENT_TOOL_ACTION_LABELS[name] ?? `调用 ${name}`;
+}
+
+function policyRejectionDetail(summary: string): string {
+  if (/AGENT_TOOL_AUTHORIZATION_REPLAYED/.test(summary)) return '同一轮重复调用，授权已失效';
+  if (/AGENT_TOOL_AUTHORIZATION_EXPIRED/.test(summary)) return '工具授权已过期';
+  if (/LIBRARY_HANDLE_INVALID/.test(summary)) return '资料句柄无效或已过期';
+  const code = summary.match(/\(([A-Z0-9_]+)\)/);
+  return code?.[1] ? `请求被拒绝（${code[1]}）` : '工具请求被拒绝';
+}
+
+function readableAgentTaskError(error: string | undefined): string | undefined {
+  if (!error) return undefined;
+  const turnLimit = error.match(/Pi runtime exceeded the (\d+)-turn limit/i);
+  if (turnLimit) return `助手连续调用工具超过 ${turnLimit[1]} 轮，已停止。`;
+  if (/Provider generation failed/i.test(error) || /Provider generation was failed/i.test(error)) {
+    return '模型生成失败，助手任务已中止。';
+  }
+  if (
+    /Provider generation cancelled/i.test(error) ||
+    /Provider generation was cancelled/i.test(error)
+  ) {
+    return '本次生成已取消。';
+  }
+  return error;
+}
+
+type AgentActionRow = {
+  id: string;
+  title: string;
+  toolName?: string;
+  detail?: string;
+  status: 'running' | 'ok' | 'warn' | 'error';
+};
+
+const AGENT_TOOL_ACTION_LABELS: Record<string, string> = {
+  'library.search': '检索项目资料',
+  'library.read': '阅读资料正文',
+  'document.create_draft': '创建文档草稿',
+  'document.update_draft': '更新文档草稿',
+  'document.list': '列出项目文档',
+  'document.read': '阅读项目文档',
+  'document.archive': '归档文档',
+  'document.restore': '恢复文档',
+  'document.publish': '发布文档',
+  'conversation.search': '检索会话记录',
+  'conversation.create': '创建会话',
+  'conversation.rename': '重命名会话',
+  'conversation.archive': '归档会话',
+  'conversation.restore': '恢复会话',
+  'asset.search': '检索素材',
+  'asset.get': '查看素材',
+  'project.get_context': '读取项目上下文',
+  'project.integrity.check': '检查项目完整性',
+  'research.search': '检索外部资料',
+  'research.fetch': '抓取外部页面',
+  'media.image.prepare': '准备图片生成',
+  'media.video.prepare': '准备视频生成',
+  'media.generation.submit': '提交生成任务',
+  'media.task.get': '查询生成任务',
+  'media.task.cancel': '取消生成任务',
+  'task.plan.submit': '提交任务计划',
+  'task.package.complete': '完成任务包',
+  'settings.get': '读取设置',
+  'adapter.schema.get': '查看适配器结构',
+};
+
+function agentTaskForAssistantMessage(
+  messageId: string,
+  messages: ChatMessageInfo[],
+  tasks: AgentTaskDetail[],
+  generation: LlmGenerationInfo | undefined,
+  liveTask: AgentTaskDetail | undefined,
+): AgentTaskDetail | undefined {
+  if (generation?.assistantMessage.id === messageId && liveTask) return liveTask;
+  const index = messages.findIndex((item) => item.id === messageId);
+  if (index < 0) return undefined;
+  const user = [...messages.slice(0, index)].reverse().find((item) => item.role === 'user');
+  if (!user) return undefined;
+  return tasks
+    .filter((item) => item.task.userMessageId === user.id)
+    .sort((left, right) => right.task.updatedAt.localeCompare(left.task.updatedAt))[0];
+}
+
+function agentActionRows(detail: AgentTaskDetail, generationFailed: boolean): AgentActionRow[] {
+  const rows: AgentActionRow[] = [];
+  const pending: AgentActionRow[] = [];
+  const flushPending = (status: AgentActionRow['status'], detailText?: string) => {
+    while (pending.length > 0) {
+      const row = pending.shift()!;
+      row.status = status;
+      if (detailText) row.detail = detailText;
+      rows.push(row);
+    }
+  };
+
+  for (const event of detail.events) {
+    if (event.eventType === 'agent.tool.started') {
+      flushPending('ok');
+      for (const name of toolNamesFromStartedSummary(event.summary)) {
+        pending.push({
+          id: `${event.id}:${name}`,
+          title: agentToolActionLabel(name),
+          toolName: name,
+          status: 'running',
+        });
+      }
+      continue;
+    }
+    if (event.eventType === 'agent.policy.rejected') {
+      const detailText = policyRejectionDetail(event.summary);
+      if (pending.length > 0) flushPending('warn', detailText);
+      else {
+        rows.push({
+          id: event.id,
+          title: '工具请求被拒绝',
+          detail: detailText,
+          status: 'warn',
+        });
+      }
+      continue;
+    }
+    if (
+      event.eventType === 'agent.library.completed' ||
+      event.eventType === 'agent.tool.succeeded' ||
+      event.eventType === 'agent.research.completed'
+    ) {
+      flushPending('ok');
+      continue;
+    }
+    if (event.eventType === 'document.draft.created') {
+      rows.push({ id: event.id, title: '已写入文档草稿', status: 'ok' });
+      continue;
+    }
+    if (
+      event.eventType === 'document.draft.updated' ||
+      event.eventType === 'document.draft.revision_created'
+    ) {
+      rows.push({ id: event.id, title: '已更新文档草稿', status: 'ok' });
+      continue;
+    }
+    if (event.eventType === 'document.published') {
+      rows.push({ id: event.id, title: '已发布文档', status: 'ok' });
+      continue;
+    }
+    if (event.eventType === 'agent.media.selection.requested') {
+      rows.push({ id: event.id, title: '等待选择生成模型', status: 'running' });
+      continue;
+    }
+    if (event.eventType === 'agent.media.selection.resolved') {
+      rows.push({ id: event.id, title: '已选定生成模型', status: 'ok' });
+      continue;
+    }
+    if (event.eventType === 'agent.task.interrupted') {
+      flushPending(generationFailed ? 'error' : 'warn');
+      rows.push({
+        id: event.id,
+        title: '任务已中止',
+        detail: readableAgentTaskError(event.summary),
+        status: 'error',
+      });
+    }
+  }
+
+  const runningTask = detail.task.status === 'running' || detail.task.status === 'queued';
+  if (runningTask && !generationFailed) rows.push(...pending);
+  else flushPending(generationFailed || detail.task.status === 'failed' ? 'error' : 'ok');
+  return rows;
+}
+
+function mergeLiveAgentActions(
+  rows: AgentActionRow[],
+  liveActions: ConversationRuntimeLiveAction[] | undefined,
+  running: boolean,
+): AgentActionRow[] {
+  const merged = [...rows];
+  for (const live of liveActions ?? []) {
+    if (merged.some((row) => row.toolName === live.toolName || row.id === `live:${live.id}`)) {
+      continue;
+    }
+    merged.push({
+      id: `live:${live.id}`,
+      title: agentToolActionLabel(live.toolName),
+      toolName: live.toolName,
+      status: live.status === 'failed' ? 'error' : live.status === 'succeeded' ? 'ok' : 'running',
+    });
+  }
+  if (running && merged.length === 0) {
+    merged.push({
+      id: 'live:thinking',
+      title: '正在思考',
+      status: 'running',
+    });
+  }
+  return merged;
+}
+
+function AgentToolTimeline({
+  detail,
+  generationStatus,
+  generationError,
+  liveActions,
+  runningPlaceholder = false,
+  onOpenLibrarySource,
+}: {
+  detail?: AgentTaskDetail;
+  generationStatus?: LlmGenerationInfo['status'];
+  generationError?: string;
+  liveActions?: ConversationRuntimeLiveAction[];
+  runningPlaceholder?: boolean;
+  onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
+}) {
+  const generationFailed = generationStatus === 'failed' || generationStatus === 'cancelled';
+  const running =
+    runningPlaceholder ||
+    (!generationFailed &&
+      (generationStatus === 'prepared' ||
+        generationStatus === 'streaming' ||
+        detail?.task.status === 'running' ||
+        detail?.task.status === 'queued'));
+  const actions = mergeLiveAgentActions(
+    detail ? agentActionRows(detail, generationFailed) : [],
+    liveActions,
+    running && !generationFailed,
+  );
+  const errorMessage =
+    readableAgentTaskError(generationError) ??
+    readableAgentTaskError(detail?.task.errorMessage);
+  const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
+  const expanded = expandedOverride ?? true;
+
+  useEffect(() => {
+    setExpandedOverride(null);
+  }, [detail?.task.id]);
+
+  if (actions.length === 0 && (detail?.librarySources?.length ?? 0) === 0 && !errorMessage) {
+    return null;
+  }
+
   return (
-    <section className="agent-activity" role="status" aria-live="polite">
-      <div className="agent-activity-heading">
-        <strong>Agent 执行进度</strong>
-        <span>{agentStatusLabels[detail.task.status]}</span>
-      </div>
-      <div className="agent-activity-summary">
-        <span>{agentPhaseLabels[detail.task.phase]}</span>
-        {latestStep && (
-          <span>
-            Provider 步骤 {latestStep.ordinal + 1} · {agentStepStatusLabels[latestStep.status]} ·
-            工具 {latestStep.toolCallCount} 次
-          </span>
-        )}
-      </div>
-      {recentEvents.length > 0 ? (
-        <ol className="agent-activity-events">
-          {recentEvents.map((event) => (
-            <li key={event.id} data-level={event.level}>
-              <span>{agentEventSummary(event)}</span>
-              <time dateTime={event.createdAt}>
-                {new Date(event.createdAt).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                })}
-              </time>
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <p className="agent-activity-empty">正在准备项目上下文和工具…</p>
-      )}
-      {detail.task.errorMessage && (
-        <p className="agent-activity-error">{detail.task.errorMessage}</p>
-      )}
+    <section
+      className="agent-tool-timeline"
+      role="status"
+      aria-live="polite"
+      data-state={running ? 'running' : 'settled'}
+    >
+      {actions.length > 0 || (detail?.librarySources?.length ?? 0) > 0 ? (
+        <>
+          <button
+            className="agent-tool-timeline-toggle"
+            type="button"
+            aria-expanded={expanded}
+            onClick={() => setExpandedOverride(!expanded)}
+          >
+            <Terminal size={12} />
+            <span>{running ? '正在调用工具' : '调用了工具'}</span>
+            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+          {expanded ? (
+            <ul className="agent-tool-timeline-calls">
+              {actions.map((action) => (
+                <li key={action.id} data-status={action.status}>
+                  {action.status === 'warn' || action.status === 'error' ? (
+                    <AlertTriangle size={12} />
+                  ) : (
+                    <Terminal size={12} />
+                  )}
+                  <span>
+                    <strong>{action.title}</strong>
+                    {action.toolName ? (
+                      <>
+                        {' '}
+                        <code>{action.toolName}</code>
+                      </>
+                    ) : null}
+                    {action.detail ? <small>{action.detail}</small> : null}
+                  </span>
+                </li>
+              ))}
+              {(detail?.librarySources ?? []).map((source) => (
+                <li key={`${source.citationLabel}-${source.sourceId}`}>
+                  <BookOpen size={12} />
+                  {onOpenLibrarySource ? (
+                    <button type="button" onClick={() => onOpenLibrarySource(source)}>
+                      {source.citationLabel} {source.title} ·{' '}
+                      {source.status === 'draft'
+                        ? '草稿'
+                        : source.status === 'published'
+                          ? '已发布'
+                          : source.status}
+                    </button>
+                  ) : (
+                    <span>
+                      {source.citationLabel} {source.title} · {source.status}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : null}
+      {errorMessage ? <p className="agent-tool-timeline-error">{errorMessage}</p> : null}
     </section>
   );
 }

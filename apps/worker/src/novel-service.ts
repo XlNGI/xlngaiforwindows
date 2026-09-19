@@ -26,7 +26,11 @@ import type {
   NovelProfileRecord,
   NovelVolumeRecord,
 } from '@ai-video/domain';
-import { createRepositories, rebuildNovelRagChunks } from '@ai-video/persistence';
+import {
+  createRepositories,
+  rebuildLibraryChunksForDocument,
+  rebuildNovelRagChunks,
+} from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 const bindingRoles = new Set<DocumentBindingRole>([
@@ -423,6 +427,7 @@ export class NovelService {
             contentMarkdown: content,
             now,
           });
+          rebuildLibraryChunksForDocument(database, project.id, documentId, now);
           imported.push({
             id: chapterId,
             projectId: project.id,

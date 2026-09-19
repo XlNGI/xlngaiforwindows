@@ -288,9 +288,9 @@ describe('adapter registry', () => {
         (adapter) => adapter.key === 'REFERENCE_TO_IMAGE:unicompapi:qwen-image-edit:v1',
       ),
     ).toMatchObject({ endpoint: 'https://unicompapi.com/v1/images/generations' });
-    expect(catalog.adapters.some((adapter) => adapter.key.includes('unicompapi:qwen-image:v1'))).toBe(
-      false,
-    );
+    expect(
+      catalog.adapters.some((adapter) => adapter.key.includes('unicompapi:qwen-image:v1')),
+    ).toBe(false);
     expect(catalog.adapters.some((adapter) => adapter.model === 'kling-v3-turbo')).toBe(false);
     expect(() =>
       resolveAdapter({ capability: 'TEXT_TO_VIDEO', provider: 'unicompapi', model: 'qwen-image' }),

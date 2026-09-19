@@ -6,13 +6,14 @@ import type {
   ChatMessageInfo,
   ConversationInfo,
   MediaModelSelectionRequest,
+  ProductionContextInfo,
 } from '@ai-video/contracts';
 import { ChatPanel } from './ChatPanel';
 
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
-  it('shows Agent phase, Provider step, and tool activity while a task runs', () => {
+  it('shows in-conversation tool calls while a task runs', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -88,10 +89,546 @@ describe('ChatPanel attempt metadata', () => {
         onSendMessage={vi.fn()}
       />,
     );
-    expect(screen.getByText('Agent 执行进度')).toBeInTheDocument();
-    expect(screen.getByText('校验工具调用')).toBeInTheDocument();
-    expect(screen.getByText('正在调用工具：document.create_draft')).toBeInTheDocument();
-    expect(screen.getByText(/Provider 步骤 1 · 调用中 · 工具 1 次/)).toBeInTheDocument();
+    const panel = screen.getByText('正在调用工具').closest('.agent-tool-timeline');
+    expect(panel).toBeInTheDocument();
+    expect(panel?.closest('.message-list')).not.toBeNull();
+    expect(screen.getByText('document.create_draft')).toBeInTheDocument();
+    expect(screen.queryByText('Agent 执行进度')).not.toBeInTheDocument();
+    expect(screen.queryByText('校验工具调用')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Provider 步骤/)).not.toBeInTheDocument();
+  });
+
+  it('places live tool progress after the in-progress assistant message', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '工具进度',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const userMessage: ChatMessageInfo = {
+      id: 'user',
+      conversationId: conversation.id,
+      role: 'user',
+      content: '创建文档',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    };
+    const assistantMessage: ChatMessageInfo = {
+      id: 'assistant',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '正在处理',
+      status: 'streaming',
+      createdAt: '2026-09-09T00:00:01.000Z',
+    };
+    const agentTask: AgentTaskDetail = {
+      task: {
+        id: 'task',
+        projectId: 'project',
+        conversationId: conversation.id,
+        taskType: 'document-create',
+        scopeType: 'project',
+        title: '创建文档',
+        status: 'running',
+        phase: 'tool_validating',
+        rowVersion: 1,
+        createdAt: '2026-09-09T00:00:00.000Z',
+        updatedAt: '2026-09-09T00:00:01.000Z',
+      },
+      events: [
+        {
+          id: 'event',
+          taskId: 'task',
+          sequence: 0,
+          eventType: 'agent.tool.started',
+          level: 'info',
+          summary: '正在调用工具：document.create_draft',
+          createdAt: '2026-09-09T00:00:01.000Z',
+        },
+      ],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[userMessage, assistantMessage]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        generation={{
+          generationId: 'generation',
+          conversationId: conversation.id,
+          snapshotId: 'snapshot',
+          status: 'streaming',
+          userMessage,
+          assistantMessage,
+          sources: [],
+        }}
+        agentTask={agentTask}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    const list = screen.getByText('正在调用工具').closest('.message-list');
+    expect(list).not.toBeNull();
+    const items = Array.from(list!.children);
+    const timelineIndex = items.findIndex((node) => node.classList.contains('agent-tool-timeline'));
+    const assistantIndex = items.findIndex((node) => node.classList.contains('assistant'));
+    const userIndex = items.findIndex((node) => node.classList.contains('user'));
+    expect(userIndex).toBeGreaterThan(-1);
+    expect(assistantIndex).toBeGreaterThan(userIndex);
+    expect(timelineIndex).toBeGreaterThan(assistantIndex);
+  });
+
+  it('shows live tool progress after the in-progress assistant message', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Tool chat',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const userMessage: ChatMessageInfo = {
+      id: 'user',
+      conversationId: conversation.id,
+      role: 'user',
+      content: 'Find the draft',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    };
+    const assistantMessage: ChatMessageInfo = {
+      id: 'assistant',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '',
+      status: 'streaming',
+      createdAt: '2026-09-09T00:00:01.000Z',
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[userMessage, assistantMessage]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        generation={{
+          generationId: 'generation',
+          conversationId: conversation.id,
+          snapshotId: 'snapshot',
+          status: 'streaming',
+          userMessage,
+          assistantMessage,
+          sources: [],
+        }}
+        liveAgentActions={[
+          { id: 'call-search', toolName: 'library.search', status: 'running' },
+        ]}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('library.search')).toBeInTheDocument();
+    const list = screen.getByText('library.search').closest('.message-list');
+    const items = Array.from(list!.children);
+    const timelineIndex = items.findIndex((node) => node.classList.contains('agent-tool-timeline'));
+    const assistantIndex = items.findIndex((node) => node.classList.contains('assistant'));
+    expect(timelineIndex).toBeGreaterThan(assistantIndex);
+  });
+
+  it('shows a thinking placeholder while generation is running without tools yet', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Tool chat',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const userMessage: ChatMessageInfo = {
+      id: 'user',
+      conversationId: conversation.id,
+      role: 'user',
+      content: 'Hello',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    };
+    const assistantMessage: ChatMessageInfo = {
+      id: 'assistant',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '',
+      status: 'streaming',
+      createdAt: '2026-09-09T00:00:01.000Z',
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[userMessage, assistantMessage]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        generation={{
+          generationId: 'generation',
+          conversationId: conversation.id,
+          snapshotId: 'snapshot',
+          status: 'streaming',
+          userMessage,
+          assistantMessage,
+          sources: [],
+        }}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('\u6b63\u5728\u601d\u8003')).toBeInTheDocument();
+  });
+
+  it('keeps library citations expanded after the task settles', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '工具进度',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const agentTask: AgentTaskDetail = {
+      task: {
+        id: 'task',
+        projectId: 'project',
+        conversationId: conversation.id,
+        taskType: 'document-query',
+        scopeType: 'project',
+        title: '检索资料',
+        status: 'completed',
+        phase: 'artifact_persisting',
+        rowVersion: 2,
+        createdAt: '2026-09-09T00:00:00.000Z',
+        updatedAt: '2026-09-09T00:00:08.000Z',
+      },
+      events: [
+        {
+          id: 'event',
+          taskId: 'task',
+          sequence: 0,
+          eventType: 'agent.tool.started',
+          level: 'info',
+          summary: '正在调用工具：library.search',
+          createdAt: '2026-09-09T00:00:01.000Z',
+        },
+      ],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+      librarySources: [
+        {
+          citationLabel: 'L2',
+          title: '第 1 章',
+          sourceType: 'novel-chapter',
+          sourceId: 'chapter-1',
+          versionId: 'version-1',
+          status: 'published',
+          kind: 'note',
+          toolName: 'library.search',
+        },
+      ],
+    };
+    const onOpenLibrarySource = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentTask={agentTask}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+        onOpenLibrarySource={onOpenLibrarySource}
+      />,
+    );
+    expect(screen.getByText('调用了工具')).toBeInTheDocument();
+    expect(screen.getByText('library.search')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /L2 第 1 章/ }));
+    expect(onOpenLibrarySource).toHaveBeenCalledWith(agentTask.librarySources?.[0]);
+    fireEvent.click(screen.getByRole('button', { name: /调用了工具/ }));
+    expect(screen.queryByText('library.search')).not.toBeInTheDocument();
+  });
+
+  it('renders Chinese action labels, rejections, and the real generation error', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '助手会话',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const userMessage: ChatMessageInfo = {
+      id: 'user',
+      conversationId: conversation.id,
+      role: 'user',
+      content: '写镜头提示词',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    };
+    const assistantMessage: ChatMessageInfo = {
+      id: 'assistant',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '正在检索',
+      status: 'failed',
+      createdAt: '2026-09-09T00:00:08.000Z',
+    };
+    const agentTask: AgentTaskDetail = {
+      task: {
+        id: 'task',
+        projectId: 'project',
+        conversationId: conversation.id,
+        userMessageId: userMessage.id,
+        taskType: 'document-query',
+        scopeType: 'project',
+        title: '检索资料',
+        status: 'failed',
+        phase: 'recovering',
+        errorMessage: 'Provider generation failed.',
+        rowVersion: 2,
+        createdAt: '2026-09-09T00:00:00.000Z',
+        updatedAt: '2026-09-09T00:00:08.000Z',
+      },
+      events: [
+        {
+          id: 'started',
+          taskId: 'task',
+          sequence: 0,
+          eventType: 'agent.tool.started',
+          level: 'info',
+          summary: '正在调用工具：library.search',
+          createdAt: '2026-09-09T00:00:01.000Z',
+        },
+        {
+          id: 'rejected',
+          taskId: 'task',
+          sequence: 1,
+          eventType: 'agent.policy.rejected',
+          level: 'warning',
+          summary: 'Agent tool policy rejected the request (AGENT_TOOL_AUTHORIZATION_REPLAYED).',
+          createdAt: '2026-09-09T00:00:01.050Z',
+        },
+      ],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[userMessage, assistantMessage]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        generation={{
+          generationId: 'generation',
+          conversationId: conversation.id,
+          snapshotId: 'snapshot',
+          status: 'failed',
+          userMessage,
+          assistantMessage,
+          sources: [],
+          error: 'Pi runtime exceeded the 24-turn limit.',
+        }}
+        agentTask={agentTask}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('检索项目资料')).toBeInTheDocument();
+    expect(screen.getByText('同一轮重复调用，授权已失效')).toBeInTheDocument();
+    expect(screen.getByText('助手连续调用工具超过 24 轮，已停止。')).toBeInTheDocument();
+    expect(screen.queryByText('Provider generation failed.')).not.toBeInTheDocument();
+  });
+
+  it('keeps historical tool actions on the matching assistant message', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '助手会话',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const userMessage: ChatMessageInfo = {
+      id: 'user-old',
+      conversationId: conversation.id,
+      role: 'user',
+      content: '查看第一章',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    };
+    const assistantMessage: ChatMessageInfo = {
+      id: 'assistant-old',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '第一章内容如下',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:08.000Z',
+    };
+    const historicalTask: AgentTaskDetail = {
+      task: {
+        id: 'task-old',
+        projectId: 'project',
+        conversationId: conversation.id,
+        userMessageId: userMessage.id,
+        taskType: 'document-query',
+        scopeType: 'project',
+        title: '检索资料',
+        status: 'completed',
+        phase: 'artifact_persisting',
+        rowVersion: 2,
+        createdAt: '2026-09-09T00:00:00.000Z',
+        updatedAt: '2026-09-09T00:00:08.000Z',
+      },
+      events: [
+        {
+          id: 'read',
+          taskId: 'task-old',
+          sequence: 0,
+          eventType: 'agent.tool.started',
+          level: 'info',
+          summary: '正在调用工具：library.read',
+          createdAt: '2026-09-09T00:00:01.000Z',
+        },
+        {
+          id: 'done',
+          taskId: 'task-old',
+          sequence: 1,
+          eventType: 'agent.library.completed',
+          level: 'info',
+          summary: '项目检索完成 1 次调用。',
+          createdAt: '2026-09-09T00:00:02.000Z',
+        },
+      ],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[userMessage, assistantMessage]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        agentTasks={[historicalTask]}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    const timeline = screen.getByText('阅读资料正文').closest('.agent-tool-timeline');
+    const list = screen.getByText('第一章内容如下').closest('.message-list');
+    const items = [...(list?.children ?? [])];
+    const timelineIndex = items.findIndex((node) => node.classList.contains('agent-tool-timeline'));
+    const assistantIndex = items.findIndex((node) => node.classList.contains('assistant'));
+    const userIndex = items.findIndex((node) => node.classList.contains('user'));
+    expect(timeline).toBeInTheDocument();
+    expect(userIndex).toBeGreaterThan(-1);
+    expect(timelineIndex).toBeGreaterThan(userIndex);
+    expect(assistantIndex).toBeGreaterThan(timelineIndex);
   });
 
   it('provides an attachment picker for image, video, and document files', () => {
@@ -884,7 +1421,95 @@ describe('ChatPanel attempt metadata', () => {
     expect(screen.queryByRole('button', { name: '场次' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '镜头' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '小说创作' })).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/描述你要完成的任务/)).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText('描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'),
+    ).toBeInTheDocument();
+  });
+
+  it('collapses untitled conversation chips in the library catalog', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: 'Test conversation',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const contextPreview: ProductionContextInfo = {
+      version: 1,
+      scopeType: 'project',
+      scopeLabel: '项目',
+      estimatedTokens: 1200,
+      budgetTokens: 24000,
+      sources: [],
+      catalog: [
+        {
+          id: 'doc-1',
+          sourceType: 'document',
+          sourceId: 'doc-1',
+          status: 'draft',
+          title: '林澈',
+          updatedAt: '2026-08-03T00:00:00.000Z',
+        },
+        {
+          id: 'convo-1',
+          sourceType: 'conversation',
+          sourceId: 'convo-1',
+          status: 'conversation',
+          title: '新会话',
+          updatedAt: '2026-08-03T00:00:00.000Z',
+        },
+        {
+          id: 'convo-2',
+          sourceType: 'conversation',
+          sourceId: 'convo-2',
+          status: 'conversation',
+          title: '新会话',
+          updatedAt: '2026-08-03T00:00:01.000Z',
+        },
+        {
+          id: 'convo-3',
+          sourceType: 'conversation',
+          sourceId: 'convo-3',
+          status: 'conversation',
+          title: '角色讨论',
+          updatedAt: '2026-08-03T00:00:02.000Z',
+        },
+      ],
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        contextPreview={contextPreview}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('资料目录 3 项')).toBeInTheDocument();
+    expect(screen.getByText(/林澈 · 草稿/)).toBeInTheDocument();
+    expect(screen.getByText(/角色讨论 · conversation/)).toBeInTheDocument();
+    expect(screen.getByText(/会话记录 2 条 · conversation/)).toBeInTheDocument();
+    expect(screen.queryByText(/新会话 · conversation/)).not.toBeInTheDocument();
   });
 
   it('does not expose internal workflow mode labels', () => {
@@ -1170,9 +1795,7 @@ describe('ChatPanel attempt metadata', () => {
 
     // Selected chapters turn every following turn into a short-drama task, so
     // the state has to stay visible after the chapter workspace is left.
-    expect(screen.getByRole('status')).toHaveTextContent(
-      '已加入 2 个章节，后续消息都按短剧任务处理',
-    );
+    expect(screen.getByRole('status')).toHaveTextContent('下次发送将带上 2 个章节作为本集范围');
     fireEvent.click(screen.getByRole('button', { name: '清除' }));
     expect(onClearSelectedChapters).toHaveBeenCalledOnce();
   });

@@ -17,6 +17,24 @@ describe('RequestScheduler', () => {
     await backup;
   });
 
+  it('allows agent task inspection while a serialized mutation is active', async () => {
+    const scheduler = new RequestScheduler();
+    let releaseSave: (() => void) | undefined;
+    const save = scheduler.run(
+      'chat.message.save',
+      () => new Promise<void>((resolve) => (releaseSave = resolve)),
+    );
+
+    await expect(scheduler.run('agent.task.get', () => Promise.resolve('task'))).resolves.toBe(
+      'task',
+    );
+    await expect(
+      scheduler.run('conversation.runtime.get', () => Promise.resolve('runtime')),
+    ).resolves.toBe('runtime');
+    releaseSave?.();
+    await save;
+  });
+
   it('serializes short mutations in submission order', async () => {
     const scheduler = new RequestScheduler();
     const events: string[] = [];

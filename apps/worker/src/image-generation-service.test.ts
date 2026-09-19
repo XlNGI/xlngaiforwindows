@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ContentService } from './content-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { ProjectService } from './project-service.js';
 
@@ -808,6 +809,73 @@ describe('ImageGenerationService', () => {
     expect(service.cancelAll()).toBe(0);
     expect(service.get(job.id)).toMatchObject({ status: 'running', mediaState: 'draft' });
     expect(service.cancelAll()).toBe(0);
+  });
+
+  it('rejects prepare when the source document is missing', async () => {
+    const { service } = await setup();
+    expect(() =>
+      service.prepare({
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+        sourceDocumentId: 'missing-document',
+      }),
+    ).toThrow('Document was not found.');
+  });
+
+  it('stores sourceDocumentId and lists completed assets by it', async () => {
+    const { project, service } = await setup();
+    const document = new ContentService(project).saveDocument({
+      kind: 'character',
+      title: '林澈',
+      contentMarkdown: '灯塔守望员',
+    });
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+      sourceDocumentId: document.id,
+    });
+    project.access(false, (database) => {
+      const row = database
+        .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id = ?')
+        .get(job.id) as { task_snapshot_json: string };
+      expect(JSON.parse(row.task_snapshot_json)).toMatchObject({
+        sourceDocumentId: document.id,
+      });
+    });
+
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    expect(result.status).toBe('succeeded');
+    expect(service.listAssets({ sourceDocumentId: document.id }).map((item) => item.id)).toEqual([
+      result.results[0]?.asset?.id,
+    ]);
+    expect(service.listAssets({ sourceDocumentId: document.id + '-other' })).toHaveLength(0);
+  });
+
+  it('lists completed assets by shotId', async () => {
+    const { project, service } = await setup();
+    const content = new ContentService(project);
+    const scene = content.saveScene({ title: '旧码头' });
+    const shot = content.saveShot({
+      sceneId: scene.id,
+      title: '镜头 1',
+    });
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+      shotId: shot.id,
+    });
+    const result = await service.complete({
+      jobId: job.id,
+      providerStatus: 200,
+      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    expect(service.listAssets({ shotId: shot.id }).map((item) => item.id)).toEqual([
+      result.results[0]?.asset?.id,
+    ]);
   });
 
   it('keeps an unsubmitted media draft across Worker restart', async () => {

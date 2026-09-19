@@ -60,6 +60,10 @@ interface ProductionPanelProps {
   projectId?: string;
   projectRootPath?: string;
   shotId?: string;
+  sourceDocumentId?: string;
+  seedPrompt?: string;
+  seedImages?: string[];
+  preferredAssetKind?: ImageAssetKind;
   writable: boolean;
   assets?: AssetInfo[];
   videoJobs?: VideoGenerationJobInfo[];
@@ -249,6 +253,10 @@ export function ProductionPanel({
   projectId,
   projectRootPath,
   shotId,
+  sourceDocumentId,
+  seedPrompt,
+  seedImages,
+  preferredAssetKind,
   writable,
   assets: controlledAssets,
   videoJobs = [],
@@ -289,7 +297,9 @@ export function ProductionPanel({
 
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
-  const [assetKind, setAssetKind] = useState<ImageAssetKind>('generated-image');
+  const [assetKind, setAssetKind] = useState<ImageAssetKind>(
+    preferredAssetKind ?? 'generated-image',
+  );
   const [videoAssetKind, setVideoAssetKind] = useState<VideoAssetKind>('shot-video');
   const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
@@ -297,6 +307,10 @@ export function ProductionPanel({
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
   const [savingPreview, setSavingPreview] = useState(false);
   const currentProjectIdRef = useRef(projectId);
+  const seedPromptRef = useRef(seedPrompt);
+  seedPromptRef.current = seedPrompt;
+  const seedImagesRef = useRef(seedImages);
+  seedImagesRef.current = seedImages;
   const assets = controlledAssets ?? localAssets;
   const selectedAsset = assets.find((item) => item.id === selectedAssetId);
   const selectedImageAsset = isVideoAsset(selectedAsset) ? undefined : selectedAsset;
@@ -309,6 +323,19 @@ export function ProductionPanel({
       : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
   currentProjectIdRef.current = projectId;
+
+  useEffect(() => {
+    if (preferredAssetKind) setAssetKind(preferredAssetKind);
+  }, [preferredAssetKind, sourceDocumentId]);
+
+  useEffect(() => {
+    if (!seedPrompt && !seedImages?.length) return;
+    setParameters((current) => ({
+      ...current,
+      ...(seedPrompt ? { prompt: seedPrompt } : {}),
+      ...(seedImages?.length ? { images: seedImages } : {}),
+    }));
+  }, [seedPrompt, seedImages, sourceDocumentId]);
 
   useEffect(() => {
     if (focusedAssetId && assets.some((item) => item.id === focusedAssetId)) {
@@ -417,7 +444,13 @@ export function ProductionPanel({
         setErrors([]);
         setMessage('');
         const defaults = defaultParameters(resolved);
-        setParameters(defaults);
+        const withSeed = (params: AdapterParameters): AdapterParameters => {
+          const next = { ...params };
+          if (seedPromptRef.current) next.prompt = seedPromptRef.current;
+          if (seedImagesRef.current?.length) next.images = seedImagesRef.current;
+          return next;
+        };
+        setParameters(withSeed(defaults));
         if (!shotId) {
           return;
         }
@@ -431,22 +464,30 @@ export function ProductionPanel({
         if (!selectedProfile || !selectedModel) {
           // Without a project draft the remembered form values are the only
           // thing standing between the user and an empty parameter form.
-          if (active) setParameters({ ...defaults, ...readStoredParameters(resolved.key) });
+          if (active)
+            setParameters(withSeed({ ...defaults, ...readStoredParameters(resolved.key) }));
           return;
         }
-        const draft = await callWorker('generation.draft.get', {
-          shotId,
-          adapterKey: resolved.key,
-          providerProfileId: selectedProfile.id,
-          modelId: selectedModel.remoteModelId,
-        });
-        // Precedence: schema defaults < remembered form values < project draft.
-        if (active)
-          setParameters({
-            ...defaults,
-            ...readStoredParameters(resolved.key),
-            ...(draft?.parameters ?? {}),
+        try {
+          const draft = await callWorker('generation.draft.get', {
+            shotId,
+            adapterKey: resolved.key,
+            providerProfileId: selectedProfile.id,
+            modelId: selectedModel.remoteModelId,
           });
+          // Precedence: schema defaults < remembered form values < project draft < document seed.
+          if (active)
+            setParameters(
+              withSeed({
+                ...defaults,
+                ...readStoredParameters(resolved.key),
+                ...(draft?.parameters ?? {}),
+              }),
+            );
+        } catch {
+          if (active)
+            setParameters(withSeed({ ...defaults, ...readStoredParameters(resolved.key) }));
+        }
       })
       .catch((reason) => {
         if (active) {
@@ -514,33 +555,30 @@ export function ProductionPanel({
     () => catalog?.adapters.filter((item) => item.capability === effectiveCapability) ?? [],
     [catalog, effectiveCapability],
   );
-  const modelOptions = useMemo(
-    () => {
-      if (!selectedProfile) return [];
-      return models.flatMap((model) => {
-        if (!model.enabled || model.unavailableAt) return [];
-        const supportsCapability = isVideoCapability(effectiveCapability)
-          ? model.capabilities.videoGeneration
-          : effectiveCapability === 'REFERENCE_TO_IMAGE'
-            ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration
-            : model.capabilities.imageGeneration;
-        if (!supportsCapability) return [];
-        return capabilityAdapters
-          .filter((adapter) =>
-            selectedProfile.providerType === 'unicompapi'
-              ? adapter.provider === 'unicompapi' && adapter.model === model.parameterTemplateKey
-              : adapter.provider === selectedProfile.providerType &&
-                adapter.model === model.remoteModelId,
-          )
-          .map((adapter) => ({
-            optionKey: `${model.id}::${adapter.key}`,
-            adapter,
-            model,
-          }));
-      });
-    },
-    [capabilityAdapters, effectiveCapability, models, selectedProfile],
-  );
+  const modelOptions = useMemo(() => {
+    if (!selectedProfile) return [];
+    return models.flatMap((model) => {
+      if (!model.enabled || model.unavailableAt) return [];
+      const supportsCapability = isVideoCapability(effectiveCapability)
+        ? model.capabilities.videoGeneration
+        : effectiveCapability === 'REFERENCE_TO_IMAGE'
+          ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration
+          : model.capabilities.imageGeneration;
+      if (!supportsCapability) return [];
+      return capabilityAdapters
+        .filter((adapter) =>
+          selectedProfile.providerType === 'unicompapi'
+            ? adapter.provider === 'unicompapi' && adapter.model === model.parameterTemplateKey
+            : adapter.provider === selectedProfile.providerType &&
+              adapter.model === model.remoteModelId,
+        )
+        .map((adapter) => ({
+          optionKey: `${model.id}::${adapter.key}`,
+          adapter,
+          model,
+        }));
+    });
+  }, [capabilityAdapters, effectiveCapability, models, selectedProfile]);
   const selectedModel =
     modelOptions.find((item) => item.model.id === catalogModelId && item.adapter.key === adapterKey)
       ?.model ?? models.find((model) => model.id === catalogModelId);
@@ -715,6 +753,7 @@ export function ProductionPanel({
       }
       const job = await callWorker('image.generate.prepare', {
         shotId,
+        sourceDocumentId,
         adapterKey: adapter.key,
         parameters: submissionParameters,
         providerProfileId: selectedProfile.id,

@@ -13,6 +13,8 @@ SQLite Schema v2 为正式文档增加 `scope_type` 和 `scope_id`。从 Schema 
 
 文档工作流阶段升级到 Schema v12：`documents.current_version_id` 表示当前工作版本，`documents.published_version_id` 是唯一默认权威版本。草稿、审核和发布记录保存在项目 SQLite；未发布草稿默认不进入其他会话的 LLM 上下文。小说章节是明确例外：自 Schema v30 起，用户导入或保存的小说章节草稿会生成项目本地 RAG 切片，可作为小说创作与短剧改编的源材料，无需先发布；普通文档和派生资料的发布边界不变。
 
+Schema v39 起，普通助理会话改为按需检索：Worker 只注入有界资料目录和最近会话，不再自动灌入已发布文档、记忆、约束或小说正文。模型通过 `library.search` / `library.read` 读取当前项目资料；草稿可被检索，但必须保持 `draft` 标记，不能当作已发布权威。短剧结构化生成仍可按任务冻结已确认章节。自动注入权威上下文的旧规则继续适用于未调用检索工具的路径。详见 `docs/PROJECT-LIBRARY-RETRIEVAL-IMPLEMENTATION-PLAN.md`。
+
 审计加固阶段升级到 Schema v13：新增项目级不可变 `document_audit_events`，记录草稿保存/恢复、审核提交/退回/拒绝和发布动作。审计事件只保存有界元数据，不保存 Markdown 正文或完整审核评论，并与任务事件保持分离。
 
 当前运行基线为 Schema v13；后续上下文草稿显式引用、模型动态预算和结构化 Agent 提案应从 v14 起增量设计。

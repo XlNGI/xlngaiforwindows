@@ -16,7 +16,7 @@ async function expectTimeout(promise: Promise<unknown>, message: string): Promis
 describe('OpenAIResponsesProvider', () => {
   it('requires configuration without exposing a key', async () => {
     const provider = new OpenAIResponsesProvider();
-    expect(provider.status()).toMatchObject({ configured: false, model: 'gpt-5.6-terra' });
+    expect(provider.status()).toMatchObject({ configured: false, model: '' });
     await expect(
       provider.stream({ systemInstruction: '', context: '', prompt: '', onDelta() {} }),
     ).rejects.toBeInstanceOf(LlmProviderError);

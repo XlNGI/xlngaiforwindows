@@ -11,8 +11,39 @@ import type {
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
+  ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
+
+export function coalesceVisibleDelta(accumulated: string, incoming: string): string | undefined {
+  if (!incoming) return undefined;
+  const leadingTrimmed = incoming.replace(/^(?:\r\n|\n|\r)+/, '');
+  if (!accumulated) return leadingTrimmed || undefined;
+  const prefix = prefixVisibleDelta(accumulated, incoming);
+  if (prefix !== false) return prefix;
+  if (!leadingTrimmed) return undefined;
+  if (leadingTrimmed === incoming) return incoming;
+  const trimmedPrefix = prefixVisibleDelta(accumulated, leadingTrimmed);
+  if (trimmedPrefix !== false) return trimmedPrefix;
+  if (isVisibleReplay(accumulated, leadingTrimmed)) return undefined;
+  return incoming;
+}
+
+function prefixVisibleDelta(accumulated: string, incoming: string): string | undefined | false {
+  if (incoming === accumulated || accumulated.startsWith(incoming)) return undefined;
+  if (incoming.startsWith(accumulated)) {
+    const suffix = incoming.slice(accumulated.length);
+    return suffix || undefined;
+  }
+  return false;
+}
+
+function isVisibleReplay(accumulated: string, incoming: string): boolean {
+  if (!incoming || accumulated === incoming) return true;
+  if (!accumulated.endsWith(incoming)) return false;
+  const prefix = accumulated.slice(0, accumulated.length - incoming.length);
+  return prefix.length === 0 || prefix.endsWith('\n');
+}
 
 const FLUSH_INTERVAL_MS = 250;
 const FLUSH_CHARACTER_THRESHOLD = 512;
@@ -31,6 +62,7 @@ type AgentCapablePrepared = LlmGenerationPrepareResult & {
 export interface LlmStreamCallbacks {
   onDelta(content: string): void;
   onState(state: LlmGenerationInfo): void;
+  onLiveActions?(actions: ConversationRuntimeLiveAction[]): void;
   onConfirmation?(request: AgentToolConfirmationRequest): Promise<boolean>;
   onMediaSelection?(
     request: MediaModelSelectionRequest,
@@ -56,6 +88,7 @@ export function streamPreparedLlmGeneration(
     Boolean((prepared as AgentCapablePrepared).agentTaskId) &&
     (prepared as AgentCapablePrepared).runtimeOwner === 'pi';
   let aggregate = prepared.generation.assistantMessage.content;
+  let streamVisible = '';
   let persisted = aggregate;
   let terminal = false;
   let closing = false;
@@ -194,6 +227,7 @@ export function streamPreparedLlmGeneration(
     if (terminal || closing) return;
     switch (event.type) {
       case 'started':
+        streamVisible = '';
         if ((prepared as AgentCapablePrepared).agentTaskId && !nativeAgentRuntime) {
           await callWorker('agent.providerStep.start', identity);
         }
@@ -201,8 +235,13 @@ export function streamPreparedLlmGeneration(
         break;
       case 'delta':
         if (cancelRequested || !event.delta) return;
-        aggregate += event.delta;
-        callbacks.onDelta(aggregate);
+        {
+          streamVisible += event.delta;
+          const fragment = coalesceVisibleDelta(aggregate, streamVisible);
+          if (!fragment) return;
+          aggregate += fragment;
+          callbacks.onDelta(aggregate);
+        }
         if (!nativeAgentRuntime) queueObserve();
         break;
       case 'confirmation': {
@@ -406,6 +445,7 @@ export function streamPreparedLlmGeneration(
           const runtimeState = await callWorker('conversation.runtime.get', {
             generationId: identity.generationId,
           });
+          callbacks.onLiveActions?.(runtimeState.liveActions ?? []);
           if (
             runtimeState.confirmation &&
             !handledConfirmations.has(runtimeState.confirmation.confirmationToken)

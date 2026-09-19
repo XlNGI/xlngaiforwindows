@@ -199,13 +199,9 @@ describe('provider registry', () => {
     expect(
       assertAgentToolLoopSelection(
         selectedProfile,
-        model(
-          selectedProfile.id,
-          'deepseek-v4-pro',
-          {
-            ...inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra'),
-          },
-        ),
+        model(selectedProfile.id, 'deepseek-v4-pro', {
+          ...inferKnownModelCapabilities('unicompapi', 'gpt-5.6-terra'),
+        }),
       ),
     ).toMatchObject({ id: 'openai-chat-completions-v1' });
 
@@ -231,26 +227,22 @@ describe('provider registry', () => {
       accessType: 'custom',
       baseUrl: 'https://relay.example/v1',
     });
-    const selectedModel = model(
-      chatProfile.id,
-      'vendor-experimental-model',
-      {
-        ...inferKnownModelCapabilities('openai', 'gpt-5'),
-        text: true,
-        streaming: true,
-        tools: true,
-      },
-    );
+    const selectedModel = model(chatProfile.id, 'vendor-experimental-model', {
+      ...inferKnownModelCapabilities('openai', 'gpt-5'),
+      text: true,
+      streaming: true,
+      tools: true,
+    });
 
     expect(assertAgentToolLoopSelection(chatProfile, selectedModel)).toMatchObject({
       id: 'openai-chat-completions-v1',
       accessType: 'custom',
     });
     expect(
-      assertAgentToolLoopSelection(
-        responsesProfile,
-        { ...selectedModel, providerProfileId: responsesProfile.id },
-      ),
+      assertAgentToolLoopSelection(responsesProfile, {
+        ...selectedModel,
+        providerProfileId: responsesProfile.id,
+      }),
     ).toMatchObject({
       id: 'openai-responses-v1',
       accessType: 'custom',

@@ -392,6 +392,85 @@ describe('GenerationService', () => {
     );
   });
 
+  it('tells Agent runtimes to write documents through tools instead of chat Markdown', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const { conversation, generations } = await setup(provider, {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses' as const,
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Create an outline document',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    generations.configureAgentTools(prepared.stream, [
+      {
+        name: 'document.create_draft',
+        description: 'Create a draft',
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+      },
+    ]);
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+      '# Agent document write policy',
+    );
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+      'Do not paste the document into the chat',
+    );
+  });
+
+  it('keeps ordinary generation context on the catalog instead of document bodies', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const { content, conversation, generations } = await setup(provider, {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses' as const,
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    });
+    content.saveDocument({
+      kind: 'character',
+      title: '林澈',
+      contentMarkdown: '这段正文不应进入普通会话。',
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '介绍角色',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+    generations.configureAgentTools(prepared.stream, [
+      {
+        name: 'library.search',
+        description: 'Search',
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+      },
+    ]);
+    const runtime = generations.runtime(prepared.stream);
+    expect(runtime.systemInstruction).toContain('工作助理');
+    expect(runtime.systemInstruction).toContain('library.search');
+    expect(runtime.systemInstruction).toContain('Do not repeat a successful library.search');
+    expect(runtime.context).toContain('林澈');
+    expect(runtime.context).not.toContain('这段正文不应进入普通会话');
+  });
+
   it('ignores a delayed shorter observe snapshot instead of failing the generation', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
@@ -423,6 +502,44 @@ describe('GenerationService', () => {
     expect(generations.complete({ ...prepared.stream, content: 'Newer' })).toMatchObject({
       status: 'complete',
       assistantMessage: { content: 'Newer tool response' },
+    });
+  });
+
+  it('ignores a divergent observe snapshot instead of failing the generation', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),
+      stream: () => Promise.resolve({ model: 'test-model', content: '', toolCalls: [] }),
+    };
+    const { conversation, generations } = await setup(provider, {
+      resolveLlmSelection: () => ({
+        providerProfileId: 'profile-selection',
+        modelId: 'model-selection',
+        providerName: 'Test',
+        modelName: 'test-model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses' as const,
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Divergent observe',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+    });
+
+    generations.observe({ ...prepared.stream, content: 'First paragraph' });
+    expect(generations.observe({ ...prepared.stream, content: 'Replaced snapshot' })).toMatchObject(
+      {
+        status: 'streaming',
+        assistantMessage: { content: 'First paragraph' },
+      },
+    );
+    expect(
+      generations.observe({ ...prepared.stream, content: 'First paragraph continued' }),
+    ).toMatchObject({
+      status: 'streaming',
+      assistantMessage: { content: 'First paragraph continued' },
     });
   });
 

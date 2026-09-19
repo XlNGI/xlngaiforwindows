@@ -71,6 +71,10 @@ import type {
   ShotRecord,
   ShotRepository,
 } from '@ai-video/domain';
+import {
+  rebuildLibraryChunksForAsset,
+  rebuildLibraryChunksForMediaTask,
+} from './project-library-chunks.js';
 
 export class SqliteProjectRepository implements ProjectRepository {
   constructor(private readonly database: Database.Database) {}
@@ -2952,6 +2956,12 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         record.deletedAt ?? null,
         record.trashRelativePath ?? null,
       );
+    rebuildLibraryChunksForAsset(
+      this.database,
+      record.projectId,
+      record.id,
+      record.updatedAt ?? record.createdAt,
+    );
   }
 
   get(id: string): AssetRecord | undefined {
@@ -3094,6 +3104,8 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
       );
       for (const tagId of [...new Set(tagIds)]) insert.run(assetId, tagId, createdAt);
     })();
+    const asset = this.get(assetId);
+    if (asset) rebuildLibraryChunksForAsset(this.database, asset.projectId, assetId, createdAt);
   }
   countDraftReferences(assetId: string): number {
     const row = this.database
@@ -3321,6 +3333,7 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
         record.createdAt,
         record.updatedAt,
       );
+    rebuildLibraryChunksForMediaTask(this.database, record.projectId, record.id, record.updatedAt);
   }
 
   get(id: string): JobRecord | undefined {

@@ -15,6 +15,7 @@ import type {
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
+  ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
 import { Agent, type AgentContext, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works/pi-ai';
@@ -56,6 +57,7 @@ type ActiveRun = {
   agent: Agent;
   completion: Promise<void>;
   cancelled: boolean;
+  liveActions: ConversationRuntimeLiveAction[];
 };
 
 type PendingConfirmation = {
@@ -186,6 +188,14 @@ export class PiConversationRuntime implements ConversationRuntime {
             usageFromPi(assistantMessage),
           );
         }
+        const active = this.active.get(identity.generationId);
+        if (active && !active.liveActions.some((item) => item.id === toolCall.id)) {
+          active.liveActions.push({
+            id: toolCall.id,
+            toolName: toolCall.name,
+            status: 'running',
+          });
+        }
         return undefined;
       },
       prepareNextTurnWithContext: ({ message, toolResults, context }) => {
@@ -258,6 +268,9 @@ export class PiConversationRuntime implements ConversationRuntime {
       },
       // eslint-disable-next-line @typescript-eslint/require-await
       afterToolCall: async ({ toolCall, isError }) => {
+        const active = this.active.get(identity.generationId);
+        const live = active?.liveActions.find((item) => item.id === toolCall.id);
+        if (live) live.status = isError ? 'failed' : 'succeeded';
         if (!isError)
           this.options.onEvent?.({
             type: 'tool_succeeded',
@@ -286,6 +299,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       agent,
       completion,
       cancelled: false,
+      liveActions: [],
     });
     this.options.onEvent?.({ type: 'started', taskId: request.taskId });
     void completion.finally(() => {
@@ -327,8 +341,10 @@ export class PiConversationRuntime implements ConversationRuntime {
     mediaSelection?: MediaModelSelectionRequest;
     mediaSubmission?: MediaSubmissionConfirmationRequest;
   } {
+    const active = this.active.get(generationId);
     return {
-      active: this.active.has(generationId),
+      active: Boolean(active),
+      liveActions: active?.liveActions ?? [],
       confirmation: this.pendingConfirmations.get(generationId)?.request,
       mediaSelection: this.pendingMediaSelections.get(generationId)?.request,
       mediaSubmission: this.pendingMediaSubmissions.get(generationId)?.request,
@@ -621,31 +637,62 @@ function assistantText(message: {
     : '';
 }
 
-type AssistantTextAccumulator = {
+export type AssistantTextAccumulator = {
   aggregate: string;
   responseId?: string;
   segment: string;
 };
 
-function appendAssistantText(accumulator: AssistantTextAccumulator, message: AssistantMessage): string {
+export function appendAssistantText(
+  accumulator: AssistantTextAccumulator,
+  message: AssistantMessage,
+): string {
   const text = assistantText(message);
   if (!text) return accumulator.aggregate;
   const responseId = message.responseId?.trim() || undefined;
-  const sameTurn = responseId
-    ? responseId === accumulator.responseId
-    : accumulator.segment.length === 0 || text.startsWith(accumulator.segment);
+  const strippedText = stripLeadingNewlines(text);
+  const strippedSegment = stripLeadingNewlines(accumulator.segment);
+  const sameTurn =
+    accumulator.segment.length === 0 ||
+    (responseId && accumulator.responseId
+      ? responseId === accumulator.responseId
+      : strippedText === strippedSegment || strippedText.startsWith(strippedSegment));
   if (sameTurn) {
-    if (text.length < accumulator.segment.length) return accumulator.aggregate;
+    if (strippedText.length < strippedSegment.length) {
+      if (responseId) accumulator.responseId = responseId;
+      return accumulator.aggregate;
+    }
+    const nextSegment = text.startsWith(accumulator.segment) ? text : strippedText;
     accumulator.aggregate =
-      accumulator.aggregate.slice(0, Math.max(0, accumulator.aggregate.length - accumulator.segment.length)) +
-      text;
-    accumulator.segment = text;
+      accumulator.aggregate.slice(
+        0,
+        Math.max(0, accumulator.aggregate.length - accumulator.segment.length),
+      ) + nextSegment;
+    accumulator.segment = nextSegment;
+    if (responseId) accumulator.responseId = responseId;
+    return accumulator.aggregate;
+  }
+  if (
+    strippedText === strippedSegment ||
+    strippedText === stripLeadingNewlines(accumulator.aggregate)
+  ) {
+    if (responseId) accumulator.responseId = responseId;
     return accumulator.aggregate;
   }
   accumulator.responseId = responseId;
-  accumulator.segment = text;
-  accumulator.aggregate = accumulator.aggregate ? `${accumulator.aggregate}\n\n${text}` : text;
+  accumulator.segment = strippedText;
+  accumulator.aggregate = accumulator.aggregate
+    ? `${stripTrailingNewlines(accumulator.aggregate)}\n\n${strippedText}`
+    : strippedText;
   return accumulator.aggregate;
+}
+
+function stripLeadingNewlines(value: string): string {
+  return value.replace(/^(?:\r\n|\n|\r)+/, '');
+}
+
+function stripTrailingNewlines(value: string): string {
+  return value.replace(/(?:\r\n|\n|\r)+$/, '');
 }
 
 function usageFromPi(message: AssistantMessage): NormalizedLlmUsage | undefined {

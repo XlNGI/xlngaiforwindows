@@ -385,6 +385,56 @@ describe('ProductionPanel', () => {
     });
   });
 
+  it('seeds reference images from a shot workspace', async () => {
+    render(
+      <ProductionPanel
+        writable
+        capability="TEXT_TO_IMAGE"
+        shotId="shot-1"
+        seedPrompt="雨夜里林澈回头"
+        seedImages={['asset://character-1', 'asset://scene-1']}
+        preferredAssetKind="first-frame"
+      />,
+    );
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('雨夜里林澈回头');
+    expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
+  });
+
+  it('keeps seeded shot parameters when the project draft cannot be loaded', async () => {
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.reject(new Error('draft missing'));
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(
+      <ProductionPanel
+        writable
+        shotId="shot"
+        seedPrompt="雨夜里林澈回头"
+        preferredAssetKind="first-frame"
+      />,
+    );
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('雨夜里林澈回头');
+    expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
+    expect(screen.queryByText(/适配器解析失败/)).not.toBeInTheDocument();
+  });
+
+  it('seeds the image prompt and asset kind from a character document', async () => {
+    render(
+      <ProductionPanel
+        writable
+        capability="TEXT_TO_IMAGE"
+        sourceDocumentId="character-doc"
+        seedPrompt="林澈，灯塔守望员"
+        preferredAssetKind="character"
+      />,
+    );
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('林澈，灯塔守望员');
+    expect(screen.getByLabelText('保存为')).toHaveValue('character');
+  });
+
   it('renders schema fields and saves a validated per-shot draft', async () => {
     render(<ProductionPanel shotId="shot" writable />);
     const prompt = await screen.findByLabelText(/画面提示词/);

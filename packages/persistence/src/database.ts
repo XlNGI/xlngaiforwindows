@@ -38,12 +38,14 @@ import {
   MIGRATION_V34,
   MIGRATION_V36,
   MIGRATION_V38,
+  MIGRATION_V39,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
 import { backfillCurrentNovelRagChunks } from './novel-rag-chunks.js';
+import { backfillProjectLibraryChunks, createProjectLibraryFts } from './project-library-chunks.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -410,7 +412,21 @@ export function migrateDatabase(
         .run(38, now);
     })();
   }
+  if (getSchemaVersion(database) === 38) {
+    database.transaction(() => {
+      applyMigrationV39(database, now);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(39, now);
+    })();
+  }
   return getSchemaVersion(database);
+}
+
+function applyMigrationV39(database: Database.Database, now: string): void {
+  database.exec(MIGRATION_V39);
+  createProjectLibraryFts(database);
+  backfillProjectLibraryChunks(database, now);
 }
 
 function applyMigrationV37(database: Database.Database): void {

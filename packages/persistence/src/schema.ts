@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 38;
+export const CURRENT_SCHEMA_VERSION = 39;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -2454,4 +2454,38 @@ WHEN (OLD.status = 'pending' AND NEW.status NOT IN ('pending', 'ready', 'blocked
 BEGIN
   SELECT RAISE(ABORT, 'invalid agent task deliverable status transition');
 END;
+`;
+
+/** Unified project library chunks and optional FTS5 trigram index. */
+export const MIGRATION_V39 = `
+CREATE TABLE project_library_chunks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  document_id TEXT,
+  version_id TEXT,
+  status TEXT NOT NULL,
+  kind TEXT,
+  scope_type TEXT,
+  scope_id TEXT,
+  title TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+  end_offset INTEGER NOT NULL CHECK (end_offset >= start_offset),
+  content_text TEXT NOT NULL CHECK (length(content_text) > 0),
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+  character_count INTEGER NOT NULL CHECK (character_count > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_library_chunks_identity
+  ON project_library_chunks(project_id, source_type, source_id, ifnull(version_id, ''), ordinal);
+CREATE INDEX idx_library_chunks_project_type
+  ON project_library_chunks(project_id, source_type, status, updated_at, id);
+CREATE INDEX idx_library_chunks_source
+  ON project_library_chunks(project_id, source_id, version_id, ordinal);
+CREATE INDEX idx_library_chunks_document
+  ON project_library_chunks(project_id, document_id, version_id, ordinal);
 `;

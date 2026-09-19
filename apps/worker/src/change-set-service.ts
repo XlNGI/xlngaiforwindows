@@ -9,6 +9,7 @@ import type {
   AgentChangeSetListParams,
   AgentChangeSetRejectParams,
 } from '@ai-video/contracts';
+import { rebuildLibraryChunksForChangeSet } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 type ChangeSetRow = {
@@ -134,6 +135,7 @@ export class ChangeSetService {
             now,
           );
         });
+        rebuildLibraryChunksForChangeSet(database, project.id, id, now);
         return this.getInTransaction(database, project.id, id);
       })(),
     );
@@ -189,6 +191,7 @@ export class ChangeSetService {
                row_version = row_version + 1 WHERE id = ? AND row_version = ?`,
             )
             .run(now, now, set.id, set.row_version);
+          rebuildLibraryChunksForChangeSet(database, project.id, set.id, now);
           return this.getInTransaction(database, project.id, set.id);
         }
         const pending = this.pendingCount(database, set.id);
@@ -204,6 +207,7 @@ export class ChangeSetService {
             set.id,
             set.row_version,
           );
+        rebuildLibraryChunksForChangeSet(database, project.id, set.id, now);
         return this.getInTransaction(database, project.id, set.id);
       })(),
     );
@@ -245,6 +249,7 @@ export class ChangeSetService {
             set.id,
             set.row_version,
           );
+        rebuildLibraryChunksForChangeSet(database, project.id, set.id, now);
         return this.getInTransaction(database, project.id, set.id);
       })(),
     );

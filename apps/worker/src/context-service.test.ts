@@ -2,7 +2,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRepositories } from '@ai-video/persistence';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -30,112 +29,73 @@ async function setup() {
   };
 }
 
-function publishDocument(
-  workflow: DocumentWorkflowService,
-  documentId: string,
-  rowVersion: number,
-) {
-  workflow.submitReview({
-    documentId,
-    expectedDocumentRowVersion: rowVersion,
-  });
-  const reviewed = workflow.getDocument(documentId);
-  workflow.publish({
-    documentId,
-    expectedDocumentRowVersion: reviewed.rowVersion,
-    expectedPublishedVersionId: reviewed.publishedVersionId,
-  });
-}
-
 describe('ContextService', () => {
-  it('tracks document versions and excludes unrelated scene content', async () => {
+  it('injects a catalog without document bodies', async () => {
+    const { content, contexts } = await setup();
+    content.saveDocument({
+      kind: 'character',
+      title: '林澈',
+      contentMarkdown: '林澈是灯塔守望员，这段正文不应进入普通会话。',
+    });
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const context = contexts.compile(conversation.id);
+    const preview = contexts.preview(conversation.id);
+
+    expect(context.systemInstruction).toContain('工作助理');
+    expect(context.rendered).toContain('林澈');
+    expect(context.rendered).toContain('draft');
+    expect(context.rendered).not.toContain('这段正文不应进入普通会话');
+    expect(preview.catalog?.some((item) => item.title === '林澈' && item.status === 'draft')).toBe(
+      true,
+    );
+  });
+
+  it('lists published and draft catalog entries without injecting memories or constraints', async () => {
     const { content, contexts, workflow } = await setup();
-    const sceneOne = content.saveScene({ title: '场次一' });
-    const sceneTwo = content.saveScene({ title: '场次二' });
-    const shot = content.saveShot({ sceneId: sceneOne.id, title: '镜头一' });
     const outline = content.saveDocument({
       kind: 'outline',
       title: '项目大纲',
-      contentMarkdown: '全局大纲',
+      contentMarkdown: '全局大纲正文',
     });
-    const sceneDocument = content.saveDocument({
-      kind: 'scene',
-      title: '场次一文档',
-      contentMarkdown: '当前场次',
-      scopeType: 'scene',
-      scopeId: sceneOne.id,
+    workflow.submitReview({
+      documentId: outline.id,
+      expectedDocumentRowVersion: outline.rowVersion,
     });
-    publishDocument(workflow, sceneDocument.id, sceneDocument.rowVersion);
-    const unrelatedDocument = content.saveDocument({
-      kind: 'scene',
-      title: '场次二文档',
-      contentMarkdown: '不应泄漏',
-      scopeType: 'scene',
-      scopeId: sceneTwo.id,
+    const reviewed = workflow.getDocument(outline.id);
+    workflow.publish({
+      documentId: outline.id,
+      expectedDocumentRowVersion: reviewed.rowVersion,
+      expectedPublishedVersionId: reviewed.publishedVersionId,
     });
-    publishDocument(workflow, unrelatedDocument.id, unrelatedDocument.rowVersion);
-    publishDocument(workflow, outline.id, outline.rowVersion);
-    const conversation = content.createConversation({ scopeType: 'shot', scopeId: shot.id });
-
-    const context = contexts.compile(conversation.id);
-    expect(context.rendered).toContain('当前场次');
-    expect(context.rendered).not.toContain('不应泄漏');
-    expect(context.sources).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: outline.id,
-          version: 1,
-          versionId: outline.currentVersion?.id,
-        }),
-      ]),
+    content.messageToMemory(
+      content.saveMessage({
+        conversationId: content.createConversation({ scopeType: 'project' }).id,
+        role: 'user',
+        content: '记住林澈怕海雾',
+      }).id,
     );
-  });
-
-  it('reuses the deterministic summary cache for long documents', async () => {
-    const { projects, content, contexts, workflow } = await setup();
-    const document = content.saveDocument({
-      kind: 'outline',
-      title: '长篇大纲',
-      contentMarkdown: '开场'.repeat(5_000),
-    });
-    publishDocument(workflow, document.id, document.rowVersion);
-    const conversation = content.createConversation({ scopeType: 'project' });
-
-    const first = contexts.compile(conversation.id);
-    const second = contexts.compile(conversation.id);
-    const snapshots = projects.access(false, (database, project) =>
-      createRepositories(database).contextSnapshots.listByProject(project.id, 10),
-    );
-
-    expect(first.sources[0]?.summaryCacheKey).toBe(second.sources[0]?.summaryCacheKey);
-    expect(snapshots.filter((snapshot) => snapshot.purpose === 'summary-cache')).toHaveLength(1);
-  });
-
-  it('includes published scene and shot documents in the project Agent context', async () => {
-    const { content, contexts, workflow } = await setup();
-    const scene = content.saveScene({ title: '场次一' });
-    const shot = content.saveShot({ sceneId: scene.id, title: '镜头一' });
-    const sceneDocument = content.saveDocument({
-      kind: 'scene',
-      title: '场次资料',
-      contentMarkdown: '场次级约束与人物调度',
-      scopeType: 'scene',
-      scopeId: scene.id,
-    });
-    const shotDocument = content.saveDocument({
-      kind: 'storyboard',
-      title: '镜头资料',
-      contentMarkdown: '镜头级构图与运动',
-      scopeType: 'shot',
-      scopeId: shot.id,
-    });
-    publishDocument(workflow, sceneDocument.id, sceneDocument.rowVersion);
-    publishDocument(workflow, shotDocument.id, shotDocument.rowVersion);
-
     const conversation = content.createConversation({ scopeType: 'project' });
     const context = contexts.compile(conversation.id);
+    expect(context.rendered).toContain('项目大纲');
+    expect(context.rendered).not.toContain('全局大纲正文');
+    expect(context.rendered).not.toContain('林澈怕海雾');
+  });
 
-    expect(context.rendered).toContain('场次级约束与人物调度');
-    expect(context.rendered).toContain('镜头级构图与运动');
+  it('compacts untitled conversations in the rendered catalog', async () => {
+    const { content, contexts } = await setup();
+    content.saveDocument({
+      kind: 'character',
+      title: '林澈',
+      contentMarkdown: '守灯人',
+    });
+    content.createConversation({ scopeType: 'project', title: '角色讨论' });
+    content.createConversation({ scopeType: 'project' });
+    content.createConversation({ scopeType: 'project' });
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const context = contexts.compile(conversation.id);
+    expect(context.rendered).toContain('林澈');
+    expect(context.rendered).toContain('角色讨论');
+    expect(context.rendered).toMatch(/会话记录 3 条 · conversation/);
+    expect(context.rendered).not.toContain('新会话 · conversation');
   });
 });

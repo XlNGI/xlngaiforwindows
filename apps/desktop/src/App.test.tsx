@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
+import type { AdapterDescriptor, ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
 import {
   App,
   buildAgentAttachments,
@@ -244,9 +244,11 @@ describe('App', () => {
   it('renders the M2 workspace areas and runtime health', async () => {
     const { container } = render(<App />);
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
-    expect(within(projectNav).getByText('项目文档')).toBeInTheDocument();
-    expect(screen.getByText('文档编辑器')).toBeInTheDocument();
-    expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent('项目文档');
+    expect(within(projectNav).getByText('剧本')).toBeInTheDocument();
+    expect(within(projectNav).getByText('角色与场景')).toBeInTheDocument();
+    expect(within(projectNav).getByText('小说')).toBeInTheDocument();
+    expect(screen.getByText('剧本编辑器')).toBeInTheDocument();
+    expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent('剧本');
     expect(container.querySelector('[data-pane-id="conversation"]')).toHaveTextContent('会话');
     expect(screen.getAllByText('项目 AI 助手').length).toBeGreaterThan(0);
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
@@ -290,14 +292,19 @@ describe('App', () => {
 
   it.each([
     {
-      nav: /项目文档/,
-      heading: '文档编辑器',
+      nav: /^剧本/,
+      heading: '剧本编辑器',
       close: '关闭文档面板',
     },
     {
-      nav: '小说章节',
+      nav: /^角色与场景/,
+      heading: '角色与场景',
+      close: '关闭文档面板',
+    },
+    {
+      nav: '小说',
       heading: '小说工作区',
-      close: '关闭小说章节',
+      close: '关闭小说',
     },
     {
       nav: /场次与镜头/,
@@ -1134,7 +1141,7 @@ describe('App', () => {
     ).toHaveLength(2);
   });
 
-  it('lists workspace document kinds together and filters by kind', async () => {
+  it('splits script documents from character and scene prompts', async () => {
     vi.mocked(callWorker).mockImplementation((method: string) => {
       if (method === 'health')
         return Promise.resolve({
@@ -1263,13 +1270,28 @@ describe('App', () => {
     render(<App />);
     expect(await screen.findByText('项目大纲')).toBeInTheDocument();
     expect(screen.getByText('项目计划')).toBeInTheDocument();
-    // Characters and scenes moved into this list instead of a second page.
-    expect(screen.getByText('角色设定')).toBeInTheDocument();
-    expect(screen.getByText('场景设定')).toBeInTheDocument();
-    // Novel chapters (kind note) and shot storyboards keep their own workspaces.
+    expect(screen.getByRole('heading', { name: '项目文档' })).toBeInTheDocument();
+    expect(screen.getByText(/不会发给生图或生视频/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '生成角色图' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '生成本镜画面' })).not.toBeInTheDocument();
+    const scriptKind = screen.getByLabelText('文档类型');
+    expect(within(scriptKind).getByRole('option', { name: '大纲' })).toBeInTheDocument();
+    expect(within(scriptKind).getByRole('option', { name: '计划' })).toBeInTheDocument();
+    expect(within(scriptKind).getByRole('option', { name: '笔记' })).toBeInTheDocument();
+    expect(within(scriptKind).queryByRole('option', { name: '角色' })).not.toBeInTheDocument();
+    expect(within(scriptKind).queryByRole('option', { name: '场景' })).not.toBeInTheDocument();
+    expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
+    expect(screen.queryByText('场景设定')).not.toBeInTheDocument();
     expect(screen.queryByText('小说章节一')).not.toBeInTheDocument();
     expect(screen.queryByText('第一集分镜')).not.toBeInTheDocument();
     expect(screen.getByText('所有镜头保持冷色调')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
+    expect(screen.getByText('角色设定')).toBeInTheDocument();
+    expect(screen.getByText('场景设定')).toBeInTheDocument();
+    expect(screen.queryByText('项目大纲')).not.toBeInTheDocument();
+    expect(screen.queryByText('约束条件')).not.toBeInTheDocument();
+    expect(screen.queryByText('所有镜头保持冷色调')).not.toBeInTheDocument();
 
     const filters = screen.getByRole('group', { name: '文档类型筛选' });
     expect(within(filters).getByRole('button', { name: '全部' })).toHaveAttribute(
@@ -1279,7 +1301,6 @@ describe('App', () => {
 
     fireEvent.click(within(filters).getByRole('button', { name: '角色' }));
     expect(screen.getByText('角色设定')).toBeInTheDocument();
-    expect(screen.queryByText('项目大纲')).not.toBeInTheDocument();
     expect(screen.queryByText('场景设定')).not.toBeInTheDocument();
 
     fireEvent.click(within(filters).getByRole('button', { name: '场景' }));
@@ -1287,8 +1308,8 @@ describe('App', () => {
     expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
 
     fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
-    expect(screen.getByText('项目大纲')).toBeInTheDocument();
     expect(screen.getByText('角色设定')).toBeInTheDocument();
+    expect(screen.getByText('场景设定')).toBeInTheDocument();
   });
 
   it('publishes an edited document in one action without a separate review step', async () => {
@@ -1543,16 +1564,182 @@ describe('App', () => {
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
     fireEvent.click(await screen.findByText('角色设定'));
     await waitFor(() => expect(screen.getByDisplayValue('角色设定')).toBeInTheDocument());
 
     const filters = screen.getByRole('group', { name: '文档类型筛选' });
-    fireEvent.click(within(filters).getByRole('button', { name: '计划' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '场景' }));
 
-    // Hidden by the filter, but still listed because it is the open document.
     const directory = screen.getByRole('complementary', { name: '项目文档目录' });
     expect(within(directory).queryByText('项目大纲')).not.toBeInTheDocument();
     expect(within(directory).getByText('角色设定')).toBeInTheDocument();
+  });
+
+  it('opens character prompts in a prompt-and-gallery workspace and seeds image production', async () => {
+    const project = {
+      id: 'project',
+      name: 'Filter Project',
+      rootPath: 'D:\\Filter',
+      createdAt: 'now',
+      updatedAt: 'now',
+      mode: 'read-write' as const,
+      schemaVersion: 4,
+    };
+    const character = {
+      id: 'd-character',
+      projectId: 'project',
+      kind: 'character' as const,
+      title: '角色设定',
+      scopeType: 'project' as const,
+      lifecycleStatus: 'active' as const,
+      rowVersion: 0,
+      createdAt: 'now',
+      updatedAt: 'now',
+      currentVersion: {
+        id: 'v-1',
+        version: 1,
+        state: 'draft' as const,
+        contentMarkdown: '林澈，灯塔守望员',
+        createdAt: 'now',
+      },
+      currentVersionId: 'v-1',
+    };
+    const imageAdapter: AdapterDescriptor = {
+      key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      capability: 'TEXT_TO_IMAGE' as const,
+      capabilityLabel: '文生图',
+      provider: 'vidu',
+      providerLabel: 'Vidu',
+      model: 'viduq2',
+      modelLabel: 'Vidu Q2',
+      apiVersion: 'v2',
+      schemaVersion: 1,
+      endpoint: 'https://api.vidu.com/ent/v2/text2image',
+      documentationUrl: 'https://platform.vidu.com/docs',
+      credentialProvider: 'vidu',
+      parameterSchema: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema' as const,
+        type: 'object' as const,
+        additionalProperties: false,
+        required: ['prompt'],
+        properties: {
+          prompt: { type: 'string', title: '画面提示词', minLength: 1 },
+        },
+      },
+      uiSchema: {
+        fields: [
+          { key: 'prompt', control: 'textarea' as const, group: 'basic' as const, order: 10 },
+        ],
+      },
+    };
+    const profile = {
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Vidu',
+      category: 'image' as const,
+      providerType: 'vidu' as const,
+      accessType: 'official' as const,
+      protocol: 'vidu-v2',
+      baseUrl: 'https://api.vidu.cn',
+      enabled: true,
+      connectionStatus: 'ready' as const,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const model = {
+      id: '21111111-1111-4111-8111-111111111111',
+      providerProfileId: profile.id,
+      remoteModelId: 'viduq2',
+      displayName: 'Vidu Q2',
+      capabilities: {
+        text: false,
+        vision: false,
+        streaming: false,
+        reasoning: false,
+        tools: false,
+        structuredOutput: false,
+        embeddings: false,
+        imageGeneration: true,
+        videoGeneration: false,
+      },
+      source: 'built-in' as const,
+      enabled: true,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current') return Promise.resolve(project);
+      if (method === 'project.recent') return Promise.resolve([]);
+      if (method === 'document.list') return Promise.resolve([character]);
+      if (method === 'document.get') return Promise.resolve(character);
+      if (method === 'document.versions') return Promise.resolve([]);
+      if (method === 'scene.list') return Promise.resolve([]);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'constraint.list')
+        return Promise.resolve([
+          {
+            id: 'c-1',
+            projectId: 'project',
+            scopeType: 'project',
+            kind: 'production',
+            content: '所有镜头保持冷色调',
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          capabilities: [{ key: 'TEXT_TO_IMAGE' as const, label: '文生图' }],
+          providers: [{ key: 'vidu', label: 'Vidu' }],
+          adapters: [imageAdapter],
+        });
+      if (method === 'adapter.resolve') return Promise.resolve(imageAdapter);
+      if (method === 'provider.profile.list') return Promise.resolve([profile]);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method);
+    });
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
+    fireEvent.click(await screen.findByText('角色设定'));
+    expect(await screen.findByRole('heading', { name: '提示词' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '已生成图片' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '生成角色图' })).toBeInTheDocument();
+    expect(screen.queryByText('约束条件')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '生成角色图' }));
+    await waitFor(() =>
+      expect(container.querySelector('.app-shell')).toHaveAttribute(
+        'data-navigation-mode',
+        'production',
+      ),
+    );
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('林澈，灯塔守望员');
+    expect(screen.getByLabelText('保存为')).toHaveValue('character');
   });
 
   it('shows and saves the shot storyboard document in the shot workspace', async () => {
@@ -1682,6 +1869,10 @@ describe('App', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: /场次与镜头/ }));
     fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
+    expect(await screen.findByRole('heading', { name: '镜头提示词' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '参考图' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '分镜说明' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '生成本镜画面' })).toBeInTheDocument();
     expect(await screen.findByLabelText('分镜标题')).toHaveValue('镜头一分镜');
     expect(screen.getByLabelText('分镜内容')).toHaveValue('# 分镜\n\n1. 远景。');
 
@@ -1696,6 +1887,409 @@ describe('App', () => {
         contentMarkdown: '# 分镜\n\n2. 中景。',
       }),
     );
+  });
+
+  it('seeds shot prompt into image production from the shot workspace', async () => {
+    const project = {
+      id: 'project',
+      name: 'Shot Project',
+      rootPath: 'D:\\Shots',
+      createdAt: 'now',
+      updatedAt: 'now',
+      mode: 'read-write' as const,
+      schemaVersion: 4,
+    };
+    const imageAdapter: AdapterDescriptor = {
+      key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      capability: 'TEXT_TO_IMAGE',
+      capabilityLabel: '文生图',
+      provider: 'vidu',
+      providerLabel: 'Vidu',
+      model: 'viduq2',
+      modelLabel: 'Vidu Q2',
+      apiVersion: 'v2',
+      schemaVersion: 1,
+      endpoint: 'https://api.vidu.com/ent/v2/text2image',
+      documentationUrl: 'https://platform.vidu.com/docs',
+      credentialProvider: 'vidu',
+      parameterSchema: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        additionalProperties: false,
+        required: ['prompt'],
+        properties: {
+          prompt: { type: 'string', title: '画面提示词', minLength: 1 },
+        },
+      },
+      uiSchema: {
+        fields: [{ key: 'prompt', control: 'textarea', group: 'basic', order: 10 }],
+      },
+    };
+    const profile = {
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Vidu',
+      category: 'image' as const,
+      providerType: 'vidu' as const,
+      accessType: 'official' as const,
+      protocol: 'vidu-v2',
+      baseUrl: 'https://api.vidu.cn',
+      enabled: true,
+      connectionStatus: 'ready' as const,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const model = {
+      id: '21111111-1111-4111-8111-111111111111',
+      providerProfileId: profile.id,
+      remoteModelId: 'viduq2',
+      displayName: 'Vidu Q2',
+      capabilities: {
+        text: false,
+        vision: false,
+        streaming: false,
+        reasoning: false,
+        tools: false,
+        structuredOutput: false,
+        embeddings: false,
+        imageGeneration: true,
+        videoGeneration: false,
+      },
+      source: 'built-in' as const,
+      enabled: true,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current') return Promise.resolve(project);
+      if (method === 'project.recent' || method === 'document.list' || method === 'constraint.list')
+        return Promise.resolve([]);
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'scene.list')
+        return Promise.resolve([
+          {
+            id: 'scene',
+            projectId: 'project',
+            title: '场次一',
+            position: 0,
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'shot.list' || method === 'shot.save')
+        return Promise.resolve(
+          method === 'shot.list'
+            ? [
+                {
+                  id: 'shot',
+                  sceneId: 'scene',
+                  title: '镜头一',
+                  position: 0,
+                  status: 'draft',
+                  prompt: '雨夜里林澈回头',
+                  rowVersion: 0,
+                  createdAt: 'now',
+                  updatedAt: 'now',
+                },
+              ]
+            : {
+                id: 'shot',
+                sceneId: 'scene',
+                title: '镜头一',
+                position: 0,
+                status: 'draft',
+                prompt: '雨夜里林澈回头',
+                rowVersion: 1,
+                createdAt: 'now',
+                updatedAt: 'now',
+              },
+        );
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          capabilities: [{ key: 'TEXT_TO_IMAGE' as const, label: '文生图' }],
+          providers: [{ key: 'vidu', label: 'Vidu' }],
+          adapters: [imageAdapter],
+        });
+      if (method === 'adapter.resolve') return Promise.resolve(imageAdapter);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'provider.profile.list') return Promise.resolve([profile]);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'video.generate.list' || method === 'agent.changeSet.list')
+        return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method);
+    });
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /场次与镜头/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
+    expect(await screen.findByRole('textbox', { name: '镜头提示词' })).toHaveValue(
+      '雨夜里林澈回头',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '生成本镜画面' }));
+    await waitFor(() =>
+      expect(container.querySelector('.app-shell')).toHaveAttribute(
+        'data-navigation-mode',
+        'production',
+      ),
+    );
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('雨夜里林澈回头');
+    expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
+  });
+
+  it('resolves mentioned character assets into reference-to-image production', async () => {
+    const project = {
+      id: 'project',
+      name: 'Shot Project',
+      rootPath: 'D:\\Shots',
+      createdAt: 'now',
+      updatedAt: 'now',
+      mode: 'read-write' as const,
+      schemaVersion: 4,
+    };
+    const character = {
+      id: 'character-doc',
+      projectId: 'project',
+      kind: 'character' as const,
+      title: '林澈',
+      scopeType: 'project' as const,
+      lifecycleStatus: 'active' as const,
+      rowVersion: 0,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const characterAsset = {
+      id: 'character-asset',
+      projectId: 'project',
+      kind: 'character',
+      relativePath: 'assets/images/lin.png',
+      contentHash: 'hash',
+      sizeBytes: 2048,
+      createdAt: 'now',
+    };
+    const imageAdapter: AdapterDescriptor = {
+      key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      capability: 'TEXT_TO_IMAGE',
+      capabilityLabel: '文生图',
+      provider: 'vidu',
+      providerLabel: 'Vidu',
+      model: 'viduq2',
+      modelLabel: 'Vidu Q2',
+      apiVersion: 'v2',
+      schemaVersion: 1,
+      endpoint: 'https://api.vidu.com/ent/v2/text2image',
+      documentationUrl: 'https://platform.vidu.com/docs',
+      credentialProvider: 'vidu',
+      parameterSchema: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        additionalProperties: false,
+        required: ['prompt'],
+        properties: {
+          prompt: { type: 'string', title: '画面提示词', minLength: 1 },
+        },
+      },
+      uiSchema: {
+        fields: [{ key: 'prompt', control: 'textarea', group: 'basic', order: 10 }],
+      },
+    };
+    const referenceAdapter: AdapterDescriptor = {
+      ...imageAdapter,
+      key: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+      capability: 'REFERENCE_TO_IMAGE',
+      capabilityLabel: '参考生图',
+      endpoint: 'https://api.vidu.com/ent/v2/reference2image',
+      parameterSchema: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        additionalProperties: false,
+        required: ['images', 'prompt'],
+        properties: {
+          images: {
+            type: 'array',
+            title: '参考图片',
+            minItems: 1,
+            maxItems: 7,
+            items: { type: 'string', format: 'uri' },
+          },
+          prompt: { type: 'string', title: '画面提示词', minLength: 1 },
+        },
+      },
+      uiSchema: {
+        fields: [
+          { key: 'images', control: 'url-list', group: 'basic', order: 10 },
+          { key: 'prompt', control: 'textarea', group: 'basic', order: 20 },
+        ],
+      },
+    };
+    const profile = {
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Vidu',
+      category: 'image' as const,
+      providerType: 'vidu' as const,
+      accessType: 'official' as const,
+      protocol: 'vidu-v2',
+      baseUrl: 'https://api.vidu.cn',
+      enabled: true,
+      connectionStatus: 'ready' as const,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const model = {
+      id: '21111111-1111-4111-8111-111111111111',
+      providerProfileId: profile.id,
+      remoteModelId: 'viduq2',
+      displayName: 'Vidu Q2',
+      capabilities: {
+        text: false,
+        vision: false,
+        streaming: false,
+        reasoning: false,
+        tools: false,
+        structuredOutput: false,
+        embeddings: false,
+        imageGeneration: true,
+        videoGeneration: false,
+      },
+      source: 'built-in' as const,
+      enabled: true,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'health')
+        return Promise.resolve({
+          protocolVersion: 1,
+          workerVersion: '0.1.0',
+          nodeVersion: 'v22.0.0',
+          platform: 'win32',
+          arch: 'x64',
+          pid: 123,
+        });
+      if (method === 'sqlite.probe')
+        return Promise.resolve({
+          databasePath: 'probe.sqlite',
+          sqliteVersion: '3.50.0',
+          journalMode: 'wal',
+          writeVerified: true,
+        });
+      if (method === 'project.current') return Promise.resolve(project);
+      if (method === 'project.recent' || method === 'constraint.list') return Promise.resolve([]);
+      if (method === 'document.list') return Promise.resolve([character]);
+      if (method === 'asset.list') {
+        const sourceDocumentId = (params as { sourceDocumentId?: string } | undefined)
+          ?.sourceDocumentId;
+        if (!sourceDocumentId || sourceDocumentId === character.id) {
+          return Promise.resolve([characterAsset]);
+        }
+        return Promise.resolve([]);
+      }
+      if (method === 'scene.list')
+        return Promise.resolve([
+          {
+            id: 'scene',
+            projectId: 'project',
+            title: '场次一',
+            position: 0,
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'shot.list' || method === 'shot.save')
+        return Promise.resolve(
+          method === 'shot.list'
+            ? [
+                {
+                  id: 'shot',
+                  sceneId: 'scene',
+                  title: '镜头一',
+                  position: 0,
+                  status: 'draft',
+                  prompt: '[角色:林澈] 雨夜里回头',
+                  rowVersion: 0,
+                  createdAt: 'now',
+                  updatedAt: 'now',
+                },
+              ]
+            : {
+                id: 'shot',
+                sceneId: 'scene',
+                title: '镜头一',
+                position: 0,
+                status: 'draft',
+                prompt: '[角色:林澈] 雨夜里回头',
+                rowVersion: 1,
+                createdAt: 'now',
+                updatedAt: 'now',
+              },
+        );
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'test',
+          configured: false,
+          configurationSource: 'none',
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          capabilities: [
+            { key: 'TEXT_TO_IMAGE' as const, label: '文生图' },
+            { key: 'REFERENCE_TO_IMAGE' as const, label: '参考生图' },
+          ],
+          providers: [{ key: 'vidu', label: 'Vidu' }],
+          adapters: [imageAdapter, referenceAdapter],
+        });
+      if (method === 'adapter.resolve') {
+        const capability = (params as { capability?: string } | undefined)?.capability;
+        return Promise.resolve(
+          capability === 'REFERENCE_TO_IMAGE' ? referenceAdapter : imageAdapter,
+        );
+      }
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'provider.profile.list') return Promise.resolve([profile]);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'video.generate.list' || method === 'agent.changeSet.list')
+        return Promise.resolve([]);
+      throw new Error('Unexpected method ' + method);
+    });
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /场次与镜头/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
+    expect(await screen.findByRole('textbox', { name: '镜头提示词' })).toHaveValue(
+      '[角色:林澈] 雨夜里回头',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '生成本镜画面' }));
+    await waitFor(() =>
+      expect(container.querySelector('.app-shell')).toHaveAttribute(
+        'data-navigation-mode',
+        'production',
+      ),
+    );
+    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('[角色:林澈] 雨夜里回头');
+    expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
+    expect(screen.getByText('素材库图片')).toBeInTheDocument();
   });
 
   it('reviews a direct paid image submission on the shared confirmation card', async () => {

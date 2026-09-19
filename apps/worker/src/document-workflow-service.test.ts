@@ -41,7 +41,7 @@ async function setup() {
 }
 
 describe('DocumentWorkflowService', () => {
-  it('keeps an agent draft out of context until explicit publication', async () => {
+  it('lists an agent draft in catalog and marks it published without injecting the body', async () => {
     const { projects, content, workflow, contexts, conversation, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
       messageId: assistant.id,
@@ -76,10 +76,13 @@ describe('DocumentWorkflowService', () => {
           .map((event) => ({ action: event.action, actorType: event.actorType })),
       ),
     ).toEqual([{ action: 'draft_saved', actorType: 'agent' }]);
+    const draftContext = contexts.compile(conversation.id);
+    expect(draftContext.sources.some((source) => source.id === created.document.id)).toBe(false);
     expect(
-      contexts.compile(conversation.id).sources.some((source) => source.id === created.document.id),
-    ).toBe(false);
-
+      draftContext.catalog.some(
+        (item) => item.sourceId === created.document.id && item.status === 'draft',
+      ),
+    ).toBe(true);
     const review = workflow.submitReview({
       documentId: created.document.id,
       expectedDocumentRowVersion: created.document.rowVersion,
@@ -93,8 +96,14 @@ describe('DocumentWorkflowService', () => {
     });
 
     expect(published.document.publishedVersionId).toBe(published.document.currentVersion?.id);
+    const publishedContext = contexts.compile(conversation.id);
+    expect(publishedContext.sources.some((source) => source.id === created.document.id)).toBe(
+      false,
+    );
     expect(
-      contexts.compile(conversation.id).sources.some((source) => source.id === created.document.id),
+      publishedContext.catalog.some(
+        (item) => item.sourceId === created.document.id && item.status === 'published',
+      ),
     ).toBe(true);
     expect(workflow.getTask({ taskId: created.task.id }).task).toMatchObject({
       status: 'completed',

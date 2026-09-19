@@ -12,7 +12,7 @@ import { readMarkdownDocument } from './markdown-import-client';
 export interface UseDocumentWorkspaceOptions {
   writable: boolean;
   syncDetachedPanel: (entityId?: string) => void;
-  openDocumentWorkspace: () => void;
+  openDocumentWorkspace: (kind?: DocumentKind) => void;
   closeDocumentPanel: () => void;
 }
 
@@ -53,7 +53,7 @@ export function useDocumentWorkspace({
     setVersions(await callWorker('document.versions', { documentId: nextDocument.id }));
     setDocuments(await callWorker('document.list', {}));
     syncDetachedPanel(nextDocument.id);
-    if (openPanel) openDocumentWorkspace();
+    if (openPanel) openDocumentWorkspace(nextDocument.kind);
   };
 
   const selectDocument = async (summary: DocumentSummary) => {
@@ -72,7 +72,7 @@ export function useDocumentWorkspace({
       setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
       setVersions(history);
       syncDetachedPanel(detail.id);
-      openDocumentWorkspace();
+      openDocumentWorkspace(detail.kind);
     } catch (reason) {
       if (requestId === documentRequest.current) {
         setContentMessage(reason instanceof Error ? reason.message : '文档加载失败');
@@ -98,7 +98,7 @@ export function useDocumentWorkspace({
       setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
       setVersions(history);
       syncDetachedPanel(detail.id);
-      openDocumentWorkspace();
+      openDocumentWorkspace(detail.kind);
     } catch (reason) {
       if (requestId === documentRequest.current) {
         setContentMessage(reason instanceof Error ? reason.message : '文档加载失败');
@@ -146,10 +146,10 @@ export function useDocumentWorkspace({
     }
   };
 
-  const saveDocument = async (): Promise<boolean | undefined> => {
+  const saveDocument = async (): Promise<DocumentDetail | undefined> => {
     if (!documentEditorWritable) {
       setContentMessage('审核中的版本不可编辑，请先退回修改或完成发布。');
-      return false;
+      return undefined;
     }
     setContentBusy(true);
     setContentMessage('');
@@ -165,10 +165,10 @@ export function useDocumentWorkspace({
       setDocuments(await callWorker('document.list', {}));
       setVersions(await callWorker('document.versions', { documentId: saved.id }));
       setContentMessage(`已保存草稿 v${saved.currentVersion?.version}`);
-      return true;
+      return saved;
     } catch (reason) {
       setContentMessage(reason instanceof Error ? reason.message : '保存失败');
-      return false;
+      return undefined;
     } finally {
       setContentBusy(false);
     }

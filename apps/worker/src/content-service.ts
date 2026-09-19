@@ -39,7 +39,11 @@ import type {
   ConversationRecord,
   LlmGenerationAttemptRecord,
 } from '@ai-video/domain';
-import { createRepositories } from '@ai-video/persistence';
+import {
+  createRepositories,
+  rebuildLibraryChunksForRecord,
+  syncLibraryChunksForChatMessage,
+} from '@ai-video/persistence';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 
@@ -142,6 +146,20 @@ export class ContentService {
         updatedAt: now,
       };
       repositories.scenes.save(record);
+      rebuildLibraryChunksForRecord(
+        database,
+        project.id,
+        {
+          sourceType: 'scene',
+          sourceId: record.id,
+          status: 'active',
+          title: record.title,
+          content: record.title,
+          scopeType: 'scene',
+          scopeId: record.id,
+        },
+        now,
+      );
       repositories.projects.touch(now);
       project.updatedAt = now;
       return repositories.scenes.get(record.id)!;
@@ -200,6 +218,21 @@ export class ContentService {
         updatedAt: now,
       };
       repositories.shots.save(record);
+      rebuildLibraryChunksForRecord(
+        database,
+        project.id,
+        {
+          sourceType: 'shot',
+          sourceId: record.id,
+          documentId: record.documentId,
+          status: record.status || 'active',
+          title: record.title,
+          content: [record.title, record.prompt?.trim()].filter(Boolean).join('\n'),
+          scopeType: 'shot',
+          scopeId: record.id,
+        },
+        now,
+      );
       repositories.projects.touch(now);
       project.updatedAt = now;
       return repositories.shots.get(record.id)!;
@@ -504,6 +537,7 @@ export class ContentService {
         createdAt: existing?.createdAt ?? now,
       };
       repositories.chatMessages.save(record);
+      syncLibraryChunksForChatMessage(database, project.id, record, conversation, now);
       repositories.conversations.save({ ...conversation, updatedAt: now });
       repositories.projects.touch(now);
       project.updatedAt = now;
@@ -532,6 +566,19 @@ export class ContentService {
         createdAt: now,
         updatedAt: now,
       });
+      rebuildLibraryChunksForRecord(
+        database,
+        project.id,
+        {
+          sourceType: 'memory',
+          sourceId: id,
+          status: 'memory',
+          scopeType: 'project',
+          title: '项目记忆',
+          content,
+        },
+        now,
+      );
       repositories.projects.touch(now);
       project.updatedAt = now;
       return { id };
@@ -553,6 +600,20 @@ export class ContentService {
         createdAt: now,
         updatedAt: now,
       });
+      rebuildLibraryChunksForRecord(
+        database,
+        project.id,
+        {
+          sourceType: 'constraint',
+          sourceId: id,
+          status: 'constraint',
+          kind: params.kind?.trim() || 'production',
+          scopeType: 'project',
+          title: `生产约束：${params.kind?.trim() || 'production'}`,
+          content,
+        },
+        now,
+      );
       repositories.projects.touch(now);
       project.updatedAt = now;
       return { id };

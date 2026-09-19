@@ -735,6 +735,7 @@ fn run_agent_runtime(
                 String,
                 Option<NormalizedUsage>,
             )> = None;
+            let mut stream_visible = String::new();
             stream_provider_with_emitter(
                 runtime,
                 secret,
@@ -751,7 +752,11 @@ fn run_agent_runtime(
                         Ok(())
                     }
                     LlmStreamEvent::Delta { delta } => {
-                        aggregate.push_str(&delta);
+                        stream_visible.push_str(&delta);
+                        let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) else {
+                            return Ok(());
+                        };
+                        aggregate.push_str(&fragment);
                         let mut params = runtime_identity(&request);
                         params["content"] = serde_json::Value::String(aggregate.clone());
                         worker_call(
@@ -760,8 +765,10 @@ fn run_agent_runtime(
                             "llm.generation.observe",
                             params,
                         )?;
-                        streams
-                            .emit_agent_event(&request.attempt_id, LlmStreamEvent::Delta { delta });
+                        streams.emit_agent_event(
+                            &request.attempt_id,
+                            LlmStreamEvent::Delta { delta: fragment },
+                        );
                         Ok(())
                     }
                     LlmStreamEvent::ThinkingDelta { .. } => Ok(()),
@@ -1655,6 +1662,7 @@ struct SseParser {
     usage: Option<NormalizedUsage>,
     tool_calls: HashMap<String, ToolCallAccumulator>,
     next_tool_call_ordinal: u64,
+    visible_text: String,
 }
 
 struct ToolCallAccumulator {
@@ -1673,6 +1681,7 @@ impl SseParser {
             usage: None,
             tool_calls: HashMap::new(),
             next_tool_call_ordinal: 0,
+            visible_text: String::new(),
         }
     }
 
@@ -1938,9 +1947,10 @@ impl SseParser {
                     .pointer("/delta/content")
                     .and_then(serde_json::Value::as_str)
                 {
-                    if !delta.is_empty() {
+                    if let Some(fragment) = coalesce_visible_delta(&self.visible_text, delta) {
+                        self.visible_text.push_str(&fragment);
                         emit(LlmStreamEvent::Delta {
-                            delta: delta.to_string(),
+                            delta: fragment,
                         })?;
                     }
                 }
@@ -2002,6 +2012,60 @@ impl SseParser {
         }
         Ok(())
     }
+}
+
+fn coalesce_visible_delta(accumulated: &str, incoming: &str) -> Option<String> {
+    if incoming.is_empty() {
+        return None;
+    }
+    let trimmed = incoming.trim_start_matches(['\n', '\r']);
+    if accumulated.is_empty() {
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(fragment) = prefix_visible_delta(accumulated, incoming) {
+        return fragment;
+    }
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == incoming {
+        return Some(incoming.to_string());
+    }
+    if let Some(fragment) = prefix_visible_delta(accumulated, trimmed) {
+        return fragment;
+    }
+    if is_visible_replay(accumulated, trimmed) {
+        return None;
+    }
+    Some(incoming.to_string())
+}
+
+fn prefix_visible_delta(accumulated: &str, incoming: &str) -> Option<Option<String>> {
+    if incoming == accumulated || accumulated.starts_with(incoming) {
+        return Some(None);
+    }
+    if incoming.starts_with(accumulated) {
+        let suffix = &incoming[accumulated.len()..];
+        return Some(if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.to_string())
+        });
+    }
+    None
+}
+
+fn is_visible_replay(accumulated: &str, incoming: &str) -> bool {
+    if incoming.is_empty() || accumulated == incoming {
+        return true;
+    }
+    accumulated
+        .strip_suffix(incoming)
+        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('\n'))
 }
 
 fn append_bounded(target: &mut String, fragment: &str, label: &str) -> Result<(), StreamFailure> {
@@ -2215,8 +2279,9 @@ fn winhttp_error(operation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_boundary, parse_base_url, stream_provider, LlmCancellation, LlmRuntimeRequest,
-        LlmStreamEvent, LlmStreamState, NormalizedUsage, ProviderReportedCost, SseParser,
+        coalesce_visible_delta, event_boundary, parse_base_url, stream_provider, LlmCancellation,
+        LlmRuntimeRequest, LlmStreamEvent, LlmStreamState, NormalizedUsage, ProviderReportedCost,
+        SseParser,
     };
     use crate::credential_store::CredentialSecret;
     use std::{
@@ -2474,6 +2539,139 @@ mod tests {
         assert_eq!(serialized["type"], "toolCalls");
         assert_eq!(serialized["providerResponseId"], "chat-tool-call:call_1");
         assert!(serialized.get("provider_response_id").is_none());
+    }
+
+    #[test]
+    fn coalesces_chat_content_across_tool_steps() {
+        assert_eq!(coalesce_visible_delta("A\n\n", "A\n\n"), None);
+        assert_eq!(
+            coalesce_visible_delta("A\n\n", "A\n\nB\n\n"),
+            Some("B\n\n".to_string())
+        );
+        assert_eq!(coalesce_visible_delta("你", "好"), Some("好".to_string()));
+    }
+
+    #[test]
+    fn ignores_leading_newline_replays_of_visible_text() {
+        assert_eq!(coalesce_visible_delta("A", "\n\nA"), None);
+        assert_eq!(
+            coalesce_visible_delta("A", "\n\nA\n\nB"),
+            Some("\n\nB".to_string())
+        );
+        assert_eq!(coalesce_visible_delta("A\n\nB", "\n\nB"), None);
+        assert_eq!(
+            coalesce_visible_delta(
+                "我先了解一下当前项目的文档情况。",
+                "\n\n我先了解一下当前项目的文档情况。"
+            ),
+            None
+        );
+        let mut aggregate = String::new();
+        for incoming in [
+            "我先了解一下当前项目的文档情况。",
+            "\n\n我先了解一下当前项目的文档情况。",
+            "\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。",
+            "\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。",
+        ] {
+            if let Some(fragment) = coalesce_visible_delta(&aggregate, incoming) {
+                aggregate.push_str(&fragment);
+            }
+        }
+        assert_eq!(
+            aggregate,
+            "我先了解一下当前项目的文档情况。\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。"
+        );
+    }
+
+    #[test]
+    fn ignores_whitespace_only_and_token_replays_across_tool_rounds() {
+        assert_eq!(coalesce_visible_delta("A", "\n\n"), None);
+        assert_eq!(coalesce_visible_delta("", "\n\nA"), Some("A".to_string()));
+        let mut aggregate = String::new();
+        let mut stream_visible = String::new();
+        for incoming in ["I will search the library."] {
+            stream_visible.push_str(incoming);
+            if let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) {
+                aggregate.push_str(&fragment);
+            }
+        }
+        stream_visible.clear();
+        for incoming in ["\n\n", "I", " will search the library."] {
+            stream_visible.push_str(incoming);
+            if let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) {
+                aggregate.push_str(&fragment);
+            }
+        }
+        assert_eq!(aggregate, "I will search the library.");
+        stream_visible.clear();
+        for incoming in ["\n\n", "Search hit 3 results."] {
+            stream_visible.push_str(incoming);
+            if let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) {
+                aggregate.push_str(&fragment);
+            }
+        }
+        assert_eq!(
+            aggregate,
+            "I will search the library.\n\nSearch hit 3 results."
+        );
+    }
+
+    #[test]
+    fn coalesces_duplicate_and_cumulative_chat_content_snapshots() {
+        let mut parser = SseParser::new("openai-chat-completions");
+        let mut events = Vec::new();
+        parser
+            .feed(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\nB\\n\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\nB\\n\\n\"}}]}\n\ndata: [DONE]\n\n",
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .expect("chat snapshots should parse");
+        parser
+            .finish(|_| Ok(()))
+            .expect("done should complete chat stream");
+        assert_eq!(
+            events,
+            vec![
+                LlmStreamEvent::Delta {
+                    delta: "A\n\n".to_string()
+                },
+                LlmStreamEvent::Delta {
+                    delta: "B\n\n".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_chat_content_replayed_after_incremental_tokens() {
+        let mut parser = SseParser::new("openai-chat-completions");
+        let mut events = Vec::new();
+        parser
+            .feed(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\n\\nA\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\n\\nA\\n\\nB\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\n\\nA\\n\\nB\"}}]}\n\ndata: [DONE]\n\n",
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .expect("chat replay snapshots should parse");
+        parser
+            .finish(|_| Ok(()))
+            .expect("done should complete chat stream");
+        assert_eq!(
+            events,
+            vec![
+                LlmStreamEvent::Delta {
+                    delta: "A".to_string()
+                },
+                LlmStreamEvent::Delta {
+                    delta: "\n\nB".to_string()
+                }
+            ]
+        );
     }
 
     #[test]

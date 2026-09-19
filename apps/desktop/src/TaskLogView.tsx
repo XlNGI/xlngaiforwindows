@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  AgentLibrarySourceInfo,
   AgentTaskDetail,
   AgentPartialArtifactInfo,
   GenerationJobEventInfo,
@@ -33,6 +34,7 @@ interface TaskLogViewProps {
   taskRevision?: number;
   onOpenDocument?: (documentId: string) => void;
   onOpenConversation?: (conversationId: string) => void;
+  onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
 }
 
 const kindLabel: Record<TaskLogItem['kind'], string> = {
@@ -150,12 +152,14 @@ function AgentTaskDetailPanel({
   detail,
   onOpenDocument,
   onOpenConversation,
+  onOpenLibrarySource,
 }: {
   detail: AgentTaskDetail;
   onOpenDocument?: (documentId: string) => void;
   onOpenConversation?: (conversationId: string) => void;
+  onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
 }) {
-  const { task, events, documents, providerSteps, researchSources } = detail;
+  const { task, events, documents, providerSteps, researchSources, librarySources = [] } = detail;
   const [partials, setPartials] = useState<AgentPartialArtifactInfo[]>([]);
   const [partialBusy, setPartialBusy] = useState<string>();
   const [partialError, setPartialError] = useState<string>();
@@ -451,6 +455,48 @@ function AgentTaskDetailPanel({
         )}
       </section>
 
+      <section className="task-log-detail-section" aria-labelledby="task-log-library-heading">
+        <h3 id="task-log-library-heading">项目检索来源</h3>
+        {librarySources.length > 0 ? (
+          <ul className="task-log-research-sources">
+            {librarySources.map((source) => (
+              <li key={`${source.toolName}-${source.citationLabel}-${source.sourceId}`}>
+                <div className="task-log-research-heading">
+                  <strong>{source.citationLabel}</strong>
+                  <span>
+                    {source.status === 'draft'
+                      ? '草稿'
+                      : source.status === 'published'
+                        ? '已发布'
+                        : source.status}
+                  </span>
+                </div>
+                {onOpenLibrarySource ? (
+                  <button type="button" onClick={() => onOpenLibrarySource(source)}>
+                    {source.title}
+                  </button>
+                ) : onOpenDocument &&
+                  (source.sourceType === 'document' ||
+                    source.sourceType === 'storyboard' ||
+                    source.sourceType === 'novel-reference') ? (
+                  <button type="button" onClick={() => onOpenDocument(source.sourceId)}>
+                    {source.title}
+                  </button>
+                ) : (
+                  <span>{source.title}</span>
+                )}
+                <div className="task-log-research-meta">
+                  <span>{source.sourceType}</span>
+                  {source.kind && <span>{source.kind}</span>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="task-log-detail-empty">暂无项目检索来源。</p>
+        )}
+      </section>
+
       <section className="task-log-detail-section" aria-labelledby="task-log-partials-heading">
         <h3 id="task-log-partials-heading">
           <FileText size={15} /> 未完成产物
@@ -682,6 +728,7 @@ export function TaskLogView({
   taskRevision,
   onOpenDocument,
   onOpenConversation,
+  onOpenLibrarySource,
 }: TaskLogViewProps) {
   const [items, setItems] = useState<TaskLogItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<TaskLogItem>();
@@ -902,6 +949,7 @@ export function TaskLogView({
                 className={`task-log-row${selectedItem?.id === item.id ? ' is-selected' : ''}`}
                 key={item.id}
                 type="button"
+                title="查看任务详情"
                 aria-pressed={selectedItem?.id === item.id}
                 onClick={() => void openDetails(item)}
               >
@@ -963,6 +1011,7 @@ export function TaskLogView({
                   detail={detail}
                   onOpenDocument={onOpenDocument}
                   onOpenConversation={onOpenConversation}
+                  onOpenLibrarySource={onOpenLibrarySource}
                 />
               ) : selectedItem.kind === 'agent-document' ? (
                 <div className="task-log-detail-loading">暂无任务详情。</div>

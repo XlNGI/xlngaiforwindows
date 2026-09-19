@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import type { ProductionContextInfo } from '@ai-video/contracts';
+import type {
+  LibraryCatalogItem,
+  LibrarySourceStatus,
+  ProductionContextInfo,
+} from '@ai-video/contracts';
 import {
   compileProductionContext,
-  extractiveSummary,
-  sourceSummaryKey,
   toContextManifest,
   type ContextScope,
   type ContextSourceInput,
   type ProductionContext,
 } from '@ai-video/context';
-import { createRepositories } from '@ai-video/persistence';
+import { createRepositories, listProjectLibraryCatalog } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 export class ContextService {
@@ -27,50 +29,28 @@ export class ContextService {
         conversation.scopeType,
         conversation.scopeId,
       );
-      const sources: ContextSourceInput[] = [];
-
-      for (const document of repositories.documents.listByProject(project.id)) {
-        // A working draft is intentionally not project authority. Only the explicit
-        // publication pointer may contribute to another generation's context.
-        const version = document.publishedVersionId
-          ? repositories.documents.getVersion(document.publishedVersionId)
-          : undefined;
-        if (!version) continue;
-        sources.push({
-          id: document.id,
-          type: 'document',
-          scopeType: document.scopeType,
-          scopeId: document.scopeId,
-          label: document.title,
-          content: version.contentMarkdown,
-          version: version.version,
-          versionId: version.id,
-          updatedAt: document.updatedAt,
-        });
-      }
-      for (const memory of repositories.memories.listByProject(project.id)) {
-        sources.push({
-          id: memory.id,
-          type: 'memory',
-          scopeType: memory.scopeType as ContextSourceInput['scopeType'],
-          scopeId: memory.scopeId,
-          label: '项目记忆',
-          content: memory.content,
-          updatedAt: memory.updatedAt,
-        });
-      }
-      for (const constraint of repositories.constraints.listByProject(project.id)) {
-        sources.push({
-          id: constraint.id,
-          type: 'constraint',
-          scopeType: constraint.scopeType as ContextSourceInput['scopeType'],
-          scopeId: constraint.scopeId,
-          label: `生产约束：${constraint.kind}`,
-          content: constraint.content,
-          updatedAt: constraint.updatedAt,
-        });
-      }
-      const messages = repositories.chatMessages.listPage(conversation.id, 20).reverse();
+      const catalog = listProjectLibraryCatalog(database, project.id).map((item) => ({
+        id: item.id,
+        sourceType: item.sourceType,
+        sourceId: item.sourceId,
+        versionId: item.versionId,
+        status: item.status as LibrarySourceStatus,
+        kind: item.kind,
+        title: item.title,
+        updatedAt: item.updatedAt,
+      }));
+      const sources: ContextSourceInput[] = [
+        {
+          id: `${project.id}:catalog`,
+          type: 'catalog',
+          scopeType: 'project',
+          label: `资料目录 ${catalog.length} 项`,
+          content: renderLibraryCatalog(catalog),
+          updatedAt: project.updatedAt,
+          priority: 10,
+        },
+      ];
+      const messages = repositories.chatMessages.listPage(conversation.id, 12).reverse();
       if (messages.length > 0) {
         sources.push({
           id: conversation.id,
@@ -83,36 +63,13 @@ export class ContextService {
           priority: 50,
         });
       }
-
-      const summaries: Record<string, string> = {};
-      for (const source of sources.filter(
-        (item) => item.type !== 'constraint' && item.content.length > 8_000,
-      )) {
-        const key = sourceSummaryKey(source);
-        const cached = repositories.contextSnapshots.get(`summary-${key}`);
-        if (cached) {
-          summaries[key] = (JSON.parse(cached.contentJson) as { summary: string }).summary;
-        } else {
-          const summary = extractiveSummary(source.content);
-          summaries[key] = summary;
-          if (project.mode === 'read-write') {
-            repositories.contextSnapshots.save({
-              id: `summary-${key}`,
-              projectId: project.id,
-              purpose: 'summary-cache',
-              contentJson: JSON.stringify({ sourceId: source.id, summary }),
-              createdAt: new Date().toISOString(),
-            });
-          }
-        }
-      }
       return compileProductionContext({
         projectId: project.id,
         projectName: project.name,
         scope,
         sources,
+        catalog,
         budgetTokens,
-        summaries,
       });
     });
   }
@@ -156,7 +113,34 @@ export function toContextInfo(context: ProductionContext): ProductionContextInfo
       originalCharacters: source.originalCharacters,
       truncated: source.truncated,
     })),
+    catalog: context.catalog as LibraryCatalogItem[],
   };
+}
+
+function isDefaultConversationTitle(title: string): boolean {
+  return title.trim() === '' || title.trim() === '新会话' || title.trim() === '会话';
+}
+
+function renderLibraryCatalog(catalog: LibraryCatalogItem[]): string {
+  if (catalog.length === 0)
+    return '资料目录为空。需要项目资料时调用 library.search / library.read。';
+  const lines: string[] = [];
+  let untitledConversations = 0;
+  for (const item of catalog) {
+    if (item.sourceType === 'conversation' && isDefaultConversationTitle(item.title)) {
+      untitledConversations += 1;
+      continue;
+    }
+    lines.push(
+      `${lines.length + 1}. ${item.title} · ${item.sourceType} · ${item.status}${item.kind ? ` · ${item.kind}` : ''}`,
+    );
+  }
+  if (untitledConversations > 0) {
+    lines.push(
+      `${lines.length + 1}. 会话记录 ${untitledConversations} 条 · conversation · 需要时检索`,
+    );
+  }
+  return lines.join('\n');
 }
 
 function resolveScope(
