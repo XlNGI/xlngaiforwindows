@@ -2685,6 +2685,44 @@ describe('AgentProviderLoopService', () => {
     expect(workflow.getDocument(parsed.documentId).kind).toBe('character');
   });
 
+  it('rejects a combined character bible and asks for one create_draft per character', async () => {
+    const { conversation, generations, loop, workflow } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '把第一章人物做成提示词',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      '把第一章人物做成提示词',
+      '角色提示词',
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_combined_cast',
+      calls: [
+        {
+          id: 'call_combined_cast',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools[0]!.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: '第一章 角色提示词',
+            contentMarkdown: '## 角色：许大山\n肩宽背厚。\n\n## 角色：沈清禾\n温婉清雅。\n',
+            documentKind: 'character',
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain('CHARACTER_PROMPT_NOT_SINGLE');
+    expect(result.continuation?.outputs[0]?.output).toContain('许大山、沈清禾');
+    expect(workflow.listDocuments().filter((row) => row.kind === 'character')).toHaveLength(0);
+  });
+
   it('infers documentKind from the draft title when the model omits it', async () => {
     const { conversation, generations, loop, workflow } = await setup();
     const prepared = generations.prepare({
@@ -2922,20 +2960,13 @@ describe('AgentProviderLoopService', () => {
       'project.get_context',
       'project.integrity.check',
       'conversation.search',
-      'asset.get',
-      'asset.search',
-      'tag.list',
-      'assetGroup.list',
-      'assetGroup.resolve',
-      'settings.get',
-      'maintenance.status',
-      'media.task.get',
       'conversation.rename',
       'library.search',
       'library.read',
       'research.search',
       'research.fetch',
     ]);
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('assetGroup.list');
     expect(agent.tools.map((tool) => tool.name)).not.toContain('asset.update_alias');
 
     loop.startProviderStep(prepared.stream);
@@ -2956,6 +2987,44 @@ describe('AgentProviderLoopService', () => {
       status: 'succeeded',
       conversation: { id: conversation.id, title: '项目讨论' },
     });
+  });
+
+  it('does not grant asset catalog tools for a character prompt draft', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prompt = '把第一章人物做成角色提示词';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      prompt,
+      '角色提示词',
+      { operation: 'document.create_draft' },
+      'project_only',
+    );
+    expect(agent.tools.map((tool) => tool.name)).toContain('document.create_draft');
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('asset.search');
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('tag.list');
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('assetGroup.list');
+  });
+
+  it('grants asset search only when the prompt is about the media library', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prompt = '列出素材库里的角色图';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    expect(agent.tools.map((tool) => tool.name)).toContain('asset.search');
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('assetGroup.list');
   });
 
   it('previews and executes a system R2 action exactly once with recoverable metadata', async () => {

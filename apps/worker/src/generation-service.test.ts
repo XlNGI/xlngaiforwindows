@@ -427,6 +427,9 @@ describe('GenerationService', () => {
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
       'Do not paste the document into the chat',
     );
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+      'one document per character',
+    );
   });
 
   it('keeps ordinary generation context on the catalog instead of document bodies', async () => {

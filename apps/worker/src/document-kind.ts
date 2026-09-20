@@ -25,3 +25,27 @@ export function inferDocumentKindFromDraft(title: string, contentMarkdown = ''):
   }
   return 'note';
 }
+
+const CHARACTER_SECTION_HEADING = /^#{1,3}\s*(?:群体)?角色\s*[:：]\s*(.+?)\s*$/gmu;
+
+export function listCharacterPromptSubjects(contentMarkdown: string): string[] {
+  const names: string[] = [];
+  for (const match of contentMarkdown.normalize('NFC').matchAll(CHARACTER_SECTION_HEADING)) {
+    const name = match[1]!.replace(/[`*_]/g, '').trim();
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+export function assertSingleCharacterPromptDocument(
+  kind: DocumentKind,
+  _title: string,
+  contentMarkdown: string,
+): void {
+  if (kind !== 'character') return;
+  const names = listCharacterPromptSubjects(contentMarkdown);
+  if (names.length <= 1) return;
+  throw new Error(
+    `CHARACTER_PROMPT_NOT_SINGLE: 角色提示词必须一人一份，请分别调用 document.create_draft。本文同时包含：${names.join('、')}。`,
+  );
+}

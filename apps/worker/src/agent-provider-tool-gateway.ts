@@ -28,7 +28,11 @@ export interface AgentProviderToolExecutor {
   selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult;
   startProviderStep(identity: LlmGenerationIdentity): void;
   completeProviderStep(params: AgentProviderStepCompleteParams): void;
-  terminateGeneration(generationId: string, reason: 'cancelled' | 'failed'): number;
+  terminateGeneration(
+    generationId: string,
+    reason: 'cancelled' | 'failed',
+    errorMessage?: string,
+  ): number;
 }
 
 type ProviderCallContext = {
@@ -118,7 +122,11 @@ export class AgentProviderToolGateway {
     });
   }
 
-  terminate(reason: 'cancelled' | 'failed'): void {
+  terminate(reason: 'cancelled' | 'failed', errorMessage?: string): void {
+    if (errorMessage?.trim()) {
+      this.executor.terminateGeneration(this.identity.generationId, reason, errorMessage);
+      return;
+    }
     this.executor.terminateGeneration(this.identity.generationId, reason);
   }
 

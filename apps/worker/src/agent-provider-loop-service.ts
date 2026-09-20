@@ -32,7 +32,10 @@ import { rebuildLibraryChunksForAdaptation } from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
-import { inferDocumentKindFromDraft } from './document-kind.js';
+import {
+  assertSingleCharacterPromptDocument,
+  inferDocumentKindFromDraft,
+} from './document-kind.js';
 import {
   ResearchError,
   ResearchService,
@@ -1636,6 +1639,14 @@ export class AgentProviderLoopService {
             .run(output, now, toolCallId);
           outputs.push({ callId: call.id, output });
         }
+        this.appendEvent(
+          database,
+          project.id,
+          task.id,
+          'agent.tool.succeeded',
+          `已完成：${params.calls.map((call) => call.name).join('、')}`,
+          now,
+        );
         const readonlySystemStep = params.calls.every(
           (call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel',
         );
@@ -1851,6 +1862,13 @@ export class AgentProviderLoopService {
         let args: ReturnType<typeof parseToolArguments>;
         try {
           args = parseToolArguments(call.name, call.argumentsJson);
+          if (call.name === 'document.create_draft' || call.name === 'document.update_draft') {
+            assertSingleCharacterPromptDocument(
+              resolveDocumentToolKind(database, call.name, authorization.targetDocumentId, args),
+              args.title ?? '',
+              args.contentMarkdown ?? '',
+            );
+          }
         } catch (error) {
           return toolErrorContinuation(activeGeneration.protocol, params, call, error);
         }
@@ -3175,7 +3193,11 @@ export class AgentProviderLoopService {
     );
   }
 
-  terminateGeneration(generationId: string, reason: 'cancelled' | 'failed'): number {
+  terminateGeneration(
+    generationId: string,
+    reason: 'cancelled' | 'failed',
+    errorMessage?: string,
+  ): number {
     this.cancelGeneration(generationId);
     this.researchCancellations.delete(generationId);
     return this.projects.access(true, (database, project) =>
@@ -3194,6 +3216,7 @@ export class AgentProviderLoopService {
              WHERE links.generation_id = ? AND tasks.project_id = ? AND tasks.status = 'running'`,
           )
           .all(generationId, project.id) as Array<{ id: string }>;
+        const detail = errorMessage?.trim() || `Provider generation ${reason}.`;
         for (const task of tasks) {
           database
             .prepare(
@@ -3201,7 +3224,7 @@ export class AgentProviderLoopService {
                error_message = ?, completed_at = ?, updated_at = ?, row_version = row_version + 1
                WHERE id = ? AND status = 'running'`,
             )
-            .run(reason, reason, `Provider generation ${reason}.`, now, now, task.id);
+            .run(reason, reason, detail.slice(0, 1000), now, now, task.id);
           database
             .prepare(
               `UPDATE agent_tool_authorizations SET status = 'revoked', revoked_at = ?,
@@ -3232,14 +3255,7 @@ export class AgentProviderLoopService {
                WHERE task_id = ? AND status = 'pending'`,
             )
             .run(now, task.id);
-          this.appendEvent(
-            database,
-            project.id,
-            task.id,
-            'agent.task.interrupted',
-            `The Agent task stopped because its Provider generation was ${reason}.`,
-            now,
-          );
+          this.appendEvent(database, project.id, task.id, 'agent.task.interrupted', detail, now);
         }
         for (const openStep of openSteps) this.openStepHandles.delete(openStep.id);
         return tasks.length;
@@ -3861,6 +3877,25 @@ function createToolContinuation(
   };
 }
 
+function resolveDocumentToolKind(
+  database: Database.Database,
+  operation: string,
+  targetDocumentId: string | undefined,
+  args: { title?: string; contentMarkdown?: string; documentKind?: string },
+): DocumentDetail['kind'] {
+  if (operation === 'document.create_draft') {
+    return (
+      (args.documentKind as DocumentDetail['kind'] | undefined) ??
+      inferDocumentKindFromDraft(args.title ?? '', args.contentMarkdown ?? '')
+    );
+  }
+  const existing = targetDocumentId
+    ? (database.prepare('SELECT kind FROM documents WHERE id = ?').get(targetDocumentId) as
+        { kind: DocumentDetail['kind'] } | undefined)
+    : undefined;
+  return existing?.kind ?? inferDocumentKindFromDraft(args.title ?? '', args.contentMarkdown ?? '');
+}
+
 function parseToolArguments(
   operation: string,
   value: string,
@@ -4351,15 +4386,10 @@ function systemAuthorizationSpecsForTask(
     'project.get_context',
     'project.integrity.check',
     'conversation.search',
-    'asset.get',
-    'asset.search',
-    'tag.list',
-    'assetGroup.list',
-    'assetGroup.resolve',
-    'settings.get',
-    'maintenance.status',
-    'media.task.get',
   ];
+  for (const operation of SYSTEM_CONTEXTUAL_READ_OPERATIONS) {
+    if (hasSystemReadIntent(prompt, operation)) operations.push(operation);
+  }
   for (const operation of SYSTEM_MUTATING_OPERATIONS) {
     if (hasSystemOperationIntent(prompt, operation)) operations.push(operation);
   }
@@ -4584,6 +4614,34 @@ const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'maintenance.diagnostics.prepare',
   'media.task.get',
 ]);
+
+const SYSTEM_CONTEXTUAL_READ_OPERATIONS = [
+  'asset.get',
+  'asset.search',
+  'tag.list',
+  'assetGroup.list',
+  'assetGroup.resolve',
+  'settings.get',
+  'maintenance.status',
+  'media.task.get',
+] as const satisfies readonly SystemAgentToolOperation[];
+
+function hasSystemReadIntent(
+  prompt: string,
+  operation: (typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number],
+): boolean {
+  const patterns: Record<(typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number], RegExp> = {
+    'asset.get': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
+    'asset.search': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
+    'tag.list': /(?:标签|\btags?\b)/iu,
+    'assetGroup.list': /(?:素材组|资源组|asset group|media group)/iu,
+    'assetGroup.resolve': /(?:素材组|资源组|asset group|media group)/iu,
+    'settings.get': /(?:应用设置|Provider|提供商|连接凭据|\bsettings?\b)/iu,
+    'maintenance.status': /(?:维护|诊断包|清理缓存|\bmaintenance\b)/iu,
+    'media.task.get': /(?:生成任务|媒体任务|media task)/iu,
+  };
+  return patterns[operation].test(prompt);
+}
 
 const SYSTEM_MUTATING_OPERATIONS = [
   'project.backup.prepare',

@@ -557,7 +557,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       const final = snapshot();
       const plan = plannedWorkflow ? this.options.plans.getByTask(taskId) : undefined;
       if (state.errorMessage) {
-        providerGateway?.terminate('failed');
+        providerGateway?.terminate('failed', state.errorMessage);
         this.options.generation.failNative({
           ...identity,
           content: final.aggregate || observed.aggregate,
@@ -584,7 +584,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     } catch (error) {
       if (isCancelled()) return;
       const message = error instanceof Error ? error.message : String(error);
-      providerGateway?.terminate('failed');
+      providerGateway?.terminate('failed', message);
       this.options.generation.failNative({
         ...identity,
         content: observed.aggregate,
