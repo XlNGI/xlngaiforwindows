@@ -5,17 +5,19 @@ import type {
 } from './conversation-runtime.js';
 import type {
   AgentToolConfirmationRequest,
+  ConversationRuntimeGetResult,
+  ConversationRuntimeLiveAction,
   LlmGenerationCompleteParams,
   LlmGenerationIdentity,
   LlmGenerationRuntimeRequest,
   LlmToolDefinition,
   LlmToolCall,
   LlmToolContinuation,
+  LlmChatToolTurn,
   NormalizedLlmUsage,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
-  ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
 import { Agent, type AgentContext, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works/pi-ai';
@@ -168,7 +170,8 @@ export class PiConversationRuntime implements ConversationRuntime {
       streamFn,
       initialState: {
         systemPrompt: withFrozenContext(
-          planning?.systemInstruction ?? unifiedAgentInstruction(runtime.systemInstruction),
+          planning?.systemInstruction ??
+            unifiedAgentInstruction(this.options.generation.runtime(identity).systemInstruction),
           runtime.context,
         ),
         model,
@@ -236,6 +239,7 @@ export class PiConversationRuntime implements ConversationRuntime {
           runtimeProtocol(this.options.generation.runtime(identity)),
           message,
           toolResults,
+          context.messages,
         );
         this.options.generation.configureAgentTools(identity, definitions, continuation);
         if (
@@ -252,7 +256,9 @@ export class PiConversationRuntime implements ConversationRuntime {
             systemPrompt: planningRound
               ? context.systemPrompt
               : withFrozenContext(
-                  unifiedAgentInstruction(runtime.systemInstruction),
+                  unifiedAgentInstruction(
+                    this.options.generation.runtime(identity).systemInstruction,
+                  ),
                   runtime.context,
                 ),
             tools:
@@ -335,12 +341,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     return this.active.has(generationId);
   }
 
-  get(generationId: string): {
-    active: boolean;
-    confirmation?: AgentToolConfirmationRequest;
-    mediaSelection?: MediaModelSelectionRequest;
-    mediaSubmission?: MediaSubmissionConfirmationRequest;
-  } {
+  get(generationId: string): ConversationRuntimeGetResult {
     const active = this.active.get(generationId);
     return {
       active: Boolean(active),
@@ -521,9 +522,14 @@ export class PiConversationRuntime implements ConversationRuntime {
 
   private createNativeStream(identity: LlmGenerationIdentity): StreamFn {
     if (!this.options.bridge) throw new Error('Pi runtime requires a NativeProviderBridge.');
-    return createPiStreamFunction(this.options.bridge, () => {
+    return createPiStreamFunction(this.options.bridge, (_model, context) => {
       const runtime = this.options.generation.runtime(identity);
-      return nativeParams(runtime);
+      return nativeParams({
+        ...runtime,
+        systemInstruction: context.systemPrompt ?? runtime.systemInstruction,
+        // Pi's system prompt already includes the frozen project context.
+        context: context.systemPrompt === undefined ? runtime.context : '',
+      });
     });
   }
 
@@ -713,8 +719,10 @@ function buildContinuation(
   protocol: LlmToolContinuation['protocol'],
   message: AgentContext['messages'][number],
   results: ToolResultMessage[],
+  messages: AgentContext['messages'],
 ): LlmToolContinuation | undefined {
-  if (message.role !== 'assistant' || !message.responseId || results.length === 0) return undefined;
+  if (message.role !== 'assistant' || results.length === 0) return undefined;
+  if (protocol === 'openai-responses' && !message.responseId) return undefined;
   const calls = message.content
     .filter(
       (item): item is Extract<AssistantMessage['content'][number], { type: 'toolCall' }> =>
@@ -734,7 +742,44 @@ function buildContinuation(
       .slice(0, 100_000),
   }));
   if (protocol === 'openai-responses') {
-    return { protocol, previousResponseId: message.responseId, outputs };
+    return { protocol, previousResponseId: message.responseId!, outputs };
   }
-  return { protocol, providerResponseId: message.responseId, calls, outputs };
+  // Chat Completions is stateless: a response ID cannot recover earlier tool
+  // results. Rebuild completed turns from Pi, including failed tool results.
+  const history: LlmChatToolTurn[] = [];
+  let turn: LlmChatToolTurn | undefined;
+  for (const item of messages) {
+    if (item === message) break;
+    if (item.role === 'assistant') {
+      turn = {
+        content: assistantText(item),
+        calls: item.content
+          .filter((block) => block.type === 'toolCall')
+          .map((call) => ({
+            id: call.id,
+            name: call.name,
+            argumentsJson: JSON.stringify(call.arguments),
+          })),
+        outputs: [],
+      };
+      history.push(turn);
+    } else if (item.role === 'toolResult' && turn) {
+      turn.outputs.push({
+        callId: item.toolCallId,
+        output: item.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n')
+          .slice(0, 100_000),
+      });
+    }
+  }
+  return {
+    protocol,
+    providerResponseId: message.responseId ?? `pi:${calls[0]?.id ?? 'tool-turn'}`,
+    history,
+    content: assistantText(message),
+    calls,
+    outputs,
+  };
 }

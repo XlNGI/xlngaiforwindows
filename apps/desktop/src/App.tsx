@@ -399,6 +399,9 @@ function readableFailure(reason: unknown, fallback: string): string {
 
 function readableGenerationError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  if (error.includes('AGENT_DOCUMENT_NOT_WRITTEN')) {
+    return '助手尚未将文档保存到项目，本次任务未完成。请重试保存。';
+  }
   if (/Out-of-order LLM stream content was rejected/i.test(error)) {
     return '生成流出现了延迟片段，已停止本次任务；请重新发送，工具调用不会重复提交。';
   }

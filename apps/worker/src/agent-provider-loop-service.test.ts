@@ -26,6 +26,8 @@ import { ImageGenerationService } from './image-generation-service.js';
 import { MediaPreparationService } from './media-preparation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
+import { PiConversationRuntime } from './pi-conversation-runtime.js';
+import { createFauxCore, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -1490,10 +1492,7 @@ describe('AgentProviderLoopService', () => {
           ),
         ),
     });
-    const { conversation, generations, loop, project } = await setup(
-      'openai-responses',
-      research,
-    );
+    const { conversation, generations, loop, project } = await setup('openai-responses', research);
     const prepared = generations.prepare({
       conversationId: conversation.id,
       prompt: 'Look up sequential evidence.',
@@ -1516,7 +1515,9 @@ describe('AgentProviderLoopService', () => {
         },
       ],
     });
-    expect(JSON.parse(first.continuation!.outputs[0]!.output).sources).toHaveLength(1);
+    expect(
+      (JSON.parse(first.continuation!.outputs[0]!.output) as { sources: unknown[] }).sources,
+    ).toHaveLength(1);
 
     const second = await loop.executeTools({
       ...prepared.stream,
@@ -1530,7 +1531,9 @@ describe('AgentProviderLoopService', () => {
         },
       ],
     });
-    expect(JSON.parse(second.continuation!.outputs[0]!.output).sources).toHaveLength(1);
+    expect(
+      (JSON.parse(second.continuation!.outputs[0]!.output) as { sources: unknown[] }).sources,
+    ).toHaveLength(1);
     expect(second.tools?.find((tool) => tool.name === 'research.fetch')?.authorizationHandle).toBe(
       agent.tools.find((tool) => tool.name === 'research.fetch')?.authorizationHandle,
     );
@@ -2717,6 +2720,191 @@ describe('AgentProviderLoopService', () => {
     const parsed = JSON.parse(result.continuation!.outputs[0]!.output) as { documentId: string };
     expect(workflow.getDocument(parsed.documentId).kind).toBe('character');
   });
+
+  it.each([
+    '保存',
+    '保存吧',
+    '请把上面的分镜保存为文档',
+    '存为草稿',
+    '存入项目',
+    'save it',
+    'can you save it',
+  ])('authorizes document saving for %s', async (prompt) => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    expect(agent.tools.map((tool) => tool.name)).toContain('document.create_draft');
+    expect(taskSnapshot(project, agent.taskId).documentOperation).toBe('document.create_draft');
+  });
+
+  it.each([
+    '如何保存文档？',
+    '不要保存',
+    '先不保存',
+    '查看资料',
+    'how do I save it?',
+    "don't save the draft",
+    '怎么保存生成的文档？',
+  ])('keeps informational or declined save requests read-only: %s', async (prompt) => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('document.create_draft');
+    loop.startProviderStep(prepared.stream);
+    expect(() =>
+      loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+    ).not.toThrow();
+  });
+
+  it.each(['document.create_draft', 'document.update_draft'] as const)(
+    'requires a persisted version from this task before completing %s',
+    async (operation) => {
+      const { conversation, generations, project, workflow } = await setup();
+      const loop = createSystemLoop(project, workflow);
+      const previous = workflow.saveDraft({
+        title: 'Existing draft',
+        contentMarkdown: '# Old version',
+      });
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: '保存',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(
+        prepared.stream,
+        '保存',
+        undefined,
+        operation === 'document.update_draft'
+          ? { operation, documentId: previous.id }
+          : { operation },
+      );
+      loop.startProviderStep(prepared.stream);
+      expect(() => loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+        'AGENT_DOCUMENT_NOT_WRITTEN',
+      );
+      expect(
+        project.access(false, (database) =>
+          database.prepare('SELECT status FROM agent_tasks WHERE id = ?').get(agent.taskId),
+        ),
+      ).toEqual({ status: 'running' });
+      const tool = agent.tools.find((item) => item.name === operation)!;
+      await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'write-response',
+        calls: [
+          {
+            id: 'write',
+            name: operation,
+            authorizationHandle: tool.authorizationHandle,
+            argumentsJson: JSON.stringify({
+              title: '分镜文档',
+              contentMarkdown: '# 第一章\n\n镜头一：青萝村。',
+            }),
+          },
+        ],
+      });
+      loop.startProviderStep(prepared.stream);
+      expect(() =>
+        loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+      ).not.toThrow();
+      const saved = workflow.listDocuments().find((doc) => doc.title === '分镜文档')!;
+      expect(workflow.getDocument(saved.id).currentVersion?.contentMarkdown).toContain(
+        '镜头一：青萝村',
+      );
+      expect(
+        project.access(false, (database) =>
+          database.prepare('SELECT status FROM agent_tasks WHERE id = ?').get(agent.taskId),
+        ),
+      ).toEqual({ status: 'waiting_review' });
+    },
+  );
+
+  it.each([true, false])(
+    'Pi reports success only when the save tool actually writes (write=%s)',
+    async (write) => {
+      const { conversation, generations, project, workflow } = await setup();
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: '保存',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, '保存');
+      generations.configureAgentTools(prepared.stream, agent.tools);
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      faux.setResponses(
+        write
+          ? [
+              fauxAssistantMessage(
+                [
+                  fauxToolCall(
+                    'document.create_draft',
+                    { title: '分镜草稿', contentMarkdown: '# 分镜\n镜头正文' },
+                    { id: 'write' },
+                  ),
+                ],
+                { stopReason: 'toolUse', responseId: 'written' },
+              ),
+              fauxAssistantMessage('已保存分镜草稿。'),
+            ]
+          : [fauxAssistantMessage('已经写好了，要保存吗？')],
+      );
+      const runtime = new PiConversationRuntime({
+        generation: generations,
+        plans: {} as never,
+        providerTools: loop,
+        streamFn: faux.streamSimple,
+        createGateway: () => {
+          throw new Error('Unexpected planner');
+        },
+      });
+      await runtime.start({
+        ...prepared.stream,
+        identity: prepared.stream,
+        taskId: agent.taskId,
+        mode: 'document',
+        prompt: '保存',
+      });
+      await runtime.wait(prepared.stream.generationId);
+      const result = generations.get(prepared.stream.generationId);
+      expect(result.status).toBe(write ? 'complete' : 'failed');
+      expect(workflow.listDocuments()).toHaveLength(write ? 1 : 0);
+      if (!write) expect(JSON.stringify(result)).toContain('AGENT_DOCUMENT_NOT_WRITTEN');
+    },
+  );
+
+  it.each(['生成一张图片', '帮我生成视频'])(
+    'does not require a text document for a media-only task: %s',
+    async (prompt) => {
+      const { conversation, generations, project, workflow } = await setup();
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      loop.prepare(prepared.stream, prompt);
+      loop.startProviderStep(prepared.stream);
+      expect(() =>
+        loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+      ).not.toThrow();
+    },
+  );
 
   it('exposes bounded system queries and only grants an explicitly requested reversible write', async () => {
     const { conversation, generations, project, workflow } = await setup();

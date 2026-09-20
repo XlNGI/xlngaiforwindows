@@ -1014,7 +1014,7 @@ function withAgentResearchInstruction(systemInstruction: string): string {
 
 function withAgentDocumentInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_DOCUMENT_INSTRUCTION_MARKER)) return systemInstruction;
-  return `${systemInstruction}\n\n${AGENT_DOCUMENT_INSTRUCTION_MARKER}\nIf the user asks to create, generate, save, place, or update a project document, you must call document.create_draft or document.update_draft. Put the full Markdown body in the tool arguments. Do not paste the document into the chat as a substitute for writing it into the project document library. Chat text should only briefly report the tool result, such as the created title and document kind.`;
+  return `${systemInstruction}\n\n${AGENT_DOCUMENT_INSTRUCTION_MARKER}\nIf the user asks to create, generate, save, place, or update a project document, you must call document.create_draft or document.update_draft. A follow-up such as "保存" or "save it" refers to the document discussed in the conversation. The user's request already authorizes saving a draft; do not ask for another save confirmation. Put the full Markdown body in the tool arguments. Do not paste the document into the chat as a substitute for writing it into the project document library. Only report completion after a successful write tool result. Chat text should only briefly report the tool result, such as the created title and document kind.`;
 }
 
 function cloneToolContinuation(continuation: LlmToolContinuation): LlmToolContinuation {
@@ -1022,6 +1022,12 @@ function cloneToolContinuation(continuation: LlmToolContinuation): LlmToolContin
     return {
       protocol: continuation.protocol,
       providerResponseId: continuation.providerResponseId,
+      content: continuation.content,
+      history: continuation.history?.map((turn) => ({
+        content: turn.content,
+        calls: turn.calls.map((call) => ({ ...call })),
+        outputs: turn.outputs.map((output) => ({ ...output })),
+      })),
       calls: continuation.calls.map((call) => ({ ...call })),
       outputs: continuation.outputs.map((output) => ({ ...output })),
     };

@@ -3118,6 +3118,32 @@ export class AgentProviderLoopService {
       database.transaction(() => {
         const task = this.requireTask(database, project.id, params.generationId);
         const step = this.requireOpenStep(database, params.attemptId);
+        const request = JSON.parse(task.request_snapshot_json) as { documentOperation?: string };
+        const operation = request.documentOperation;
+        const userMessage = database
+          .prepare('SELECT content FROM chat_messages WHERE id = ?')
+          .get(task.user_message_id) as { content: string } | undefined;
+        if (
+          (operation === 'document.create_draft' || operation === 'document.update_draft') &&
+          userMessage &&
+          hasExplicitOperationIntent(userMessage.content, operation) &&
+          !isMediaOnlyRequest(userMessage.content)
+        ) {
+          const written = database
+            .prepare(
+              `SELECT 1 FROM agent_tool_calls calls
+               INNER JOIN document_versions versions ON versions.id = calls.result_document_version_id
+               INNER JOIN documents documents ON documents.id = versions.document_id
+               WHERE calls.task_id = ? AND calls.tool_name = ? AND calls.status = 'succeeded'
+                 AND documents.id = calls.result_document_id AND documents.project_id = ? LIMIT 1`,
+            )
+            .get(task.id, operation, project.id);
+          if (!written) {
+            throw new Error(
+              `AGENT_DOCUMENT_NOT_WRITTEN: 文档尚未保存到项目，请调用 ${operation} 写入完整正文后再结束任务。`,
+            );
+          }
+        }
         const now = new Date().toISOString();
         this.completeStep(
           database,
@@ -4695,13 +4721,25 @@ function parseConfirmationContinuationDescriptor(
 
 function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {
   const value = prompt.normalize('NFKC');
+  const mentionsSave = /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value);
+  const saveIsNotRequested =
+    /(?:不要|不用|无需|别|不需要|暂不|先不|如何|怎么|怎样|是否).{0,12}(?:保存|存为|存成|存到|存入)|(?:do not|don't|how (?:do|to)).{0,20}\bsave\b/iu.test(
+      value,
+    );
+  const saveIntent = mentionsSave && !saveIsNotRequested;
+  if (
+    mentionsSave &&
+    saveIsNotRequested &&
+    (operation === 'document.create_draft' || operation === 'document.update_draft')
+  )
+    return false;
   if (operation === 'adapter.schema.propose') {
     return /(?:schema|参数|字段|配置项).{0,24}(?:添加|新增|修改|更新|补充|调整|add|update|modify|change)/iu.test(
       value,
     );
   }
   if (operation === 'document.update_draft') {
-    return /(?:修改|更新|修订|重写|改写|edit|update|revise|rewrite)/iu.test(value);
+    return saveIntent || /(?:修改|更新|修订|重写|改写|edit|update|revise|rewrite)/iu.test(value);
   }
   if (
     operation === 'document.create_draft' ||
@@ -4711,11 +4749,23 @@ function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperatio
     operation === 'novel.episode.submit_structure' ||
     operation === 'novel.adaptation.submit_proposal'
   ) {
-    return /(?:创建|生成|写|起草|撰写|整理成|做成|续写|改写|create|generate|write|draft|compose|continue|rewrite)/iu.test(
-      value,
+    return (
+      saveIntent ||
+      /(?:创建|生成|写|起草|撰写|整理成|做成|续写|改写|create|generate|write|draft|compose|continue|rewrite)/iu.test(
+        value,
+      )
     );
   }
   return true;
+}
+
+function isMediaOnlyRequest(prompt: string): boolean {
+  return (
+    /(?:图片|图像|视频|生图|image|video|picture)/iu.test(prompt) &&
+    !/(?:文档|草稿|剧本|分镜|大纲|提示词|document|draft|script|storyboard|outline|prompt)/iu.test(
+      prompt,
+    )
+  );
 }
 
 type SchemaToolArguments =

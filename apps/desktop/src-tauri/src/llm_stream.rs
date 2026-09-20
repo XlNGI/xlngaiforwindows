@@ -100,6 +100,15 @@ struct LlmToolOutput {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LlmChatToolTurn {
+    #[serde(default)]
+    content: Option<String>,
+    calls: Vec<LlmToolCall>,
+    outputs: Vec<LlmToolOutput>,
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(tag = "protocol")]
 enum LlmToolContinuation {
     #[serde(rename = "openai-responses")]
@@ -112,6 +121,10 @@ enum LlmToolContinuation {
     ChatCompletions {
         #[serde(rename = "providerResponseId")]
         provider_response_id: String,
+        #[serde(default)]
+        history: Vec<LlmChatToolTurn>,
+        #[serde(default)]
+        content: Option<String>,
         calls: Vec<LlmToolCall>,
         outputs: Vec<LlmToolOutput>,
     },
@@ -753,7 +766,8 @@ fn run_agent_runtime(
                     }
                     LlmStreamEvent::Delta { delta } => {
                         stream_visible.push_str(&delta);
-                        let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) else {
+                        let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible)
+                        else {
                             return Ok(());
                         };
                         aggregate.push_str(&fragment);
@@ -1339,6 +1353,8 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
         if let Some(continuation) = &runtime.continuation {
             let LlmToolContinuation::ChatCompletions {
                 provider_response_id,
+                history,
+                content,
                 calls,
                 outputs,
             } = continuation
@@ -1348,7 +1364,21 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                     false,
                 ));
             };
-            append_chat_continuation(&mut messages, provider_response_id, calls, outputs)?;
+            for turn in history {
+                append_chat_turn(
+                    &mut messages,
+                    &turn.calls,
+                    &turn.outputs,
+                    turn.content.as_deref(),
+                )?;
+            }
+            append_chat_continuation(
+                &mut messages,
+                provider_response_id,
+                calls,
+                outputs,
+                content.as_deref(),
+            )?;
         }
         let mut value = serde_json::json!({
             "model": runtime.remote_model_id,
@@ -1391,12 +1421,28 @@ fn append_chat_continuation(
     provider_response_id: &str,
     calls: &[LlmToolCall],
     outputs: &[LlmToolOutput],
+    content: Option<&str>,
 ) -> Result<(), StreamFailure> {
     if provider_response_id.trim().is_empty() || calls.is_empty() || outputs.is_empty() {
         return Err(StreamFailure::new(
             "LLM tool continuation is invalid.",
             false,
         ));
+    }
+    append_chat_turn(messages, calls, outputs, content)
+}
+
+fn append_chat_turn(
+    messages: &mut Vec<serde_json::Value>,
+    calls: &[LlmToolCall],
+    outputs: &[LlmToolOutput],
+    content: Option<&str>,
+) -> Result<(), StreamFailure> {
+    if calls.is_empty() && outputs.is_empty() {
+        if let Some(text) = content.filter(|text| !text.is_empty()) {
+            messages.push(serde_json::json!({ "role": "assistant", "content": text }));
+        }
+        return Ok(());
     }
     let mut outputs_by_call = HashMap::new();
     for output in outputs {
@@ -1453,7 +1499,7 @@ fn append_chat_continuation(
     }
     messages.push(serde_json::json!({
         "role": "assistant",
-        "content": serde_json::Value::Null,
+        "content": content,
         "tool_calls": provider_calls,
     }));
     messages.extend(tool_messages);
@@ -1949,9 +1995,7 @@ impl SseParser {
                 {
                     if let Some(fragment) = coalesce_visible_delta(&self.visible_text, delta) {
                         self.visible_text.push_str(&fragment);
-                        emit(LlmStreamEvent::Delta {
-                            delta: fragment,
-                        })?;
+                        emit(LlmStreamEvent::Delta { delta: fragment })?;
                     }
                 }
                 if let Some(tool_calls) = choice
@@ -2901,6 +2945,8 @@ mod tests {
             tools: Vec::new(),
             continuation: Some(super::LlmToolContinuation::ChatCompletions {
                 provider_response_id: "chatcmpl_tool".to_string(),
+                history: Vec::new(),
+                content: None,
                 calls: vec![super::LlmToolCall {
                     id: "call_1".to_string(),
                     name: "document.create_draft".to_string(),
@@ -2931,6 +2977,73 @@ mod tests {
     }
 
     #[test]
+    fn rebuilds_chat_history_in_order_with_text_parallel_calls_and_errors() {
+        let mut runtime: LlmRuntimeRequest = serde_json::from_value(serde_json::json!({
+            "generationId": "generation", "attemptId": "attempt", "projectId": "project",
+            "projectSessionId": "session", "conversationId": "conversation",
+            "providerProfileId": "profile", "modelId": "model", "remoteModelId": "model",
+            "protocol": "openai-chat-completions", "baseUrl": "https://example.invalid/v1",
+            "systemInstruction": "System", "context": "Catalog", "prompt": "Summarize",
+            "continuation": {
+                "protocol": "openai-chat-completions", "providerResponseId": "response-3",
+                "history": [
+                    {
+                        "content": "Search the sources.",
+                        "calls": [
+                            {"id": "a", "name": "library.search", "argumentsJson": "{}", "authorizationHandle": "private-capability"},
+                            {"id": "b", "name": "library.search", "argumentsJson": "{}"}
+                        ],
+                        "outputs": [
+                            {"callId": "b", "output": "source B"},
+                            {"callId": "a", "output": "source A"}
+                        ]
+                    },
+                    {
+                        "content": "Read chapter one.",
+                        "calls": [{"id": "c", "name": "library.read", "argumentsJson": "{}"}],
+                        "outputs": [{"callId": "c", "output": "第一章正文"}]
+                    }
+                ],
+                "content": "Read the outline.",
+                "calls": [{"id": "d", "name": "library.read", "argumentsJson": "{}"}],
+                "outputs": [{"callId": "d", "output": "Library source handle is invalid or expired."}]
+            }
+        })).expect("history should deserialize");
+        let body = super::build_request_body(&runtime).expect("history should build");
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let messages = value["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 9);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["content"], "Summarize");
+        assert_eq!(messages[2]["content"], "Search the sources.");
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["name"],
+            "library__dot__search"
+        );
+        assert_eq!(messages[3]["tool_call_id"], "a");
+        assert_eq!(messages[3]["content"], "source A");
+        assert_eq!(messages[4]["tool_call_id"], "b");
+        assert_eq!(messages[4]["content"], "source B");
+        assert_eq!(messages[5]["content"], "Read chapter one.");
+        assert_eq!(messages[6]["content"], "第一章正文");
+        assert_eq!(messages[7]["content"], "Read the outline.");
+        assert_eq!(
+            messages[8]["content"],
+            "Library source handle is invalid or expired."
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("private-capability"));
+
+        // Prior turns must pass the same call/output validation as the latest turn.
+        if let Some(super::LlmToolContinuation::ChatCompletions { history, .. }) =
+            &mut runtime.continuation
+        {
+            history[0].outputs.pop();
+        }
+        let error = super::build_request_body(&runtime).expect_err("incomplete history must fail");
+        assert!(error.message.contains("missing a call output"));
+    }
+
+    #[test]
     fn rejects_chat_continuation_without_matching_output() {
         let runtime = LlmRuntimeRequest {
             generation_id: "generation".to_string(),
@@ -2950,6 +3063,8 @@ mod tests {
             tools: Vec::new(),
             continuation: Some(super::LlmToolContinuation::ChatCompletions {
                 provider_response_id: "chatcmpl_tool".to_string(),
+                history: Vec::new(),
+                content: None,
                 calls: vec![super::LlmToolCall {
                     id: "call_1".to_string(),
                     name: "document.read".to_string(),

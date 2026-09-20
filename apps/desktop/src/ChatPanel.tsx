@@ -1020,6 +1020,9 @@ function policyRejectionDetail(summary: string): string {
 
 function readableAgentTaskError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  if (error.includes('AGENT_DOCUMENT_NOT_WRITTEN')) {
+    return '助手尚未将文档保存到项目，本次任务未完成。请重试保存。';
+  }
   const turnLimit = error.match(/Pi runtime exceeded the (\d+)-turn limit/i);
   if (turnLimit) return `助手连续调用工具超过 ${turnLimit[1]} 轮，已停止。`;
   if (/Provider generation failed/i.test(error) || /Provider generation was failed/i.test(error)) {
@@ -1233,8 +1236,7 @@ function AgentToolTimeline({
     running && !generationFailed,
   );
   const errorMessage =
-    readableAgentTaskError(generationError) ??
-    readableAgentTaskError(detail?.task.errorMessage);
+    readableAgentTaskError(generationError) ?? readableAgentTaskError(detail?.task.errorMessage);
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
   const expanded = expandedOverride ?? true;
 

@@ -1859,9 +1859,18 @@ export interface LlmResponsesToolContinuation {
   outputs: LlmToolOutput[];
 }
 
+export interface LlmChatToolTurn {
+  content?: string;
+  calls: Array<Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>>;
+  outputs: LlmToolOutput[];
+}
+
 export interface LlmChatCompletionsToolContinuation {
   protocol: 'openai-chat-completions';
   providerResponseId: string;
+  /** Completed tool turns preceding the current calls, in conversation order. */
+  history?: LlmChatToolTurn[];
+  content?: string;
   calls: LlmToolCall[];
   outputs: LlmToolOutput[];
 }
