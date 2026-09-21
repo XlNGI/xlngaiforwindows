@@ -3144,7 +3144,7 @@ export class AgentProviderLoopService {
         if (
           (operation === 'document.create_draft' || operation === 'document.update_draft') &&
           userMessage &&
-          hasExplicitOperationIntent(userMessage.content, operation) &&
+          requiresPersistedDocumentWrite(userMessage.content, operation) &&
           !isMediaOnlyRequest(userMessage.content)
         ) {
           const written = database
@@ -4777,17 +4777,43 @@ function parseConfirmationContinuationDescriptor(
   return descriptor as unknown as SystemConfirmationContinuationDescriptor;
 }
 
-function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {
+function requiresPersistedDocumentWrite(prompt: string, operation: AgentToolOperation): boolean {
+  if (operation !== 'document.create_draft' && operation !== 'document.update_draft') return false;
+  if (!hasExplicitOperationIntent(prompt, operation)) return false;
+  const value = prompt.normalize('NFKC');
+  if (isOpenEndedStoryGoal(value)) return false;
+  return isNamedDocumentWrite(value) || hasSaveIntent(value);
+}
+
+function hasSaveIntent(prompt: string): boolean {
   const value = prompt.normalize('NFKC');
   const mentionsSave = /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value);
   const saveIsNotRequested =
     /(?:不要|不用|无需|别|不需要|暂不|先不|如何|怎么|怎样|是否).{0,12}(?:保存|存为|存成|存到|存入)|(?:do not|don't|how (?:do|to)).{0,20}\bsave\b/iu.test(
       value,
     );
-  const saveIntent = mentionsSave && !saveIsNotRequested;
+  return mentionsSave && !saveIsNotRequested;
+}
+
+function isOpenEndedStoryGoal(prompt: string): boolean {
+  return (
+    /(?:想|要|帮我|请)?(?:写|创作|编)(?:一)?(?:部|本|个)?(?:小说|故事)/u.test(prompt) &&
+    !isNamedDocumentWrite(prompt)
+  );
+}
+
+function isNamedDocumentWrite(prompt: string): boolean {
+  return /(?:文档|草稿|大纲|计划|分镜|剧本|提示词|角色设定|人物设定|场景设定|章节|下一章|第[0-9零〇一二两三四五六七八九十百]+章|document|draft|outline|plan|storyboard|script|prompt)/iu.test(
+    prompt,
+  );
+}
+
+function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {
+  const value = prompt.normalize('NFKC');
+  const saveIntent = hasSaveIntent(value);
   if (
-    mentionsSave &&
-    saveIsNotRequested &&
+    /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value) &&
+    !saveIntent &&
     (operation === 'document.create_draft' || operation === 'document.update_draft')
   )
     return false;
@@ -5173,9 +5199,12 @@ function summarizeLibraryResult(result: {
     title: string;
     status: string;
     sourceType: string;
+    sourceTypeLabel?: string;
     sourceId: string;
     versionId?: string;
     kind?: string;
+    kindLabel?: string;
+    matchKind?: string;
   }>;
   sourceHandle?: string;
   citationLabel?: string;
@@ -5198,9 +5227,12 @@ function summarizeLibraryResult(result: {
         title: source.title,
         status: source.status,
         sourceType: source.sourceType,
+        sourceTypeLabel: source.sourceTypeLabel,
         sourceId: source.sourceId,
         versionId: source.versionId,
         kind: source.kind,
+        kindLabel: source.kindLabel,
+        matchKind: source.matchKind,
       })),
     };
   }

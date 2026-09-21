@@ -331,7 +331,8 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'project.get_context',
-    description: 'Get a bounded summary of the currently open project. This is read-only.',
+    description:
+      'Get a bounded catalog of the currently open project. Document bodies are not included. Prefer library.search / library.read for facts; the catalog is already in context.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
@@ -785,7 +786,7 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.search',
     description:
-      'Search the current project library for facts, character bibles, novel drafts, and guidelines. By default searches authoritative documents, novel chapters, memories, and constraints. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
+      'Search the current project library. Title, chapter label (第N章), 《title》, and filename rank above body text. Results include matchKind (title|body), kindLabel, and sourceTypeLabel so you can verify identity before writing. Prefer a short identity query such as a name or 第一章, not the whole user sentence. Conversation history is excluded unless sourceTypes includes conversation.',
     parameters: {
       type: 'object',
       additionalProperties: false,

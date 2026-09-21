@@ -275,19 +275,9 @@ describe('PiConversationRuntime', () => {
     expect(systemPrompt).toContain('unified project Agent');
   });
 
-  it('enforces an image-to-video generic dependency plan before Worker tool execution', async () => {
+  it('lets the model pick image and video tools in document mode without a forced plan', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
-      fauxAssistantMessage(
-        [
-          fauxToolCall(
-            'task.plan.submit',
-            { version: 2, steps: [], constraints: [] },
-            { id: 'plan' },
-          ),
-        ],
-        { stopReason: 'toolUse' },
-      ),
       fauxAssistantMessage(
         [fauxToolCall('media.image.prepare', { prompt: 'Dragon' }, { id: 'image-call' })],
         { stopReason: 'toolUse', responseId: 'response-image' },
@@ -302,11 +292,10 @@ describe('PiConversationRuntime', () => {
         ],
         { stopReason: 'toolUse', responseId: 'response-video' },
       ),
-      fauxAssistantMessage([fauxToolCall('task.package.complete', {}, { id: 'complete' })], {
-        stopReason: 'toolUse',
-      }),
+      fauxAssistantMessage('The dragon image and video drafts are ready.'),
     ]);
     const plans = new FakePlanService();
+    const planOnlyRound = vi.spyOn(plans, 'planOnlyRound');
     const providerTools = fakeProviderExecutor();
     vi.mocked(providerTools.executeTools).mockImplementation((params) =>
       Promise.resolve({
@@ -358,26 +347,15 @@ describe('PiConversationRuntime', () => {
     });
     await runtime.wait(identity.generationId);
 
-    expect(plans.generic).toBe(true);
+    expect(planOnlyRound).not.toHaveBeenCalled();
+    expect(plans.generic).toBe(false);
     expect(generation.failNative.mock.calls).toEqual([]);
-    expect(plans.completed).toBe(true);
-    const configuredCalls = generation.configureAgentTools.mock.calls as unknown as Array<
-      [unknown, LlmToolDefinition[]]
-    >;
-    expect(configuredCalls.map((call) => call[1].map((tool) => tool.name))).toEqual([
-      ['task.plan.submit'],
-      ['media.image.prepare', 'task.package.complete'],
-      ['media.video.prepare', 'task.package.complete'],
-      ['task.package.complete'],
-      [],
-    ]);
     expect(
       vi.mocked(providerTools.executeTools).mock.calls.map(([params]) => params.calls[0]?.name),
     ).toEqual(['media.image.prepare', 'media.video.prepare']);
-    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(2);
-    expect(configuredCalls[0]?.[1].map((tool) => tool.name)).toEqual(['task.plan.submit']);
+    expect(providerTools.startProviderStep).toHaveBeenCalled();
     expect(generation.complete).toHaveBeenCalledWith(
-      expect.objectContaining({ finishReason: 'task_package_complete' }),
+      expect.objectContaining({ content: 'The dragon image and video drafts are ready.' }),
     );
   });
 

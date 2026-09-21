@@ -150,9 +150,6 @@ interface ChatPanelProps {
   mediaReferenceImageInputs?: string[];
   onSelectMediaModel?: (selection: MediaModelSelectionDecision) => void;
   onCancelMediaModelSelection?: () => void;
-  /** One-shot episode chapter range for the next send only. */
-  selectedChapterCount?: number;
-  onClearSelectedChapters?: () => void;
   canLoadEarlierMessages?: boolean;
   loadingEarlierMessages?: boolean;
   onLoadEarlierMessages?: () => void;
@@ -229,8 +226,6 @@ export function ChatPanel({
   mediaReferenceImageInputs,
   onSelectMediaModel,
   onCancelMediaModelSelection,
-  selectedChapterCount,
-  onClearSelectedChapters,
   onOpenLibrarySource,
   agentParameterRequest,
   onSubmitAgentParameters,
@@ -483,17 +478,6 @@ export function ChatPanel({
             </div>
           </details>
         )}
-        {selectedChapterCount ? (
-          <div className="chapter-context-chip" role="status">
-            <BookOpen size={13} />
-            <span>下次发送将带上 {selectedChapterCount} 个章节作为本集范围</span>
-            {onClearSelectedChapters && (
-              <button type="button" onClick={onClearSelectedChapters}>
-                清除
-              </button>
-            )}
-          </div>
-        ) : null}
       </div>
       <div className="message-list" ref={messageListRef}>
         {canLoadEarlierMessages && (

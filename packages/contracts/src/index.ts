@@ -1658,6 +1658,8 @@ export interface LibraryCatalogItem {
   updatedAt: string;
 }
 
+export type LibrarySearchMatchKind = 'title' | 'body';
+
 export interface LibrarySearchSource {
   sourceHandle: string;
   sourceType: LibrarySourceType;
@@ -1665,6 +1667,9 @@ export interface LibrarySearchSource {
   versionId?: string;
   status: LibrarySourceStatus;
   kind?: string;
+  kindLabel?: string;
+  sourceTypeLabel?: string;
+  matchKind: LibrarySearchMatchKind;
   title: string;
   snippet: string;
   citationLabel: string;

@@ -1412,11 +1412,12 @@ export function buildGenericPlanOnlyInstruction(input: {
 
 export function shouldRequireStructuredPlan(
   mode: ConversationTaskMode,
-  userPrompt: string,
-  authorizedOperations: readonly string[],
+  _userPrompt: string,
+  _authorizedOperations: readonly string[],
 ): boolean {
-  if (mode === 'short-drama') return true;
-  return inferRequiredPlanOperations(userPrompt, authorizedOperations).length >= 2;
+  // Ordinary project sessions let the model pick tools. Only the explicit
+  // short-drama UI path freezes a structured plan before write tools.
+  return mode === 'short-drama';
 }
 
 export function inferRequiredPlanOperations(

@@ -341,7 +341,7 @@ describe('ConversationTaskPlanV2 validation and inference', () => {
     ).toBe('TASK_PLAN_AUTHORITY_FIELD_FORBIDDEN');
   });
 
-  it('requires a plan for the image-to-video dependency but not a single tag write', () => {
+  it('does not force a generic plan from prompt language in document mode', () => {
     const operations = ['media.image.prepare', 'media.video.prepare', 'tag.create'];
     expect(inferRequiredPlanOperations('生成一张龙的图片，再把它生成视频', operations)).toEqual([
       'media.image.prepare',
@@ -349,14 +349,15 @@ describe('ConversationTaskPlanV2 validation and inference', () => {
     ]);
     expect(
       shouldRequireStructuredPlan('document', '生成一张龙的图片，再把它生成视频', operations),
-    ).toBe(true);
+    ).toBe(false);
     expect(shouldRequireStructuredPlan('document', '把这个素材加上龙标签', operations)).toBe(false);
     expect(inferRequiredPlanOperations('生成一张龙的图片，再生成一张虎的图片', operations)).toEqual(
       ['media.image.prepare', 'media.image.prepare'],
     );
     expect(
       shouldRequireStructuredPlan('document', '生成一张龙的图片，再生成一张虎的图片', operations),
-    ).toBe(true);
+    ).toBe(false);
+    expect(shouldRequireStructuredPlan('short-drama', '生成本集', operations)).toBe(true);
   });
 });
 

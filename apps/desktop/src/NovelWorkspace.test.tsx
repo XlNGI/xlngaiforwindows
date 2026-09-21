@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentDetail, NovelChapterInfo, WorkerMethod } from '@ai-video/contracts';
-import { NovelWorkspace } from './NovelWorkspace';
+import { NovelWorkspace, composeEpisodeChapterPrompt } from './NovelWorkspace';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readNovelDocument } from './novel-import-client';
@@ -92,7 +92,17 @@ describe('NovelWorkspace', () => {
     );
   });
 
-  it('selects chapters and emits the selected chapter IDs for episode generation', async () => {
+  it('writes selected chapter titles into a retrievable prompt', () => {
+    expect(
+      composeEpisodeChapterPrompt([
+        { id: 'chapter-1', displayLabel: '第一章', title: '开篇' },
+        { id: 'chapter-2', displayLabel: '第二章', title: '风暴' },
+      ]),
+    ).toContain('第一章《开篇》、第二章《风暴》');
+  });
+
+  it('selects chapters and emits chapter refs for the conversation prompt', async () => {
+
     const chapter2 = {
       ...chapter,
       id: 'chapter-2',
@@ -113,7 +123,10 @@ describe('NovelWorkspace', () => {
     fireEvent.click(screen.getByLabelText('选择 Chapter 1 Opening'));
     fireEvent.click(screen.getByLabelText('选择 Chapter 2 Storm'));
     fireEvent.click(screen.getByRole('button', { name: /生成短剧内容/ }));
-    expect(onGenerateEpisode).toHaveBeenCalledWith(['chapter-1', 'chapter-2']);
+    expect(onGenerateEpisode).toHaveBeenCalledWith([
+      { id: 'chapter-1', displayLabel: 'Chapter 1', title: 'Opening' },
+      { id: 'chapter-2', displayLabel: 'Chapter 2', title: 'Storm' },
+    ]);
   });
 
   it('exports the immutable work package through Worker', async () => {

@@ -1754,51 +1754,6 @@ describe('ChatPanel attempt metadata', () => {
     expect(onRestoreConversation).toHaveBeenCalledWith('conversation');
   });
 
-  it('surfaces the sticky chapter context and clears it on request', () => {
-    const conversation: ConversationInfo = {
-      id: 'conversation',
-      projectId: 'project',
-      scopeType: 'project',
-      title: '短剧会话',
-      createdAt: '2026-09-15T00:00:00.000Z',
-      updatedAt: '2026-09-15T00:00:00.000Z',
-    };
-    const onClearSelectedChapters = vi.fn();
-    render(
-      <ChatPanel
-        scopeType="project"
-        scopeAvailable
-        writable
-        conversations={[conversation]}
-        conversation={conversation}
-        messages={[]}
-        composer=""
-        statusMessage=""
-        legacyLlmConfigured={false}
-        llmProfiles={[]}
-        llmModels={[]}
-        selectedLlmProfileId=""
-        selectedLlmModelId=""
-        selectedChapterCount={2}
-        onClearSelectedChapters={onClearSelectedChapters}
-        onSelectConversation={vi.fn()}
-        onCreateConversation={vi.fn()}
-        onRetryGeneration={vi.fn()}
-        onLlmProfileChange={vi.fn()}
-        onLlmModelChange={vi.fn()}
-        onOpenProviderSettings={vi.fn()}
-        onComposerChange={vi.fn()}
-        onCancelGeneration={vi.fn()}
-        onSendMessage={vi.fn()}
-      />,
-    );
-
-    // Selected chapters turn every following turn into a short-drama task, so
-    // the state has to stay visible after the chapter workspace is left.
-    expect(screen.getByRole('status')).toHaveTextContent('下次发送将带上 2 个章节作为本集范围');
-    fireEvent.click(screen.getByRole('button', { name: '清除' }));
-    expect(onClearSelectedChapters).toHaveBeenCalledOnce();
-  });
   it('disables message composer and buttons when conversation is archived', () => {
     const archivedConversation: ConversationInfo = {
       id: 'archived-conv',

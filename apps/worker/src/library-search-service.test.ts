@@ -170,12 +170,17 @@ describe('LibrarySearchService', () => {
       sourceType: 'memory',
       status: 'memory',
     });
-    expect(library.search({ taskId: 't', attemptId: 'c', query: '潮声' }).sources[0]).toMatchObject(
-      {
-        sourceType: 'conversation',
-        status: 'conversation',
-      },
-    );
+    expect(
+      library.search({
+        taskId: 't',
+        attemptId: 'c',
+        query: '潮声',
+        sourceTypes: ['conversation'],
+      }).sources[0],
+    ).toMatchObject({
+      sourceType: 'conversation',
+      status: 'conversation',
+    });
     expect(
       library.search({ taskId: 't', attemptId: 'd', query: '雾港角色图' }).sources[0],
     ).toMatchObject({
@@ -241,6 +246,40 @@ describe('LibrarySearchService', () => {
     expect(read.status).toBe('read');
     expect(read.truncated).toBe(true);
     expect(read.content.length).toBe(12);
+  });
+
+  it('prefers the named chapter when the query is a generation request', async () => {
+    const { novels, content, library } = await setup();
+    novels.importNovel({
+      chapters: [
+        {
+          title: '雾港',
+          displayLabel: '第一章',
+          contentMarkdown: '雾港的雨落在石阶上，林澈提着马灯走向旧码头。',
+        },
+        {
+          title: '余波',
+          displayLabel: '第十一章',
+          contentMarkdown: '第一章的余波还在旧码头回响。',
+        },
+      ],
+    });
+    content.saveDocument({
+      kind: 'plan',
+      title: '本集计划',
+      contentMarkdown: '根据第一章生成剧本，把第一章改成短剧场次。'.repeat(8),
+    });
+    const result = library.search({
+      taskId: 'task',
+      attemptId: 'attempt',
+      query: '根据第一章生成剧本',
+    });
+    expect(result.sources[0]).toMatchObject({
+      title: '第一章',
+      sourceType: 'novel-chapter',
+      matchKind: 'title',
+      sourceTypeLabel: '小说章节',
+    });
   });
 
   it('does not index incomplete streaming chat messages', async () => {

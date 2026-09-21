@@ -86,7 +86,7 @@ import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { TaskLogView } from './TaskLogView';
-import { NovelWorkspace } from './NovelWorkspace';
+import { NovelWorkspace, composeEpisodeChapterPrompt } from './NovelWorkspace';
 import { ChangeSetReviewPanel } from './ChangeSetReviewPanel';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
@@ -694,7 +694,6 @@ export function App() {
     initialLlmSelectionValue.modelId ?? '',
   );
   const [researchMode, setResearchMode] = useState<AgentResearchMode>(initialResearchMode);
-  const [episodeChapterIds, setEpisodeChapterIds] = useState<string[]>([]);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const [agentTask, setAgentTask] = useState<import('@ai-video/contracts').AgentTaskDetail>();
   const [conversationAgentTasks, setConversationAgentTasks] = useState<
@@ -2037,15 +2036,9 @@ export function App() {
             : {}),
           ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
           researchMode,
-          ...(episodeChapterIds.length > 0
-            ? { selectedChapterIds: episodeChapterIds, targetPlatform: 'seedance' as const }
-            : {}),
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         });
-        if (unified.status !== 'needs_model_selection' && episodeChapterIds.length > 0) {
-          setEpisodeChapterIds([]);
-        }
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
@@ -2906,11 +2899,6 @@ export function App() {
       onOpenProtectedUi={openAgentProtectedUi}
       onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
       onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
-      selectedChapterCount={episodeChapterIds.length}
-      onClearSelectedChapters={() => {
-        setEpisodeChapterIds([]);
-        setChatMessage('已清除本集章节范围。');
-      }}
       onOpenLibrarySource={openLibrarySource}
       onConfirmSchemaProposal={(adapterKey, version) => {
         void confirmSchemaProposal(adapterKey, version);
@@ -3208,7 +3196,6 @@ export function App() {
         versions={versions}
         currentVersionId={document?.currentVersionId}
         message={contentMessage}
-        episodeChapterCount={episodeChapterIds.length}
         onTitleChange={setDocumentTitle}
         onKindChange={setDocumentKind}
         onContentChange={setDocumentContent}
@@ -3731,11 +3718,14 @@ export function App() {
                 projectId={project?.id}
                 writable={writable}
                 onOpenDocument={(documentId) => void openNovelDocument(documentId)}
-                onGenerateEpisode={(chapterIds) => {
-                  setEpisodeChapterIds(chapterIds);
+                onGenerateEpisode={(chapters) => {
+                  const prompt = composeEpisodeChapterPrompt(chapters);
+                  setComposer((current) =>
+                    current.trim() ? `${current.trim()}\n\n${prompt}` : prompt,
+                  );
                   workspaceDispatch({ type: 'open', panelId: 'conversation' });
                   setChatMessage(
-                    `已指定 ${chapterIds.length} 个章节作为本集范围。直接描述要生成的短剧内容，下次发送会冻结这些章节。`,
+                    `已写入 ${chapters.length} 个章节引用。确认后发送即可，助手会按需检索这些章节。`,
                   );
                 }}
               />

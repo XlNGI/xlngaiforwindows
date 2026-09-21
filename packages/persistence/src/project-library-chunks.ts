@@ -1,6 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { splitNovelRagChunks } from './novel-rag-chunks.js';
+import {
+  analyzeLibraryQuery,
+  escapeLibraryLike,
+  libraryFtsMatchQuery,
+  libraryKindLabel,
+  libraryQueryTerms,
+  librarySourceTypeLabel,
+  scoreLibraryChunk,
+  type LibraryQueryMatchKind,
+} from './project-library-query.js';
 
 export const LIBRARY_SOURCE_TYPES = [
   'document',
@@ -56,6 +66,9 @@ export interface LibraryCatalogRecord {
 export interface LibrarySearchHit {
   chunk: ProjectLibraryChunkRecord;
   score: number;
+  matchKind: LibraryQueryMatchKind;
+  kindLabel?: string;
+  sourceTypeLabel: string;
 }
 
 export interface LibrarySearchQuery {
@@ -423,7 +436,25 @@ export function searchProjectLibraryChunks(
   const limit = Math.min(Math.max(params.limit ?? 8, 1), 20);
   const rows = loadSearchCandidates(database, params, query);
   const scored = rows
-    .map((row) => ({ chunk: toChunkRecord(row), score: libraryChunkScore(row, query) }))
+    .map((row) => {
+      const ranked = scoreLibraryChunk(
+        {
+          title: row.title,
+          content: row.content_text,
+          sourceType: row.source_type,
+          status: row.status,
+          kind: row.kind ?? undefined,
+        },
+        query,
+      );
+      return {
+        chunk: toChunkRecord(row),
+        score: ranked.score,
+        matchKind: ranked.matchKind,
+        kindLabel: libraryKindLabel(row.kind ?? undefined),
+        sourceTypeLabel: librarySourceTypeLabel(row.source_type),
+      };
+    })
     .filter((item) => item.score > 0)
     .sort(
       (left, right) =>
@@ -466,23 +497,6 @@ export function librarySnippet(content: string, query: string, maxChars = 400): 
   const start = Math.max(0, index - Math.floor(maxChars / 4));
   const snippet = content.slice(start, start + maxChars).trim();
   return snippet.length < content.length && start > 0 ? `…${snippet}` : snippet;
-}
-
-export function libraryQueryTerms(query: string): string[] {
-  const terms = new Set<string>();
-  const segments = query.toLocaleLowerCase('zh-CN').match(/[\p{L}\p{N}_-]+/gu) ?? [];
-  for (const segment of segments) {
-    if (/^[\u3400-\u9fff]+$/u.test(segment)) {
-      if (segment.length === 1) terms.add(segment);
-      for (let index = 0; index < segment.length - 1 && terms.size < 64; index += 1) {
-        terms.add(segment.slice(index, index + 2));
-      }
-    } else if (segment.length >= 2) {
-      terms.add(segment);
-    }
-    if (terms.size >= 64) break;
-  }
-  return [...terms];
 }
 
 function insertLibraryWrites(
@@ -638,48 +652,59 @@ function loadSearchCandidates(
     )`);
   }
   const where = filters.join(' AND ');
-  if (projectLibraryFtsEnabled(database) && [...query].length >= 3) {
+  const byId = new Map<string, LibraryChunkRow>();
+  const add = (rows: LibraryChunkRow[]) => {
+    for (const row of rows) byId.set(row.id, row);
+  };
+
+  const ftsQuery = libraryFtsMatchQuery(query);
+  if (projectLibraryFtsEnabled(database) && ftsQuery) {
     try {
-      const rows = database
-        .prepare(
-          `SELECT chunks.*
-           FROM project_library_fts
-           INNER JOIN project_library_chunks chunks ON chunks.rowid = project_library_fts.rowid
-           WHERE project_library_fts MATCH ? AND ${where}
-           ORDER BY chunks.updated_at DESC, chunks.id LIMIT 500`,
-        )
-        .all(`"${query.replaceAll('"', '""')}"`, ...values) as LibraryChunkRow[];
-      if (rows.length > 0) return rows;
+      add(
+        database
+          .prepare(
+            `SELECT chunks.*
+             FROM project_library_fts
+             INNER JOIN project_library_chunks chunks ON chunks.rowid = project_library_fts.rowid
+             WHERE project_library_fts MATCH ? AND ${where}
+             ORDER BY chunks.updated_at DESC, chunks.id LIMIT 500`,
+          )
+          .all(ftsQuery, ...values) as LibraryChunkRow[],
+      );
     } catch {
-      // Fall through to explicit n-gram scoring; never tokenize on whitespace.
+      // Fall through to identity matching and explicit n-gram scoring; never tokenize on whitespace.
     }
   }
+
+  const identityTerms = analyzeLibraryQuery(query).identityTerms.slice(0, 8);
+  if (identityTerms.length > 0) {
+    const clauses = identityTerms.map(
+      () => "(chunks.title LIKE ? ESCAPE '\\' OR chunks.content_text LIKE ? ESCAPE '\\')",
+    );
+    const likeValues: unknown[] = [];
+    for (const term of identityTerms) {
+      const pattern = `%${escapeLibraryLike(term)}%`;
+      likeValues.push(pattern, pattern);
+    }
+    add(
+      database
+        .prepare(
+          `SELECT chunks.* FROM project_library_chunks chunks
+           WHERE ${where} AND (${clauses.join(' OR ')})
+           ORDER BY chunks.updated_at DESC, chunks.id LIMIT 800`,
+        )
+        .all(...values, ...likeValues) as LibraryChunkRow[],
+    );
+  }
+
+  if (byId.size > 0) return [...byId.values()];
+
   return database
     .prepare(
       `SELECT chunks.* FROM project_library_chunks chunks WHERE ${where}
        ORDER BY chunks.updated_at DESC, chunks.id LIMIT 5000`,
     )
     .all(...values) as LibraryChunkRow[];
-}
-
-function libraryChunkScore(row: LibraryChunkRow, query: string): number {
-  const haystack = `${row.title}\n${row.content_text}`.toLocaleLowerCase('zh-CN');
-  const needle = query.trim().toLocaleLowerCase('zh-CN');
-  let score = 0;
-  if (needle && haystack.includes(needle)) score += Math.min(needle.length, 12) * 4;
-  if (row.title.toLocaleLowerCase('zh-CN').includes(needle)) score += 8;
-  for (const term of libraryQueryTerms(query)) {
-    if (haystack.includes(term)) score += Math.min(term.length, 6);
-  }
-
-  // Weight by source type: authoritative documents and novels come first, conversations are demoted
-  if (row.source_type === 'document' || row.source_type === 'novel-chapter') {
-    score = score * 1.5 + (row.status === 'published' ? 10 : 5);
-  } else if (row.source_type === 'conversation') {
-    score = Math.floor(score * 0.3); // conversation chat messages are demoted to avoid search loops
-  }
-
-  return score;
 }
 
 function toChunkRecord(row: LibraryChunkRow): ProjectLibraryChunkRecord {

@@ -289,33 +289,7 @@ function resolveMediaSelectionForRequest(
   };
 }
 
-/**
- * Map read-only schema questions onto the controlled Agent tool loop.
- *
- * This intentionally stays conservative: only an explicit inspection-style
- * request containing schema/parameter vocabulary is classified as a schema
- * query. Everything else keeps the normal document-draft default.
- */
-export function inferAgentDocumentIntent(prompt: string): AgentDocumentIntent {
-  const value = prompt.normalize('NFC').trim();
-  const mentionsSchema = /(schema|参数|字段|配置项|输入项|接口定义|能力描述)/iu.test(value);
-  const asksToInspect =
-    /(?:查看|查询|查一下|了解|支持哪些|有哪些|哪些|什么|列出|获取|inspect|show|get|list|what|which)/iu.test(
-      value,
-    );
-  if (mentionsSchema && /(?:历史|审计|记录|版本|history|audit|changes)/iu.test(value)) {
-    return { operation: 'adapter.schema.audit.list' };
-  }
-  if (
-    mentionsSchema &&
-    /(?:添加|新增|修改|更新|补充|调整|add|update|modify|change)/iu.test(value)
-  ) {
-    return { operation: 'adapter.schema.propose' };
-  }
-  return mentionsSchema && asksToInspect
-    ? { operation: 'adapter.schema.get' }
-    : { operation: 'document.create_draft' };
-}
+const DEFAULT_DOCUMENT_INTENT: AgentDocumentIntent = { operation: 'document.create_draft' };
 
 /** Compatibility wrapper around resolveAgentRunWorkflow. Prompt language is not a router. */
 export function inferConversationTaskMode(
@@ -1564,7 +1538,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               researchMode: agentParams.researchMode,
               documentIntent: shortDrama
                 ? inferShortDramaDocumentIntent(agentParams.prompt)
-                : inferAgentDocumentIntent(agentParams.prompt),
+                : DEFAULT_DOCUMENT_INTENT,
               selectedChapterIds: shortDrama ? agentParams.selectedChapterIds : undefined,
               targetPlatform: shortDrama ? (agentParams.targetPlatform ?? 'seedance') : undefined,
             });
@@ -1574,7 +1548,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
               undefined,
               shortDrama
                 ? inferShortDramaDocumentIntent(agentParams.prompt)
-                : inferAgentDocumentIntent(agentParams.prompt),
+                : DEFAULT_DOCUMENT_INTENT,
               agentParams.researchMode,
               undefined,
               shortDrama ? agentParams.selectedChapterIds : undefined,
@@ -1680,7 +1654,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             prepared.stream,
             agentParams.prompt,
             agentParams.title,
-            agentParams.documentIntent ?? inferAgentDocumentIntent(agentParams.prompt),
+            agentParams.documentIntent ?? DEFAULT_DOCUMENT_INTENT,
             agentParams.researchMode,
             undefined,
             agentParams.agentMode === 'short-drama' ? agentParams.selectedChapterIds : undefined,

@@ -124,6 +124,8 @@ export class PiConversationRuntime implements ConversationRuntime {
       projectSessionId: request.projectSessionId,
       conversationId: request.conversationId,
     };
+    // Short-drama still freezes a plan first. Ordinary document sessions
+    // authorize tools and let the model choose; prompt regex is not a router.
     const shortDramaWorkflow = request.mode === 'short-drama';
     const genericPlanWorkflow =
       !shortDramaWorkflow &&

@@ -197,8 +197,11 @@ describe('project library chunks', () => {
         .sourceType,
     ).toBe('constraint');
     expect(
-      searchProjectLibraryChunks(database, { projectId: 'project', query: '潮声' })[0]?.chunk
-        .sourceType,
+      searchProjectLibraryChunks(database, {
+        projectId: 'project',
+        query: '潮声',
+        sourceTypes: ['conversation'],
+      })[0]?.chunk.sourceType,
     ).toBe('conversation');
     expect(
       searchProjectLibraryChunks(database, { projectId: 'project', query: '雾港角色图' })[0]?.chunk
@@ -230,6 +233,113 @@ describe('project library chunks', () => {
       'untitled-4',
       'untitled-3',
     ]);
+    database.close();
+  });
+
+  it('ranks a character title above a body that repeats the whole request', async () => {
+    const { database, now } = await temporaryDatabase();
+    insertDocument(database, now, {
+      id: 'character',
+      kind: 'character',
+      title: '林澈',
+      content: '林澈是灯塔守望员。',
+      versionId: 'character-version',
+    });
+    insertDocument(database, now, {
+      id: 'outline',
+      kind: 'outline',
+      title: '项目大纲',
+      content: '根据林澈的角色设定生成剧本。'.repeat(20),
+      versionId: 'outline-version',
+    });
+    rebuildLibraryChunksForDocument(database, 'project', 'character', now);
+    rebuildLibraryChunksForDocument(database, 'project', 'outline', now);
+
+    const hits = searchProjectLibraryChunks(database, {
+      projectId: 'project',
+      query: '林澈的角色设定',
+    });
+    expect(hits[0]?.chunk.title).toBe('林澈');
+    expect(hits[0]?.chunk.kind).toBe('character');
+    expect(hits[0]?.matchKind).toBe('title');
+    expect(hits[0]?.kindLabel).toBe('角色设定');
+    database.close();
+  });
+
+  it('ranks the named chapter above documents that only mention it', async () => {
+    const { database, now } = await temporaryDatabase();
+    rebuildLibraryChunksForRecord(
+      database,
+      'project',
+      {
+        sourceType: 'novel-chapter',
+        sourceId: 'chapter-1',
+        status: 'draft',
+        title: '第一章',
+        content: '雾港的雨落在石阶上，林澈提着马灯走向旧码头。',
+      },
+      now,
+    );
+    rebuildLibraryChunksForRecord(
+      database,
+      'project',
+      {
+        sourceType: 'novel-chapter',
+        sourceId: 'chapter-11',
+        status: 'draft',
+        title: '第十一章',
+        content: '第一章的余波还在旧码头回响。',
+      },
+      now,
+    );
+    insertDocument(database, now, {
+      id: 'plan',
+      kind: 'plan',
+      title: '本集计划',
+      content: '根据第一章生成剧本，把第一章改成短剧场次。'.repeat(12),
+      versionId: 'plan-version',
+    });
+    rebuildLibraryChunksForDocument(database, 'project', 'plan', now);
+
+    const hits = searchProjectLibraryChunks(database, {
+      projectId: 'project',
+      query: '根据第一章生成剧本',
+    });
+    expect(hits[0]?.chunk.title).toBe('第一章');
+    expect(hits[0]?.chunk.sourceType).toBe('novel-chapter');
+    expect(hits[0]?.matchKind).toBe('title');
+    expect(hits[0]?.sourceTypeLabel).toBe('小说章节');
+    expect(hits.find((item) => item.chunk.title === '第十一章')?.score ?? 0).toBeLessThan(
+      hits[0]!.score,
+    );
+    database.close();
+  });
+
+  it('ranks a book-title mark against the document title', async () => {
+    const { database, now } = await temporaryDatabase();
+    insertDocument(database, now, {
+      id: 'named',
+      kind: 'note',
+      title: '雾港',
+      content: '这是书名笔记。',
+      versionId: 'named-version',
+    });
+    insertDocument(database, now, {
+      id: 'outline',
+      kind: 'outline',
+      title: '项目大纲',
+      content: '雾港的雨落在石阶上。'.repeat(8),
+      versionId: 'outline-version',
+    });
+    rebuildLibraryChunksForDocument(database, 'project', 'named', now);
+    rebuildLibraryChunksForDocument(database, 'project', 'outline', now);
+
+    const hits = searchProjectLibraryChunks(database, {
+      projectId: 'project',
+      query: '《雾港》',
+    });
+    expect(hits[0]?.chunk.title).toBe('雾港');
+    expect(hits[0]?.matchKind).toBe('title');
     database.close();
   });
 });

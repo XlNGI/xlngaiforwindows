@@ -199,9 +199,9 @@ describe('GenerationService', () => {
     };
     const { content, conversation, generations } = await setup(provider);
     content.archiveConversation({ conversationId: conversation.id });
-    expect(() =>
-      generations.generate(conversation.id, 'Test archived'),
-    ).toThrow('Archived conversations cannot be updated.');
+    expect(() => generations.generate(conversation.id, 'Test archived')).toThrow(
+      'Archived conversations cannot be updated.',
+    );
   });
 
   it('cancels an active generation', async () => {
@@ -482,6 +482,9 @@ describe('GenerationService', () => {
     expect(runtime.systemInstruction).toContain('工作助理');
     expect(runtime.systemInstruction).toContain('library.search');
     expect(runtime.systemInstruction).toContain('Do not repeat a successful library.search');
+    expect(runtime.systemInstruction).toContain('核源');
+    expect(runtime.systemInstruction).toContain('matchKind=title');
+    expect(runtime.systemInstruction).toContain('project.get_context');
     expect(runtime.context).toContain('林澈');
     expect(runtime.context).not.toContain('这段正文不应进入普通会话');
   });

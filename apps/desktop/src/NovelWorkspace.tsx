@@ -26,12 +26,29 @@ import { callWorker } from './worker-client';
 import { readNovelDocument } from './novel-import-client';
 import { parseNovelSource, type NovelImportChapterDraft } from './novel-import';
 
+export interface NovelEpisodeChapterRef {
+  id: string;
+  displayLabel: string;
+  title: string;
+}
+
 interface NovelWorkspaceProps {
   projectId?: string;
   writable: boolean;
   onOpenDocument?: (documentId: string) => void;
-  /** Called with the user-selected chapter IDs when starting episode generation. */
-  onGenerateEpisode?: (chapterIds: string[]) => void;
+  /** Puts selected chapter titles into the current conversation prompt. */
+  onGenerateEpisode?: (chapters: NovelEpisodeChapterRef[]) => void;
+}
+
+export function composeEpisodeChapterPrompt(chapters: readonly NovelEpisodeChapterRef[]): string {
+  const names = chapters
+    .map((chapter) => `${chapter.displayLabel}《${chapter.title.trim() || '未命名'}》`)
+    .join('、');
+  return (
+    `请基于这些小说章节生成本集短剧内容：${names}。` +
+    '先用 library.search 检索 sourceType 为 novel-chapter 的对应章节，核对标题后再写草稿；' +
+    '不要用其它文档或未点名的章节代替。'
+  );
 }
 
 function documentStateLabel(state: DocumentVersionState): string {
@@ -434,10 +451,14 @@ export function NovelWorkspace({
           title="用所选章节生成短剧内容（本集整体把控、场次与镜头、角色与场景）"
           disabled={!onGenerateEpisode || selectedChapterIds.size === 0}
           onClick={() => {
-            const ids = chapters
+            const selected = chapters
               .filter((chapter) => selectedChapterIds.has(chapter.id))
-              .map((chapter) => chapter.id);
-            if (ids.length > 0) onGenerateEpisode?.(ids);
+              .map((chapter) => ({
+                id: chapter.id,
+                displayLabel: chapter.displayLabel,
+                title: chapter.title,
+              }));
+            if (selected.length > 0) onGenerateEpisode?.(selected);
           }}
         >
           <Clapperboard size={13} /> 生成短剧内容（{selectedChapterIds.size}）

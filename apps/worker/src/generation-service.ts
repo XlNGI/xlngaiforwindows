@@ -1008,11 +1008,16 @@ function withAgentToolInstructions(
 function withAgentLibraryInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_LIBRARY_INSTRUCTION_MARKER)) return systemInstruction;
   return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nDo not repeat a successful library.search for the same query.
-项目资料按需检索准则：
-1. 核心事实、设定、大纲与剧情以 document（项目文档）和 novel-chapter（小说正文/草稿）为准。
-2. conversation 是历史聊天记录。除非用户明确要求回忆先前的会话内容，否则禁止反复检索 conversation，应优先检索 document 和 novel-chapter。
-3. 严禁连续反复调用 library.search。若 1~2 次检索未找到完全匹配的结果，代表资料库暂无该具体记录，请直接基于已有项目常识回答或向用户寻求澄清，切勿变换近义词死循环重试。
-4. 调用 library.search 得到 handles 后，至多读取 1~2 个最相关的 sourceHandle 即可开始回答。不要无休止地翻阅每一个片段。`;
+项目资料按需检索与核源准则：
+1. 检索范围仅限当前打开的项目。不要编造读过的资料，也不要按操作系统或其他项目去找文件。
+2. 查询应优先使用对象身份：标题、书名号《》、「」引号、章号（第一章/第1章）、文件名。不要把整句用户请求（例如“根据第一章生成剧本”）当作唯一检索词。
+3. 结果里的 kind / sourceType 是英文枚举。对照：character=角色设定，scene=场景设定，outline=大纲，plan=计划，storyboard=分镜，note=笔记；novel-chapter=小说章节，document=项目文档，memory=项目记忆，constraint=生产约束，asset=素材。matchKind=title 表示标题/章号命中，body 只表示正文里出现过这些词。
+4. 读完必须核源：title、kindLabel、sourceTypeLabel 是否就是用户点名的那个对象。用户要“第一章”时，不能因为别的文档正文提到第一章就拿来用。
+5. 若 resultCount>1 且没有唯一身份匹配（标题/章号对得上），列出候选的标题、类型、草稿或已发布状态，请用户确认；此时禁止写入或生成派生文档。用户要的是连续章节范围（第3-5章）时，多章命中是预期，可以都读。
+6. 标题或章号对不上时，不要用正文命中凑合生成。可再检索一次更短的身份词（人名、第一章、《书名》）；仍不唯一就停止并询问。
+7. conversation 是历史聊天记录。除非用户明确要求回忆先前会话，否则不要检索 conversation。
+8. 不要连续反复变换近义词死循环检索。核心事实以 document 与 novel-chapter 为准。
+9. 资料目录已在系统提示中。不要用 project.get_context 找正文；正文只用 library.search / library.read。`;
 }
 
 function withAgentResearchInstruction(systemInstruction: string): string {
@@ -1022,7 +1027,7 @@ function withAgentResearchInstruction(systemInstruction: string): string {
 
 function withAgentDocumentInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_DOCUMENT_INSTRUCTION_MARKER)) return systemInstruction;
-  return `${systemInstruction}\n\n${AGENT_DOCUMENT_INSTRUCTION_MARKER}\nIf the user asks to create, generate, save, place, or update a project document, you must call document.create_draft or document.update_draft. A follow-up such as "保存" or "save it" refers to the document discussed in the conversation. The user's request already authorizes saving a draft; do not ask for another save confirmation. Put the full Markdown body in the tool arguments. Do not paste the document into the chat as a substitute for writing it into the project document library. Only report completion after a successful write tool result. Chat text should only briefly report the tool result, such as the created title and document kind. Character prompts are one document per character or named group. Title that draft with the character name and set documentKind=character. If a chapter has several characters, call document.create_draft once per character in sequence until the cast is complete. Do not put multiple characters into one character document, and do not write a combined bible to split later.`;
+  return `${systemInstruction}\n\n${AGENT_DOCUMENT_INSTRUCTION_MARKER}\nIf the user names a project document to create or save (大纲、角色设定、场景设定、章节、剧本、分镜、计划, or 保存), you must call document.create_draft or document.update_draft. A follow-up such as "保存" or "save it" refers to the document discussed in the conversation. The user's request already authorizes saving that draft; do not ask for another save confirmation. Put the full Markdown body in the tool arguments. Do not paste the document into the chat as a substitute for writing it into the project document library. Only report completion after a successful write tool result. Chat text should only briefly report the tool result, such as the created title and document kind. If the user only states an open-ended goal such as "我想写一部小说", you may ask a few clarifying questions or start a draft; asking questions is a valid completion and must not be treated as a failed save. Character prompts are one document per character or named group. Title that draft with the character name and set documentKind=character. If a chapter has several characters, call document.create_draft once per character in sequence until the cast is complete. Do not put multiple characters into one character document, and do not write a combined bible to split later.`;
 }
 
 function cloneToolContinuation(continuation: LlmToolContinuation): LlmToolContinuation {

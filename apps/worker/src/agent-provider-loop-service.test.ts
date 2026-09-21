@@ -2806,6 +2806,44 @@ describe('AgentProviderLoopService', () => {
     ).not.toThrow();
   });
 
+  it.each(['我想写一部小说', '帮我写个故事', '想创作一本小说'])(
+    'allows clarifying an open-ended writing goal without aborting: %s',
+    async (prompt) => {
+      const { conversation, generations, project, workflow } = await setup();
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      loop.prepare(prepared.stream, prompt);
+      loop.startProviderStep(prepared.stream);
+      expect(() =>
+        loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+      ).not.toThrow();
+    },
+  );
+
+  it.each(['生成一份大纲', '写一份角色设定', '根据第一章生成剧本'])(
+    'still requires a saved document for a named write: %s',
+    async (prompt) => {
+      const { conversation, generations, project, workflow } = await setup();
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      loop.prepare(prepared.stream, prompt);
+      loop.startProviderStep(prepared.stream);
+      expect(() => loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+        'AGENT_DOCUMENT_NOT_WRITTEN',
+      );
+    },
+  );
+
   it.each(['document.create_draft', 'document.update_draft'] as const)(
     'requires a persisted version from this task before completing %s',
     async (operation) => {
