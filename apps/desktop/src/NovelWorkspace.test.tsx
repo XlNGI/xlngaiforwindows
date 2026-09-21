@@ -359,6 +359,36 @@ describe('NovelWorkspace', () => {
     expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: 'document-1' });
   });
 
+  it('opens the focused chapter from a library citation', async () => {
+    const chapter2: NovelChapterInfo = {
+      ...chapter,
+      id: 'chapter-2',
+      documentId: 'document-2',
+      title: 'Fog Harbor',
+      position: 1,
+      displayLabel: 'Chapter 2',
+    };
+    mockWorker((method, params) => {
+      if (method === 'novel.chapter.list') return [chapter, chapter2];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') {
+        const documentId = (params as { documentId?: string } | undefined)?.documentId;
+        return {
+          ...documentDetail(documentId === 'document-2' ? 'Fog Harbor body' : 'Draft'),
+          id: documentId ?? 'document-1',
+          title: documentId === 'document-2' ? 'Fog Harbor' : 'Opening',
+        };
+      }
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable focusChapterId="chapter-2" />);
+    expect(await screen.findByText(/Chapter 2 Fog Harbor/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: 'document-2' }),
+    );
+    expect(screen.getByLabelText('章节内容')).toHaveValue('Fog Harbor body');
+  });
+
   it('offers explicit server-version and local-edit conflict actions', async () => {
     let saveAttempt = 0;
     mockWorker((method) => {

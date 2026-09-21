@@ -197,8 +197,11 @@ describe('project library chunks', () => {
         .sourceType,
     ).toBe('constraint');
     expect(
-      searchProjectLibraryChunks(database, { projectId: 'project', query: '潮声' })[0]?.chunk
-        .sourceType,
+      searchProjectLibraryChunks(database, {
+        projectId: 'project',
+        query: '潮声',
+        sourceTypes: ['conversation'],
+      })[0]?.chunk.sourceType,
     ).toBe('conversation');
     expect(
       searchProjectLibraryChunks(database, { projectId: 'project', query: '雾港角色图' })[0]?.chunk
@@ -230,6 +233,44 @@ describe('project library chunks', () => {
       'untitled-4',
       'untitled-3',
     ]);
+    database.close();
+  });
+
+  it('indexes chapter location names that are not repeated in the body', async () => {
+    const { database, now } = await temporaryDatabase();
+    insertDocument(database, now, {
+      id: 'chapter-doc',
+      kind: 'note',
+      title: '雾港',
+      content: '雨落在石阶上，只有潮声。',
+      versionId: 'chapter-version',
+    });
+    database
+      .prepare(
+        `INSERT INTO novel_chapters
+         (id, project_id, document_id, position, display_label, lifecycle_status,
+          row_version, created_at, updated_at)
+         VALUES (?, 'project', ?, 0, ?, 'active', 0, ?, ?)`,
+      )
+      .run('chapter-1', 'chapter-doc', '第 1 章', now, now);
+    rebuildLibraryChunksForDocument(database, 'project', 'chapter-doc', now);
+
+    expect(
+      searchProjectLibraryChunks(database, { projectId: 'project', query: '雾港' })[0]?.chunk,
+    ).toMatchObject({
+      sourceType: 'novel-chapter',
+      sourceId: 'chapter-1',
+      title: '第 1 章 雾港',
+    });
+    expect(
+      searchProjectLibraryChunks(database, { projectId: 'project', query: '第1章' })[0]?.chunk
+        .title,
+    ).toBe('第 1 章 雾港');
+    expect(
+      listProjectLibraryCatalog(database, 'project').find(
+        (item) => item.sourceType === 'novel-chapter',
+      )?.title,
+    ).toBe('第 1 章 雾港');
     database.close();
   });
 });
