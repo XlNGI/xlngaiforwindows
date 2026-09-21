@@ -36,7 +36,7 @@ describe('app settings database', () => {
     expect(migrateAppDatabase(appDatabase)).toBe(5);
     expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 5 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
-    expect(migrateDatabase(projectDatabase)).toBe(39);
+    expect(migrateDatabase(projectDatabase)).toBe(40);
     expect(getAppSchemaVersion(appDatabase)).toBe(5);
 
     const providerColumns = appDatabase

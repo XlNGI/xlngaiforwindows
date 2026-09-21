@@ -642,6 +642,7 @@ export function App() {
   );
 
   const [view, setView] = useState<WorkspaceView>('documents');
+  const [libraryFocusChapterId, setLibraryFocusChapterId] = useState<string>();
   const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
   const [detachedPanels, setDetachedPanels] = useState<Partial<Record<WorkspacePanelId, string>>>(
     {},
@@ -885,6 +886,7 @@ export function App() {
 
   const openLibrarySource = (source: AgentLibrarySourceInfo) => {
     if (source.sourceType === 'novel-chapter') {
+      setLibraryFocusChapterId(source.sourceId);
       openProjectView('novel');
       return;
     }
@@ -906,7 +908,15 @@ export function App() {
       openProjectView('assets');
       return;
     }
-    if (source.sourceType === 'scene' || source.sourceType === 'shot') {
+    if (source.sourceType === 'scene') {
+      const target = scenes.find((item) => item.id === source.sourceId);
+      if (target) void selectScene(target);
+      else openProjectView('shots');
+      return;
+    }
+    if (source.sourceType === 'shot') {
+      const loaded = shots.find((item) => item.id === source.sourceId);
+      if (loaded) setShot(loaded);
       openProjectView('shots');
       return;
     }
@@ -3444,7 +3454,10 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'novel' ? 'active' : ''}`}
                 type="button"
-                onClick={() => openProjectView('novel')}
+                onClick={() => {
+                  if (view !== 'novel') setLibraryFocusChapterId(undefined);
+                  openProjectView('novel');
+                }}
               >
                 <BookOpen size={16} />
                 <span>小说</span>
@@ -3730,6 +3743,7 @@ export function App() {
               <NovelWorkspace
                 projectId={project?.id}
                 writable={writable}
+                focusChapterId={libraryFocusChapterId}
                 onOpenDocument={(documentId) => void openNovelDocument(documentId)}
                 onGenerateEpisode={(chapterIds) => {
                   setEpisodeChapterIds(chapterIds);

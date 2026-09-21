@@ -45,7 +45,11 @@ import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
 import { backfillCurrentNovelRagChunks } from './novel-rag-chunks.js';
-import { backfillProjectLibraryChunks, createProjectLibraryFts } from './project-library-chunks.js';
+import {
+  backfillProjectLibraryChunks,
+  createProjectLibraryFts,
+  rebuildLibraryChunksForDocument,
+} from './project-library-chunks.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -420,6 +424,14 @@ export function migrateDatabase(
         .run(39, now);
     })();
   }
+  if (getSchemaVersion(database) === 39) {
+    database.transaction(() => {
+      applyMigrationV40(database, now);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(40, now);
+    })();
+  }
   return getSchemaVersion(database);
 }
 
@@ -427,6 +439,16 @@ function applyMigrationV39(database: Database.Database, now: string): void {
   database.exec(MIGRATION_V39);
   createProjectLibraryFts(database);
   backfillProjectLibraryChunks(database, now);
+}
+
+function applyMigrationV40(database: Database.Database, now: string): void {
+  const rows = database.prepare('SELECT id, project_id FROM documents').all() as Array<{
+    id: string;
+    project_id: string;
+  }>;
+  for (const row of rows) {
+    rebuildLibraryChunksForDocument(database, row.project_id, row.id, now);
+  }
 }
 
 function applyMigrationV37(database: Database.Database): void {

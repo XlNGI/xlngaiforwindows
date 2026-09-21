@@ -82,10 +82,42 @@ describe('LibrarySearchService', () => {
     expect(result.sources[0]).toMatchObject({
       sourceType: 'novel-chapter',
       status: 'draft',
-      title: '第一章',
+      title: '第一章 雾港',
+    });
+    expect(
+      library.search({ taskId: 'task', attemptId: 'title-query', query: '雾港' }).sources[0],
+    ).toMatchObject({
+      sourceType: 'novel-chapter',
+      title: '第一章 雾港',
     });
   });
 
+  it('finds a chapter by title even when the body does not repeat the location name', async () => {
+    const { novels, library } = await setup();
+    novels.importNovel({
+      chapters: [
+        {
+          title: '灯塔',
+          displayLabel: '第 2 章',
+          contentMarkdown: '雨落在石阶上，只有潮声。',
+        },
+      ],
+    });
+    const result = library.search({
+      taskId: 'task',
+      attemptId: 'attempt',
+      query: '灯塔',
+    });
+    expect(result.sources[0]).toMatchObject({
+      sourceType: 'novel-chapter',
+      title: '第 2 章 灯塔',
+    });
+    expect(
+      library.search({ taskId: 'task', attemptId: 'compact', query: '第2章' }).sources[0],
+    ).toMatchObject({
+      title: '第 2 章 灯塔',
+    });
+  });
   it('rejects expired and cross-task handles', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -170,12 +202,17 @@ describe('LibrarySearchService', () => {
       sourceType: 'memory',
       status: 'memory',
     });
-    expect(library.search({ taskId: 't', attemptId: 'c', query: '潮声' }).sources[0]).toMatchObject(
-      {
-        sourceType: 'conversation',
-        status: 'conversation',
-      },
-    );
+    expect(
+      library.search({
+        taskId: 't',
+        attemptId: 'c',
+        query: '潮声',
+        sourceTypes: ['conversation'],
+      }).sources[0],
+    ).toMatchObject({
+      sourceType: 'conversation',
+      status: 'conversation',
+    });
     expect(
       library.search({ taskId: 't', attemptId: 'd', query: '雾港角色图' }).sources[0],
     ).toMatchObject({

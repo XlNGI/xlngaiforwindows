@@ -87,6 +87,24 @@ const CATALOG_LIMIT_PER_TYPE = 20;
 const CATALOG_LIMIT_CONVERSATIONS = 5;
 const LIBRARY_FTS_NAME = 'project_library_fts';
 
+export function libraryChapterTitle(
+  displayLabel: string | null | undefined,
+  title: string,
+): string {
+  const label = displayLabel?.trim() ?? '';
+  const name = title.trim();
+  if (label && name && label !== name) {
+    if (name.includes(label)) return name;
+    if (label.includes(name)) return label;
+    return `${label} ${name}`;
+  }
+  return name || label;
+}
+
+function collapseLibraryText(value: string): string {
+  return value.replace(/\s+/g, '');
+}
+
 export function projectLibraryFtsEnabled(database: Database.Database): boolean {
   return Boolean(
     database
@@ -559,7 +577,7 @@ function resolveDocumentSource(
     return {
       sourceType: 'novel-chapter',
       sourceId: document.chapter_id,
-      title: document.chapter_label?.trim() || document.title,
+      title: libraryChapterTitle(document.chapter_label, document.title),
     };
   }
   if (document.kind === 'storyboard') {
@@ -665,9 +683,16 @@ function loadSearchCandidates(
 function libraryChunkScore(row: LibraryChunkRow, query: string): number {
   const haystack = `${row.title}\n${row.content_text}`.toLocaleLowerCase('zh-CN');
   const needle = query.trim().toLocaleLowerCase('zh-CN');
+  const collapsedHaystack = collapseLibraryText(haystack);
+  const collapsedNeedle = collapseLibraryText(needle);
+  const collapsedTitle = collapseLibraryText(row.title.toLocaleLowerCase('zh-CN'));
   let score = 0;
   if (needle && haystack.includes(needle)) score += Math.min(needle.length, 12) * 4;
+  else if (collapsedNeedle && collapsedHaystack.includes(collapsedNeedle)) {
+    score += Math.min(collapsedNeedle.length, 12) * 3;
+  }
   if (row.title.toLocaleLowerCase('zh-CN').includes(needle)) score += 8;
+  else if (collapsedNeedle && collapsedTitle.includes(collapsedNeedle)) score += 6;
   for (const term of libraryQueryTerms(query)) {
     if (haystack.includes(term)) score += Math.min(term.length, 6);
   }
@@ -746,7 +771,7 @@ function catalogDocuments(database: Database.Database, projectId: string): Libra
       versionId: row.current_version_id,
       status: row.published_version_id === row.current_version_id ? 'published' : 'draft',
       kind: row.kind,
-      title: row.chapter_label?.trim() || row.title,
+      title: row.chapter_id ? libraryChapterTitle(row.chapter_label, row.title) : row.title,
       updatedAt: row.updated_at,
     });
   }

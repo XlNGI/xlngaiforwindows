@@ -29,6 +29,7 @@ import { parseNovelSource, type NovelImportChapterDraft } from './novel-import';
 interface NovelWorkspaceProps {
   projectId?: string;
   writable: boolean;
+  focusChapterId?: string;
   onOpenDocument?: (documentId: string) => void;
   /** Called with the user-selected chapter IDs when starting episode generation. */
   onGenerateEpisode?: (chapterIds: string[]) => void;
@@ -84,6 +85,7 @@ function consistencyIssueLabel(code: NovelConsistencyReport['issues'][number]['c
 export function NovelWorkspace({
   projectId,
   writable,
+  focusChapterId,
   onOpenDocument,
   onGenerateEpisode,
 }: NovelWorkspaceProps) {
@@ -170,8 +172,8 @@ export function NovelWorkspace({
   };
 
   useEffect(() => {
-    void loadChapters();
-  }, [projectId, includeArchived]);
+    void loadChapters(focusChapterId);
+  }, [projectId, includeArchived, focusChapterId]);
 
   const openChapter = async (chapter: NovelChapterInfo) => {
     setBusy(true);
