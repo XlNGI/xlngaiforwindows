@@ -609,6 +609,9 @@ function loadSearchCandidates(
   if (params.sourceTypes && params.sourceTypes.length > 0) {
     filters.push(`chunks.source_type IN (${params.sourceTypes.map(() => '?').join(', ')})`);
     values.push(...params.sourceTypes);
+  } else {
+    // By default, exclude conversation chunks so general search does not loop on chat history unless explicitly requested
+    filters.push("chunks.source_type <> 'conversation'");
   }
   if (params.status && params.status !== 'any') {
     filters.push('chunks.status = ?');
@@ -668,6 +671,14 @@ function libraryChunkScore(row: LibraryChunkRow, query: string): number {
   for (const term of libraryQueryTerms(query)) {
     if (haystack.includes(term)) score += Math.min(term.length, 6);
   }
+
+  // Weight by source type: authoritative documents and novels come first, conversations are demoted
+  if (row.source_type === 'document' || row.source_type === 'novel-chapter') {
+    score = score * 1.5 + (row.status === 'published' ? 10 : 5);
+  } else if (row.source_type === 'conversation') {
+    score = Math.floor(score * 0.3); // conversation chat messages are demoted to avoid search loops
+  }
+
   return score;
 }
 

@@ -2,7 +2,7 @@
 
 版本：1.0
 日期：2026-09-19
-状态：待实施（产品决策已在会话中锁定；代码未开始）
+状态：已实施（P0–P6 核心功能及测试门禁已全部完成）
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、Pi Runtime。Native Research Bridge 不在本计划范围内。
 
 > 本文档是后续项目检索与召回改造的单一事实来源。确认规则变化时，先改本文，再改代码；若后续增加 DOCX 版本，必须与本 Markdown 同步。

@@ -192,6 +192,18 @@ describe('GenerationService', () => {
     expect(generations.get(started.generationId).assistantMessage.content).toHaveLength(300);
   });
 
+  it('rejects creating a generation for an archived conversation', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'mock', name: 'Mock', model: 'mock-model', configured: true }),
+      stream: () => Promise.reject(new Error('not used')),
+    };
+    const { content, conversation, generations } = await setup(provider);
+    content.archiveConversation({ conversationId: conversation.id });
+    expect(() =>
+      generations.generate(conversation.id, 'Test archived'),
+    ).toThrow('Archived conversations cannot be updated.');
+  });
+
   it('cancels an active generation', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'test', name: 'Test', model: 'test-model', configured: true }),

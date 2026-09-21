@@ -1799,4 +1799,98 @@ describe('ChatPanel attempt metadata', () => {
     fireEvent.click(screen.getByRole('button', { name: '清除' }));
     expect(onClearSelectedChapters).toHaveBeenCalledOnce();
   });
+  it('disables message composer and buttons when conversation is archived', () => {
+    const archivedConversation: ConversationInfo = {
+      id: 'archived-conv',
+      projectId: 'proj',
+      scopeType: 'project',
+      title: '已归档会话',
+      archivedAt: '2026-09-09T00:00:00.000Z',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[archivedConversation]}
+        conversation={archivedConversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    const textarea = screen.getByLabelText('会话消息');
+    expect(textarea).toBeDisabled();
+    expect(textarea).toHaveAttribute('placeholder', '当前会话已归档，处于只读状态');
+    expect(screen.getByTitle('发送消息')).toBeDisabled();
+    expect(screen.getByTitle('添加图片、视频或文件')).toBeDisabled();
+  });
+  it('renders load earlier messages button when canLoadEarlierMessages is true', () => {
+    const testConv: ConversationInfo = {
+      id: 'test-conv',
+      projectId: 'proj',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const testMessage: ChatMessageInfo = {
+      id: 'msg-1',
+      conversationId: testConv.id,
+      role: 'user',
+      content: '第一条消息',
+      status: 'complete',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    };
+    const onLoadEarlier = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[testConv]}
+        conversation={testConv}
+        messages={[testMessage]}
+        composer=""
+        statusMessage=""
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        canLoadEarlierMessages
+        loadingEarlierMessages={false}
+        onLoadEarlierMessages={onLoadEarlier}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    const loadButton = screen.getByRole('button', { name: '加载更早历史消息' });
+    expect(loadButton).toBeInTheDocument();
+    fireEvent.click(loadButton);
+    expect(onLoadEarlier).toHaveBeenCalledOnce();
+  });
 });

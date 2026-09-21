@@ -14,8 +14,8 @@ import {
 import { ProjectService } from './project-service.js';
 
 const SOURCE_HANDLE_TTL_MS = 10 * 60_000;
-const SEARCH_CALL_LIMIT = 8;
-const READ_CALL_LIMIT = 16;
+const SEARCH_CALL_LIMIT = 4;
+const READ_CALL_LIMIT = 8;
 const DEFAULT_READ_CHARS = 4_000;
 const MAX_READ_CHARS = 20_000;
 const DRAFT_CANDIDATE_NOTE = '未审核候选资料，不能当作已发布权威';
@@ -182,8 +182,8 @@ export class LibrarySearchService {
       throw new LibraryError(
         'LIBRARY_BUDGET_EXCEEDED',
         operation === 'search'
-          ? 'Library search budget has been exhausted.'
-          : 'Library read budget has been exhausted.',
+          ? '本轮检索次数已达上限。请直接基于已有资料与上下文为用户生成回答，不要再调用检索工具。'
+          : '本轮正文读取次数已达上限。请直接基于已有内容为用户生成回答，不要再调用读取工具。',
         false,
       );
     }

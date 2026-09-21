@@ -32,6 +32,8 @@ export function useConversationWorkspace({
   const [conversationNextCursor, setConversationNextCursor] = useState<string>();
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const [conversation, setConversation] = useState<ConversationInfo>();
+  const [messageNextCursor, setMessageNextCursor] = useState<string>();
+  const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
   const conversationRequest = useRef(0);
 
   useEffect(() => {
@@ -68,6 +70,7 @@ export function useConversationWorkspace({
         setConversationNextCursor(page.nextCursor);
         setConversation(selected);
         setMessages(messagePage?.items ?? []);
+        setMessageNextCursor(messagePage?.nextCursor);
         setContextPreview(preview);
         setChatMessage('');
       } catch (reason) {
@@ -98,6 +101,7 @@ export function useConversationWorkspace({
       setConversations((current) => [created, ...current]);
       setConversation(created);
       setMessages([]);
+      setMessageNextCursor(undefined);
       setContextPreview(preview);
     } catch (reason) {
       if (requestId === conversationRequest.current) {
@@ -122,8 +126,19 @@ export function useConversationWorkspace({
     try {
       const updated = await callWorker('conversation.archive', { conversationId });
       if (!showArchivedConversations) {
-        setConversations((current) => current.filter((item) => item.id !== conversationId));
-        setConversation((current) => (current?.id === conversationId ? undefined : current));
+        const remaining = conversations.filter((item) => item.id !== conversationId);
+        setConversations(remaining);
+        if (conversation?.id === conversationId) {
+          const next = remaining[0];
+          if (next) {
+            void selectConversation(next);
+          } else {
+            setConversation(undefined);
+            setMessages([]);
+            setMessageNextCursor(undefined);
+            setContextPreview(undefined);
+          }
+        }
       } else {
         setConversations((current) =>
           current.map((item) => (item.id === updated.id ? updated : item)),
@@ -178,18 +193,38 @@ export function useConversationWorkspace({
         await onCancelGenerationForConversation(selected.id);
         if (requestId !== conversationRequest.current) return;
       }
-      setConversation(selected);
       const [messagePage, preview] = await Promise.all([
         callWorker('chat.message.list', { conversationId: selected.id }),
         callWorker('context.preview', { conversationId: selected.id }),
       ]);
       if (requestId !== conversationRequest.current) return;
+      setConversation(selected);
       setMessages(messagePage.items);
+      setMessageNextCursor(messagePage.nextCursor);
       setContextPreview(preview);
     } catch (reason) {
       if (requestId === conversationRequest.current) {
         setChatMessage(reason instanceof Error ? reason.message : '会话加载失败');
       }
+    }
+  };
+
+  const loadEarlierMessages = async () => {
+    if (!conversation || !messageNextCursor || loadingEarlierMessages) return;
+    const currentConvId = conversation.id;
+    setLoadingEarlierMessages(true);
+    try {
+      const page = await callWorker('chat.message.list', {
+        conversationId: currentConvId,
+        before: messageNextCursor,
+      });
+      if (conversation?.id !== currentConvId) return;
+      setMessages((current) => [...page.items, ...current]);
+      setMessageNextCursor(page.nextCursor);
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '加载历史消息失败');
+    } finally {
+      setLoadingEarlierMessages(false);
     }
   };
 
@@ -200,6 +235,7 @@ export function useConversationWorkspace({
     setShowArchivedConversations(false);
     setConversation(undefined);
     setMessages([]);
+    setMessageNextCursor(undefined);
     setContextPreview(undefined);
     setChatMessage('');
   };
@@ -220,6 +256,9 @@ export function useConversationWorkspace({
     restoreConversation,
     loadMoreConversations,
     selectConversation,
+    messageNextCursor,
+    loadingEarlierMessages,
+    loadEarlierMessages,
     reset,
   };
 }

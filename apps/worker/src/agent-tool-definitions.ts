@@ -785,7 +785,7 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.search',
     description:
-      'Search the current project library (drafts and published documents, novel chapters, memories, constraints, conversations, scenes, shots, and assets). Returns short snippets and source handles. Draft hits are labeled draft and are not published authority.',
+      'Search the current project library for facts, character bibles, novel drafts, and guidelines. By default searches authoritative documents, novel chapters, memories, and constraints. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
     parameters: {
       type: 'object',
       additionalProperties: false,

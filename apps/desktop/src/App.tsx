@@ -1402,6 +1402,9 @@ export function App() {
     restoreConversation,
     loadMoreConversations,
     selectConversation,
+    messageNextCursor,
+    loadingEarlierMessages,
+    loadEarlierMessages,
     reset: resetConversationWorkspace,
   } = conversationWorkspace;
 
@@ -2023,10 +2026,12 @@ export function App() {
         const agentAttachments = modelSelection?.parameters
           ? undefined
           : buildAgentAttachments(chatAttachments);
+        const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
         const unified = await callWorker('agent.run', {
           conversationId: conversation.id,
           prompt: agentPrompt || '请分析我提供的附件。',
           capability,
+          idempotencyKey,
           ...(agentAttachments && agentAttachments.length > 0
             ? { attachments: agentAttachments }
             : {}),
@@ -2157,11 +2162,13 @@ export function App() {
     }
     if (selectedLlmProfile && selectedLlmModel) {
       try {
+        const idempotencyKey = `desktop-prepare:${conversation.id}:${crypto.randomUUID()}`;
         const prepared = await callWorker('llm.generation.prepare', {
           conversationId: conversation.id,
           prompt,
           providerProfileId: selectedLlmProfile.id,
           modelId: selectedLlmModel.id,
+          idempotencyKey,
         });
         launchPreparedGeneration(prepared);
       } catch (reason) {
@@ -2173,9 +2180,11 @@ export function App() {
     }
     if (llmStatus?.configured) {
       try {
+        const idempotencyKey = `desktop-generate:${conversation.id}:${crypto.randomUUID()}`;
         const started = await callWorker('llm.generate', {
           conversationId: conversation.id,
           prompt,
+          idempotencyKey,
         });
         setGeneration(started);
         setMessages((current) => [...current, started.userMessage, started.assistantMessage]);
@@ -2930,6 +2939,9 @@ export function App() {
       onRestoreConversation={(conversationId) => void restoreConversation(conversationId)}
       canLoadMoreConversations={Boolean(conversationNextCursor)}
       onLoadMoreConversations={() => void loadMoreConversations()}
+      canLoadEarlierMessages={Boolean(messageNextCursor)}
+      loadingEarlierMessages={loadingEarlierMessages}
+      onLoadEarlierMessages={() => void loadEarlierMessages()}
       onRetryGeneration={(messageId) => void retryGeneration(messageId)}
       onLlmProfileChange={(profileId) => {
         setSelectedLlmProfileId(profileId);

@@ -69,9 +69,9 @@ const DOCUMENT_TOOL_CALL_RESERVE = 1;
 const RESEARCH_SEARCH_CALL_LIMIT = 3;
 const RESEARCH_FETCH_CALL_LIMIT = 8;
 const RESEARCH_STEP_CALL_LIMIT = 8;
-const LIBRARY_SEARCH_CALL_LIMIT = 8;
-const LIBRARY_READ_CALL_LIMIT = 16;
-const LIBRARY_STEP_CALL_LIMIT = 8;
+const LIBRARY_SEARCH_CALL_LIMIT = 4;
+const LIBRARY_READ_CALL_LIMIT = 8;
+const LIBRARY_STEP_CALL_LIMIT = 6;
 
 type ResearchOperation = 'research.search' | 'research.fetch';
 type LibraryOperation = 'library.search' | 'library.read';

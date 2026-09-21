@@ -114,11 +114,11 @@ describe('LibrarySearchService', () => {
       title: '大纲',
       contentMarkdown: '林澈的故事从雾港开始。',
     });
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
       library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' });
     }
     expect(() => library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' })).toThrow(
-      /LIBRARY_BUDGET_EXCEEDED|budget/,
+      /LIBRARY_BUDGET_EXCEEDED|budget|上限/,
     );
   });
 

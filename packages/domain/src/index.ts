@@ -942,10 +942,19 @@ export interface ShotRepository {
   listByScene(sceneId: string): ShotRecord[];
 }
 
+export interface ConversationPageOptions {
+  limit: number;
+  cursor?: string;
+  scopeType?: ConversationRecord['scopeType'];
+  scopeId?: string;
+  includeArchived?: boolean;
+}
+
 export interface ConversationRepository {
   save(record: ConversationRecord): void;
   get(id: string): ConversationRecord | undefined;
   listByProject(projectId: string): ConversationRecord[];
+  listPageByProject(projectId: string, options: ConversationPageOptions): ConversationRecord[];
 }
 
 export interface ConversationModelPreferenceRecord {

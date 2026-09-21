@@ -98,10 +98,12 @@ export class AgentOrchestrationService {
       database.transaction(() => {
         const prompt = requiredText(input.prompt, 'Prompt', 100_000);
         const conversation = database
-          .prepare('SELECT id FROM conversations WHERE id = ? AND project_id = ?')
-          .get(input.conversationId, project.id) as { id: string } | undefined;
+          .prepare('SELECT id, archived_at FROM conversations WHERE id = ? AND project_id = ?')
+          .get(input.conversationId, project.id) as { id: string; archived_at: string | null } | undefined;
         if (!conversation)
           throw new AgentOrchestrationError('NOT_FOUND', 'Conversation was not found.');
+        if (conversation.archived_at)
+          throw new AgentOrchestrationError('CONFLICT', 'Archived conversations cannot be updated.');
 
         const requestHash = sha256(
           JSON.stringify({

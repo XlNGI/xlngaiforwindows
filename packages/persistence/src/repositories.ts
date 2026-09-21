@@ -1236,6 +1236,47 @@ class SqliteConversationRepository
         .all(projectId) as ConversationRow[]
     ).map(mapConversation);
   }
+
+  listPageByProject(
+    projectId: string,
+    options: import("@ai-video/domain").ConversationPageOptions,
+  ): ConversationRecord[] {
+    const conditions: string[] = ['project_id = ?'];
+    const params: unknown[] = [projectId];
+
+    if (options.scopeType) {
+      conditions.push('scope_type = ?');
+      params.push(options.scopeType);
+    }
+    if (options.scopeId !== undefined) {
+      conditions.push('scope_id = ?');
+      params.push(options.scopeId);
+    }
+    if (!options.includeArchived) {
+      conditions.push('archived_at IS NULL');
+    }
+
+    if (options.cursor) {
+      const cursorRow = this.database
+        .prepare('SELECT updated_at, id FROM conversations WHERE id = ? AND project_id = ?')
+        .get(options.cursor, projectId) as Pick<ConversationRow, 'updated_at' | 'id'> | undefined;
+      if (cursorRow) {
+        conditions.push('(updated_at < ? OR (updated_at = ? AND id < ?))');
+        params.push(cursorRow.updated_at, cursorRow.updated_at, cursorRow.id);
+      } else {
+        return [];
+      }
+    }
+
+    const sql = `SELECT * FROM conversations
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ?`;
+    params.push(options.limit);
+
+    const rows = this.database.prepare(sql).all(...params) as ConversationRow[];
+    return rows.map(mapConversation);
+  }
 }
 
 class SqliteConversationModelPreferenceRepository

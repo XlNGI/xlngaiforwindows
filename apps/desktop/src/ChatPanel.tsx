@@ -153,6 +153,9 @@ interface ChatPanelProps {
   /** One-shot episode chapter range for the next send only. */
   selectedChapterCount?: number;
   onClearSelectedChapters?: () => void;
+  canLoadEarlierMessages?: boolean;
+  loadingEarlierMessages?: boolean;
+  onLoadEarlierMessages?: () => void;
   onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
   agentParameterRequest?: {
     prompt: string;
@@ -231,6 +234,9 @@ export function ChatPanel({
   onOpenLibrarySource,
   agentParameterRequest,
   onSubmitAgentParameters,
+  canLoadEarlierMessages = false,
+  loadingEarlierMessages = false,
+  onLoadEarlierMessages,
 }: ChatPanelProps) {
   const close = onClose ?? onCollapse;
   const catalogItems = visibleLibraryCatalog(contextPreview?.catalog ?? []);
@@ -274,6 +280,7 @@ export function ChatPanel({
       : researchMode === 'network_disabled'
         ? '禁止联网'
         : undefined;
+  const isArchived = Boolean(conversation?.archivedAt);
   const generationLocked = generation?.status === 'prepared' || generation?.status === 'streaming';
   const messageListRef = useRef<HTMLDivElement>(null);
   /**
@@ -489,6 +496,18 @@ export function ChatPanel({
         ) : null}
       </div>
       <div className="message-list" ref={messageListRef}>
+        {canLoadEarlierMessages && (
+          <div className="load-earlier-container" style={{ display: "flex", justifyContent: "center", padding: "8px" }}>
+            <button
+              className="button subtle"
+              type="button"
+              disabled={loadingEarlierMessages}
+              onClick={onLoadEarlierMessages}
+            >
+              {loadingEarlierMessages ? "正在加载更早消息…" : "加载更早历史消息"}
+            </button>
+          </div>
+        )}
         {messages.length === 0 ? (
           <div className="chat-empty">
             <Bot size={22} />
@@ -916,7 +935,9 @@ export function ChatPanel({
         <textarea
           aria-label="会话消息"
           placeholder={
-            conversation
+            isArchived
+              ? '当前会话已归档，处于只读状态'
+              : conversation
               ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
               : '请先新建会话'
           }
@@ -933,6 +954,7 @@ export function ChatPanel({
             if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
             event.preventDefault();
             if (
+              !isArchived &&
               generation?.status !== 'prepared' &&
               generation?.status !== 'streaming' &&
               (composer.trim() || attachments.length > 0) &&
@@ -942,7 +964,7 @@ export function ChatPanel({
               onSendMessage();
             }
           }}
-          disabled={!conversation || !writable}
+          disabled={!conversation || !writable || isArchived}
         />
         {generation?.status === 'prepared' || generation?.status === 'streaming' ? (
           <button
@@ -968,7 +990,7 @@ export function ChatPanel({
                 if (event.target.files?.length) onAddAttachments?.(event.target.files);
                 event.currentTarget.value = '';
               }}
-              disabled={!conversation || !writable}
+              disabled={!conversation || !writable || isArchived}
             />
             <button
               type="button"
@@ -976,7 +998,7 @@ export function ChatPanel({
               title="添加图片、视频或文件"
               aria-label="添加图片、视频或文件"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!conversation || !writable}
+              disabled={!conversation || !writable || isArchived}
             >
               <Paperclip size={16} />
             </button>
@@ -985,7 +1007,7 @@ export function ChatPanel({
               type="button"
               title="发送消息"
               onClick={onSendMessage}
-              disabled={(!composer.trim() && attachments.length === 0) || !conversation}
+              disabled={(!composer.trim() && attachments.length === 0) || !conversation || isArchived}
             >
               <ChevronRight size={18} />
             </button>

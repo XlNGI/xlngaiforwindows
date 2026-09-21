@@ -669,6 +669,9 @@ export class GenerationService {
       if (!conversation || conversation.projectId !== project.id) {
         throw new Error('Conversation was not found.');
       }
+      if (conversation.archivedAt) {
+        throw new Error('Archived conversations cannot be updated.');
+      }
       const persistedUser = existingUser
         ? repositories.chatMessages.get(existingUser.id)
         : undefined;
@@ -1004,7 +1007,12 @@ function withAgentToolInstructions(
 
 function withAgentLibraryInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_LIBRARY_INSTRUCTION_MARKER)) return systemInstruction;
-  return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nProject objects are not auto-injected. Call library.search, then library.read, for drafts and published sources in the current project. Keep draft labels. Chat attachments are not library sources unless saved as drafts. Do not repeat a successful library.search for the same query. Authorization replay or an invalid handle is not a missing result; use the latest successful search and its returned handles instead of searching again.`;
+  return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nDo not repeat a successful library.search for the same query.
+项目资料按需检索准则：
+1. 核心事实、设定、大纲与剧情以 document（项目文档）和 novel-chapter（小说正文/草稿）为准。
+2. conversation 是历史聊天记录。除非用户明确要求回忆先前的会话内容，否则禁止反复检索 conversation，应优先检索 document 和 novel-chapter。
+3. 严禁连续反复调用 library.search。若 1~2 次检索未找到完全匹配的结果，代表资料库暂无该具体记录，请直接基于已有项目常识回答或向用户寻求澄清，切勿变换近义词死循环重试。
+4. 调用 library.search 得到 handles 后，至多读取 1~2 个最相关的 sourceHandle 即可开始回答。不要无休止地翻阅每一个片段。`;
 }
 
 function withAgentResearchInstruction(systemInstruction: string): string {

@@ -321,6 +321,7 @@ export class ProjectService {
 
   async backup(destinationPath?: string): Promise<string> {
     const session = this.requireWritableSession();
+    const sessionId = session.id;
     checkpoint(session.database);
     const timestamp = new Date().toISOString().replaceAll(':', '-');
     const destination = resolve(
@@ -331,6 +332,9 @@ export class ProjectService {
     }
     mkdirSync(dirname(destination), { recursive: true });
     await session.database.backup(destination);
+    if (this.session?.id !== sessionId) {
+      throw new Error('Project session changed during backup.');
+    }
     return destination;
   }
 

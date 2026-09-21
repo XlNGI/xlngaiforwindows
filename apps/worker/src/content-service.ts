@@ -306,22 +306,40 @@ export class ContentService {
     const query = params.query?.trim().toLocaleLowerCase();
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
     return this.projects.access(false, (database, project) => {
-      const conversations = createRepositories(database)
-        .conversations.listByProject(project.id)
-        .map(asConversation)
-        .filter(
-          (conversation) =>
-            (!params.scopeType || conversation.scopeType === params.scopeType) &&
-            (params.scopeId === undefined || conversation.scopeId === params.scopeId) &&
-            (params.includeArchived || !conversation.archivedAt) &&
-            (!query || conversation.title.toLocaleLowerCase().includes(query)),
-        );
-      if (params.cursor !== undefined) {
-        const cursorIndex = conversations.findIndex((item) => item.id === params.cursor);
-        if (cursorIndex < 0) return { items: [], nextCursor: undefined };
-        return sliceConversationPage(conversations, cursorIndex + 1, limit);
+      const repo = createRepositories(database).conversations;
+      // If there is an in-memory query filter, use project-wide query; otherwise use keyset pagination directly
+      if (query) {
+        const conversations = repo
+          .listByProject(project.id)
+          .map(asConversation)
+          .filter(
+            (conversation) =>
+              (!params.scopeType || conversation.scopeType === params.scopeType) &&
+              (params.scopeId === undefined || conversation.scopeId === params.scopeId) &&
+              (params.includeArchived || !conversation.archivedAt) &&
+              conversation.title.toLocaleLowerCase().includes(query),
+          );
+        if (params.cursor !== undefined) {
+          const cursorIndex = conversations.findIndex((item) => item.id === params.cursor);
+          if (cursorIndex < 0) return { items: [], nextCursor: undefined };
+          return sliceConversationPage(conversations, cursorIndex + 1, limit);
+        }
+        return sliceConversationPage(conversations, 0, limit);
       }
-      return sliceConversationPage(conversations, 0, limit);
+
+      const paged = repo.listPageByProject(project.id, {
+        limit: limit + 1,
+        cursor: params.cursor,
+        scopeType: params.scopeType,
+        scopeId: params.scopeId,
+        includeArchived: params.includeArchived,
+      });
+      const hasMore = paged.length > limit;
+      const items = paged.slice(0, limit).map(asConversation);
+      return {
+        items,
+        nextCursor: hasMore ? items[items.length - 1]?.id : undefined,
+      };
     });
   }
 
@@ -507,6 +525,9 @@ export class ContentService {
       const conversation = repositories.conversations.get(params.conversationId);
       if (!conversation || conversation.projectId !== project.id) {
         throw new Error('Conversation was not found.');
+      }
+      if (conversation.archivedAt) {
+        throw new Error('Archived conversations cannot be updated.');
       }
       const existing = params.messageId
         ? repositories.chatMessages.get(params.messageId)
