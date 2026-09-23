@@ -1119,15 +1119,18 @@ describe('App', () => {
     fireEvent.click(screen.getByTitle('发送消息'));
 
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('agent.run', expect.objectContaining({
-        conversationId: conversation.id,
-        prompt: 'Draft a project brief',
-        capability: 'text',
-        idempotencyKey: expect.stringMatching(/^desktop-run:/),
-        providerProfileId: profile.id,
-        modelId: model.id,
-        researchMode: 'auto',
-      })),
+      expect(callWorker).toHaveBeenCalledWith(
+        'agent.run',
+        expect.objectContaining({
+          conversationId: conversation.id,
+          prompt: 'Draft a project brief',
+          capability: 'text',
+          idempotencyKey: expect.stringMatching(/^desktop-run:/) as unknown,
+          providerProfileId: profile.id,
+          modelId: model.id,
+          researchMode: 'auto',
+        }),
+      ),
     );
     expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);
     expect(await screen.findByDisplayValue(createdDocument.title)).toBeInTheDocument();

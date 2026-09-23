@@ -289,7 +289,10 @@ library.search
     title,
     snippet,               // <= 400 字
     citationLabel,         // L1, L2, ...
-    updatedAt
+    updatedAt,
+    chunkOrdinal,          // 命中切片在同一来源版本内的位置
+    startOffset,
+    endOffset
   }]
 }
 ```
@@ -298,7 +301,9 @@ library.search
 
 - 只搜索当前打开项目。
 - 句柄绑定 `taskId + attemptId`，TTL 10 分钟，过期后必须重新 search。
-- 结果按相关性排序，稳定二次键为 `updatedAt DESC, id`。
+- 结果按相关性排序；同分时依次按章节号、切片序号、`updatedAt DESC, id` 稳定排序。每个来源版本只保留最优切片。
+- 章节号归一化匹配中文、阿拉伯数字及全角数字写法。显式章节定位扫描标题元数据，普通搜索不按最近 500/5000 个候选截断；无关内容不得仅凭来源类型加分而命中。
+- `truncated=true` 表示存在超过返回上限的其他匹配来源版本，不以“刚好返回 limit 条”推断截断。
 - 草稿命中必须 `status=draft`，不得省略。
 - 不返回完整正文、绝对路径、密钥或授权字段。
 - 单任务预算：最多 8 次 search。
@@ -308,7 +313,9 @@ library.search
 ```text
 library.read
   sourceHandle     string  必填
-  maxChars?        integer 1..20000，默认 4000
+  maxChars?        integer 1..20000，chunk 默认 4000，source 默认 20000
+  readMode?        chunk | source，默认 chunk；source 读取命中的同一来源版本
+  offset?          integer >= 0，默认 0；截断后传入上次的 nextOffset 续读
 ```
 
 成功结果：
@@ -317,14 +324,20 @@ library.read
 {
   status: "read",
   sourceHandle,
+  readMode,
   sourceType,
   sourceId,
   versionId?,
-  status,
+  sourceStatus,            // draft | published | ...
   kind?,
   title,
   content,                 // 有界正文
   characterCount,
+  startOffset,
+  endOffset,
+  nextOffset?,             // 截断时提供，续读同一句柄
+  totalCharacters,
+  contentHash,
   truncated,
   citationLabel,
   untrusted: false         // 项目内资料；外网研究仍走 research.fetch
@@ -335,6 +348,8 @@ library.read
 
 - 只能读取本次任务 search 返回且未过期的句柄。
 - 默认读单个切片；不得一次把整本小说或全部会话打包返回。
+- `readMode=source` 只读取命中的同一章节/文档版本，分页返回 `startOffset/endOffset/nextOffset/totalCharacters/contentHash`；偏移使用 UTF-16 字符串索引。优先读取不可变版本正文以保留段落，不拼接另一草稿或已发布版本。
+- 字符数或 64 KiB 序列化限制导致截断时保留 `truncated=true`，续读位置必须对应实际返回正文，不能跳过被序列化截掉的部分。来源更新使句柄失效时要求重新检索，不静默换成新版本。
 - 单任务预算：最多 16 次 read。
 - Tool Result 仍受 64 KiB 限制；超限截断并设 `truncated=true`。
 - 读取草稿时，序列化结果必须包含“未审核候选资料，不能当作已发布权威”的固定提示字段或 status。
@@ -675,6 +690,25 @@ Desktop 刷新对应工作区列表
 - `apps/desktop/src/use-conversation-workspace.ts`
 
 ## 17. 变更记录
+
+### 2026-09-22 自主检索与章节定位修复（已验证）
+
+延续已确认方向：LLM 自主决定是否需要检索、查询词、来源范围与续读；不按“小说”等关键词把会话硬路由到固定任务计划，也不要求用户先勾选章节。Pi 普通规划/执行轮持续提供已经获得 Worker 授权的 `library.search/read`；非检索写工具继续遵循计划依赖和原授权。
+
+本次不变量与失败处理：章节号不同写法应指向相同候选；无相关命中不得仅按来源类型返回章节；目录仅是有界预览，不能证明对象不存在；正文仍按需读取。同任务、attempt、project 的短期句柄只对应检索时的版本。跨任务/项目、过期、来源更新或越界续读均失败，不能静默跳到相邻章节。成功读取的版本、内容 hash、实际范围记录在任务工具审计中，正文不进审计。
+
+- [x] 修复章节编号归一化、虚假命中、候选截断和搜索截断标记；覆盖大目录、多个章节号与无关查询。
+- [x] 支持单来源版本的有界分页读取，保留段落、草稿状态、hash 与真实续读偏移。
+- [x] Pi 规划和执行允许自主检索，计划遗漏检索不封锁工具；其他操作仍遵循依赖。
+- [x] 更新助理指令及目录提示，缺失证据时说明不足，不凭常识编造指定章节剧情。
+- [x] 集成回归：未勾选章节，模拟模型调用 search → read → 创建镜头提示词草稿；记录聚焦测试与仓库门禁。
+
+验证记录：
+
+- 持久化检索测试 12 项通过，包括旧章节排在 5001 个新增切片之后仍可命中；Pi、工具网关及任务计划聚焦测试合计 50 项通过。
+- 检索服务、工具序列化及真实业务服务链集成测试合计 28 项通过。集成测试导入三章，读取跨多个切片的第一章全文，再创建带来源关联的镜头提示词文档草稿；初始上下文不含正文，任务没有 `selectedChapterIds`。模型响应由 faux 模拟，未调用真实模型；该验证不代表结构化场次/镜头写入或真实模型效果已经实测。
+- 补充分页复现覆盖 Emoji 位于 UTF-16 页边界、JSON 转义触发 64 KiB 截断及多字节混排；各页拼接等于原文，hash 稳定，续读偏移严格前进，版本更新后旧句柄明确失效。
+- 全仓 `pnpm test` 837 项通过（context 8、contracts 12、llm 32、generation-adapters 18、persistence 40、desktop 250、worker 477）；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build` 及 `git diff --check` 通过。Vite 构建仅提示主包超过 500 kB 的体积警告。
 
 ### 2026-09-21 章节位置检索
 

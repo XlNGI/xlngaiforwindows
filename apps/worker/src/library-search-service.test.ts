@@ -280,6 +280,74 @@ describe('LibrarySearchService', () => {
     expect(read.content.length).toBe(12);
   });
 
+  it('reads a novel chapter as an ordered source when requested', async () => {
+    const { novels, library } = await setup();
+    const chapterBody = `  开头线索。\n\n${'海雾中的灯塔。\n\n'.repeat(500)}结尾线索。  `;
+    novels.importNovel({
+      chapters: [
+        {
+          title: '雾港',
+          displayLabel: '第 1 章',
+          contentMarkdown: chapterBody,
+        },
+      ],
+    });
+    const searched = library.search({
+      taskId: 'source-task',
+      attemptId: 'source-attempt',
+      query: '第一章',
+      sourceTypes: ['novel-chapter'],
+    });
+    const read = library.read({
+      taskId: 'source-task',
+      attemptId: 'source-attempt',
+      sourceHandle: searched.sources[0]!.sourceHandle,
+      readMode: 'source',
+      maxChars: 20_000,
+    });
+    expect(read.readMode).toBe('source');
+    expect(read.content.trimStart().startsWith('开头线索。')).toBe(true);
+    expect(read.content).toContain('结尾线索。');
+    expect(read.content).toBe(chapterBody.trim());
+    expect(read.truncated).toBe(false);
+  });
+
+  it('continues long source reads without gaps, overlaps, or crossing versions', async () => {
+    const { content, library } = await setup();
+    const body = '序章\n\n' + '这是带有段落的证据🧭。\n\n'.repeat(2400) + '最后的线索。';
+    const document = content.saveDocument({
+      kind: 'note',
+      title: '长篇证据',
+      contentMarkdown: body,
+    });
+    const searched = library.search({ taskId: 't', attemptId: 'a', query: '长篇证据' });
+    const args = {
+      taskId: 't',
+      attemptId: 'a',
+      sourceHandle: searched.sources[0]!.sourceHandle,
+      readMode: 'source' as const,
+    };
+    const first = library.read(args);
+    expect(first).toMatchObject({ truncated: true, startOffset: 0, totalCharacters: body.length });
+    expect(first.nextOffset).toBe(first.endOffset);
+    const second = library.read({ ...args, offset: first.nextOffset });
+    expect(first.content + second.content).toBe(body);
+    expect(second).toMatchObject({
+      truncated: false,
+      contentHash: first.contentHash,
+      versionId: first.versionId,
+    });
+    expect(second.nextOffset).toBeUndefined();
+    content.saveDocument({
+      documentId: document.id,
+      kind: 'note',
+      title: document.title,
+      contentMarkdown: '另一个版本',
+      expectedDocumentRowVersion: document.rowVersion,
+    });
+    expect(() => library.read(args)).toThrow('Library source is no longer available');
+  });
+
   it('does not index incomplete streaming chat messages', async () => {
     const { content, library } = await setup();
     const conversation = content.createConversation({ scopeType: 'project' });
@@ -290,5 +358,31 @@ describe('LibrarySearchService', () => {
       status: 'streaming',
     });
     expect(library.search({ taskId: 't', attemptId: 'a', query: '灯塔正文' }).resultCount).toBe(0);
+  });
+
+  it('reports truncated search results and chunk positions without unrelated filler', async () => {
+    const { novels, library } = await setup();
+    novels.importNovel({
+      chapters: [1, 2, 3].map((number) => ({
+        title: `线索${number}`,
+        contentMarkdown: '候选章节正文。',
+      })),
+    });
+    const common = { taskId: 't', attemptId: 'a', sourceTypes: ['novel-chapter'] };
+    const first = library.search({ ...common, query: '第一章', limit: 1 });
+    expect(first).toMatchObject({ resultCount: 1, truncated: false });
+    expect(first.sources[0]).toMatchObject({
+      title: '第 1 章 线索1',
+      chunkOrdinal: 0,
+      startOffset: 0,
+    });
+    expect(library.search({ ...common, query: '候选章节', limit: 1 })).toMatchObject({
+      resultCount: 1,
+      truncated: true,
+    });
+    expect(library.search({ ...common, query: '月球空间站' })).toMatchObject({
+      resultCount: 0,
+      truncated: false,
+    });
   });
 });

@@ -140,10 +140,17 @@ created -> streaming -> complete
 | 浏览器开发 Worker 只接受本次可信会话 | Worker HTTP / Vite Proxy | origin/content-type/token unit-and-live-server |
 | 损坏 JSON 不终止 Worker | Worker IPC Handler / Packaged Sidecar | parser-recovery/subsequent-health |
 | 安装升级不得损坏外部项目 | NSIS / SQLite | clean-install/overwrite-digest/integrity/uninstall-preservation |
+| 外部请求的并发、速率、队列及服务状态有界 | Native Request Guard / LLM Network Admission | global/service-burst/concurrency/queue-timeout/cancel/state-eviction |
+| 远端故障熔断、单探测恢复且旧请求不能覆盖新状态 | Native Request Guard / LLM Network Admission | half-open/epoch-race/retry-after/monotonic-clock |
+| 流和下载完整生命周期持有许可，本地错误不计远端故障 | Native Transport / Worker Network Transfer | stream-held-permit/download-body-disconnect/local-error-neutral |
+| 未发送拒绝、已提交查询失败和结果未知不可混淆 | Native Bridge / Media Orchestration / Desktop Feedback | admission-origin/remote-message-spoof/no-paid-resubmit/poll-backoff |
+| 研究桥慢连接和取消风暴不造成无界线程或内存 | Native Research Bridge | response-permit-lifetime/cancel-registry-bound/early-cancel-ttl |
 
 后续里程碑必须在本表中追加不变量，不得删除历史条目来规避门禁。
 
 ## 6. 本轮复验状态
+
+2026-09-22 请求风暴与网络故障防护：`pnpm.cmd test` 820 项、Rust 113 项通过；TypeScript 类型、Lint、格式、生产构建及 Rust fmt/check 通过。覆盖熔断、限流、有界排队、跨出口共享、整流许可、取消、媒体提交状态保护和本地错误分类，详见 [网络韧性实现记录](./NETWORK-RESILIENCE-IMPLEMENTATION.md)。未验证真实 Provider、断网/休眠、安装包及跨进程共享限额；本记录不改变既有发布 `HOLD`。
 
 2026-09-08 全系统 Agent 编排 P6 复验：
 

@@ -837,7 +837,7 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.read',
     description:
-      'Read one project library source returned by library.search. Default is a single chunk. Draft content is labeled candidate material, never published authority.',
+      'Read project content using a library.search handle. Use readMode="source" for a complete novel chapter or document, with bounded pages (default 20000 characters); default chunk mode reads one matching chunk (4000 characters). If truncated, continue with the same handle, readMode and offset=nextOffset. Verify title and draft/published status before using the source.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -845,6 +845,8 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         sourceHandle: { type: 'string', minLength: 1, maxLength: 128 },
         maxChars: { type: 'integer', minimum: 1, maximum: 20_000 },
+        readMode: { type: 'string', enum: ['chunk', 'source'] },
+        offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
       },
     },
   },

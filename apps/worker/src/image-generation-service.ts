@@ -35,8 +35,10 @@ import type {
 import type { AssetRecord, JobRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
 import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
+import { NetworkAdmissionError } from '@ai-video/llm';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
+import { withNetworkResponse } from './network-transfer.js';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -1280,32 +1282,39 @@ async function downloadImage(source: ImageSource): Promise<DownloadedImage> {
     return validatedDownloadedImage(decodeImageBase64(source.value), source.declaredContentType);
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('Image download timed out.', 'TimeoutError')),
+    DOWNLOAD_TIMEOUT_MS,
+  );
+  let receivedResponse = false;
   try {
-    let response: Response;
-    try {
-      response = await fetch(source.value, { signal: controller.signal });
-    } catch (error) {
-      throw formatImageDownloadError(source.value, error);
-    }
-    if (!response.ok)
-      throw new Error(
-        `Image download failed${sourceHostSuffix(source.value)} with HTTP ${response.status}.`,
-      );
-    const contentType =
-      response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (!contentType.startsWith('image/'))
-      throw new Error(`Downloaded result${sourceHostSuffix(source.value)} is not an image.`);
-    try {
-      const bytes = await readBoundedResponseBody(response);
-      return validatedDownloadedImage(bytes, contentType, source.value);
-    } catch (error) {
-      if (error instanceof Error && error.message === 'Image size is invalid.') throw error;
-      throw formatImageDownloadError(source.value, error, 'while reading the image body');
-    }
+    return await withNetworkResponse(
+      source.value,
+      { signal: controller.signal },
+      async (response, read) => {
+        receivedResponse = true;
+        if (!response.ok)
+          throw new Error(
+            `Image download failed${sourceHostSuffix(source.value)} with HTTP ${response.status}.`,
+          );
+        const contentType =
+          response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
+        if (!contentType.startsWith('image/'))
+          throw new Error(`Downloaded result${sourceHostSuffix(source.value)} is not an image.`);
+        try {
+          const bytes = await readBoundedResponseBody(response, read);
+          return validatedDownloadedImage(bytes, contentType, source.value);
+        } catch (error) {
+          if (error instanceof Error && error.message === 'Image size is invalid.') throw error;
+          throw formatImageDownloadError(source.value, error, 'while reading the image body');
+        }
+      },
+    );
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError')
+    if (controller.signal.aborted)
       throw new Error(`Image download${sourceHostSuffix(source.value)} timed out.`);
+    if (!receivedResponse && !(error instanceof NetworkAdmissionError))
+      throw formatImageDownloadError(source.value, error);
     throw error;
   } finally {
     clearTimeout(timer);
@@ -1371,7 +1380,10 @@ function detectImageContentType(
   return undefined;
 }
 
-async function readBoundedResponseBody(response: Response): Promise<Uint8Array> {
+async function readBoundedResponseBody(
+  response: Response,
+  read: <T>(operation: () => Promise<T>) => Promise<T>,
+): Promise<Uint8Array> {
   const declaredLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_BYTES)
     throw new Error('Image size is invalid.');
@@ -1381,7 +1393,7 @@ async function readBoundedResponseBody(response: Response): Promise<Uint8Array> 
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await read(() => reader.read());
       if (done) break;
       if (!value) continue;
       total += value.byteLength;

@@ -3,6 +3,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { withNetworkResponse } from './network-transfer.js';
 
 const DEFAULT_SEARCH_ENDPOINT = 'https://cn.bing.com/search';
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -789,30 +790,35 @@ async function publicDnsLookup(
       const endpoint = new URL(PUBLIC_DNS_ENDPOINT);
       endpoint.searchParams.set('name', hostname);
       endpoint.searchParams.set('type', String(type));
-      const response = await fetch(endpoint, {
-        headers: { accept: 'application/dns-json' },
-        signal: AbortSignal.timeout(PUBLIC_DNS_TIMEOUT_MS),
-      });
-      if (!response.ok) throw new Error('Public DNS lookup failed.');
-      const body = await response.text();
-      if (Buffer.byteLength(body, 'utf8') > PUBLIC_DNS_RESPONSE_LIMIT) {
-        throw new Error('Public DNS response exceeded the safe limit.');
-      }
-      const payload = JSON.parse(body) as {
-        Status?: unknown;
-        Answer?: Array<{ type?: unknown; data?: unknown }>;
-      };
-      if (payload.Status !== 0 || !Array.isArray(payload.Answer)) return [];
-      return payload.Answer.flatMap((answer) => {
-        if (
-          (answer.type !== 1 && answer.type !== 28) ||
-          typeof answer.data !== 'string' ||
-          isIP(answer.data) === 0
-        ) {
-          return [];
-        }
-        return [{ address: answer.data, family: answer.type === 1 ? 4 : 6 }];
-      });
+      return withNetworkResponse(
+        endpoint.href,
+        {
+          headers: { accept: 'application/dns-json' },
+          signal: AbortSignal.timeout(PUBLIC_DNS_TIMEOUT_MS),
+        },
+        async (response, read) => {
+          if (!response.ok) throw new Error('Public DNS lookup failed.');
+          const body = await read(() => response.text());
+          if (Buffer.byteLength(body, 'utf8') > PUBLIC_DNS_RESPONSE_LIMIT) {
+            throw new Error('Public DNS response exceeded the safe limit.');
+          }
+          const payload = JSON.parse(body) as {
+            Status?: unknown;
+            Answer?: Array<{ type?: unknown; data?: unknown }>;
+          };
+          if (payload.Status !== 0 || !Array.isArray(payload.Answer)) return [];
+          return payload.Answer.flatMap((answer) => {
+            if (
+              (answer.type !== 1 && answer.type !== 28) ||
+              typeof answer.data !== 'string' ||
+              isIP(answer.data) === 0
+            ) {
+              return [];
+            }
+            return [{ address: answer.data, family: answer.type === 1 ? 4 : 6 }];
+          });
+        },
+      );
     }),
   );
   return responses.flat();

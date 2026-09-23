@@ -1009,10 +1009,12 @@ function withAgentLibraryInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_LIBRARY_INSTRUCTION_MARKER)) return systemInstruction;
   return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nDo not repeat a successful library.search for the same query.
 项目资料按需检索准则：
-1. 核心事实、设定、大纲与剧情以 document（项目文档）和 novel-chapter（小说正文/草稿）为准。
-2. conversation 是历史聊天记录。除非用户明确要求回忆先前的会话内容，否则禁止反复检索 conversation，应优先检索 document 和 novel-chapter。
-3. 严禁连续反复调用 library.search。若 1~2 次检索未找到完全匹配的结果，代表资料库暂无该具体记录，请直接基于已有项目常识回答或向用户寻求澄清，切勿变换近义词死循环重试。
-4. 调用 library.search 得到 handles 后，至多读取 1~2 个最相关的 sourceHandle 即可开始回答。不要无休止地翻阅每一个片段。`;
+1. 项目小说、章节和文档存储在当前项目 SQLite 资料库中，通过 library.search / library.read 获取；它们不是需要用户提供磁盘路径的文件目录。上下文中的资料目录仅为有界预览，可能不完整；未列出不代表不存在。
+2. 根据用户目标和已有证据，自主判断是否检索、查询词、来源类型及需要读取的范围，不按固定关键词机械选择工作流。查找小说章节时，推荐 sourceTypes=["novel-chapter"]，query 保留用户给出的章节号、书名或标题线索；其他资料按实际来源选择。小说页面的章节勾选只是可选快捷入口，不是 Agent 检索的前置条件，不得依赖界面勾选状态或预先注入的章节正文。
+3. 基于指定章节回答、改编或生成镜头提示词前，必须调用 library.read 取得覆盖目标章节范围的正文证据。不能仅凭目录、标题或搜索摘要推断情节。读取章节可使用 readMode="source"，maxChars 不超过 20000；若 truncated=true 且有 nextOffset，将 nextOffset 作为后续调用的 offset 继续读取同一 sourceHandle，直到所需范围覆盖或工具预算耗尽。
+4. 核心事实、设定、大纲与剧情以 document（项目文档）和 novel-chapter（小说正文/草稿）的实际正文为依据。保留 draft / published 来源标记，不能把草稿当作已发布权威。conversation 是历史聊天记录，仅在目标需要回忆会话时检索。
+5. 不重复相同的成功查询，不盲目变换近义词循环。空结果只表示本次查询未命中，可以根据证据调整查询或来源类型，不能据此断言资料不存在。遵守工具返回的剩余预算与硬限制；预算耗尽时停止检索，不改用自动注入正文作为降级。
+6. 若正文证据不足以完成用户指定的任务，说明已查到的范围和具体缺口，必要时澄清目标；不得凭常识编造项目剧情，也不得把未读取的范围声称为已完成。`;
 }
 
 function withAgentResearchInstruction(systemInstruction: string): string {

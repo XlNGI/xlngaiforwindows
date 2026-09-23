@@ -227,6 +227,41 @@ describe('AgentProviderToolGateway', () => {
     expect(gateway.currentDefinitions([])).toEqual([]);
   });
 
+  it('keeps authorized library retrieval available while restricting all other operations', async () => {
+    const search = definition('library.search', 'search-handle');
+    const read = definition('library.read', 'read-handle');
+    const image = definition('media.image.prepare', 'image-handle');
+    const video = definition('media.video.prepare', 'video-handle');
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'retrieval-response',
+        outputs: [{ callId: 'read-call', output: '{"status":"read","content":"第一章正文"}' }],
+      },
+    });
+    const planHooks = { begin: vi.fn(() => undefined), succeed: vi.fn(() => true), fail: vi.fn() };
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [search, read, image, video],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      planHooks,
+    );
+    expect(gateway.currentDefinitions(['media.image.prepare'])).toEqual([search, read, image]);
+    expect(gateway.tools([]).map((tool) => tool.name)).toEqual(['library.search', 'library.read']);
+    gateway.captureProviderCall('read-call', 'retrieval-response');
+    await gateway
+      .tools([])
+      .find((tool) => tool.name === 'library.read')!
+      .execute('read-call', { sourceHandle: 'source' });
+    expect(worker.executeTools).toHaveBeenCalledOnce();
+    expect(planHooks.begin).toHaveBeenCalledWith('library.read');
+    expect(planHooks.succeed).not.toHaveBeenCalled();
+    expect(planHooks.fail).not.toHaveBeenCalled();
+  });
+
   it('records planned tool success only after a successful Worker Tool Result', async () => {
     const worker = executor({
       continuation: {
@@ -303,13 +338,7 @@ describe('AgentProviderToolGateway', () => {
       },
       tools: [definition('library.search', 'handle-two')],
     });
-    const gateway = new AgentProviderToolGateway(
-      worker,
-      identity,
-      [search],
-      vi.fn(),
-      vi.fn(),
-    );
+    const gateway = new AgentProviderToolGateway(worker, identity, [search], vi.fn(), vi.fn());
     const tool = gateway.tools()[0]!;
 
     gateway.captureProviderCall('call-1', 'response-1');
@@ -357,13 +386,7 @@ describe('AgentProviderToolGateway', () => {
         outputs: [{ callId: 'call-keep', output: '{"status":"ok"}' }],
       },
     });
-    const gateway = new AgentProviderToolGateway(
-      worker,
-      identity,
-      [search],
-      vi.fn(),
-      vi.fn(),
-    );
+    const gateway = new AgentProviderToolGateway(worker, identity, [search], vi.fn(), vi.fn());
 
     gateway.captureProviderCall('call-keep', 'response-keep');
     await gateway.tools()[0]!.execute('call-keep', { query: 'keep' });

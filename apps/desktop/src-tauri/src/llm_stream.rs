@@ -16,12 +16,14 @@ use windows_sys::Win32::{
         WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
         WinHttpSetTimeouts, ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
-        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
     },
 };
 
 use super::{
     credential_store::{credential_read, ensure_credential_subject, CredentialSecret},
+    provider_http::{http_outcome, query_optional_header},
+    request_guard::{self, Outcome},
     WorkerState,
 };
 
@@ -533,6 +535,8 @@ pub(crate) struct StreamFailure {
     pub(crate) retryable: bool,
     pub(crate) cancelled: bool,
     pub(crate) usage: Option<NormalizedUsage>,
+    pub(crate) guard_outcome: Outcome,
+    pub(crate) admission_rejected: bool,
 }
 
 impl StreamFailure {
@@ -542,7 +546,20 @@ impl StreamFailure {
             retryable,
             cancelled: false,
             usage: None,
+            guard_outcome: Outcome::Neutral,
+            admission_rejected: false,
         }
+    }
+
+    fn with_outcome(mut self, outcome: Outcome) -> Self {
+        self.guard_outcome = outcome;
+        self
+    }
+
+    fn admission(error: request_guard::AdmissionError) -> Self {
+        let mut failure = Self::new(error.to_string(), true);
+        failure.admission_rejected = true;
+        failure
     }
 
     fn cancelled() -> Self {
@@ -551,6 +568,8 @@ impl StreamFailure {
             retryable: true,
             cancelled: true,
             usage: None,
+            guard_outcome: Outcome::Neutral,
+            admission_rejected: false,
         }
     }
 }
@@ -600,6 +619,13 @@ pub(crate) async fn llm_stream(
     worker: tauri::State<'_, WorkerState>,
     streams: tauri::State<'_, LlmStreamState>,
 ) -> Result<(), String> {
+    let dispatch = match request_guard::try_dispatch() {
+        Ok(dispatch) => dispatch,
+        Err(error) => {
+            send_failure(&on_event, StreamFailure::admission(error))?;
+            return Ok(());
+        }
+    };
     let runtime = match resolve_runtime(&request, &worker) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -632,6 +658,7 @@ pub(crate) async fn llm_stream(
     let native_cancellation = Arc::clone(&cancellation);
     let native_channel = on_event.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let _dispatch = dispatch;
         stream_provider(runtime, secret, native_cancellation, native_channel, false)
     })
     .await
@@ -660,9 +687,11 @@ pub(crate) fn agent_runtime_start(
     app: tauri::AppHandle,
     streams: tauri::State<'_, LlmStreamState>,
 ) -> Result<(), String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     let cancellation = streams.register_agent(&request, on_event)?;
     let attempt_id = request.attempt_id.clone();
     std::thread::spawn(move || {
+        let _dispatch = dispatch;
         let worker = app.state::<WorkerState>();
         let streams = app.state::<LlmStreamState>();
         run_agent_runtime(request, &worker, Arc::clone(&cancellation), &streams);
@@ -862,6 +891,8 @@ fn run_agent_runtime(
                         message: error,
                         retryable,
                         cancelled: false,
+                        guard_outcome: Outcome::Neutral,
+                        admission_rejected: false,
                         usage,
                     }),
                     LlmStreamEvent::Cancelled => Err(StreamFailure::cancelled()),
@@ -1023,11 +1054,36 @@ fn stream_provider_with_emitter<F>(
     runtime: LlmRuntimeRequest,
     secret: CredentialSecret,
     cancellation: Arc<LlmCancellation>,
-    mut emit: F,
+    emit: F,
     allow_http_for_test: bool,
 ) -> Result<(), StreamFailure>
 where
     F: FnMut(LlmStreamEvent) -> Result<(), StreamFailure>,
+{
+    stream_provider_with_admission(
+        runtime,
+        secret,
+        cancellation,
+        emit,
+        allow_http_for_test,
+        |origin, cancellation| request_guard::acquire(origin, || cancellation.is_cancelled()),
+    )
+}
+
+fn stream_provider_with_admission<F, A>(
+    runtime: LlmRuntimeRequest,
+    secret: CredentialSecret,
+    cancellation: Arc<LlmCancellation>,
+    mut emit: F,
+    allow_http_for_test: bool,
+    acquire: A,
+) -> Result<(), StreamFailure>
+where
+    F: FnMut(LlmStreamEvent) -> Result<(), StreamFailure>,
+    A: FnOnce(
+        &str,
+        &LlmCancellation,
+    ) -> Result<request_guard::Permit, request_guard::AdmissionError>,
 {
     if cancellation.is_cancelled() {
         return Err(StreamFailure::cancelled());
@@ -1057,171 +1113,203 @@ where
         .as_str()
         .map_err(|message| StreamFailure::new(message, false))?;
 
-    let agent = wide("unicomp/0.1");
-    let host = wide(&endpoint.host);
-    let verb = wide("POST");
-    let path_value = endpoint.path(suffix);
-    let path = wide(&path_value);
-    let session = WinHttpHandle::new(
-        unsafe {
-            WinHttpOpen(
-                agent.as_ptr(),
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            )
-        },
-        "Unable to initialize LLM transport",
-    )?;
-    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, LLM_RECEIVE_TIMEOUT_MS) } == 0
-    {
-        return Err(StreamFailure::new(
-            winhttp_error("Unable to configure LLM timeouts"),
-            true,
-        ));
-    }
-    let connection = WinHttpHandle::new(
-        unsafe { WinHttpConnect(session.0, host.as_ptr(), endpoint.port, 0) },
-        "Unable to connect LLM transport",
-    )?;
-    let flags = if endpoint.secure {
-        WINHTTP_FLAG_SECURE
-    } else {
-        0
-    };
-    let request_handle = unsafe {
-        WinHttpOpenRequest(
-            connection.0,
-            verb.as_ptr(),
-            path.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            flags,
-        )
-    };
-    if request_handle.is_null() {
-        return Err(StreamFailure::new(
-            winhttp_error("Unable to create LLM request"),
-            true,
-        ));
-    }
-    cancellation.attach(request_handle);
-    let _request_guard = RequestGuard(Arc::clone(&cancellation));
-    let disabled_features = WINHTTP_DISABLE_REDIRECTS;
-    if unsafe {
-        WinHttpSetOption(
-            cancellation.request()?,
-            WINHTTP_OPTION_DISABLE_FEATURE,
-            (&disabled_features as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        )
-    } == 0
-    {
-        return Err(transport_failure(
-            &cancellation,
-            "Unable to disable LLM redirects",
-        ));
-    }
-
-    let mut headers: Vec<u16> = "Accept: text/event-stream\r\nAuthorization: Bearer "
-        .encode_utf16()
-        .collect();
-    headers.extend(secret.encode_utf16());
-    headers.extend("\r\nContent-Type: application/json\r\n".encode_utf16());
-    let sent = unsafe {
-        WinHttpSendRequest(
-            cancellation.request()?,
-            headers.as_ptr(),
-            headers.len() as u32,
-            body.as_ptr().cast(),
-            body.len() as u32,
-            body.len() as u32,
-            0,
-        )
-    };
-    headers.fill(0);
-    if sent == 0 {
-        return Err(transport_failure(
-            &cancellation,
-            "LLM request could not be sent",
-        ));
-    }
-    if unsafe { WinHttpReceiveResponse(cancellation.request()?, std::ptr::null_mut()) } == 0 {
-        return Err(transport_failure(
-            &cancellation,
-            "LLM response headers could not be received",
-        ));
-    }
-    let status = query_status(cancellation.request()?)?;
-    if !(200..=299).contains(&status) {
-        let error_body = read_bounded_body(&cancellation, ERROR_BODY_LIMIT)?;
-        return Err(classify_http_error(status, &error_body));
-    }
-
-    emit(LlmStreamEvent::Started)?;
-    let started_at = Instant::now();
-    let mut parser = SseParser::new(&runtime.protocol);
-    loop {
+    let origin = request_guard::origin_key(endpoint.secure, &endpoint.host, endpoint.port);
+    let permit = acquire(&origin, &cancellation).map_err(|error| {
         if cancellation.is_cancelled() {
-            return Err(StreamFailure::cancelled());
+            StreamFailure::cancelled()
+        } else {
+            StreamFailure::admission(error)
         }
-        if started_at.elapsed() > TOTAL_TIMEOUT {
+    })?;
+    let result = (|| -> Result<(), StreamFailure> {
+        let agent = wide("unicomp/0.1");
+        let host = wide(&endpoint.host);
+        let verb = wide("POST");
+        let path_value = endpoint.path(suffix);
+        let path = wide(&path_value);
+        let session = WinHttpHandle::new(
+            unsafe {
+                WinHttpOpen(
+                    agent.as_ptr(),
+                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                )
+            },
+            "Unable to initialize LLM transport",
+        )?;
+        if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, LLM_RECEIVE_TIMEOUT_MS) }
+            == 0
+        {
             return Err(StreamFailure::new(
-                "LLM stream exceeded the total timeout.",
+                winhttp_error("Unable to configure LLM timeouts"),
                 true,
             ));
         }
-        let mut chunk = [0_u8; 8192];
-        let mut read = 0_u32;
+        let connection = WinHttpHandle::new(
+            unsafe { WinHttpConnect(session.0, host.as_ptr(), endpoint.port, 0) },
+            "Unable to connect LLM transport",
+        )?;
+        let flags = if endpoint.secure {
+            WINHTTP_FLAG_SECURE
+        } else {
+            0
+        };
+        let request_handle = unsafe {
+            WinHttpOpenRequest(
+                connection.0,
+                verb.as_ptr(),
+                path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                flags,
+            )
+        };
+        if request_handle.is_null() {
+            return Err(StreamFailure::new(
+                winhttp_error("Unable to create LLM request"),
+                true,
+            ));
+        }
+        cancellation.attach(request_handle);
+        let _request_guard = RequestGuard(Arc::clone(&cancellation));
+        let disabled_features = WINHTTP_DISABLE_REDIRECTS;
         if unsafe {
-            WinHttpReadData(
+            WinHttpSetOption(
                 cancellation.request()?,
-                chunk.as_mut_ptr().cast(),
-                chunk.len() as u32,
-                &mut read,
+                WINHTTP_OPTION_DISABLE_FEATURE,
+                (&disabled_features as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
             )
         } == 0
         {
+            return Err(
+                transport_failure(&cancellation, "Unable to disable LLM redirects")
+                    .with_outcome(Outcome::Neutral),
+            );
+        }
+
+        let mut headers: Vec<u16> = "Accept: text/event-stream\r\nAuthorization: Bearer "
+            .encode_utf16()
+            .collect();
+        headers.extend(secret.encode_utf16());
+        headers.extend("\r\nContent-Type: application/json\r\n".encode_utf16());
+        let sent = unsafe {
+            WinHttpSendRequest(
+                cancellation.request()?,
+                headers.as_ptr(),
+                headers.len() as u32,
+                body.as_ptr().cast(),
+                body.len() as u32,
+                body.len() as u32,
+                0,
+            )
+        };
+        headers.fill(0);
+        if sent == 0 {
             return Err(transport_failure(
                 &cancellation,
-                "LLM response stream could not be read",
+                "LLM request could not be sent",
             ));
         }
-        if read == 0 {
-            break;
+        if unsafe { WinHttpReceiveResponse(cancellation.request()?, std::ptr::null_mut()) } == 0 {
+            return Err(transport_failure(
+                &cancellation,
+                "LLM response headers could not be received",
+            ));
         }
-        parser.feed(&chunk[..read as usize], |event| emit(event))?;
-    }
-    let completed = parser.finish(|event| emit(event))?;
-    if completed.tool_calls.is_empty() {
-        emit(LlmStreamEvent::Complete {
-            provider_response_id: completed.provider_response_id,
-            finish_reason: completed.finish_reason,
-            usage: completed.usage,
-        })?;
+        let status = query_status(cancellation.request()?)?;
+        if !(200..=299).contains(&status) {
+            let retry_after =
+                query_optional_header(cancellation.request()?, WINHTTP_QUERY_RETRY_AFTER);
+            let outcome = http_outcome(status, retry_after.as_deref());
+            let error_body =
+                read_bounded_body(&cancellation, ERROR_BODY_LIMIT).map_err(|failure| {
+                    if failure.cancelled {
+                        failure
+                    } else {
+                        failure.with_outcome(outcome)
+                    }
+                })?;
+            return Err(classify_http_error(status, &error_body).with_outcome(outcome));
+        }
+
+        emit(LlmStreamEvent::Started)?;
+        let started_at = Instant::now();
+        let mut parser = SseParser::new(&runtime.protocol);
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(StreamFailure::cancelled());
+            }
+            if started_at.elapsed() > TOTAL_TIMEOUT {
+                return Err(
+                    StreamFailure::new("LLM stream exceeded the total timeout.", true)
+                        .with_outcome(Outcome::Failure),
+                );
+            }
+            let mut chunk = [0_u8; 8192];
+            let mut read = 0_u32;
+            if unsafe {
+                WinHttpReadData(
+                    cancellation.request()?,
+                    chunk.as_mut_ptr().cast(),
+                    chunk.len() as u32,
+                    &mut read,
+                )
+            } == 0
+            {
+                return Err(transport_failure(
+                    &cancellation,
+                    "LLM response stream could not be read",
+                ));
+            }
+            if read == 0 {
+                break;
+            }
+            parser.feed(&chunk[..read as usize], |event| emit(event))?;
+        }
+        let completed = parser.finish(|event| emit(event))?;
+        if completed.tool_calls.is_empty() {
+            emit(LlmStreamEvent::Complete {
+                provider_response_id: completed.provider_response_id,
+                finish_reason: completed.finish_reason,
+                usage: completed.usage,
+            })?;
+        } else {
+            let mut calls = completed.tool_calls;
+            let provider_response_id = completed.provider_response_id.or_else(|| {
+                calls.first().and_then(|call| {
+                    normalize_optional(&format!("chat-tool-call:{}", call.id), 256)
+                })
+            });
+            for call in &mut calls {
+                call.authorization_handle = runtime
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == call.name)
+                    .and_then(|tool| tool.authorization_handle.clone());
+            }
+            emit(LlmStreamEvent::ToolCalls {
+                calls,
+                provider_response_id,
+                usage: completed.usage,
+            })?;
+        }
+        Ok(())
+    })();
+    let result = if cancellation.is_cancelled() {
+        Err(StreamFailure::cancelled())
     } else {
-        let mut calls = completed.tool_calls;
-        let provider_response_id = completed.provider_response_id.or_else(|| {
-            calls
-                .first()
-                .and_then(|call| normalize_optional(&format!("chat-tool-call:{}", call.id), 256))
-        });
-        for call in &mut calls {
-            call.authorization_handle = runtime
-                .tools
-                .iter()
-                .find(|tool| tool.name == call.name)
-                .and_then(|tool| tool.authorization_handle.clone());
-        }
-        emit(LlmStreamEvent::ToolCalls {
-            calls,
-            provider_response_id,
-            usage: completed.usage,
-        })?;
-    }
-    Ok(())
+        result
+    };
+    let outcome = match &result {
+        Ok(()) => Outcome::Success,
+        Err(failure) => failure.guard_outcome,
+    };
+    permit.finish(outcome);
+    result
 }
 
 fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFailure> {
@@ -1616,10 +1704,10 @@ fn query_status(request: *mut core::ffi::c_void) -> Result<u32, StreamFailure> {
         )
     } == 0
     {
-        Err(StreamFailure::new(
-            winhttp_error("LLM response status could not be read"),
-            true,
-        ))
+        Err(
+            StreamFailure::new(winhttp_error("LLM response status could not be read"), true)
+                .with_outcome(Outcome::Failure),
+        )
     } else {
         Ok(status)
     }
@@ -1679,15 +1767,16 @@ fn classify_http_error(status: u32, body: &[u8]) -> StreamFailure {
         provider_message
             .filter(|message| !message.is_empty())
             .unwrap_or(fallback),
-        status == 408 || status == 429 || status >= 500,
+        status == 408 || status == 429 || (500..=599).contains(&status),
     )
+    .with_outcome(http_outcome(status, None))
 }
 
 fn transport_failure(cancellation: &LlmCancellation, operation: &str) -> StreamFailure {
     if cancellation.is_cancelled() {
         StreamFailure::cancelled()
     } else {
-        StreamFailure::new(winhttp_error(operation), true)
+        StreamFailure::new(winhttp_error(operation), true).with_outcome(Outcome::Failure)
     }
 }
 
@@ -1762,7 +1851,8 @@ impl SseParser {
             return Err(StreamFailure::new(
                 "LLM stream ended before a protocol success event.",
                 true,
-            ));
+            )
+            .with_outcome(Outcome::Failure));
         }
         let mut tool_calls = self.tool_calls.into_values().collect::<Vec<_>>();
         tool_calls.sort_by_key(|item| item.ordinal);
@@ -2323,18 +2413,225 @@ fn winhttp_error(operation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        coalesce_visible_delta, event_boundary, parse_base_url, stream_provider, LlmCancellation,
-        LlmRuntimeRequest, LlmStreamEvent, LlmStreamState, NormalizedUsage, ProviderReportedCost,
-        SseParser,
+        coalesce_visible_delta, event_boundary, parse_base_url, stream_provider,
+        stream_provider_with_admission, LlmCancellation, LlmRuntimeRequest, LlmStreamEvent,
+        LlmStreamState, NormalizedUsage, ProviderReportedCost, SseParser,
     };
     use crate::credential_store::CredentialSecret;
+    use crate::{
+        provider_http::{request_bytes_with_admission, JsonHttpRequest},
+        request_guard::{self, AdmissionError, Outcome},
+    };
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc, Mutex,
+        },
         thread,
+        time::Duration,
     };
     use tauri::ipc::Channel;
+
+    fn mock_runtime(port: u16) -> LlmRuntimeRequest {
+        serde_json::from_value(serde_json::json!({
+            "generationId": "generation", "attemptId": "attempt", "projectId": "project",
+            "projectSessionId": "session", "conversationId": "conversation",
+            "providerProfileId": "profile", "modelId": "model", "remoteModelId": "mock-model",
+            "protocol": "openai-responses", "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+            "systemInstruction": "System", "context": "Context", "prompt": "Prompt"
+        }))
+        .expect("valid runtime")
+    }
+
+    #[test]
+    fn json_rate_limit_blocks_llm_on_the_same_origin_before_sending() {
+        let scheduler = request_guard::isolated_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_listener = listener.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = server_listener.accept().unwrap();
+            stream.read(&mut [0_u8; 4096]).unwrap();
+            stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        let response = request_bytes_with_admission(
+            JsonHttpRequest {
+                host: "127.0.0.1",
+                port,
+                secure: false,
+                method: "GET",
+                path: "/v1/models",
+                authorization_scheme: "Bearer",
+                accept: "application/json",
+                secret: "test-key",
+                body: None,
+                request_body_limit: 1,
+                response_body_limit: 1024,
+            },
+            |origin| scheduler.acquire(origin, || false),
+        )
+        .unwrap();
+        assert_eq!(response.status, 429);
+        server.join().unwrap();
+
+        let error = stream_provider_with_admission(
+            mock_runtime(port),
+            CredentialSecret::for_test("test-key"),
+            Arc::new(LlmCancellation::default()),
+            |_| panic!("no stream event before admission"),
+            true,
+            |origin, cancelled| scheduler.acquire(origin, || cancelled.is_cancelled()),
+        )
+        .unwrap_err();
+        assert!(error.message.starts_with("PROVIDER_COOLDOWN"));
+        assert!(error.admission_rejected);
+        assert_eq!(error.guard_outcome, Outcome::Neutral);
+        assert!(error.retryable);
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn llm_keeps_admission_until_the_complete_response_body_is_read() {
+        let scheduler = request_guard::isolated_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let origin = request_guard::origin_key(false, "127.0.0.1", port);
+        let _first = scheduler.acquire(&origin, || false).unwrap();
+        let _second = scheduler.acquire(&origin, || false).unwrap();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.read(&mut [0_u8; 4096]).unwrap();
+            let prefix =
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
+            let suffix = "data: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prefix}", prefix.len() + suffix.len()).unwrap();
+            stream.flush().unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            stream.write_all(suffix.as_bytes()).unwrap();
+        });
+        let (started_tx, started_rx) = mpsc::channel();
+        let streaming_scheduler = scheduler.clone();
+        let streaming = thread::spawn(move || {
+            stream_provider_with_admission(
+                mock_runtime(port),
+                CredentialSecret::for_test("test-key"),
+                Arc::new(LlmCancellation::default()),
+                |event| {
+                    if matches!(event, LlmStreamEvent::Started) {
+                        started_tx.send(()).unwrap();
+                    }
+                    Ok(())
+                },
+                true,
+                |origin, cancelled| {
+                    streaming_scheduler.acquire(origin, || cancelled.is_cancelled())
+                },
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let polls = AtomicUsize::new(0);
+        let waiting = scheduler.acquire(&origin, || polls.fetch_add(1, Ordering::Relaxed) >= 2);
+        assert!(matches!(waiting, Err(AdmissionError::Cancelled)));
+        finish_tx.send(()).unwrap();
+        streaming.join().unwrap().unwrap();
+        server.join().unwrap();
+        scheduler
+            .acquire(&origin, || false)
+            .unwrap()
+            .finish(Outcome::Success);
+    }
+
+    #[test]
+    fn cancelling_a_queued_llm_never_opens_a_provider_connection() {
+        let scheduler = request_guard::isolated_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let origin = request_guard::origin_key(false, "127.0.0.1", port);
+        let _active = (0..3)
+            .map(|_| scheduler.acquire(&origin, || false).unwrap())
+            .collect::<Vec<_>>();
+        let cancellation = Arc::new(LlmCancellation::default());
+        let native_cancellation = cancellation.clone();
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let streaming = thread::spawn(move || {
+            stream_provider_with_admission(
+                mock_runtime(port),
+                CredentialSecret::for_test("test-key"),
+                native_cancellation,
+                |_| panic!("queued stream cannot emit"),
+                true,
+                |origin, cancelled| {
+                    queued_tx.send(()).unwrap();
+                    scheduler.acquire(origin, || cancelled.is_cancelled())
+                },
+            )
+        });
+        queued_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancellation.cancel();
+        let failure = streaming.join().unwrap().unwrap_err();
+        assert!(failure.cancelled);
+        assert_eq!(failure.guard_outcome, Outcome::Neutral);
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn http_circuit_outcomes_do_not_use_retryability_as_failure_evidence() {
+        for status in [400, 401, 403, 404, 422] {
+            assert_eq!(
+                super::classify_http_error(status, b"{}").guard_outcome,
+                Outcome::Neutral
+            );
+        }
+        for status in [408, 500, 502, 503] {
+            assert_eq!(
+                super::classify_http_error(status, b"{}").guard_outcome,
+                Outcome::Failure
+            );
+        }
+        assert_eq!(
+            super::classify_http_error(429, b"{}").guard_outcome,
+            Outcome::RateLimited(Duration::from_secs(30))
+        );
+        assert_eq!(
+            super::StreamFailure::new("local IPC failed", true).guard_outcome,
+            Outcome::Neutral
+        );
+        let interrupted = SseParser::new("openai-responses")
+            .finish(|_| Ok(()))
+            .unwrap_err();
+        assert_eq!(interrupted.guard_outcome, Outcome::Failure);
+    }
+
+    #[test]
+    fn remote_error_messages_cannot_claim_local_admission_rejection() {
+        let remote_message = "REQUEST_QUEUE_FULL: provider text";
+        let http = super::classify_http_error(
+            500,
+            br#"{"error":{"message":"REQUEST_QUEUE_FULL: provider text"}}"#,
+        );
+        assert_eq!(http.message, remote_message);
+        assert!(!http.admission_rejected);
+        for event in [
+            format!("data: {{\"type\":\"error\",\"message\":\"{remote_message}\"}}\n\n"),
+            format!("data: {{\"type\":\"response.failed\",\"response\":{{\"error\":{{\"message\":\"{remote_message}\"}}}}}}\n\n"),
+        ] {
+            let error = SseParser::new("openai-responses").feed(event.as_bytes(), |_| Ok(())).unwrap_err();
+            assert_eq!(error.message, remote_message);
+            assert!(!error.admission_rejected);
+        }
+        assert!(super::StreamFailure::admission(AdmissionError::QueueFull).admission_rejected);
+    }
 
     #[test]
     fn confirmation_waiter_accepts_only_the_pending_token() {

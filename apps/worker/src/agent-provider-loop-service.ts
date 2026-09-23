@@ -2458,8 +2458,9 @@ export class AgentProviderLoopService {
                       attemptId: params.attemptId,
                       sourceHandle: toolArguments.sourceHandle,
                       maxChars: toolArguments.maxChars,
+                      readMode: toolArguments.readMode,
+                      offset: toolArguments.offset,
                     });
-              resultSummary = summarizeLibraryResult(result);
               output = {
                 callId: call.id,
                 output:
@@ -2471,6 +2472,7 @@ export class AgentProviderLoopService {
                       )
                     : unifiedAgentToolRegistry.serializeResult(result),
               };
+              resultSummary = summarizeLibraryResult(JSON.parse(output.output) as typeof result);
             } catch (error) {
               const code = error instanceof LibraryError ? error.code : 'LIBRARY_SEARCH_FAILED';
               const message = (
@@ -4809,7 +4811,10 @@ function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperatio
   ) {
     return (
       saveIntent ||
-      /(?:创建|生成|写|起草|撰写|整理成|做成|续写|改写|create|generate|write|draft|compose|continue|rewrite)/iu.test(
+      /(?:创建|生成|起草|撰写|整理成|做成|续写|改写|create|generate|draft|compose|continue|rewrite)/iu.test(
+        value,
+      ) ||
+      /(?:写|write).{0,12}(?:文档|草稿|大纲|计划|说明|提示词|分镜|剧本|章节)|(?:文档|草稿|大纲|计划|说明|提示词|分镜|剧本|章节).{0,12}(?:写|write)/iu.test(
         value,
       )
     );
@@ -5078,7 +5083,13 @@ type LibraryToolArguments =
       includeArchived?: boolean;
       limit?: number;
     }
-  | { operation: 'library.read'; sourceHandle: string; maxChars?: number };
+  | {
+      operation: 'library.read';
+      sourceHandle: string;
+      maxChars?: number;
+      readMode?: 'chunk' | 'source';
+      offset?: number;
+    };
 
 function parseLibraryToolArguments(
   operation: LibraryOperation,
@@ -5130,7 +5141,11 @@ function parseLibraryToolArguments(
       limit: optionalBoundedInteger(record.limit, 1, 20),
     };
   }
-  if (Object.keys(record).some((key) => !['sourceHandle', 'maxChars'].includes(key))) {
+  if (
+    Object.keys(record).some(
+      (key) => !['sourceHandle', 'maxChars', 'readMode', 'offset'].includes(key),
+    )
+  ) {
     throw new Error('Library read arguments contain unsupported fields.');
   }
   if (typeof record.sourceHandle !== 'string' || !record.sourceHandle.trim()) {
@@ -5138,10 +5153,16 @@ function parseLibraryToolArguments(
   }
   const sourceHandle = record.sourceHandle.trim();
   if (sourceHandle.length > 128) throw new Error('Library sourceHandle is invalid.');
+  const readMode = record.readMode;
+  if (readMode !== undefined && readMode !== 'chunk' && readMode !== 'source') {
+    throw new Error('Library read mode is invalid.');
+  }
   return {
     operation,
     sourceHandle,
     maxChars: optionalBoundedInteger(record.maxChars, 1, 20_000),
+    readMode,
+    offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 
@@ -5161,6 +5182,8 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
     operation: argumentsValue.operation,
     sourceHandleHash: hash(argumentsValue.sourceHandle),
     maxChars: argumentsValue.maxChars,
+    readMode: argumentsValue.readMode,
+    offset: argumentsValue.offset,
   };
 }
 
@@ -5185,6 +5208,12 @@ function summarizeLibraryResult(result: {
   versionId?: string;
   sourceStatus?: string;
   kind?: string;
+  readMode?: 'chunk' | 'source';
+  contentHash?: string;
+  startOffset?: number;
+  endOffset?: number;
+  nextOffset?: number;
+  totalCharacters?: number;
   truncated?: boolean;
   characterCount?: number;
 }): Record<string, unknown> {
@@ -5193,6 +5222,7 @@ function summarizeLibraryResult(result: {
       status: result.status,
       queryHash: result.queryHash,
       resultCount: result.resultCount,
+      truncated: result.truncated,
       sources: (result.sources ?? []).map((source) => ({
         citationLabel: source.citationLabel,
         title: source.title,
@@ -5214,6 +5244,12 @@ function summarizeLibraryResult(result: {
     versionId: result.versionId,
     sourceStatus: result.sourceStatus,
     kind: result.kind,
+    readMode: result.readMode,
+    contentHash: result.contentHash,
+    startOffset: result.startOffset,
+    endOffset: result.endOffset,
+    nextOffset: result.nextOffset,
+    totalCharacters: result.totalCharacters,
     truncated: result.truncated,
     characterCount: result.characterCount,
   };

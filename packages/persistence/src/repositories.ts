@@ -1239,7 +1239,7 @@ class SqliteConversationRepository
 
   listPageByProject(
     projectId: string,
-    options: import("@ai-video/domain").ConversationPageOptions,
+    options: import('@ai-video/domain').ConversationPageOptions,
   ): ConversationRecord[] {
     const conditions: string[] = ['project_id = ?'];
     const params: unknown[] = [projectId];

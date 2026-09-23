@@ -1669,6 +1669,9 @@ export interface LibrarySearchSource {
   snippet: string;
   citationLabel: string;
   updatedAt: string;
+  chunkOrdinal?: number;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface LibrarySearchResult {
@@ -1682,6 +1685,7 @@ export interface LibrarySearchResult {
 export interface LibraryReadResult {
   status: 'read';
   sourceHandle: string;
+  readMode?: 'chunk' | 'source';
   sourceType: LibrarySourceType;
   sourceId: string;
   versionId?: string;
@@ -1694,6 +1698,12 @@ export interface LibraryReadResult {
   citationLabel: string;
   untrusted: false;
   candidateNote?: string;
+  /** UTF-16 offsets in the selected chunk or source, suitable for continuation reads. */
+  startOffset?: number;
+  endOffset?: number;
+  nextOffset?: number;
+  totalCharacters?: number;
+  contentHash?: string;
 }
 
 export interface AgentLibrarySourceInfo {
@@ -1986,6 +1996,7 @@ export interface HostError {
     | 'INVALID_PARAMETERS'
     | 'PROVIDER_UNAVAILABLE'
     | 'PROVIDER_FAILED'
+    | 'REQUEST_NOT_SENT'
     | 'INTERRUPTED'
     | 'CANCELLED'
     | 'STALE_SESSION'

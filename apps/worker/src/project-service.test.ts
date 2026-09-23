@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CURRENT_SCHEMA_VERSION } from '@ai-video/persistence';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isProcessAlive, ProjectService, resolveProjectRelativePath } from './project-service.js';
 import Database from 'better-sqlite3';
@@ -50,7 +51,11 @@ describe('ProjectService', () => {
     const recent = join(base, 'recent.json');
     const first = service(recent);
     const created = first.create(root, 'First Project');
-    expect(created).toMatchObject({ name: 'First Project', mode: 'read-write', schemaVersion: 39 });
+    expect(created).toMatchObject({
+      name: 'First Project',
+      mode: 'read-write',
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+    });
     for (const path of [
       'project.sqlite',
       'assets/images',
@@ -194,7 +199,7 @@ describe('ProjectService', () => {
     writer.close();
     expect(service(recent).open(exported)).toMatchObject({
       name: 'Portable Project',
-      schemaVersion: 39,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
     });
   });
 

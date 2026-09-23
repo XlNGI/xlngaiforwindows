@@ -199,9 +199,9 @@ describe('GenerationService', () => {
     };
     const { content, conversation, generations } = await setup(provider);
     content.archiveConversation({ conversationId: conversation.id });
-    expect(() =>
-      generations.generate(conversation.id, 'Test archived'),
-    ).toThrow('Archived conversations cannot be updated.');
+    expect(() => generations.generate(conversation.id, 'Test archived')).toThrow(
+      'Archived conversations cannot be updated.',
+    );
   });
 
   it('cancels an active generation', async () => {
@@ -482,6 +482,25 @@ describe('GenerationService', () => {
     expect(runtime.systemInstruction).toContain('工作助理');
     expect(runtime.systemInstruction).toContain('library.search');
     expect(runtime.systemInstruction).toContain('Do not repeat a successful library.search');
+    expect(runtime.systemInstruction).toContain('当前项目 SQLite 资料库');
+    expect(runtime.systemInstruction).toContain(
+      '自主判断是否检索、查询词、来源类型及需要读取的范围',
+    );
+    expect(runtime.systemInstruction).toContain('推荐 sourceTypes=["novel-chapter"]');
+    expect(runtime.systemInstruction).toContain(
+      '必须调用 library.read 取得覆盖目标章节范围的正文证据',
+    );
+    expect(runtime.systemInstruction).toContain('readMode="source"');
+    expect(runtime.systemInstruction).toContain('maxChars 不超过 20000');
+    expect(runtime.systemInstruction).toContain('将 nextOffset 作为后续调用的 offset');
+    expect(runtime.systemInstruction).toContain(
+      '章节勾选只是可选快捷入口，不是 Agent 检索的前置条件',
+    );
+    expect(runtime.systemInstruction).toContain('未列出不代表不存在');
+    expect(runtime.systemInstruction).toContain('遵守工具返回的剩余预算与硬限制');
+    expect(runtime.systemInstruction).toContain('不得凭常识编造项目剧情');
+    expect(runtime.systemInstruction).not.toContain('代表资料库暂无该具体记录');
+    expect(runtime.systemInstruction).not.toContain('至多读取 1~2 个');
     expect(runtime.context).toContain('林澈');
     expect(runtime.context).not.toContain('这段正文不应进入普通会话');
   });

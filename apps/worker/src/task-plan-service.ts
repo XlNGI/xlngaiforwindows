@@ -298,11 +298,16 @@ export class TaskPlanService {
     });
   }
 
-  beginStep(input: { taskId: string; operation: string }): string {
+  beginStep(input: { taskId: string; operation: string }): string | undefined {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const repositories = createRepositories(database);
         const plan = repositories.agentTaskPlans.getByTask(input.taskId);
+        const retrieval =
+          input.operation === 'library.search' || input.operation === 'library.read';
+        // Read-only retrieval may inform a plan before it exists. The tool
+        // executor still validates the current project's authorization.
+        if (!plan && retrieval) return undefined;
         if (
           !plan ||
           plan.projectId !== project.id ||
@@ -319,6 +324,9 @@ export class TaskPlanService {
           (candidate) => candidate.status === 'ready' && candidate.operation === input.operation,
         );
         if (!step) {
+          // The model may discover that it needs more source material after
+          // planning. Only a ready, explicit retrieval step consumes a step.
+          if (retrieval) return undefined;
           throw new TaskPlanServiceError(
             'TASK_PLAN_DELIVERABLE_NOT_READY',
             `Operation ${input.operation} is not ready in the frozen plan.`,
@@ -1278,7 +1286,7 @@ function genericPlanToolDefinition(
   return {
     name: 'task.plan.submit',
     description:
-      'Submit the complete generic dependency plan. This is the only tool available during the planning round.',
+      'Submit the complete generic dependency plan. Authorized library.search and library.read may be used before submission when project context is needed.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1400,11 +1408,12 @@ export function buildGenericPlanOnlyInstruction(input: {
 }): string {
   return [
     'You are in a plan-only round for a generic multi-step task.',
-    'Your only available tool is task.plan.submit. Call it exactly once with a version 2 plan.',
+    'Submit exactly one version 2 plan with task.plan.submit. You may first use authorized library.search and library.read tools to inspect project sources when helpful.',
     'Each step needs a stable lowercase id, one exact authorized operation, required, dependsOn, and bounded constraints.',
-    'Do not call business tools, invent authority fields, include credentials or paths, or claim completion in this round.',
+    'Do not call business write tools, invent authority fields, include credentials or paths, or claim completion in this round.',
     `Worker-authorized operations: ${input.authorizedOperations.join(', ')}.`,
     `Required operation order: ${input.requiredOperations.join(' -> ')}. Every later required operation must depend transitively on the previous one.`,
+    'Choose whether and how to retrieve project content yourself. Authorized library.search and library.read remain available throughout execution even if you omit retrieval steps from the plan.',
     'Original user request:',
     input.userPrompt,
   ].join('\n\n');

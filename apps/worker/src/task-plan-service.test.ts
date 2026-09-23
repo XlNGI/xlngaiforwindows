@@ -127,7 +127,10 @@ async function setup(targetPlatform: 'seedance' | 'generic-video' = 'seedance') 
   return { project, service: new TaskPlanService(project), ...identifiers };
 }
 
-async function setupGeneric(requiredOperations = ['media.image.prepare', 'media.video.prepare']) {
+async function setupGeneric(
+  requiredOperations = ['media.image.prepare', 'media.video.prepare'],
+  authorizedOperations = ['media.image.prepare', 'media.video.prepare'],
+) {
   const fixture = await setup();
   fixture.project.access(true, (database) => {
     database.prepare('UPDATE agent_tasks SET request_snapshot_json = ? WHERE id = ?').run(
@@ -136,7 +139,7 @@ async function setupGeneric(requiredOperations = ['media.image.prepare', 'media.
         structuredPlan: {
           version: 2,
           mode: 'document',
-          authorizedOperations: ['media.image.prepare', 'media.video.prepare'],
+          authorizedOperations,
           requiredOperations,
         },
       }),
@@ -361,6 +364,83 @@ describe('ConversationTaskPlanV2 validation and inference', () => {
 });
 
 describe('TaskPlanService P6 generic dependency plans', () => {
+  it('allows unplanned library retrieval before and after freezing without unlocking writes', async () => {
+    const { service, taskId } = await setupGeneric();
+    expect(service.beginStep({ taskId, operation: 'library.search' })).toBeUndefined();
+    expect(service.beginStep({ taskId, operation: 'library.read' })).toBeUndefined();
+    expect(serviceCode(() => service.beginStep({ taskId, operation: 'media.image.prepare' }))).toBe(
+      'TASK_PLAN_DELIVERABLE_NOT_READY',
+    );
+
+    const plan = service.submitPlanOnly({ taskId, candidate: validGenericPlan });
+    expect(service.beginStep({ taskId, operation: 'library.search' })).toBeUndefined();
+    expect(service.beginStep({ taskId, operation: 'library.read' })).toBeUndefined();
+    expect(service.getByTask(taskId)?.deliverables).toEqual(plan.deliverables);
+    expect(service.availableOperations(taskId)).toEqual(['media.image.prepare']);
+    expect(serviceCode(() => service.beginStep({ taskId, operation: 'media.video.prepare' }))).toBe(
+      'TASK_PLAN_DELIVERABLE_NOT_READY',
+    );
+    expect(
+      serviceCode(() => service.beginStep({ taskId, operation: 'document.create_draft' })),
+    ).toBe('TASK_PLAN_DELIVERABLE_NOT_READY');
+  });
+
+  it('records explicitly planned retrieval steps while allowing additional reads', async () => {
+    const { service, taskId } = await setupGeneric(undefined, [
+      'library.search',
+      'library.read',
+      'media.image.prepare',
+      'media.video.prepare',
+    ]);
+    const plan = service.submitPlanOnly({
+      taskId,
+      candidate: {
+        ...validGenericPlan,
+        steps: [
+          {
+            id: 'search',
+            operation: 'library.search',
+            required: true,
+            dependsOn: [],
+            constraints: [],
+          },
+          {
+            id: 'read',
+            operation: 'library.read',
+            required: true,
+            dependsOn: ['search'],
+            constraints: [],
+          },
+          { ...validGenericPlan.steps[0], dependsOn: ['read'] },
+          validGenericPlan.steps[1],
+        ],
+      },
+    });
+    for (const operation of ['library.search', 'library.read']) {
+      const step = plan.deliverables.find((candidate) => candidate.operation === operation)!;
+      expect(service.beginStep({ taskId, operation })).toBe(step.id);
+      expect(
+        service.recordStepSuccess({
+          taskId,
+          stepId: step.id,
+          operation,
+          resultText: JSON.stringify({
+            status: operation === 'library.search' ? 'searched' : 'read',
+          }),
+        }),
+      ).toBe(true);
+    }
+    expect(service.availableOperations(taskId)).toEqual(['media.image.prepare']);
+    expect(service.beginStep({ taskId, operation: 'library.read' })).toBeUndefined();
+    expect(service.availableOperations(taskId)).toEqual(['media.image.prepare']);
+    expect(
+      service
+        .getByTask(taskId)
+        ?.deliverables.filter((step) => step.status === 'succeeded')
+        .map((step) => step.operation),
+    ).toEqual(['library.search', 'library.read']);
+  });
+
   it('validates task authorization and the required operation order', async () => {
     const { service, taskId } = await setupGeneric();
     expect(

@@ -2,21 +2,24 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, ToSocketAddrs},
     sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use windows_sys::Win32::Foundation::GetLastError;
+use super::request_guard::{self, Outcome};
+use windows_sys::Win32::Foundation::{GetLastError, SYSTEMTIME};
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-    WinHttpSetTimeouts, ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_SECURE_FAILURE,
-    ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_REDIRECTS,
-    WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_TYPE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_RETRY_AFTER,
-    WINHTTP_QUERY_STATUS_CODE,
+    WinHttpSetTimeouts, WinHttpTimeToSystemTime, ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED,
+    ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
+    WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION,
+    WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JsonHttpErrorKind {
+    Admission,
     InvalidRequest,
     Timeout,
     Tls,
@@ -29,6 +32,7 @@ pub(crate) enum JsonHttpErrorKind {
 pub(crate) struct JsonHttpError {
     kind: JsonHttpErrorKind,
     message: String,
+    guard_outcome: Outcome,
 }
 
 impl JsonHttpError {
@@ -36,11 +40,17 @@ impl JsonHttpError {
         Self {
             kind,
             message: message.into(),
+            guard_outcome: Outcome::Neutral,
         }
     }
 
     pub(crate) fn kind(&self) -> JsonHttpErrorKind {
         self.kind
+    }
+
+    fn with_outcome(mut self, outcome: Outcome) -> Self {
+        self.guard_outcome = outcome;
+        self
     }
 }
 
@@ -187,7 +197,7 @@ struct WinHttpHandle(*mut core::ffi::c_void);
 impl WinHttpHandle {
     fn new(handle: *mut core::ffi::c_void, operation: &str) -> Result<Self, JsonHttpError> {
         if handle.is_null() {
-            Err(winhttp_error(operation))
+            Err(winhttp_error(operation).with_outcome(Outcome::Neutral))
         } else {
             Ok(Self(handle))
         }
@@ -205,7 +215,26 @@ impl Drop for WinHttpHandle {
 pub(crate) fn request_bytes(
     request: JsonHttpRequest<'_>,
 ) -> Result<RawHttpResponse, JsonHttpError> {
+    request_bytes_with_admission(request, |origin| request_guard::acquire(origin, || false))
+}
+
+pub(crate) fn request_bytes_with_admission<F>(
+    request: JsonHttpRequest<'_>,
+    acquire: F,
+) -> Result<RawHttpResponse, JsonHttpError>
+where
+    F: FnOnce(&str) -> Result<request_guard::Permit, request_guard::AdmissionError>,
+{
     validate_request(&request)?;
+    let origin = request_guard::origin_key(request.secure, request.host, request.port);
+    let permit = acquire(&origin)
+        .map_err(|error| JsonHttpError::new(JsonHttpErrorKind::Admission, error.to_string()))?;
+    let result = request_bytes_admitted(request);
+    permit.finish(request_outcome(&result));
+    result
+}
+
+fn request_bytes_admitted(request: JsonHttpRequest<'_>) -> Result<RawHttpResponse, JsonHttpError> {
     let agent = wide("unicomp/0.1");
     let host = wide(request.host);
     let verb = wide(request.method);
@@ -223,7 +252,9 @@ pub(crate) fn request_bytes(
         "Unable to initialize provider transport",
     )?;
     if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) } == 0 {
-        return Err(winhttp_error("Unable to configure provider timeouts"));
+        return Err(
+            winhttp_error("Unable to configure provider timeouts").with_outcome(Outcome::Neutral)
+        );
     }
     let connection = WinHttpHandle::new(
         unsafe { WinHttpConnect(session.0, host.as_ptr(), request.port, 0) },
@@ -258,7 +289,9 @@ pub(crate) fn request_bytes(
         )
     } == 0
     {
-        return Err(winhttp_error("Unable to disable provider redirects"));
+        return Err(
+            winhttp_error("Unable to disable provider redirects").with_outcome(Outcome::Neutral)
+        );
     }
 
     let mut headers: Vec<u16> = format!(
@@ -311,6 +344,7 @@ pub(crate) fn request_bytes(
         return Err(winhttp_error("Provider status could not be read"));
     }
 
+    let retry_after = query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER);
     let mut response = Vec::new();
     loop {
         let mut chunk = [0_u8; 8192];
@@ -324,16 +358,24 @@ pub(crate) fn request_bytes(
             )
         } == 0
         {
-            return Err(winhttp_error("Provider response body could not be read"));
+            return Err(response_error(
+                winhttp_error("Provider response body could not be read"),
+                status,
+                retry_after.as_deref(),
+            ));
         }
         if read == 0 {
             break;
         }
         response.extend_from_slice(&chunk[..read as usize]);
         if response.len() > request.response_body_limit {
-            return Err(JsonHttpError::new(
-                JsonHttpErrorKind::ResponseTooLarge,
-                "Provider response exceeds the native transport limit",
+            return Err(response_error(
+                JsonHttpError::new(
+                    JsonHttpErrorKind::ResponseTooLarge,
+                    "Provider response exceeds the native transport limit",
+                ),
+                status,
+                retry_after.as_deref(),
             ));
         }
     }
@@ -342,27 +384,31 @@ pub(crate) fn request_bytes(
         body: response,
         content_type: query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE),
         location: query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION),
-        retry_after: query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER),
+        retry_after,
     })
 }
 
 pub(crate) fn request_public_bytes(
     request: PublicHttpRequest<'_>,
 ) -> Result<RawHttpResponse, JsonHttpError> {
-    let check_cancelled = || {
-        request
-            .cancellation
-            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    validate_public_request(&request)?;
+    let origin = request_guard::origin_key(true, request.host, 443);
+    let cancellation = request.cancellation;
+    let permit = request_guard::acquire(&origin, || {
+        cancellation.is_some_and(|flag| flag.load(Ordering::Acquire))
+    })
+    .map_err(|error| JsonHttpError::new(JsonHttpErrorKind::Admission, error.to_string()))?;
+    let result = request_public_bytes_admitted(request);
+    let outcome = if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        Outcome::Neutral
+    } else {
+        request_outcome(&result)
     };
-    let cancelled = || {
-        Err(JsonHttpError::new(
-            JsonHttpErrorKind::Transport,
-            "Public request was cancelled",
-        ))
-    };
-    if check_cancelled() {
-        return cancelled();
-    }
+    permit.finish(outcome);
+    result
+}
+
+fn validate_public_request(request: &PublicHttpRequest<'_>) -> Result<(), JsonHttpError> {
     if request.host.is_empty()
         || !request.host.is_ascii()
         || request
@@ -385,6 +431,26 @@ pub(crate) fn request_public_bytes(
             "Public request is invalid",
         ));
     }
+    Ok(())
+}
+
+fn request_public_bytes_admitted(
+    request: PublicHttpRequest<'_>,
+) -> Result<RawHttpResponse, JsonHttpError> {
+    let check_cancelled = || {
+        request
+            .cancellation
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    };
+    let cancelled = || {
+        Err(JsonHttpError::new(
+            JsonHttpErrorKind::Transport,
+            "Public request was cancelled",
+        ))
+    };
+    if check_cancelled() {
+        return cancelled();
+    }
     let agent = wide("XLNGAI/1.0");
     let host = wide(request.host);
     let path = wide(request.path);
@@ -402,7 +468,8 @@ pub(crate) fn request_public_bytes(
         "Unable to initialize public transport",
     )?;
     if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, 15_000) } == 0 {
-        return Err(winhttp_error("Unable to configure public request timeouts"));
+        return Err(winhttp_error("Unable to configure public request timeouts")
+            .with_outcome(Outcome::Neutral));
     }
     let connection = WinHttpHandle::new(
         unsafe { WinHttpConnect(session.0, host.as_ptr(), 443, 0) },
@@ -432,11 +499,16 @@ pub(crate) fn request_public_bytes(
         )
     } == 0
     {
-        return Err(winhttp_error("Unable to disable public redirects"));
+        return Err(
+            winhttp_error("Unable to disable public redirects").with_outcome(Outcome::Neutral)
+        );
     }
     let mut headers: Vec<u16> = format!("Accept: {}\r\n", request.accept)
         .encode_utf16()
         .collect();
+    if check_cancelled() {
+        return cancelled();
+    }
     let sent = unsafe {
         WinHttpSendRequest(
             native_request.0,
@@ -479,6 +551,7 @@ pub(crate) fn request_public_bytes(
     }
     let content_type = query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE);
     let location = query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION);
+    let retry_after = query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER);
     let mut body = Vec::new();
     loop {
         if check_cancelled() {
@@ -495,7 +568,11 @@ pub(crate) fn request_public_bytes(
             )
         } == 0
         {
-            return Err(winhttp_error("Public response body could not be read"));
+            return Err(response_error(
+                winhttp_error("Public response body could not be read"),
+                status,
+                retry_after.as_deref(),
+            ));
         }
         if read == 0 {
             break;
@@ -505,9 +582,13 @@ pub(crate) fn request_public_bytes(
         }
         body.extend_from_slice(&chunk[..read as usize]);
         if body.len() > request.response_body_limit {
-            return Err(JsonHttpError::new(
-                JsonHttpErrorKind::ResponseTooLarge,
-                "Public response exceeds the native transport limit",
+            return Err(response_error(
+                JsonHttpError::new(
+                    JsonHttpErrorKind::ResponseTooLarge,
+                    "Public response exceeds the native transport limit",
+                ),
+                status,
+                retry_after.as_deref(),
             ));
         }
     }
@@ -516,11 +597,14 @@ pub(crate) fn request_public_bytes(
         body,
         content_type,
         location,
-        retry_after: query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER),
+        retry_after,
     })
 }
 
-fn query_optional_header(request: *mut core::ffi::c_void, header: u32) -> Option<String> {
+pub(crate) fn query_optional_header(
+    request: *mut core::ffi::c_void,
+    header: u32,
+) -> Option<String> {
     let mut size = 0_u32;
     let mut index = 0_u32;
     unsafe {
@@ -588,9 +672,78 @@ fn parse_json_response(response: RawHttpResponse) -> Result<JsonHttpResponse, Js
     })
 }
 
-fn parse_retry_after_ms(value: &str) -> Option<u64> {
-    let seconds = value.trim().parse::<u64>().ok()?;
-    Some(seconds.saturating_mul(1_000).min(30 * 60 * 1_000))
+pub(crate) fn parse_retry_after_ms(value: &str) -> Option<u64> {
+    parse_retry_after_at(value, SystemTime::now())
+}
+
+fn parse_retry_after_at(value: &str, now: SystemTime) -> Option<u64> {
+    const MAX_DELAY_MS: u64 = 30 * 60 * 1_000;
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000).min(MAX_DELAY_MS));
+    }
+    if value.len() > 128 || value.contains('\0') {
+        return None;
+    }
+    let value = wide(value.trim());
+    let mut date = SYSTEMTIME::default();
+    if unsafe { WinHttpTimeToSystemTime(value.as_ptr(), &mut date) } == 0
+        || date.wYear < 1970
+        || !(1..=12).contains(&date.wMonth)
+        || !(1..=31).contains(&date.wDay)
+        || date.wHour > 23
+        || date.wMinute > 59
+        || date.wSecond > 59
+    {
+        return None;
+    }
+    // Convert the parsed UTC civil date to days since the Unix epoch.
+    let year = i64::from(date.wYear) - i64::from(date.wMonth <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month = i64::from(date.wMonth) + if date.wMonth > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month + 2) / 5 + i64::from(date.wDay) - 1;
+    let days = era * 146_097 + year_of_era * 365 + year_of_era / 4 - year_of_era / 100
+        + day_of_year
+        - 719_468;
+    let seconds = days * 86_400
+        + i64::from(date.wHour) * 3_600
+        + i64::from(date.wMinute) * 60
+        + i64::from(date.wSecond);
+    let target = UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(seconds).ok()?))?;
+    Some(
+        target
+            .duration_since(now)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(MAX_DELAY_MS)) as u64,
+    )
+}
+
+pub(crate) fn http_outcome(status: u32, retry_after: Option<&str>) -> Outcome {
+    match status {
+        200..=399 => Outcome::Success,
+        429 => Outcome::RateLimited(Duration::from_millis(
+            retry_after.and_then(parse_retry_after_ms).unwrap_or(30_000),
+        )),
+        408 | 500..=599 => Outcome::Failure,
+        _ => Outcome::Neutral,
+    }
+}
+
+fn request_outcome(result: &Result<RawHttpResponse, JsonHttpError>) -> Outcome {
+    match result {
+        Ok(response) => http_outcome(response.status, response.retry_after.as_deref()),
+        Err(error) => error.guard_outcome,
+    }
+}
+
+fn response_error(error: JsonHttpError, status: u32, retry_after: Option<&str>) -> JsonHttpError {
+    // Preserve an observed rejection even if its body is truncated or unreadable.
+    if status >= 400 {
+        error.with_outcome(http_outcome(status, retry_after))
+    } else {
+        error
+    }
 }
 
 fn validate_request(request: &JsonHttpRequest<'_>) -> Result<(), JsonHttpError> {
@@ -680,7 +833,7 @@ fn winhttp_error(operation: &str) -> JsonHttpError {
     } else {
         format!("{operation} (Windows error {code})")
     };
-    JsonHttpError::new(kind, message)
+    JsonHttpError::new(kind, message).with_outcome(Outcome::Failure)
 }
 
 #[cfg(test)]
@@ -693,7 +846,57 @@ mod tests {
         io::{Read, Write},
         net::{IpAddr, TcpListener},
         thread,
+        time::{Duration, UNIX_EPOCH},
     };
+
+    #[test]
+    fn retry_after_supports_http_dates_without_unbounded_cooldown() {
+        let target = UNIX_EPOCH + Duration::from_secs(1_445_412_480);
+        assert_eq!(
+            super::parse_retry_after_at(
+                "Wed, 21 Oct 2015 07:28:00 GMT",
+                target - Duration::from_secs(7)
+            ),
+            Some(7_000)
+        );
+        assert_eq!(
+            super::parse_retry_after_at(
+                "Wed, 21 Oct 2015 07:28:00 GMT",
+                target + Duration::from_secs(1)
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            super::parse_retry_after_at("Wed, 21 Oct 2015 07:28:00 GMT", UNIX_EPOCH),
+            Some(1_800_000)
+        );
+        assert_eq!(super::parse_retry_after_at("not a date", target), None);
+    }
+
+    #[test]
+    fn interrupted_rejection_bodies_preserve_http_circuit_classification() {
+        use crate::request_guard::Outcome;
+        let transport = || {
+            super::JsonHttpError::new(JsonHttpErrorKind::Transport, "read failed")
+                .with_outcome(Outcome::Failure)
+        };
+        assert_eq!(
+            super::response_error(transport(), 401, None).guard_outcome,
+            Outcome::Neutral
+        );
+        assert_eq!(
+            super::response_error(transport(), 429, Some("17")).guard_outcome,
+            Outcome::RateLimited(Duration::from_secs(17))
+        );
+        assert_eq!(
+            super::response_error(transport(), 503, None).guard_outcome,
+            Outcome::Failure
+        );
+        assert_eq!(
+            super::response_error(transport(), 200, None).guard_outcome,
+            Outcome::Failure
+        );
+    }
 
     #[test]
     fn sends_authorized_json_requests_to_a_local_mock_provider() {
@@ -865,7 +1068,10 @@ mod tests {
         assert_eq!(response.status, 429);
         assert_eq!(response.retry_after_ms, Some(17_000));
         assert_eq!(parse_retry_after_ms("999999999"), Some(30 * 60 * 1_000));
-        assert_eq!(parse_retry_after_ms("Wed, 21 Oct 2015 07:28:00 GMT"), None);
+        assert_eq!(
+            parse_retry_after_ms("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(0)
+        );
     }
 
     #[test]

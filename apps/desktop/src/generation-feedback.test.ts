@@ -8,6 +8,33 @@ import {
 } from './generation-feedback';
 
 describe('generation feedback', () => {
+  it('preserves already-submitted and download outcomes when admission stops a later request', () => {
+    expect(
+      generationErrorFeedback(
+        'Provider image task already submitted; polling failed: REQUEST_QUEUE_FULL: 请求较多',
+      ).userMessage,
+    ).toContain('图片任务已提交');
+    expect(
+      generationErrorFeedback('REQUEST_QUEUE_TIMEOUT: 请求尚未发送', 'download').userMessage,
+    ).toContain('结果已生成');
+    expect(generationErrorFeedback('PROVIDER_COOLDOWN：请稍后重试').userMessage).toContain(
+      '正在限流',
+    );
+    expect(
+      generationErrorFeedback('Later operation failed: REQUEST_QUEUE_FULL: busy').userMessage,
+    ).not.toContain('尚未发送');
+  });
+  it.each([
+    ['REQUEST_QUEUE_FULL', '当前请求较多'],
+    ['REQUEST_QUEUE_TIMEOUT', '当前请求较多'],
+    ['PROVIDER_CIRCUIT_OPEN', '连续出错'],
+    ['PROVIDER_COOLDOWN', '正在限流'],
+  ])('explains %s as an admission refusal before generic transport errors', (code, message) => {
+    const result = generationErrorFeedback(`${code}: 请求尚未发送`, 'transport');
+    expect(result.userMessage).toContain(message);
+    expect(result.technicalDetail).toContain(code);
+  });
+
   it('uses one Chinese status and lifecycle vocabulary', () => {
     expect(generationStatusLabel('polling')).toBe('生成中');
     expect(generationStatusLabel('downloading')).toBe('正在保存结果');

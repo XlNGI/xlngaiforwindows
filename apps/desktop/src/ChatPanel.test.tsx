@@ -248,9 +248,7 @@ describe('ChatPanel attempt metadata', () => {
           assistantMessage,
           sources: [],
         }}
-        liveAgentActions={[
-          { id: 'call-search', toolName: 'library.search', status: 'running' },
-        ]}
+        liveAgentActions={[{ id: 'call-search', toolName: 'library.search', status: 'running' }]}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onRetryGeneration={vi.fn()}

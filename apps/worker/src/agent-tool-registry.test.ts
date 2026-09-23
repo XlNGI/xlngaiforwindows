@@ -137,4 +137,49 @@ describe('AgentToolRegistry', () => {
     expect(registry.executionMode('read')).toBe('parallel');
     expect(registry.executionMode('write')).toBe('sequential');
   });
+
+  it('preserves source truncation and adjusts continuation offsets after byte truncation', () => {
+    const registry = new AgentToolRegistry();
+    const partial = JSON.parse(
+      registry.serializeResultWithBoundedText(
+        {
+          status: 'read',
+          truncated: true,
+          startOffset: 0,
+          endOffset: 3,
+          nextOffset: 3,
+          totalCharacters: 10,
+          characterCount: 3,
+        },
+        'content',
+        '正文。',
+      ),
+    ) as { truncated: boolean; nextOffset: number };
+    expect(partial).toMatchObject({ truncated: true, nextOffset: 3 });
+    const body = '\n'.repeat(40_000);
+    const large = JSON.parse(
+      registry.serializeResultWithBoundedText(
+        {
+          status: 'read',
+          truncated: false,
+          startOffset: 100,
+          endOffset: 40_100,
+          totalCharacters: 40_100,
+          characterCount: 40_000,
+        },
+        'content',
+        body,
+      ),
+    ) as {
+      content: string;
+      truncated: boolean;
+      endOffset: number;
+      nextOffset: number;
+      characterCount: number;
+    };
+    expect(large.truncated).toBe(true);
+    expect(large.characterCount).toBe(large.content.length);
+    expect(large.nextOffset).toBe(100 + large.content.length);
+    expect(large.endOffset).toBe(large.nextOffset);
+  });
 });

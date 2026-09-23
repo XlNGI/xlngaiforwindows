@@ -2786,6 +2786,7 @@ describe('AgentProviderLoopService', () => {
     '不要保存',
     '先不保存',
     '查看资料',
+    '我想写一部小说',
     'how do I save it?',
     "don't save the draft",
     '怎么保存生成的文档？',
@@ -2869,6 +2870,25 @@ describe('AgentProviderLoopService', () => {
       ).toEqual({ status: 'waiting_review' });
     },
   );
+
+  it('allows a writing kickoff to end after clarification without requiring a document save', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = new AgentProviderLoopService(project, workflow);
+    const prompt = '我想写一部小说';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    expect(agent.tools.map((tool) => tool.name)).toContain('document.create_draft');
+    loop.startProviderStep(prepared.stream);
+    expect(() =>
+      loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+    ).not.toThrow();
+    expect(workflow.listDocuments()).toHaveLength(0);
+  });
 
   it.each([true, false])(
     'Pi reports success only when the save tool actually writes (write=%s)',

@@ -122,8 +122,9 @@ function isDefaultConversationTitle(title: string): boolean {
 }
 
 function renderLibraryCatalog(catalog: LibraryCatalogItem[]): string {
-  if (catalog.length === 0)
-    return '资料目录为空。需要项目资料时调用 library.search / library.read。';
+  const notice =
+    '资料目录仅为有界预览，可能不完整；未列出不代表不存在。需要项目资料时调用 library.search / library.read。';
+  if (catalog.length === 0) return `${notice}\n本次预览未列出条目。`;
   const lines: string[] = [];
   let untitledConversations = 0;
   for (const item of catalog) {
@@ -140,7 +141,7 @@ function renderLibraryCatalog(catalog: LibraryCatalogItem[]): string {
       `${lines.length + 1}. 会话记录 ${untitledConversations} 条 · conversation · 需要时检索`,
     );
   }
-  return lines.join('\n');
+  return `${notice}\n${lines.join('\n')}`;
 }
 
 function resolveScope(

@@ -22,6 +22,7 @@ mod llm_stream;
 mod novel_import;
 mod provider_connector;
 mod provider_http;
+mod request_guard;
 mod research_bridge;
 
 use credential_store::{
@@ -1312,6 +1313,7 @@ async fn provider_submit(
     provider_region: Option<String>,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderHttpResponse, String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     let selection = resolve_media_selection(
         &adapter_key,
         provider_profile_id.as_deref(),
@@ -1319,6 +1321,7 @@ async fn provider_submit(
         &state,
     )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _dispatch = dispatch;
         provider_submit_blocking(
             &adapter_key,
             &selection.provider_region,
@@ -1339,6 +1342,7 @@ async fn provider_submit_task(
     provider_region: Option<String>,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderTaskSubmitResponse, String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     let selection = resolve_media_selection(
         &adapter_key,
         provider_profile_id.as_deref(),
@@ -1346,6 +1350,7 @@ async fn provider_submit_task(
         &state,
     )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _dispatch = dispatch;
         provider_submit_task_blocking(
             &adapter_key,
             &selection.provider_region,
@@ -1425,6 +1430,7 @@ async fn provider_poll_task(
     provider_region: Option<String>,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderHttpResponse, String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     let selection = resolve_media_selection(
         &adapter_key,
         provider_profile_id.as_deref(),
@@ -1432,6 +1438,7 @@ async fn provider_poll_task(
         &state,
     )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _dispatch = dispatch;
         provider_poll_task_blocking(
             &adapter_key,
             &selection.provider_region,
@@ -1470,6 +1477,7 @@ async fn provider_download_task(
     provider_region: Option<String>,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderBinaryDownloadResponse, String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     let selection = resolve_media_selection(
         &adapter_key,
         provider_profile_id.as_deref(),
@@ -1477,6 +1485,7 @@ async fn provider_download_task(
         &state,
     )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _dispatch = dispatch;
         provider_download_task_blocking(
             &adapter_key,
             &selection.provider_region,
@@ -1598,6 +1607,7 @@ async fn provider_cancel_task(
     provider_region: Option<String>,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<ProviderCancelResponse, String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     let selection = resolve_media_selection(
         &adapter_key,
         provider_profile_id.as_deref(),
@@ -1605,6 +1615,7 @@ async fn provider_cancel_task(
         &state,
     )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _dispatch = dispatch;
         provider_cancel_task_blocking(
             &adapter_key,
             &selection.provider_region,
@@ -1692,7 +1703,12 @@ fn provider_submit_blocking(
     let task_path = provider_task_path(task_id)?;
     let deadline = Instant::now() + PROVIDER_POLL_TIMEOUT;
     loop {
-        let mut poll = request_provider_json(target, &secret, "GET", &task_path, None)?;
+        // The initial POST was accepted. A rejected poll must never claim the
+        // paid submission was not sent, which could make a retry unsafe.
+        let mut poll =
+            request_provider_json(target, &secret, "GET", &task_path, None).map_err(|error| {
+                format!("Provider image task already submitted; polling failed: {error}")
+            })?;
         if poll.status < 200 || poll.status >= 300 {
             return Ok(poll);
         }
@@ -2039,6 +2055,29 @@ fn dispatch_host_request(
     }
     let method = value["method"].as_str().unwrap_or_default();
     let params = value["params"].clone();
+    // Reserve before spawning: bounded network waiting must not create an
+    // unbounded number of Native threads. Local cancellation stays available.
+    let dispatch = if matches!(
+        method,
+        "provider.media.submit"
+            | "provider.media.poll"
+            | "provider.media.cancel"
+            | "provider.stream.start"
+    ) {
+        match request_guard::try_dispatch() {
+            Ok(permit) => Some(permit),
+            Err(error) => {
+                let _ = send_host_response(
+                    &writer,
+                    &request_id,
+                    Err(host_error("REQUEST_NOT_SENT", error.to_string(), true)),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
     match method {
         "provider.media.submit" => {
             if let Err(error) = validate_provider_media_submit_params(&params) {
@@ -2050,6 +2089,7 @@ fn dispatch_host_request(
                 return;
             }
             thread::spawn(move || {
+                let _dispatch = dispatch;
                 let result = provider_media_submit_blocking(&params, &streams);
                 let _ = send_host_response(&writer, &request_id, result);
             });
@@ -2064,6 +2104,7 @@ fn dispatch_host_request(
                 return;
             }
             thread::spawn(move || {
+                let _dispatch = dispatch;
                 let result = provider_media_cancel_blocking(&params, &streams);
                 let _ = send_host_response(&writer, &request_id, result);
             });
@@ -2078,6 +2119,7 @@ fn dispatch_host_request(
                 return;
             }
             thread::spawn(move || {
+                let _dispatch = dispatch;
                 let result = provider_media_poll_blocking(&params, &streams);
                 let _ = send_host_response(&writer, &request_id, result);
             });
@@ -2123,6 +2165,7 @@ fn dispatch_host_request(
                 return;
             }
             thread::spawn(move || {
+                let _dispatch = dispatch;
                 run_host_provider_stream(
                     &request_id,
                     &project_session_id,
@@ -2267,7 +2310,7 @@ fn provider_media_submit_blocking(
             parameters,
             remote_model_id,
         )
-        .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
+        .map_err(|error| provider_transport_host_error(&error, false))?;
         externalize_embedded_images(&mut response)
             .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
         return serde_json::to_value(response)
@@ -2280,7 +2323,7 @@ fn provider_media_submit_blocking(
         parameters,
         remote_model_id,
     )
-    .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
+    .map_err(|error| provider_transport_host_error(&error, false))?;
     serde_json::to_value(response)
         .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true))
 }
@@ -2424,7 +2467,7 @@ fn provider_media_cancel_blocking(
         params["providerProfileId"].as_str().unwrap_or_default(),
         params["providerTaskId"].as_str().unwrap_or_default(),
     )
-    .map_err(|error| host_error("PROVIDER_FAILED", error, true))?;
+    .map_err(|error| provider_transport_host_error(&error, true))?;
     serde_json::to_value(result)
         .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true))
 }
@@ -2443,7 +2486,7 @@ fn provider_media_poll_blocking(
         provider_profile_id,
         provider_task_id,
     )
-    .map_err(|error| host_error("PROVIDER_FAILED", error, true))?;
+    .map_err(|error| provider_transport_host_error(&error, true))?;
     let succeeded = (200..300).contains(&response.status)
         && provider_state(&response.body).is_some_and(|state| {
             matches!(
@@ -2582,6 +2625,8 @@ fn run_host_provider_stream(
             retryable: true,
             cancelled: false,
             usage: None,
+            guard_outcome: request_guard::Outcome::Neutral,
+            admission_rejected: false,
         })?;
         sequence += 1;
         Ok(())
@@ -2603,6 +2648,8 @@ fn run_host_provider_stream(
             }
             let code = if failure.cancelled {
                 "CANCELLED"
+            } else if failure.admission_rejected {
+                "REQUEST_NOT_SENT"
             } else if failure.message.to_ascii_lowercase().contains("timeout")
                 || failure.message.contains("超时")
             {
@@ -2654,6 +2701,8 @@ where
                     retryable: false,
                     cancelled: false,
                     usage: None,
+                    guard_outcome: request_guard::Outcome::Neutral,
+                    admission_rejected: false,
                 })?;
                 let call_id = value["id"].as_str().unwrap_or_default();
                 let name = value["name"].as_str().unwrap_or_default();
@@ -2878,6 +2927,14 @@ fn host_error(code: &str, message: impl AsRef<str>, retryable: bool) -> serde_js
         "message": message.as_ref().chars().take(500).collect::<String>(),
         "retryable": retryable,
     })
+}
+
+fn provider_transport_host_error(message: &str, retryable: bool) -> serde_json::Value {
+    if request_guard::is_admission_error(message) {
+        host_error("REQUEST_NOT_SENT", message, true)
+    } else {
+        host_error("PROVIDER_FAILED", message, retryable)
+    }
 }
 
 fn send_host_response(
@@ -3305,6 +3362,28 @@ mod tests {
         process::Command,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn admission_refusals_are_unsent_but_post_submit_poll_failures_are_not() {
+        for code in [
+            "REQUEST_QUEUE_FULL",
+            "REQUEST_QUEUE_TIMEOUT",
+            "PROVIDER_CIRCUIT_OPEN",
+            "PROVIDER_COOLDOWN",
+        ] {
+            let error = format!("{code}: 请求尚未发送");
+            let unsent = super::provider_transport_host_error(&error, false);
+            assert_eq!(unsent["code"], "REQUEST_NOT_SENT");
+            assert_eq!(unsent["retryable"], true);
+            let submitted = super::provider_transport_host_error(
+                &format!("Provider image task already submitted; polling failed: {error}"),
+                false,
+            );
+            assert_eq!(submitted["code"], "PROVIDER_FAILED");
+        }
+        let ambiguous = super::provider_transport_host_error("Connection reset after send", false);
+        assert_eq!(ambiguous["code"], "PROVIDER_FAILED");
+    }
 
     #[test]
     fn markdown_import_accepts_utf8_markdown_and_rejects_unsafe_inputs() {

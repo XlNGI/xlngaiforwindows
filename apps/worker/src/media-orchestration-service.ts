@@ -264,7 +264,9 @@ export class MediaOrchestrationService {
       }
       if (
         error instanceof NativeProviderRequestError &&
-        ['INVALID_PARAMETERS', 'METHOD_NOT_FOUND'].includes(error.hostError.code)
+        ['INVALID_PARAMETERS', 'METHOD_NOT_FOUND', 'REQUEST_NOT_SENT'].includes(
+          error.hostError.code,
+        )
       ) {
         cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
         return {

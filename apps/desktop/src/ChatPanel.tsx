@@ -497,14 +497,17 @@ export function ChatPanel({
       </div>
       <div className="message-list" ref={messageListRef}>
         {canLoadEarlierMessages && (
-          <div className="load-earlier-container" style={{ display: "flex", justifyContent: "center", padding: "8px" }}>
+          <div
+            className="load-earlier-container"
+            style={{ display: 'flex', justifyContent: 'center', padding: '8px' }}
+          >
             <button
               className="button subtle"
               type="button"
               disabled={loadingEarlierMessages}
               onClick={onLoadEarlierMessages}
             >
-              {loadingEarlierMessages ? "正在加载更早消息…" : "加载更早历史消息"}
+              {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早历史消息'}
             </button>
           </div>
         )}
@@ -938,8 +941,8 @@ export function ChatPanel({
             isArchived
               ? '当前会话已归档，处于只读状态'
               : conversation
-              ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
-              : '请先新建会话'
+                ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
+                : '请先新建会话'
           }
           rows={3}
           value={composer}
@@ -1007,7 +1010,9 @@ export function ChatPanel({
               type="button"
               title="发送消息"
               onClick={onSendMessage}
-              disabled={(!composer.trim() && attachments.length === 0) || !conversation || isArchived}
+              disabled={
+                (!composer.trim() && attachments.length === 0) || !conversation || isArchived
+              }
             >
               <ChevronRight size={18} />
             </button>

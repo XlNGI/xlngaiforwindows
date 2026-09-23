@@ -204,7 +204,11 @@ describe('ContentService', () => {
       content.updateConversation({ conversationId: conversation.id, title: '不可重命名' }),
     ).toThrow('Archived conversations cannot be renamed.');
     expect(() =>
-      content.saveMessage({ conversationId: conversation.id, role: 'user', content: '归档后写入测试' }),
+      content.saveMessage({
+        conversationId: conversation.id,
+        role: 'user',
+        content: '归档后写入测试',
+      }),
     ).toThrow('Archived conversations cannot be updated.');
 
     const restored = content.restoreConversation({ conversationId: conversation.id });

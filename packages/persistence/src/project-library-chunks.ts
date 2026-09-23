@@ -58,6 +58,11 @@ export interface LibrarySearchHit {
   score: number;
 }
 
+export interface LibrarySearchPage {
+  hits: LibrarySearchHit[];
+  truncated: boolean;
+}
+
 export interface LibrarySearchQuery {
   projectId: string;
   query: string;
@@ -436,29 +441,49 @@ export function searchProjectLibraryChunks(
   database: Database.Database,
   params: LibrarySearchQuery,
 ): LibrarySearchHit[] {
+  return searchProjectLibraryChunksPage(database, params).hits;
+}
+
+export function searchProjectLibraryChunksPage(
+  database: Database.Database,
+  params: LibrarySearchQuery,
+): LibrarySearchPage {
   const query = params.query.trim();
-  if (!query) return [];
+  if (!query) return { hits: [], truncated: false };
   const limit = Math.min(Math.max(params.limit ?? 8, 1), 20);
-  const rows = loadSearchCandidates(database, params, query);
-  const scored = rows
-    .map((row) => ({ chunk: toChunkRecord(row), score: libraryChunkScore(row, query) }))
-    .filter((item) => item.score > 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        right.chunk.updatedAt.localeCompare(left.chunk.updatedAt) ||
-        left.chunk.id.localeCompare(right.chunk.id),
-    );
-  const seen = new Set<string>();
+  const requestedChapters = new Set(chapterNumbersFromText(query));
   const hits: LibrarySearchHit[] = [];
-  for (const item of scored) {
-    const key = `${item.chunk.sourceType}:${item.chunk.sourceId}:${item.chunk.versionId ?? ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+  // Scan without a recency cutoff, but retain only the best result per source
+  // among the top limit + 1. The extra distinct source proves truncation.
+  for (const row of loadSearchCandidates(database, params, query, requestedChapters)) {
+    const score = libraryChunkScore(row, query, requestedChapters);
+    if (score <= 0) continue;
+    const item = { chunk: toChunkRecord(row), score };
+    const existingIndex = hits.findIndex(
+      (hit) =>
+        hit.chunk.sourceType === item.chunk.sourceType &&
+        hit.chunk.sourceId === item.chunk.sourceId &&
+        hit.chunk.versionId === item.chunk.versionId,
+    );
+    if (existingIndex >= 0) {
+      if (compareLibraryHits(hits[existingIndex]!, item) <= 0) continue;
+      hits.splice(existingIndex, 1);
+    }
     hits.push(item);
-    if (hits.length >= limit) break;
+    hits.sort(compareLibraryHits);
+    if (hits.length > limit + 1) hits.pop();
   }
-  return hits;
+  return { hits: hits.slice(0, limit), truncated: hits.length > limit };
+}
+
+function compareLibraryHits(left: LibrarySearchHit, right: LibrarySearchHit): number {
+  return (
+    right.score - left.score ||
+    compareChapterOrder(left.chunk, right.chunk) ||
+    left.chunk.ordinal - right.chunk.ordinal ||
+    right.chunk.updatedAt.localeCompare(left.chunk.updatedAt) ||
+    left.chunk.id.localeCompare(right.chunk.id)
+  );
 }
 
 export function getProjectLibraryChunk(
@@ -470,6 +495,29 @@ export function getProjectLibraryChunk(
     .prepare('SELECT * FROM project_library_chunks WHERE project_id = ? AND id = ?')
     .get(projectId, chunkId) as LibraryChunkRow | undefined;
   return row ? toChunkRecord(row) : undefined;
+}
+
+/**
+ * Load all chunks for one immutable source version in document order. The
+ * caller can use the stored offsets to join overlapping RAG chunks without
+ * duplicating the overlap text.
+ */
+export function listProjectLibrarySourceChunks(
+  database: Database.Database,
+  projectId: string,
+  sourceType: LibraryChunkSourceType,
+  sourceId: string,
+  versionId?: string,
+): ProjectLibraryChunkRecord[] {
+  const rows = database
+    .prepare(
+      `SELECT * FROM project_library_chunks
+       WHERE project_id = ? AND source_type = ? AND source_id = ?
+         AND version_id IS ?
+       ORDER BY ordinal ASC, start_offset ASC, id ASC`,
+    )
+    .all(projectId, sourceType, sourceId, versionId ?? null) as LibraryChunkRow[];
+  return rows.map(toChunkRecord);
 }
 
 export function librarySnippet(content: string, query: string, maxChars = 400): string {
@@ -488,7 +536,11 @@ export function librarySnippet(content: string, query: string, maxChars = 400): 
 
 export function libraryQueryTerms(query: string): string[] {
   const terms = new Set<string>();
-  const segments = query.toLocaleLowerCase('zh-CN').match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  const segments =
+    query
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN')
+      .match(/[\p{L}\p{N}_-]+/gu) ?? [];
   for (const segment of segments) {
     if (/^[\u3400-\u9fff]+$/u.test(segment)) {
       if (segment.length === 1) terms.add(segment);
@@ -617,11 +669,12 @@ interface LibraryChunkRow {
   updated_at: string;
 }
 
-function loadSearchCandidates(
+function* loadSearchCandidates(
   database: Database.Database,
   params: LibrarySearchQuery,
   query: string,
-): LibraryChunkRow[] {
+  requestedChapters: ReadonlySet<number>,
+): Generator<LibraryChunkRow> {
   const filters = ['chunks.project_id = ?'];
   const values: unknown[] = [params.projectId];
   if (params.sourceTypes && params.sourceTypes.length > 0) {
@@ -655,7 +708,30 @@ function loadSearchCandidates(
       WHERE archived.id = chunks.document_id AND archived.lifecycle_status = 'archived'
     )`);
   }
+  if (requestedChapters.size > 0) {
+    // Inspect only metadata across the whole library: a large recently updated
+    // chapter must not push an older requested chapter past a chunk-count cap.
+    // Each chapter/version starts at ordinal zero in the indexing pipeline.
+    const chapterRows = database
+      .prepare(
+        `SELECT chunks.id, chunks.title FROM project_library_chunks chunks
+         WHERE ${filters.join(' AND ')}
+           AND chunks.source_type = 'novel-chapter' AND chunks.ordinal = 0`,
+      )
+      .iterate(...values) as Iterable<{ id: string; title: string }>;
+    const loadChunk = database.prepare('SELECT * FROM project_library_chunks WHERE id = ?');
+    for (const row of chapterRows) {
+      const number = chapterNumbersFromText(row.title)[0];
+      if (number !== undefined && requestedChapters.has(number)) {
+        const chunk = loadChunk.get(row.id) as LibraryChunkRow | undefined;
+        if (chunk) yield chunk;
+      }
+    }
+    filters.push("chunks.source_type <> 'novel-chapter'");
+  }
   const where = filters.join(' AND ');
+  // FTS cannot equate “第一章” with “第 1 章”; explicit chapter matches
+  // were resolved above independently of the textual path.
   if (projectLibraryFtsEnabled(database) && [...query].length >= 3) {
     try {
       const rows = database
@@ -663,29 +739,43 @@ function loadSearchCandidates(
           `SELECT chunks.*
            FROM project_library_fts
            INNER JOIN project_library_chunks chunks ON chunks.rowid = project_library_fts.rowid
-           WHERE project_library_fts MATCH ? AND ${where}
-           ORDER BY chunks.updated_at DESC, chunks.id LIMIT 500`,
+           WHERE project_library_fts MATCH ? AND ${where}`,
         )
-        .all(`"${query.replaceAll('"', '""')}"`, ...values) as LibraryChunkRow[];
-      if (rows.length > 0) return rows;
+        .iterate(`"${query.replaceAll('"', '""')}"`, ...values) as Iterable<LibraryChunkRow>;
+      let found = false;
+      for (const row of rows) {
+        found = true;
+        yield row;
+      }
+      if (found) return;
     } catch {
       // Fall through to explicit n-gram scoring; never tokenize on whitespace.
     }
   }
-  return database
-    .prepare(
-      `SELECT chunks.* FROM project_library_chunks chunks WHERE ${where}
-       ORDER BY chunks.updated_at DESC, chunks.id LIMIT 5000`,
-    )
-    .all(...values) as LibraryChunkRow[];
+  yield* database
+    .prepare(`SELECT chunks.* FROM project_library_chunks chunks WHERE ${where}`)
+    .iterate(...values) as Iterable<LibraryChunkRow>;
 }
 
-function libraryChunkScore(row: LibraryChunkRow, query: string): number {
-  const haystack = `${row.title}\n${row.content_text}`.toLocaleLowerCase('zh-CN');
-  const needle = query.trim().toLocaleLowerCase('zh-CN');
+function libraryChunkScore(
+  row: LibraryChunkRow,
+  query: string,
+  requestedChapters: ReadonlySet<number>,
+): number {
+  const haystack = `${row.title}\n${row.content_text}`.normalize('NFKC').toLocaleLowerCase('zh-CN');
+  const needle = query.normalize('NFKC').trim().toLocaleLowerCase('zh-CN');
   const collapsedHaystack = collapseLibraryText(haystack);
   const collapsedNeedle = collapseLibraryText(needle);
   const collapsedTitle = collapseLibraryText(row.title.toLocaleLowerCase('zh-CN'));
+  const rowChapter =
+    row.source_type === 'novel-chapter' ? chapterNumbersFromText(row.title)[0] : undefined;
+  if (
+    requestedChapters.size > 0 &&
+    rowChapter !== undefined &&
+    !requestedChapters.has(rowChapter)
+  ) {
+    return 0;
+  }
   let score = 0;
   if (needle && haystack.includes(needle)) score += Math.min(needle.length, 12) * 4;
   else if (collapsedNeedle && collapsedHaystack.includes(collapsedNeedle)) {
@@ -697,14 +787,106 @@ function libraryChunkScore(row: LibraryChunkRow, query: string): number {
     if (haystack.includes(term)) score += Math.min(term.length, 6);
   }
 
-  // Weight by source type: authoritative documents and novels come first, conversations are demoted
-  if (row.source_type === 'document' || row.source_type === 'novel-chapter') {
-    score = score * 1.5 + (row.status === 'published' ? 10 : 5);
+  if (rowChapter !== undefined && requestedChapters.has(rowChapter)) {
+    // A chapter number is an exact structural match even when the body does not
+    // repeat the label. Keep this above ordinary keyword matches.
+    score += 1_000;
+  }
+
+  // Weight only an actual textual/structural hit. A source-type prior by itself
+  // turns unrelated novels into false positives for every query.
+  if (score > 0 && (row.source_type === 'document' || row.source_type === 'novel-chapter')) {
+    score *= 1.5;
+    score += row.status === 'published' ? 10 : 5;
   } else if (row.source_type === 'conversation') {
     score = Math.floor(score * 0.3); // conversation chat messages are demoted to avoid search loops
   }
 
   return score;
+}
+
+function compareChapterOrder(
+  left: ProjectLibraryChunkRecord,
+  right: ProjectLibraryChunkRecord,
+): number {
+  const leftChapter =
+    left.sourceType === 'novel-chapter' ? chapterNumbersFromText(left.title)[0] : undefined;
+  const rightChapter =
+    right.sourceType === 'novel-chapter' ? chapterNumbersFromText(right.title)[0] : undefined;
+  // Give missing chapter numbers a consistent position as well, so mixed
+  // document/chapter ties form a total order independent of scan order.
+  if (leftChapter === undefined) return rightChapter === undefined ? 0 : 1;
+  if (rightChapter === undefined) return -1;
+  return leftChapter - rightChapter;
+}
+
+function chapterNumbersFromText(value: string): number[] {
+  const normalized = value.normalize('NFKC');
+  // A bare number must start at a token boundary; never recover a suffix from
+  // a malformed number such as -1章, 1.2章, or abc1章.
+  const references =
+    /(?:第\s*|(?<![\p{L}\p{N}_.,+-]))([零〇一二两三四五六七八九十百千万亿\d]+)\s*章/gu;
+  const numbers = new Set<number>();
+  for (const match of normalized.matchAll(references)) {
+    const token = match[1];
+    if (!token) continue;
+    const number = /^\d+$/u.test(token) ? Number(token) : parseChineseChapterNumber(token);
+    if (number !== undefined && Number.isSafeInteger(number) && number > 0) numbers.add(number);
+  }
+  return [...numbers];
+}
+
+function parseChineseChapterNumber(value: string): number | undefined {
+  const digits: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (/^[零〇一二两三四五六七八九]+$/u.test(value)) {
+    // Digit-by-digit labels such as 一〇一 mean 101, not the last digit.
+    return Number([...value].map((character) => digits[character]).join(''));
+  }
+  for (const [character, unit] of [
+    ['亿', 100_000_000],
+    ['万', 10_000],
+  ] as const) {
+    if (!value.includes(character)) continue;
+    const sections = value.split(character);
+    if (sections.length !== 2 || !sections[0]) return undefined;
+    const left = parseChineseChapterNumber(sections[0]);
+    const right = sections[1] ? parseChineseChapterNumber(sections[1]) : 0;
+    if (left === undefined || left <= 0 || right === undefined || right >= unit) return undefined;
+    const result = left * unit + right;
+    return Number.isSafeInteger(result) ? result : undefined;
+  }
+  const units: Record<string, number> = { 十: 10, 百: 100, 千: 1_000 };
+  let total = 0;
+  let number: number | undefined;
+  let previousUnit = 10_000;
+  for (const character of value) {
+    if (digits[character] !== undefined) {
+      if (number !== undefined && number !== 0) return undefined;
+      number = digits[character];
+      continue;
+    }
+    const unit = units[character];
+    if (unit === undefined || unit >= previousUnit || number === 0) return undefined;
+    if (number === undefined && (total !== 0 || unit !== 10)) return undefined;
+    total += (number ?? 1) * unit;
+    previousUnit = unit;
+    number = undefined;
+  }
+  const result = total + (number ?? 0);
+  return Number.isSafeInteger(result) ? result : undefined;
 }
 
 function toChunkRecord(row: LibraryChunkRow): ProjectLibraryChunkRecord {

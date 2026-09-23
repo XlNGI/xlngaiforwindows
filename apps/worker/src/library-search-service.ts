@@ -9,7 +9,8 @@ import {
   getProjectLibraryChunk,
   librarySnippet,
   LIBRARY_SOURCE_TYPES,
-  searchProjectLibraryChunks,
+  listProjectLibrarySourceChunks,
+  searchProjectLibraryChunksPage,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
@@ -68,7 +69,7 @@ export class LibrarySearchService {
     const query = normalizeQuery(params.query);
     const sourceTypes = normalizeSourceTypes(params.sourceTypes);
     return this.projects.access(false, (database, project) => {
-      const hits = searchProjectLibraryChunks(database, {
+      const { hits, truncated } = searchProjectLibraryChunksPage(database, {
         projectId: project.id,
         query,
         sourceTypes,
@@ -77,7 +78,7 @@ export class LibrarySearchService {
         scopeType: params.scopeType,
         scopeId: params.scopeId,
         includeArchived: params.includeArchived,
-        limit: params.limit,
+        limit: boundedInteger(params.limit, 8, 1, 20),
       });
       this.pruneExpiredHandles();
       const sources = hits.map((hit, index) => {
@@ -103,6 +104,9 @@ export class LibrarySearchService {
           snippet: librarySnippet(hit.chunk.contentText, query),
           citationLabel,
           updatedAt: hit.chunk.updatedAt,
+          chunkOrdinal: hit.chunk.ordinal,
+          startOffset: hit.chunk.startOffset,
+          endOffset: hit.chunk.endOffset,
         };
       });
       this.incrementUsage(params.taskId, params.attemptId, 'search');
@@ -110,7 +114,7 @@ export class LibrarySearchService {
         status: 'searched' as const,
         queryHash: sha256(query),
         resultCount: sources.length,
-        truncated: false,
+        truncated,
         sources,
       };
     });
@@ -121,6 +125,8 @@ export class LibrarySearchService {
     attemptId: string;
     sourceHandle: string;
     maxChars?: number;
+    readMode?: 'chunk' | 'source';
+    offset?: number;
   }): LibraryReadResult {
     this.assertBudget(params.taskId, params.attemptId, 'read');
     const handle = this.sourceHandles.get(params.sourceHandle);
@@ -136,7 +142,17 @@ export class LibrarySearchService {
         false,
       );
     }
-    const maxChars = boundedInteger(params.maxChars, DEFAULT_READ_CHARS, 1, MAX_READ_CHARS);
+    const readMode = params.readMode ?? 'chunk';
+    if (readMode !== 'chunk' && readMode !== 'source') {
+      throw new LibraryError('LIBRARY_READ_BLOCKED', 'Library read mode is invalid.', false);
+    }
+    const offset = boundedInteger(params.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const maxChars = boundedInteger(
+      params.maxChars,
+      readMode === 'source' ? MAX_READ_CHARS : DEFAULT_READ_CHARS,
+      1,
+      MAX_READ_CHARS,
+    );
     return this.projects.access(false, (database, project) => {
       if (project.id !== handle.projectId) {
         throw new LibraryError(
@@ -153,12 +169,62 @@ export class LibrarySearchService {
           false,
         );
       }
-      const truncated = chunk.contentText.length > maxChars;
-      const content = chunk.contentText.slice(0, maxChars);
+      // Use the immutable document version when possible. RAG chunks trim
+      // whitespace and overlap, so joining them cannot reproduce every paragraph.
+      const version =
+        readMode === 'source' && chunk.documentId && chunk.versionId
+          ? (database
+              .prepare(
+                `SELECT versions.content_markdown, versions.content_hash
+                 FROM document_versions versions
+                 INNER JOIN documents ON documents.id = versions.document_id
+                 WHERE documents.project_id = ? AND documents.id = ? AND versions.id = ?`,
+              )
+              .get(project.id, chunk.documentId, chunk.versionId) as
+              { content_markdown: string; content_hash: string | null } | undefined)
+          : undefined;
+      const contentBeforeLimit =
+        readMode === 'source'
+          ? (version?.content_markdown ??
+            mergeSourceChunks(
+              listProjectLibrarySourceChunks(
+                database,
+                project.id,
+                chunk.sourceType,
+                chunk.sourceId,
+                chunk.versionId,
+              ),
+            ))
+          : chunk.contentText;
+      if (offset > contentBeforeLimit.length) {
+        throw new LibraryError(
+          'LIBRARY_READ_BLOCKED',
+          'Library read offset is outside the source.',
+          false,
+        );
+      }
+      let endOffset = Math.min(contentBeforeLimit.length, offset + maxChars);
+      // Never split a surrogate pair when a page ends in a non-BMP character.
+      if (
+        endOffset < contentBeforeLimit.length &&
+        /[\uD800-\uDBFF]/u.test(contentBeforeLimit[endOffset - 1] ?? '')
+      ) {
+        endOffset -= 1;
+      }
+      if (endOffset === offset && offset < contentBeforeLimit.length) {
+        throw new LibraryError(
+          'LIBRARY_READ_BLOCKED',
+          'Increase maxChars to read the next character.',
+          false,
+        );
+      }
+      const content = contentBeforeLimit.slice(offset, endOffset);
+      const truncated = endOffset < contentBeforeLimit.length;
       this.incrementUsage(params.taskId, params.attemptId, 'read');
       return {
         status: 'read' as const,
         sourceHandle: handle.sourceHandle,
+        readMode,
         sourceType: chunk.sourceType,
         sourceId: chunk.sourceId,
         versionId: chunk.versionId,
@@ -167,6 +233,11 @@ export class LibrarySearchService {
         title: chunk.title,
         content,
         characterCount: content.length,
+        startOffset: offset,
+        endOffset,
+        ...(truncated ? { nextOffset: endOffset } : {}),
+        totalCharacters: contentBeforeLimit.length,
+        contentHash: version?.content_hash ?? sha256(contentBeforeLimit),
         truncated,
         citationLabel: handle.citationLabel,
         untrusted: false as const,
@@ -182,8 +253,8 @@ export class LibrarySearchService {
       throw new LibraryError(
         'LIBRARY_BUDGET_EXCEEDED',
         operation === 'search'
-          ? '本轮检索次数已达上限。请直接基于已有资料与上下文为用户生成回答，不要再调用检索工具。'
-          : '本轮正文读取次数已达上限。请直接基于已有内容为用户生成回答，不要再调用读取工具。',
+          ? '本轮检索次数已达上限。请停止检索；已有证据不足时说明缺口，不得编造未读取的项目内容。'
+          : '本轮正文读取次数已达上限。请停止读取并说明已读取范围及缺口，不得把未读部分当作已知内容。',
         false,
       );
     }
@@ -202,6 +273,24 @@ export class LibrarySearchService {
       if (source.expiresAt <= now) this.sourceHandles.delete(handle);
     }
   }
+}
+
+function mergeSourceChunks(
+  chunks: Array<{ startOffset: number; endOffset: number; contentText: string }>,
+): string {
+  if (chunks.length === 0) return '';
+  let content = '';
+  let coveredUntil = 0;
+  for (const chunk of chunks) {
+    const start = Math.max(0, chunk.startOffset);
+    const end = Math.max(start, chunk.endOffset);
+    if (end <= coveredUntil) continue;
+    if (content && start > coveredUntil) content += '\n\n';
+    const skip = Math.max(0, coveredUntil - start);
+    content += chunk.contentText.slice(skip);
+    coveredUntil = end;
+  }
+  return content;
 }
 
 function normalizeQuery(value: string): string {

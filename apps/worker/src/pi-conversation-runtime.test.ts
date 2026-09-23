@@ -8,7 +8,11 @@ import type {
   LlmGenerationRuntimeRequest,
   LlmToolDefinition,
 } from '@ai-video/contracts';
-import { appendAssistantText, PiConversationRuntime, type AssistantTextAccumulator } from './pi-conversation-runtime.js';
+import {
+  appendAssistantText,
+  PiConversationRuntime,
+  type AssistantTextAccumulator,
+} from './pi-conversation-runtime.js';
 import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js';
 import type { DomainToolGateway, PiToolIdentity } from './domain-tool-gateway.js';
 
@@ -116,6 +120,9 @@ class FakePlanService {
     return [];
   }
   beginStep(_input: { taskId: string; operation: string }) {
+    if (_input.operation === 'library.search' || _input.operation === 'library.read') {
+      return undefined;
+    }
     return `step-${this.phase}`;
   }
   recordStepSuccess() {
@@ -379,6 +386,131 @@ describe('PiConversationRuntime', () => {
     expect(generation.complete).toHaveBeenCalledWith(
       expect.objectContaining({ finishReason: 'task_package_complete' }),
     );
+  });
+
+  it('lets the model retrieve before planning and after a plan omits retrieval without unlocking writes', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    const plannedCall = (name: string, id: string, args = {}) =>
+      fauxAssistantMessage([fauxToolCall(name, args, { id })], {
+        stopReason: 'toolUse',
+        responseId: `response-${id}`,
+      });
+    faux.setResponses([
+      plannedCall('library.search', 'search', { query: '第一章', sourceTypes: ['novel-chapter'] }),
+      plannedCall('media.image.prepare', 'premature-image'),
+      plannedCall('task.plan.submit', 'plan', { version: 2, steps: [], constraints: [] }),
+      plannedCall('library.read', 'read', { sourceHandle: 'chapter-source' }),
+      plannedCall('document.create_draft', 'unplanned-write'),
+      plannedCall('media.video.prepare', 'premature-video'),
+      plannedCall('media.image.prepare', 'image'),
+      plannedCall('library.read', 'read-more', { sourceHandle: 'chapter-source' }),
+      plannedCall('media.video.prepare', 'video'),
+      plannedCall('task.package.complete', 'complete'),
+    ]);
+    const plans = new FakePlanService();
+    const beginStep = vi.spyOn(plans, 'beginStep');
+    const recordStepSuccess = vi.spyOn(plans, 'recordStepSuccess');
+    const providerTools = fakeProviderExecutor();
+    const definitions = [
+      providerDefinition('library.search', 'search-handle'),
+      providerDefinition('library.read', 'read-handle'),
+      providerDefinition('document.create_draft', 'draft-handle'),
+      providerDefinition('media.image.prepare', 'image-handle'),
+      providerDefinition('media.video.prepare', 'video-handle'),
+    ];
+    vi.mocked(providerTools.executeTools).mockImplementation((params) =>
+      Promise.resolve({
+        continuation: {
+          protocol: 'openai-responses',
+          previousResponseId: params.providerResponseId,
+          outputs: params.calls.map((call) => ({
+            callId: call.id,
+            output: JSON.stringify({
+              status:
+                call.name === 'library.search'
+                  ? 'searched'
+                  : call.name === 'library.read'
+                    ? 'read'
+                    : 'prepared',
+            }),
+          })),
+        },
+        tools: definitions,
+      }),
+    );
+    const libraryPolicy = 'Decide how to search the project library; preserve draft labels.';
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        systemInstruction: libraryPolicy,
+        tools: definitions,
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const systemPrompts: string[] = [];
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: (model, context, options) => {
+        systemPrompts.push(context.systemPrompt ?? '');
+        return faux.streamSimple(model, context, options);
+      },
+      createGateway: () => fakeGateway(plans),
+    });
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: '根据小说第一章生成一张龙的图片，再把它生成视频',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(generation.failNative).not.toHaveBeenCalled();
+    expect(systemPrompts[0]).toContain(libraryPolicy);
+    expect(systemPrompts[0]).toContain('plan only');
+    expect(plans.completed).toBe(true);
+    expect(providerTools.executeTools.mock.calls.map(([params]) => params.calls[0]?.id)).toEqual([
+      'search',
+      'read',
+      'image',
+      'read-more',
+      'video',
+    ]);
+    expect(beginStep.mock.calls.map(([input]) => input.operation)).toEqual([
+      'library.search',
+      'library.read',
+      'media.image.prepare',
+      'library.read',
+      'media.video.prepare',
+    ]);
+    expect(recordStepSuccess).toHaveBeenCalledTimes(2);
+    const configured = (
+      generation.configureAgentTools.mock.calls as unknown as Array<[unknown, LlmToolDefinition[]]>
+    ).map(([, tools]) => tools.map((tool) => tool.name));
+    expect(configured[0]).toEqual(['task.plan.submit', 'library.search', 'library.read']);
+    expect(configured[1]).toEqual(configured[0]);
+    expect(configured).toContainEqual([
+      'library.search',
+      'library.read',
+      'media.image.prepare',
+      'task.package.complete',
+    ]);
+    expect(configured).toContainEqual([
+      'library.search',
+      'library.read',
+      'media.video.prepare',
+      'task.package.complete',
+    ]);
+    expect(configured.at(-1)).toEqual([]);
   });
 
   it('executes a document tool and refreshes Worker authorizations for the next Pi turn', async () => {
@@ -837,8 +969,6 @@ describe('appendAssistantText', () => {
       accumulator,
       fauxAssistantMessage('Search hit 3 results.', { responseId: 'resp-2' }),
     );
-    expect(accumulator.aggregate).toBe(
-      'I will search the library.\n\nSearch hit 3 results.',
-    );
+    expect(accumulator.aggregate).toBe('I will search the library.\n\nSearch hit 3 results.');
   });
 });

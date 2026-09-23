@@ -27,6 +27,7 @@ import type { GenerationService } from './generation-service.js';
 import { shouldRequireStructuredPlan, TaskPlanService } from './task-plan-service.js';
 import {
   AgentProviderToolGateway,
+  isLibraryRetrievalOperation,
   type AgentProviderPlanHooks,
   type AgentProviderToolExecutor,
 } from './agent-provider-tool-gateway.js';
@@ -147,7 +148,10 @@ export class PiConversationRuntime implements ConversationRuntime {
         )
       : undefined;
     const initialDefinitions = plannedWorkflow
-      ? planningGrants.map((grant) => grant.tool)
+      ? [
+          ...planningGrants.map((grant) => grant.tool),
+          ...(genericPlanWorkflow ? providerGateway!.currentDefinitions([]) : []),
+        ]
       : providerGateway!.currentDefinitions();
     this.options.generation.configureAgentTools(identity, initialDefinitions);
 
@@ -170,21 +174,35 @@ export class PiConversationRuntime implements ConversationRuntime {
       streamFn,
       initialState: {
         systemPrompt: withFrozenContext(
-          planning?.systemInstruction ??
-            unifiedAgentInstruction(this.options.generation.runtime(identity).systemInstruction),
+          genericPlanWorkflow
+            ? `${unifiedAgentInstruction(runtime.systemInstruction)}\n\n${planning!.systemInstruction}`
+            : (planning?.systemInstruction ?? unifiedAgentInstruction(runtime.systemInstruction)),
           runtime.context,
         ),
         model,
         thinkingLevel: 'off',
-        tools: plannedWorkflow ? gateway!.tools(planningGrants) : providerGateway!.tools(),
+        tools: plannedWorkflow
+          ? [
+              ...gateway!.tools(planningGrants),
+              ...(genericPlanWorkflow ? providerGateway!.tools([]) : []),
+            ]
+          : providerGateway!.tools(),
       },
       toolExecution: plannedWorkflow ? 'parallel' : 'sequential',
       // eslint-disable-next-line @typescript-eslint/require-await
       beforeToolCall: async ({ assistantMessage, toolCall }) => {
-        if (planningRound && toolCall.name !== 'task.plan.submit') {
-          return { block: true, reason: 'Only task.plan.submit is available during planning.' };
+        if (
+          planningRound &&
+          toolCall.name !== 'task.plan.submit' &&
+          !(genericPlanWorkflow && isLibraryRetrievalOperation(toolCall.name))
+        ) {
+          return {
+            block: true,
+            reason:
+              'Only task.plan.submit and authorized project retrieval are available during planning.',
+          };
         }
-        if (!planningRound && providerGateway?.hasDefinition(toolCall.name)) {
+        if (providerGateway?.hasDefinition(toolCall.name)) {
           providerGateway.captureProviderCall(
             toolCall.id,
             assistantMessage.responseId,
@@ -225,16 +243,21 @@ export class PiConversationRuntime implements ConversationRuntime {
             ? this.options.plans.availableOperations(request.taskId)
             : undefined;
         const definitions =
-          plannedWorkflow && planningRound
-            ? planningGrants.map((grant) => grant.tool)
-            : shortDramaWorkflow
-              ? grants.map((grant) => grant.tool)
-              : genericPlanWorkflow
-                ? [
-                    ...providerGateway!.currentDefinitions(readyOperations),
-                    ...grants.map((grant) => grant.tool),
-                  ]
-                : providerGateway!.currentDefinitions();
+          plan?.status === 'succeeded'
+            ? []
+            : plannedWorkflow && planningRound
+              ? [
+                  ...planningGrants.map((grant) => grant.tool),
+                  ...(genericPlanWorkflow ? providerGateway!.currentDefinitions([]) : []),
+                ]
+              : shortDramaWorkflow
+                ? grants.map((grant) => grant.tool)
+                : genericPlanWorkflow
+                  ? [
+                      ...providerGateway!.currentDefinitions(readyOperations),
+                      ...grants.map((grant) => grant.tool),
+                    ]
+                  : providerGateway!.currentDefinitions();
         const continuation = buildContinuation(
           runtimeProtocol(this.options.generation.runtime(identity)),
           message,
@@ -246,7 +269,8 @@ export class PiConversationRuntime implements ConversationRuntime {
           providerGateway &&
           toolResults.length > 0 &&
           plan?.status !== 'succeeded' &&
-          (!genericPlanWorkflow || (readyOperations?.length ?? 0) > 0)
+          (!genericPlanWorkflow ||
+            definitions.some((definition) => providerGateway.hasDefinition(definition.name)))
         ) {
           providerGateway.startProviderStep();
         }
@@ -262,13 +286,18 @@ export class PiConversationRuntime implements ConversationRuntime {
                   runtime.context,
                 ),
             tools:
-              plannedWorkflow && planningRound
-                ? gateway!.tools(planningGrants)
-                : shortDramaWorkflow
-                  ? gateway!.tools(grants)
-                  : genericPlanWorkflow
-                    ? [...providerGateway!.tools(readyOperations), ...gateway!.tools(grants)]
-                    : providerGateway!.tools(),
+              plan?.status === 'succeeded'
+                ? []
+                : plannedWorkflow && planningRound
+                  ? [
+                      ...gateway!.tools(planningGrants),
+                      ...(genericPlanWorkflow ? providerGateway!.tools([]) : []),
+                    ]
+                  : shortDramaWorkflow
+                    ? gateway!.tools(grants)
+                    : genericPlanWorkflow
+                      ? [...providerGateway!.tools(readyOperations), ...gateway!.tools(grants)]
+                      : providerGateway!.tools(),
           },
         };
       },
@@ -287,7 +316,13 @@ export class PiConversationRuntime implements ConversationRuntime {
       },
     });
 
-    if (providerGateway && !plannedWorkflow) providerGateway.startProviderStep();
+    if (
+      providerGateway &&
+      (!plannedWorkflow ||
+        (genericPlanWorkflow && providerGateway.currentDefinitions([]).length > 0))
+    ) {
+      providerGateway.startProviderStep();
+    }
 
     const completion = this.run(
       agent,

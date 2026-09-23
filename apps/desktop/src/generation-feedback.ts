@@ -102,6 +102,35 @@ export function generationErrorFeedback(
 ): GenerationErrorFeedback {
   const normalized = message.trim();
   const technicalDetail = /[\u3400-\u9fff]/u.test(normalized) ? undefined : normalized;
+  if (failureKind === 'download') {
+    return { userMessage: '结果已生成，但保存到本地时失败，请重试。', technicalDetail: normalized };
+  }
+  if (/^Provider image task already submitted; polling failed:/i.test(normalized)) {
+    return {
+      userMessage: '图片任务已提交，但查询进度暂时失败。请稍后查询结果，避免重复提交。',
+      technicalDetail: normalized,
+    };
+  }
+  // Admission failures happen before the external request is sent. Match these
+  // before generic timeout/transport wording so the UI does not imply submission.
+  if (/^(?:REQUEST_QUEUE_FULL|REQUEST_QUEUE_TIMEOUT)[:：]/.test(normalized)) {
+    return {
+      userMessage: '当前请求较多，本次请求尚未发送，请稍后重试。',
+      technicalDetail: normalized,
+    };
+  }
+  if (/^PROVIDER_CIRCUIT_OPEN[:：]/.test(normalized)) {
+    return {
+      userMessage: '生成服务连续出错，已暂时停止向该服务发送请求，请稍后重试。',
+      technicalDetail: normalized,
+    };
+  }
+  if (/^PROVIDER_COOLDOWN[:：]/.test(normalized)) {
+    return {
+      userMessage: '生成服务正在限流，本次请求尚未发送，请稍后重试。',
+      technicalDetail: normalized,
+    };
+  }
   if (failureKind === 'interrupted' || /interrupted|worker restarted/i.test(normalized)) {
     return {
       userMessage: '应用中断时任务未能安全继续，请重新生成。',
@@ -123,7 +152,7 @@ export function generationErrorFeedback(
   ) {
     return { userMessage: '无法连接生成服务，请检查网络后重试。', technicalDetail };
   }
-  if (failureKind === 'download' || /download/i.test(normalized)) {
+  if (/download/i.test(normalized)) {
     return { userMessage: '结果已生成，但保存到本地时失败，请重试。', technicalDetail };
   }
   if (

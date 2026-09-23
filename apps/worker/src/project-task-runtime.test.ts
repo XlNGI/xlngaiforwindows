@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectService } from './project-service.js';
 import { nextProjectTaskDelay, ProjectTaskRuntime } from './project-task-runtime.js';
 import { VideoGenerationService } from './video-generation-service.js';
+import { NativeProviderRequestError } from './native-provider-bridge.js';
 
 const roots: string[] = [];
 const projects: ProjectService[] = [];
@@ -148,6 +149,33 @@ describe('ProjectTaskRuntime', () => {
     expect(request).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off an unsent circuit refusal while preserving the submitted task', async () => {
+    const { videos, request, runtime } = await setup();
+    const job = attach(videos);
+    request
+      .mockRejectedValueOnce(
+        new NativeProviderRequestError({
+          code: 'REQUEST_NOT_SENT',
+          message: 'PROVIDER_CIRCUIT_OPEN: 服务暂不可用，本次查询尚未发送。',
+          retryable: true,
+        }),
+      )
+      .mockResolvedValue(runningPoll());
+
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(videos.get(job.id)).toMatchObject({
+      status: 'polling',
+      providerTaskId: job.providerTaskId,
+    });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(request).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.every(([method]) => method === 'provider.media.poll')).toBe(true);
+    runtime.stop();
   });
 
   it('fails closed when Native returns an unnormalized Provider body', async () => {
