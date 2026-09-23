@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 40;
+export const CURRENT_SCHEMA_VERSION = 41;
 
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
@@ -2488,4 +2488,34 @@ CREATE INDEX idx_library_chunks_source
   ON project_library_chunks(project_id, source_id, version_id, ordinal);
 CREATE INDEX idx_library_chunks_document
   ON project_library_chunks(project_id, document_id, version_id, ordinal);
+`;
+
+/** Persist the deterministic document hierarchy used to explain library hits. */
+export const MIGRATION_V41 = `
+CREATE TABLE IF NOT EXISTS project_structure_nodes (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  document_id TEXT,
+  version_id TEXT,
+  node_kind TEXT NOT NULL CHECK (node_kind IN ('document', 'volume', 'chapter', 'scene', 'shot', 'section')),
+  title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+  path_json TEXT NOT NULL CHECK (json_valid(path_json) AND json_type(path_json) = 'array'),
+  path_text TEXT NOT NULL CHECK (length(trim(path_text)) > 0),
+  level INTEGER NOT NULL CHECK (level >= 0),
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+  end_offset INTEGER NOT NULL CHECK (end_offset >= start_offset),
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_structure_identity
+  ON project_structure_nodes(project_id, source_type, source_id, ifnull(version_id, ''), ordinal);
+CREATE INDEX IF NOT EXISTS idx_project_structure_source
+  ON project_structure_nodes(project_id, source_type, source_id, version_id, start_offset, end_offset);
+CREATE INDEX IF NOT EXISTS idx_project_structure_path
+  ON project_structure_nodes(project_id, path_text, node_kind, updated_at);
 `;

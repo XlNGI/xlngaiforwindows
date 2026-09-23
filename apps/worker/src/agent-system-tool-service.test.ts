@@ -159,6 +159,30 @@ describe('AgentSystemToolService', () => {
     expect(JSON.stringify(settings)).not.toMatch(/baseUrl|remoteModelId|private\.example/u);
   });
 
+  it('returns one project-wide resource map for the System Agent', async () => {
+    const { service, identity } = await setup();
+    const result = service.execute('project.structure.get', {}, identity) as {
+      version: number;
+      projectId: string;
+      resources: Array<{ kind: string; title: string; locator: { workspace: string } }>;
+      revision: string;
+    };
+    expect(result).toMatchObject({ version: 1, projectId: identity.projectId });
+    expect(result.revision).toBeTruthy();
+    expect(result.resources.map((item) => item.title)).toEqual(
+      expect.arrayContaining([
+        '小说',
+        '项目文档',
+        '角色与场景',
+        '场次与镜头',
+        '素材库',
+        '会话与任务',
+        '系统设置',
+      ]),
+    );
+    expect(() => unifiedAgentToolRegistry.serializeResult(result)).not.toThrow();
+  });
+
   it('returns only the normalized media task summary', async () => {
     const { service, identity } = await setup();
     const result = service.execute('media.task.get', { taskId: 'media-task' }, identity);

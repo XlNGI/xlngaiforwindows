@@ -40,8 +40,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(40);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 40 });
+    expect(migrateDatabase(database)).toBe(41);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 41 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -166,6 +166,60 @@ describe('project database', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get('project_library_chunks'),
     ).toMatchObject({ name: 'project_library_chunks' });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('project_structure_nodes'),
+    ).toMatchObject({ name: 'project_structure_nodes' });
+    database.close();
+  });
+
+  it('backfills structure nodes when upgrading an existing v40 project', async () => {
+    const database = await temporaryDatabase();
+    migrateDatabase(database);
+    database
+      .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('structure-project', 'Structure', 'now', 'now');
+    database
+      .prepare(
+        `INSERT INTO documents
+         (id, project_id, kind, title, scope_type, lifecycle_status, row_version, created_at, updated_at,
+          current_version_id)
+         VALUES ('structure-doc', 'structure-project', 'note', '结构文档', 'project', 'active', 0,
+                 'now', 'now', 'structure-version')`,
+      )
+      .run();
+    database
+      .prepare(
+        `INSERT INTO document_versions
+         (id, document_id, version, content_markdown, state, title_snapshot, scope_type_snapshot,
+          author_type, content_hash, state_updated_at, created_at)
+         VALUES ('structure-version', 'structure-doc', 1, '# 第一章\n## 场景一\n正文', 'draft',
+                 '结构文档', 'project', 'user', ?, 'now', 'now')`,
+      )
+      .run(createHash('sha256').update('# 第一章\n## 场景一\n正文').digest('hex'));
+    database.exec(`
+      DROP INDEX idx_project_structure_identity;
+      DROP INDEX idx_project_structure_source;
+      DROP INDEX idx_project_structure_path;
+      DROP TABLE project_structure_nodes;
+      DELETE FROM schema_migrations WHERE version = 41;
+    `);
+
+    expect(migrateDatabase(database)).toBe(41);
+    expect(
+      database
+        .prepare(
+          `SELECT path_text FROM project_structure_nodes
+           WHERE project_id = 'structure-project' AND source_id = 'structure-doc'
+           ORDER BY ordinal`,
+        )
+        .all(),
+    ).toEqual([
+      { path_text: '结构文档' },
+      { path_text: '结构文档 / 第一章' },
+      { path_text: '结构文档 / 第一章 / 场景一' },
+    ]);
     database.close();
   });
 
@@ -218,7 +272,7 @@ describe('project database', () => {
       insertJob.run(`job-${status}`, status, legacySnapshot);
     }
 
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     const states = database
       .prepare('SELECT id, media_state AS mediaState FROM generation_jobs ORDER BY id')
       .all();
@@ -255,7 +309,7 @@ describe('project database', () => {
         .prepare('UPDATE generation_jobs SET submission_idempotency_key = ? WHERE id = ?')
         .run('same-attempt', 'job-pending'),
     ).toThrow();
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 40 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 41 });
     database.close();
   });
 
@@ -341,7 +395,7 @@ describe('project database', () => {
     );
 
     expect(getSchemaVersion(database)).toBe(37);
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     expect(
       database
         .prepare(
@@ -409,7 +463,7 @@ describe('project database', () => {
         updated_at: 'characters-updated',
       },
     ]);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 40 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 41 });
     database.close();
   });
 
@@ -590,7 +644,7 @@ describe('project database', () => {
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     const chunks = database
       .prepare(
         `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
@@ -840,7 +894,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -867,7 +921,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -929,7 +983,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -977,7 +1031,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     expect(
       database
         .prepare(
@@ -1050,8 +1104,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(40);
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
+    expect(migrateDatabase(database)).toBe(41);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -1206,7 +1260,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(40);
+    expect(migrateDatabase(database)).toBe(41);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -1244,7 +1298,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 40 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 41 });
     database.close();
   });
 

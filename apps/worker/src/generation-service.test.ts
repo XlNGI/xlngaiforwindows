@@ -432,6 +432,11 @@ describe('GenerationService', () => {
         description: 'Create a draft',
         parameters: { type: 'object', additionalProperties: false, properties: {} },
       },
+      {
+        name: 'conversation.search',
+        description: 'Search conversations',
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+      },
     ]);
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
       '# Agent document write policy',
@@ -441,6 +446,12 @@ describe('GenerationService', () => {
     );
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
       'one document per character',
+    );
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+      '# Agent system tool policy',
+    );
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+      '不要用相同参数重复调用',
     );
   });
 

@@ -11,9 +11,12 @@ import type {
   MediaTaskSummary,
   ProviderModelInfo,
   ProviderProfileInfo,
+  ProjectStructureResource,
+  ProjectStructureResult,
   ResearchCacheCleanupResult,
   WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
+import type Database from 'better-sqlite3';
 import type { SystemAgentToolOperation } from './agent-tool-definitions.js';
 import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { ContentService } from './content-service.js';
@@ -91,6 +94,9 @@ export class AgentSystemToolService {
       case 'project.get_context':
         rejectUnknown(args, []);
         return this.projectContext();
+      case 'project.structure.get':
+        rejectUnknown(args, ['query', 'workspace', 'resourceId', 'maxDepth']);
+        return this.projectStructure(args) as unknown as Record<string, unknown>;
       case 'project.integrity.check':
         rejectUnknown(args, []);
         return this.projectIntegrity();
@@ -368,6 +374,402 @@ export class AgentSystemToolService {
         assets: scalarCount(database, 'assets', project.id),
       },
     }));
+  }
+
+  private projectStructure(args: Record<string, unknown>): ProjectStructureResult {
+    const query = optionalString(args.query, 'query', 200)?.toLocaleLowerCase('zh-CN');
+    const workspace = optionalWorkspace(args.workspace);
+    const resourceId = optionalString(args.resourceId, 'resourceId', 200);
+    const maxDepth = optionalInteger(args.maxDepth, 'maxDepth', 0, 8) ?? 5;
+    return this.projects.access(false, (database, project) => {
+      const resources: ProjectStructureResource[] = [];
+      let truncated = false;
+      let includedResourceCount = 0;
+      const matches = (resource: ProjectStructureResource): boolean => {
+        if (workspace && resource.locator.workspace !== workspace) return false;
+        if (resourceId && resource.id !== resourceId && resource.documentId !== resourceId)
+          return false;
+        if (
+          query &&
+          !`${resource.title} ${resource.kind}`.toLocaleLowerCase('zh-CN').includes(query)
+        ) {
+          return false;
+        }
+        return true;
+      };
+      const hasMatch = (resource: ProjectStructureResource): boolean =>
+        matches(resource) || (resource.children?.some((child) => hasMatch(child)) ?? false);
+      const boundTree = (
+        resource: ProjectStructureResource,
+      ): ProjectStructureResource | undefined => {
+        if (includedResourceCount >= 500) {
+          truncated = true;
+          return undefined;
+        }
+        includedResourceCount += 1;
+        const children = resource.children
+          ?.map((child) => boundTree(child))
+          .filter((child): child is ProjectStructureResource => Boolean(child));
+        return {
+          ...resource,
+          ...(children ? { children } : {}),
+        };
+      };
+      const add = (resource: ProjectStructureResource): void => {
+        const bounded = boundTree(resource);
+        if (bounded) resources.push(bounded);
+      };
+      const projectResource: ProjectStructureResource = {
+        id: project.id,
+        kind: 'project',
+        title: project.name,
+        revision: project.updatedAt,
+        locator: { workspace: 'documents', resourceId: project.id },
+        children: [],
+      };
+      const workspaces: ProjectStructureResource[] = [
+        {
+          id: 'workspace:novel',
+          kind: 'workspace',
+          title: '小说',
+          locator: { workspace: 'novel', resourceId: 'workspace:novel' },
+          children: [],
+        },
+        {
+          id: 'workspace:documents',
+          kind: 'workspace',
+          title: '项目文档',
+          locator: { workspace: 'documents', resourceId: 'workspace:documents' },
+          children: [],
+        },
+        {
+          id: 'workspace:characters',
+          kind: 'workspace',
+          title: '角色与场景',
+          locator: { workspace: 'characters', resourceId: 'workspace:characters' },
+          children: [],
+        },
+        {
+          id: 'workspace:shots',
+          kind: 'workspace',
+          title: '场次与镜头',
+          locator: { workspace: 'shots', resourceId: 'workspace:shots' },
+          children: [],
+        },
+        {
+          id: 'workspace:assets',
+          kind: 'workspace',
+          title: '素材库',
+          locator: { workspace: 'assets', resourceId: 'workspace:assets' },
+          children: [],
+        },
+        {
+          id: 'workspace:tasks',
+          kind: 'workspace',
+          title: '会话与任务',
+          locator: { workspace: 'tasks', resourceId: 'workspace:tasks' },
+          children: [],
+        },
+        {
+          id: 'workspace:settings',
+          kind: 'workspace',
+          title: '系统设置',
+          locator: { workspace: 'settings', resourceId: 'workspace:settings' },
+          children: [
+            {
+              id: 'settings:providers',
+              kind: 'settings',
+              title: 'Provider 连接与模型',
+              parentId: 'workspace:settings',
+              locator: { workspace: 'settings', resourceId: 'settings:providers' },
+            },
+            {
+              id: 'settings:application',
+              kind: 'settings',
+              title: '应用设置',
+              parentId: 'workspace:settings',
+              locator: { workspace: 'settings', resourceId: 'settings:application' },
+            },
+          ],
+        },
+      ];
+      const novel = workspaces[0]!.children!;
+      const documents = workspaces[1]!.children!;
+      const characters = workspaces[2]!.children!;
+      const shots = workspaces[3]!.children!;
+      const novelVolumes = database
+        .prepare(
+          `SELECT id, title, position, status, row_version, updated_at FROM novel_volumes WHERE project_id = ? AND status != 'archived' ORDER BY position, id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        title: string;
+        position: number;
+        status: string;
+        row_version: number;
+        updated_at: string;
+      }>;
+      for (const volume of novelVolumes) {
+        novel.push({
+          id: volume.id,
+          kind: 'novel-volume',
+          title: volume.title,
+          parentId: 'workspace:novel',
+          lifecycleStatus: volume.status as 'active' | 'archived',
+          rowVersion: volume.row_version,
+          revision: volume.updated_at,
+          locator: { workspace: 'novel', resourceId: volume.id },
+        });
+      }
+      const chapters = database
+        .prepare(
+          `SELECT chapters.id, chapters.document_id, chapters.volume_id, chapters.display_label, chapters.position, chapters.lifecycle_status, chapters.row_version, documents.title, documents.updated_at, documents.current_version_id
+                  FROM novel_chapters chapters INNER JOIN documents ON documents.id = chapters.document_id
+                  WHERE chapters.project_id = ? AND chapters.lifecycle_status != 'archived' ORDER BY chapters.position, chapters.id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        document_id: string;
+        volume_id: string | null;
+        display_label: string;
+        position: number;
+        lifecycle_status: string;
+        row_version: number;
+        title: string;
+        updated_at: string;
+        current_version_id: string | null;
+      }>;
+      for (const chapter of chapters) {
+        novel.push({
+          id: chapter.id,
+          kind: 'novel-chapter',
+          title: `${chapter.display_label} ${chapter.title}`.trim(),
+          parentId: chapter.volume_id ?? 'workspace:novel',
+          documentId: chapter.document_id,
+          sourceType: 'novel-chapter',
+          lifecycleStatus: chapter.lifecycle_status as 'active' | 'archived',
+          rowVersion: chapter.row_version,
+          revision: chapter.updated_at,
+          versionId: chapter.current_version_id ?? undefined,
+          locator: {
+            workspace: 'novel',
+            resourceId: chapter.id,
+            documentId: chapter.document_id,
+            versionId: chapter.current_version_id ?? undefined,
+          },
+          children: this.structureNodes(
+            database,
+            project.id,
+            chapter.document_id,
+            chapter.id,
+            maxDepth,
+            'novel',
+          ),
+        });
+      }
+      const docRows = database
+        .prepare(
+          `SELECT id, kind, title, scope_type, scope_id, lifecycle_status, row_version, updated_at, current_version_id FROM documents WHERE project_id = ? AND lifecycle_status != 'archived' ORDER BY updated_at DESC, id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        kind: string;
+        title: string;
+        scope_type: string;
+        scope_id: string | null;
+        lifecycle_status: string;
+        row_version: number;
+        updated_at: string;
+        current_version_id: string | null;
+      }>;
+      for (const document of docRows) {
+        const kind = document.kind as ProjectStructureResource['documentKind'];
+        const target = kind === 'character' || kind === 'scene' ? characters : documents;
+        if (chapters.some((chapter) => chapter.document_id === document.id)) continue;
+        target.push({
+          id: document.id,
+          kind: 'document',
+          title: document.title,
+          parentId: target === characters ? 'workspace:characters' : 'workspace:documents',
+          documentId: document.id,
+          documentKind: kind,
+          sourceType: document.kind === 'storyboard' ? 'storyboard' : 'document',
+          lifecycleStatus: document.lifecycle_status as 'active' | 'archived',
+          rowVersion: document.row_version,
+          revision: document.updated_at,
+          versionId: document.current_version_id ?? undefined,
+          locator: {
+            workspace: target === characters ? 'characters' : 'documents',
+            resourceId: document.id,
+            documentId: document.id,
+            versionId: document.current_version_id ?? undefined,
+          },
+          children: this.structureNodes(
+            database,
+            project.id,
+            document.id,
+            document.id,
+            maxDepth,
+            target === characters ? 'characters' : 'documents',
+          ),
+        });
+      }
+      const sceneRows = database
+        .prepare(
+          `SELECT id, title, position, row_version, updated_at FROM scenes WHERE project_id = ? ORDER BY position, id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        title: string;
+        position: number;
+        row_version: number;
+        updated_at: string;
+      }>;
+      for (const scene of sceneRows) {
+        const sceneResource: ProjectStructureResource = {
+          id: scene.id,
+          kind: 'scene',
+          title: scene.title,
+          parentId: 'workspace:shots',
+          rowVersion: scene.row_version,
+          revision: scene.updated_at,
+          locator: { workspace: 'shots', resourceId: scene.id },
+          children: [],
+        };
+        const sceneChildren = sceneResource.children!;
+        const shotRows = database
+          .prepare(
+            `SELECT id, title, position, row_version, updated_at FROM shots WHERE scene_id = ? ORDER BY position, id`,
+          )
+          .all(scene.id) as Array<{
+          id: string;
+          title: string;
+          position: number;
+          row_version: number;
+          updated_at: string;
+        }>;
+        for (const shot of shotRows)
+          sceneChildren.push({
+            id: shot.id,
+            kind: 'shot',
+            title: shot.title,
+            parentId: scene.id,
+            rowVersion: shot.row_version,
+            revision: shot.updated_at,
+            locator: { workspace: 'shots', resourceId: shot.id },
+          });
+        shots.push(sceneResource);
+      }
+      const conversationRows = database
+        .prepare(
+          `SELECT id, title, updated_at, archived_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id LIMIT 100`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        title: string;
+        updated_at: string;
+        archived_at: string | null;
+      }>;
+      const conversations = workspaces[5]!.children!;
+      for (const conversation of conversationRows)
+        conversations.push({
+          id: conversation.id,
+          kind: 'conversation',
+          title: conversation.title || '新会话',
+          parentId: 'workspace:tasks',
+          lifecycleStatus: conversation.archived_at ? 'archived' : 'active',
+          revision: conversation.updated_at,
+          locator: { workspace: 'tasks', resourceId: conversation.id },
+        });
+      const assets = workspaces[4]!.children!;
+      for (const asset of this.assets.listAssets({ deleted: 'active', limit: 501 })) {
+        assets.push({
+          id: asset.id,
+          kind: 'asset',
+          title: asset.alias || asset.kind || '未命名素材',
+          parentId: 'workspace:assets',
+          lifecycleStatus: 'active',
+          revision: asset.updatedAt ?? asset.createdAt,
+          locator: { workspace: 'assets', resourceId: asset.id },
+        });
+      }
+      projectResource.children = workspaces.filter(
+        (item) => !workspace || item.locator.workspace === workspace,
+      );
+      const filtered = projectResource.children.filter((item) => hasMatch(item));
+      for (const resource of filtered) add(resource);
+      return {
+        version: 1,
+        projectId: project.id,
+        projectName: project.name,
+        revision: project.updatedAt,
+        resources,
+        truncated,
+      };
+    });
+  }
+
+  private structureNodes(
+    database: Database.Database,
+    projectId: string,
+    documentId: string,
+    parentId: string,
+    maxDepth: number,
+    workspace: ProjectStructureResource['locator']['workspace'],
+  ): ProjectStructureResource[] {
+    if (maxDepth <= 0) return [];
+    const rows = database
+      .prepare(
+        `SELECT id, node_kind, title, path_json, level, version_id, updated_at
+         FROM project_structure_nodes
+         WHERE project_id = ? AND document_id = ?
+           AND version_id IS (
+             SELECT current_version_id FROM documents
+             WHERE project_id = ? AND id = ?
+           )
+         ORDER BY ordinal LIMIT 100`,
+      )
+      .all(projectId, documentId, projectId, documentId) as Array<{
+      id: string;
+      node_kind: string;
+      title: string;
+      path_json: string;
+      level: number;
+      version_id: string | null;
+      updated_at: string;
+    }>;
+    const stack: Array<{ level: number; id: string }> = [];
+    return rows
+      .filter((row) => row.level <= maxDepth)
+      .map((row) => {
+        let path: string[] = [];
+        try {
+          path = JSON.parse(row.path_json) as string[];
+        } catch {
+          path = [row.title];
+        }
+        while (stack.length > 0 && stack[stack.length - 1]!.level >= row.level) stack.pop();
+        const resolvedParentId = stack.at(-1)?.id ?? parentId;
+        const resource: ProjectStructureResource = {
+          id: row.id,
+          kind: 'structure-node',
+          title: row.title,
+          parentId: resolvedParentId,
+          versionId: row.version_id ?? undefined,
+          structureKind: row.node_kind as ProjectStructureResource['structureKind'],
+          revision: row.updated_at,
+          locator: {
+            workspace,
+            resourceId: documentId,
+            documentId,
+            versionId: row.version_id ?? undefined,
+            structureNodeId: row.id,
+            structurePath: path,
+          },
+        };
+        stack.push({ level: row.level, id: row.id });
+        return resource;
+      });
   }
 
   private projectIntegrity(): Record<string, unknown> {
@@ -998,6 +1400,25 @@ function optionalString(value: unknown, name: string, maximum: number): string |
 function optionalBoolean(value: unknown, name: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw new Error(`${name} must be a boolean.`);
+  return value;
+}
+
+type ProjectStructureWorkspace =
+  'novel' | 'documents' | 'characters' | 'shots' | 'assets' | 'tasks' | 'settings';
+
+function optionalWorkspace(value: unknown): ProjectStructureWorkspace | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value !== 'novel' &&
+    value !== 'documents' &&
+    value !== 'characters' &&
+    value !== 'shots' &&
+    value !== 'assets' &&
+    value !== 'tasks' &&
+    value !== 'settings'
+  ) {
+    throw new Error('workspace is invalid.');
+  }
   return value;
 }
 

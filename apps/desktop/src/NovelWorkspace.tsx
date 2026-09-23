@@ -30,7 +30,11 @@ interface NovelWorkspaceProps {
   projectId?: string;
   writable: boolean;
   focusChapterId?: string;
+  /** Increment after an Agent chapter write so the editor reloads its bound document. */
+  refreshToken?: number;
+  onChapterSelected?: (chapter: NovelChapterInfo) => void;
   onOpenDocument?: (documentId: string) => void;
+  onGenerateChapter?: (chapter: NovelChapterInfo) => void;
   /** Called with the user-selected chapter IDs when starting episode generation. */
   onGenerateEpisode?: (chapterIds: string[]) => void;
 }
@@ -86,7 +90,10 @@ export function NovelWorkspace({
   projectId,
   writable,
   focusChapterId,
+  refreshToken = 0,
+  onChapterSelected,
   onOpenDocument,
+  onGenerateChapter,
   onGenerateEpisode,
 }: NovelWorkspaceProps) {
   const [chapters, setChapters] = useState<NovelChapterInfo[]>([]);
@@ -152,7 +159,7 @@ export function NovelWorkspace({
     </div>
   );
 
-  const loadChapters = async (preferredId?: string) => {
+  const loadChapters = async (preferredId?: string, forceOpen = false) => {
     if (!projectId) return;
     const [rows, volumeRows] = await Promise.all([
       callWorker('novel.chapter.list', { includeArchived }),
@@ -161,7 +168,7 @@ export function NovelWorkspace({
     setChapters(rows);
     setVolumes(volumeRows);
     const next = rows.find((row) => row.id === preferredId) ?? rows[0];
-    if (next && next.id !== selected?.id) await openChapter(next);
+    if (next && (forceOpen || next.id !== selected?.id)) await openChapter(next);
     else if (next) setSelected(next);
     if (!next) {
       setSelected(undefined);
@@ -172,14 +179,15 @@ export function NovelWorkspace({
   };
 
   useEffect(() => {
-    void loadChapters(focusChapterId);
-  }, [projectId, includeArchived, focusChapterId]);
+    void loadChapters(focusChapterId, true);
+  }, [projectId, includeArchived, focusChapterId, refreshToken]);
 
   const openChapter = async (chapter: NovelChapterInfo) => {
     setBusy(true);
     try {
       const detail = await callWorker('document.get', { documentId: chapter.documentId });
       setSelected(chapter);
+      onChapterSelected?.(chapter);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
@@ -554,8 +562,8 @@ export function NovelWorkspace({
                     <button
                       className="icon-button subtle"
                       type="button"
-                      title="在文档工作区打开"
-                      aria-label="在文档工作区打开"
+                      title="定位到小说章节"
+                      aria-label="定位到小说章节"
                       onClick={() => onOpenDocument(document.id)}
                     >
                       <ExternalLink size={14} />
@@ -591,6 +599,16 @@ export function NovelWorkspace({
                   >
                     <Save size={13} /> 保存并切片
                   </button>
+                  {onGenerateChapter && (
+                    <button
+                      className="button primary"
+                      type="button"
+                      disabled={!writable || busy}
+                      onClick={() => onGenerateChapter(selected)}
+                    >
+                      <BookOpen size={13} /> 生成正文到本章
+                    </button>
+                  )}
                   <button
                     className={selected.lifecycleStatus === 'archived' ? '' : 'danger'}
                     type="button"

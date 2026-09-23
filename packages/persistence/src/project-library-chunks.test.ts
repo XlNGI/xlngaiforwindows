@@ -117,6 +117,28 @@ describe('project library chunks', () => {
     database.close();
   });
 
+  it('attaches the parsed structural path to a matching library hit', async () => {
+    const { database, now } = await temporaryDatabase();
+    insertDocument(database, now, {
+      id: 'structured-doc',
+      kind: 'screenplay',
+      title: '雾港剧本',
+      content: '# 第一章 雨夜来客\n## 场景一 旧码头\n林澈在潮声里回头。',
+      versionId: 'structured-version',
+    });
+    rebuildLibraryChunksForDocument(database, 'project', 'structured-doc', now);
+
+    const hit = searchProjectLibraryChunks(database, {
+      projectId: 'project',
+      query: '林澈',
+    })[0];
+    expect(hit?.structure).toMatchObject({
+      kind: 'scene',
+      path: ['雾港剧本', '第一章 雨夜来客', '场景一 旧码头'],
+    });
+    database.close();
+  });
+
   it('keeps draft and published versions searchable side by side', async () => {
     const { database, now } = await temporaryDatabase();
     insertDocument(database, now, {

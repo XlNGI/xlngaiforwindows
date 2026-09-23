@@ -63,6 +63,75 @@ describe('LibrarySearchService', () => {
     expect(read.content).toContain('旧码头');
   });
 
+  it('returns the structural path used to locate a matching section', async () => {
+    const { content, library } = await setup();
+    content.saveDocument({
+      kind: 'scene',
+      title: '雾港剧本',
+      contentMarkdown: '# 第一章 雨夜来客\n## 场景一 旧码头\n林澈在潮声里回头。',
+    });
+    const result = library.search({ taskId: 'structure-task', attemptId: 'a', query: '林澈' });
+    expect(result.sources[0]).toMatchObject({
+      structureKind: 'scene',
+      structurePath: ['雾港剧本', '第一章 雨夜来客', '场景一 旧码头'],
+    });
+    const read = library.read({
+      taskId: 'structure-task',
+      attemptId: 'a',
+      sourceHandle: result.sources[0]!.sourceHandle,
+    });
+    expect(read).toMatchObject({
+      structureKind: 'scene',
+      structurePath: ['雾港剧本', '第一章 雨夜来客', '场景一 旧码头'],
+    });
+  });
+
+  it('browses structure metadata before reading the same source', async () => {
+    const { content, library } = await setup();
+    content.saveDocument({
+      kind: 'scene',
+      title: '结构导航文档',
+      contentMarkdown: '# 第一章\n## 场景一 旧码头\n林澈在潮声里回头。\n## 场景二 灯塔\n雾散。',
+    });
+    const tree = library.search({
+      taskId: 'structure-browse',
+      attemptId: 'a',
+      query: '*',
+      searchMode: 'structure',
+      structurePath: ['结构导航文档', '第一章'],
+      status: 'draft',
+      limit: 2,
+    });
+    expect(tree.searchMode).toBe('structure');
+    expect(tree.sources.map((source) => source.structurePath)).toEqual([
+      ['结构导航文档', '第一章'],
+      ['结构导航文档', '第一章', '场景一 旧码头'],
+    ]);
+    expect(tree.nextOffset).toBe(2);
+    expect(tree.sources.every((source) => source.snippet === '')).toBe(true);
+    const nextTree = library.search({
+      taskId: 'structure-browse',
+      attemptId: 'a',
+      query: '*',
+      searchMode: 'structure',
+      structurePath: ['结构导航文档', '第一章'],
+      status: 'draft',
+      offset: tree.nextOffset,
+      limit: 2,
+    });
+    expect(nextTree.sources.map((source) => source.structurePath)).toEqual([
+      ['结构导航文档', '第一章', '场景二 灯塔'],
+    ]);
+    const read = library.read({
+      taskId: 'structure-browse',
+      attemptId: 'a',
+      sourceHandle: tree.sources[1]!.sourceHandle,
+      readMode: 'source',
+    });
+    expect(read.content).toContain('林澈在潮声里回头');
+    expect(read.structurePath).toEqual(['结构导航文档', '第一章', '场景一 旧码头']);
+  });
+
   it('indexes imported novel drafts without publishing', async () => {
     const { novels, library } = await setup();
     novels.importNovel({

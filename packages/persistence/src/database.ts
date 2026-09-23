@@ -39,6 +39,7 @@ import {
   MIGRATION_V36,
   MIGRATION_V38,
   MIGRATION_V39,
+  MIGRATION_V41,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
@@ -47,6 +48,7 @@ import { addSchemaQueryTaskType } from './migration-v35.js';
 import { backfillCurrentNovelRagChunks } from './novel-rag-chunks.js';
 import {
   backfillProjectLibraryChunks,
+  backfillProjectStructureNodes,
   createProjectLibraryFts,
   rebuildLibraryChunksForDocument,
 } from './project-library-chunks.js';
@@ -430,6 +432,15 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(40, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 40) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V41);
+      backfillProjectStructureNodes(database, now);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(41, now);
     })();
   }
   return getSchemaVersion(database);

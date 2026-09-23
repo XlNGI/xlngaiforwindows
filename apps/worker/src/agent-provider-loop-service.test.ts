@@ -862,7 +862,7 @@ describe('AgentProviderLoopService', () => {
       return JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
     });
     expect(snapshot).toMatchObject({
-      agentMode: 'short-drama',
+      agentMode: 'document',
       selectedChapterIds: ['chapter-1'],
       targetPlatform: 'seedance',
     });
@@ -961,7 +961,7 @@ describe('AgentProviderLoopService', () => {
 
     expect(taskSnapshot(project, orchestration.taskId)).toMatchObject({
       version: 1,
-      agentMode: 'novel-writing',
+      agentMode: 'document',
       action: 'continue_chapter',
       chapterId: chapter.id,
       documentId: chapter.documentId,
@@ -2050,7 +2050,15 @@ describe('AgentProviderLoopService', () => {
           id: 'call_update',
           name: 'document.update_draft',
           authorizationHandle: agent.tools[0]?.authorizationHandle,
-          argumentsJson: JSON.stringify({ title: 'Target revised', contentMarkdown: '# After' }),
+          argumentsJson: JSON.stringify({
+            title: 'Target revised',
+            contentMarkdown: '# After',
+            resourceId: target.id,
+            documentId: target.id,
+            versionId: target.currentVersion?.id,
+            expectedRevision: target.updatedAt,
+            expectedRowVersion: target.rowVersion,
+          }),
         },
       ],
     });
@@ -2064,6 +2072,42 @@ describe('AgentProviderLoopService', () => {
         target_document_id: target.id,
       });
     });
+  });
+
+  it('rejects a resolver location that points at another document', async () => {
+    const { conversation, generations, loop, workflow } = await setup();
+    const target = workflow.saveDraft({ title: 'Target', contentMarkdown: '# Before' });
+    const other = workflow.saveDraft({ title: 'Other', contentMarkdown: '# Other' });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Update the selected document.',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, 'Update the selected document.', undefined, {
+      operation: 'document.update_draft',
+      documentId: target.id,
+    });
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'resp_location_conflict',
+      calls: [
+        {
+          id: 'call_location_conflict',
+          name: 'document.update_draft',
+          authorizationHandle: agent.tools[0]?.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: 'Wrong target',
+            contentMarkdown: '# Must not write',
+            resourceId: other.id,
+            documentId: other.id,
+          }),
+        },
+      ],
+    });
+    expect(result.continuation?.outputs[0]?.output).toContain('RESOURCE_LOCATION_CONFLICT');
+    expect(workflow.getDocument(target.id).currentVersion?.contentMarkdown).toBe('# Before');
+    expect(workflow.getDocument(other.id).currentVersion?.contentMarkdown).toBe('# Other');
   });
 
   it('requires one-time confirmation before archiving a document', async () => {
@@ -2871,6 +2915,38 @@ describe('AgentProviderLoopService', () => {
     },
   );
 
+  it('requires a persisted version from a novel chapter task before completing', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const novel = new NovelService(project);
+    const chapter = novel.saveChapter({ title: '雾港来客' });
+    workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: '旧稿。',
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    const prompt = '续写当前章节并保存小说正文';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = new AgentProviderLoopService(project, workflow);
+    const preparedAgent = agent.prepare(
+      prepared.stream,
+      prompt,
+      undefined,
+      { operation: 'novel.chapter.submit_draft', documentId: chapter.documentId },
+      'project_only',
+    );
+    expect(preparedAgent.tools.map((tool) => tool.name)).toContain('novel.chapter.submit_draft');
+    agent.startProviderStep(prepared.stream);
+    expect(() => agent.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+      'AGENT_DOCUMENT_NOT_WRITTEN',
+    );
+  });
+
   it('allows a writing kickoff to end after clarification without requiring a document save', async () => {
     const { conversation, generations, project, workflow } = await setup();
     const loop = new AgentProviderLoopService(project, workflow);
@@ -2978,6 +3054,7 @@ describe('AgentProviderLoopService', () => {
     expect(agent.tools.map((tool) => tool.name)).toEqual([
       'document.list',
       'project.get_context',
+      'project.structure.get',
       'project.integrity.check',
       'conversation.search',
       'conversation.rename',

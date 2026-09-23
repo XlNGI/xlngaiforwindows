@@ -8,5 +8,6 @@ export * from './migration-v35.js';
 export * from './migration-v37.js';
 export * from './novel-rag-chunks.js';
 export * from './project-library-chunks.js';
+export * from './project-structure.js';
 export * from './repositories.js';
 export * from './schema.js';

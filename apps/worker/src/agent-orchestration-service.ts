@@ -75,8 +75,52 @@ function pendingInfo(row: PendingRow): AgentPendingIntentInfo {
 function inferAction(prompt: string): NovelWritingAction | undefined {
   if (/(续写|继续写|继续创作)/u.test(prompt)) return 'continue_chapter';
   if (/(重写|改写|改编)/u.test(prompt)) return 'rewrite_chapter';
+  if (/(保存|存入|写入|提交)/u.test(prompt)) return 'rewrite_chapter';
   if (/(新建章节|创建章节|写第|写一章|创作章节)/u.test(prompt)) return 'create_chapter';
   return undefined;
+}
+
+function chapterNumber(value: string): number | undefined {
+  const match = value.match(/第\s*([0-9]+|[零〇一二三四五六七八九十百千万两]+)\s*章/u);
+  if (!match) return undefined;
+  if (/^[0-9]+$/u.test(match[1]!)) return Number(match[1]);
+  const digits: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    两: 2,
+  };
+  let total = 0;
+  let current = 0;
+  for (const character of match[1]!) {
+    if (character === '十' || character === '百' || character === '千' || character === '万') {
+      const unit = { 十: 10, 百: 100, 千: 1_000, 万: 10_000 }[character];
+      if (unit === 10_000) {
+        total = (total + current || 1) * unit;
+        current = 0;
+      } else {
+        total += (current || 1) * unit;
+        current = 0;
+      }
+    } else {
+      current = digits[character] ?? 0;
+    }
+  }
+  const result = total + current;
+  return result > 0 ? result : undefined;
+}
+
+function chapterDisplayLabel(value: string): string | undefined {
+  const match = value.match(/第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章/u);
+  return match?.[0].replace(/\s+/gu, '');
 }
 
 function containsNegatedAction(prompt: string): boolean {
@@ -142,8 +186,25 @@ export class AgentOrchestrationService {
           }
         }
 
-        const action = input.intent?.action ?? inferAction(prompt);
-        const pending = this.pendingReason(prompt, action, input.intent);
+        let action = input.intent?.action ?? inferAction(prompt);
+        const resolution =
+          action && action !== 'create_chapter'
+            ? this.resolveExistingChapterIntent(database, project.id, prompt, input.intent)
+            : { intent: input.intent, ambiguous: false, empty: false };
+        let intent = resolution.intent;
+        if (action && action !== 'create_chapter' && resolution.empty && !resolution.ambiguous) {
+          const displayLabel = chapterDisplayLabel(prompt);
+          if (displayLabel) {
+            action = 'create_chapter';
+            intent = {
+              ...(intent ?? {}),
+              action,
+              chapterTitle: intent?.chapterTitle ?? displayLabel,
+              displayLabel: intent?.displayLabel ?? displayLabel,
+            };
+          }
+        }
+        const pending = this.pendingReason(prompt, action, intent, resolution.ambiguous);
         if (pending) {
           return {
             pendingIntent: this.createPending(
@@ -152,7 +213,7 @@ export class AgentOrchestrationService {
               input.conversationId,
               requestHash,
               action,
-              input.intent,
+              intent,
               pending,
             ),
           };
@@ -161,8 +222,8 @@ export class AgentOrchestrationService {
         const now = new Date().toISOString();
         const target =
           action === 'create_chapter'
-            ? this.createChapterTarget(database, project.id, input.intent!, now)
-            : this.existingChapterTarget(database, project.id, input.intent!.chapterId!);
+            ? this.createChapterTarget(database, project.id, intent!, now)
+            : this.existingChapterTarget(database, project.id, intent!.chapterId!);
         const taskId = randomUUID();
         database
           .prepare(
@@ -181,7 +242,9 @@ export class AgentOrchestrationService {
             input.title ? requiredText(input.title, 'Task title', 200) : target.title,
             JSON.stringify({
               version: 1,
-              agentMode: 'novel-writing',
+              // Chapter targeting is a resolver hint, not a separate Agent
+              // persona. Every project task runs through the System Agent.
+              agentMode: 'document',
               action,
               promptHash: sha256(prompt),
               chapterId: target.chapterId,
@@ -333,12 +396,66 @@ export class AgentOrchestrationService {
     prompt: string,
     action: NovelWritingAction | undefined,
     intent: NovelWritingIntent | undefined,
+    ambiguousTarget = false,
   ): AgentPendingIntentInfo['reasonCode'] | undefined {
     if (containsNegatedAction(prompt)) return 'NEGATED_ACTION';
     if (!action) return 'AMBIGUOUS_ACTION';
     if (action === 'create_chapter' && !intent?.chapterTitle?.trim()) return 'TARGET_REQUIRED';
+    if (ambiguousTarget) return 'TARGET_NOT_UNIQUE';
     if (action !== 'create_chapter' && !intent?.chapterId) return 'TARGET_REQUIRED';
     return undefined;
+  }
+
+  private resolveExistingChapterIntent(
+    database: Database.Database,
+    projectId: string,
+    prompt: string,
+    intent?: NovelWritingIntent,
+  ): { intent?: NovelWritingIntent; ambiguous: boolean; empty: boolean } {
+    if (intent?.chapterId) return { intent, ambiguous: false, empty: false };
+    const rows = database
+      .prepare(
+        `SELECT chapters.id, chapters.display_label, chapters.position, documents.title
+         FROM novel_chapters chapters INNER JOIN documents ON documents.id = chapters.document_id
+         WHERE chapters.project_id = ? AND chapters.lifecycle_status IN ('reserved', 'active')
+         ORDER BY chapters.position, chapters.id`,
+      )
+      .all(projectId) as Array<{
+      id: string;
+      display_label: string;
+      position: number;
+      title: string;
+    }>;
+    if (rows.length === 0) return { intent, ambiguous: false, empty: true };
+    const normalizedPrompt = prompt.normalize('NFC').trim();
+    const normalizedLabel = intent?.displayLabel?.normalize('NFC').trim();
+    const normalizedTitle = intent?.chapterTitle?.normalize('NFC').trim();
+    let candidates = rows;
+    if (normalizedLabel || normalizedTitle) {
+      const exact = rows.filter(
+        (row) =>
+          (normalizedLabel && row.display_label === normalizedLabel) ||
+          (normalizedTitle && row.title === normalizedTitle),
+      );
+      if (exact.length > 0) candidates = exact;
+    }
+    const number = chapterNumber(
+      [normalizedLabel, normalizedTitle, normalizedPrompt].filter(Boolean).join(' '),
+    );
+    if (number !== undefined) {
+      const numbered = candidates.filter(
+        (row) => row.position === number - 1 || chapterNumber(row.display_label) === number,
+      );
+      if (numbered.length > 0) candidates = numbered;
+    }
+    if (candidates.length !== 1) {
+      return { intent, ambiguous: candidates.length > 1, empty: false };
+    }
+    return {
+      intent: { ...(intent ?? {}), chapterId: candidates[0]!.id },
+      ambiguous: false,
+      empty: false,
+    };
   }
 
   private createPending(

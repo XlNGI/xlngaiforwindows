@@ -7,6 +7,7 @@ import {
   collectReferenceImageInputs,
   composeImageGenerationPrompt,
   inferAgentCapability,
+  inferNovelWritingIntent,
   mergeGenerationMessage,
   normalizeImageDataUrl,
   resolveAgentRunModelSelection,
@@ -35,6 +36,24 @@ describe('inferAgentCapability', () => {
     expect(inferAgentCapability('生成一张角色图')).toBe('image');
     expect(inferAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferAgentCapability('生成角色三视图提示词')).toBe('document');
+  });
+});
+
+describe('inferNovelWritingIntent', () => {
+  it('targets the selected chapter only for an explicit prose write request', () => {
+    expect(inferNovelWritingIntent('请生成并保存本章小说正文', 'chapter-1')).toEqual({
+      action: 'rewrite_chapter',
+      chapterId: 'chapter-1',
+    });
+    expect(inferNovelWritingIntent('请续写本章小说正文', 'chapter-1')).toEqual({
+      action: 'continue_chapter',
+      chapterId: 'chapter-1',
+    });
+  });
+
+  it('does not route chapter discussion or unscoped prompts to novel writing', () => {
+    expect(inferNovelWritingIntent('请总结本章剧情', 'chapter-1')).toBeUndefined();
+    expect(inferNovelWritingIntent('请生成并保存本章小说正文')).toBeUndefined();
   });
 });
 

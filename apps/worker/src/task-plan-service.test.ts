@@ -583,6 +583,24 @@ describe('TaskPlanService P6 generic dependency plans', () => {
 });
 
 describe('TaskPlanService P4 plan-only round', () => {
+  it('accepts a short-drama deliverable plan from a unified System Agent snapshot', async () => {
+    const { project, service, taskId } = await setup();
+    project.access(true, (database) => {
+      database.prepare('UPDATE agent_tasks SET request_snapshot_json = ? WHERE id = ?').run(
+        JSON.stringify({
+          promptHash: 'prompt-hash',
+          agentMode: 'document',
+          selectedChapterIds: ['chapter-1'],
+          targetPlatform: 'seedance',
+        }),
+        taskId,
+      );
+    });
+    expect(service.submitPlanOnly({ taskId, candidate: validPlan }).plan).toMatchObject({
+      mode: 'short-drama',
+    });
+  });
+
   it('exposes only task.plan.submit and binds the example prompt to the frozen platform', async () => {
     const { service, taskId } = await setup();
     const userPrompt = '我要生成主要大纲、镜头、角色的提示词，用于生成 AI 漫剧，使用 Seedance。';

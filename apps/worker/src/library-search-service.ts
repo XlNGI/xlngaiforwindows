@@ -3,6 +3,7 @@ import type {
   LibraryErrorCode,
   LibraryReadResult,
   LibrarySearchResult,
+  LibrarySearchMode,
   LibrarySourceStatus,
 } from '@ai-video/contracts';
 import {
@@ -10,6 +11,7 @@ import {
   librarySnippet,
   LIBRARY_SOURCE_TYPES,
   listProjectLibrarySourceChunks,
+  searchProjectStructureNodesPage,
   searchProjectLibraryChunksPage,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
@@ -39,6 +41,9 @@ interface LibraryHandleRecord {
   projectId: string;
   chunkId: string;
   citationLabel: string;
+  structureKind?: LibrarySearchResult['sources'][number]['structureKind'];
+  structurePath?: string[];
+  structureNodeId?: string;
   expiresAt: number;
 }
 
@@ -57,64 +62,104 @@ export class LibrarySearchService {
     taskId: string;
     attemptId: string;
     query: string;
+    searchMode?: LibrarySearchMode;
     sourceTypes?: string[];
     status?: string;
     kind?: string;
     scopeType?: string;
     scopeId?: string;
+    structurePath?: string[];
+    offset?: number;
     includeArchived?: boolean;
     limit?: number;
   }): LibrarySearchResult {
     this.assertBudget(params.taskId, params.attemptId, 'search');
-    const query = normalizeQuery(params.query);
+    const searchMode = params.searchMode ?? 'content';
+    if (searchMode !== 'content' && searchMode !== 'structure') {
+      throw new LibraryError('LIBRARY_SEARCH_FAILED', 'Library search mode is invalid.', false);
+    }
+    const query = normalizeQuery(params.query, searchMode === 'structure');
+    const structurePath = normalizeStructurePath(params.structurePath);
     const sourceTypes = normalizeSourceTypes(params.sourceTypes);
+    const offset = boundedInteger(params.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     return this.projects.access(false, (database, project) => {
-      const { hits, truncated } = searchProjectLibraryChunksPage(database, {
-        projectId: project.id,
-        query,
-        sourceTypes,
-        status: params.status,
-        kind: params.kind,
-        scopeType: params.scopeType,
-        scopeId: params.scopeId,
-        includeArchived: params.includeArchived,
-        limit: boundedInteger(params.limit, 8, 1, 20),
-      });
+      const limit = boundedInteger(params.limit, searchMode === 'structure' ? 20 : 8, 1, 20);
+      const page =
+        searchMode === 'structure'
+          ? searchProjectStructureNodesPage(database, {
+              projectId: project.id,
+              query,
+              sourceTypes,
+              status: params.status,
+              kind: params.kind,
+              scopeType: params.scopeType,
+              scopeId: params.scopeId,
+              includeArchived: params.includeArchived,
+              structurePath,
+              offset,
+              limit,
+            })
+          : searchProjectLibraryChunksPage(database, {
+              projectId: project.id,
+              query,
+              sourceTypes,
+              status: params.status,
+              kind: params.kind,
+              scopeType: params.scopeType,
+              scopeId: params.scopeId,
+              includeArchived: params.includeArchived,
+              limit,
+            });
+      const { hits, truncated } = page;
       this.pruneExpiredHandles();
       const sources = hits.map((hit, index) => {
         const sourceHandle = randomBytes(24).toString('base64url');
         const citationLabel = `L${index + 1}`;
+        const chunk = hit.chunk;
+        const structure = 'node' in hit ? hit.node : hit.structure;
         this.sourceHandles.set(sourceHandle, {
           sourceHandle,
           taskId: params.taskId,
           attemptId: params.attemptId,
           projectId: project.id,
-          chunkId: hit.chunk.id,
+          chunkId: chunk.id,
           citationLabel,
+          structureKind: structure?.kind,
+          structurePath: structure?.path,
+          structureNodeId: structure?.id,
           expiresAt: Date.now() + SOURCE_HANDLE_TTL_MS,
         });
         return {
           sourceHandle,
-          sourceType: hit.chunk.sourceType,
-          sourceId: hit.chunk.sourceId,
-          versionId: hit.chunk.versionId,
-          status: hit.chunk.status as LibrarySourceStatus,
-          kind: hit.chunk.kind,
-          title: hit.chunk.title,
-          snippet: librarySnippet(hit.chunk.contentText, query),
+          sourceType: chunk.sourceType,
+          sourceId: chunk.sourceId,
+          versionId: chunk.versionId,
+          status: chunk.status as LibrarySourceStatus,
+          kind: chunk.kind,
+          title: chunk.title,
+          snippet: 'node' in hit ? '' : librarySnippet(chunk.contentText, query),
           citationLabel,
-          updatedAt: hit.chunk.updatedAt,
-          chunkOrdinal: hit.chunk.ordinal,
-          startOffset: hit.chunk.startOffset,
-          endOffset: hit.chunk.endOffset,
+          updatedAt: chunk.updatedAt,
+          chunkOrdinal: 'node' in hit ? hit.node.ordinal : chunk.ordinal,
+          startOffset: 'node' in hit ? hit.node.startOffset : chunk.startOffset,
+          endOffset: 'node' in hit ? hit.node.endOffset : chunk.endOffset,
+          ...(structure
+            ? {
+                structureKind: structure.kind,
+                structurePath: structure.path,
+                ...(structure.kind ? { structureNodeId: structure.id } : {}),
+              }
+            : {}),
         };
       });
       this.incrementUsage(params.taskId, params.attemptId, 'search');
       return {
         status: 'searched' as const,
+        searchMode,
         queryHash: sha256(query),
         resultCount: sources.length,
         truncated,
+        ...(searchMode === 'structure' && truncated ? { nextOffset: offset + sources.length } : {}),
         sources,
       };
     });
@@ -241,6 +286,13 @@ export class LibrarySearchService {
         truncated,
         citationLabel: handle.citationLabel,
         untrusted: false as const,
+        ...(handle.structureKind
+          ? {
+              structureKind: handle.structureKind,
+              structurePath: handle.structurePath,
+              structureNodeId: handle.structureNodeId,
+            }
+          : {}),
         ...(chunk.status === 'draft' ? { candidateNote: DRAFT_CANDIDATE_NOTE } : {}),
       };
     });
@@ -293,12 +345,12 @@ function mergeSourceChunks(
   return content;
 }
 
-function normalizeQuery(value: string): string {
+function normalizeQuery(value: string, allowStructureWildcard = false): string {
   const query = value
     .normalize('NFC')
     .replace(/[\0\r\n\t]+/g, ' ')
     .trim();
-  if (!query || query.length > 200) {
+  if (!query || query.length > 200 || (query === '*' && !allowStructureWildcard)) {
     throw new LibraryError('LIBRARY_SEARCH_FAILED', 'Library search query is invalid.', false);
   }
   return query;
@@ -311,6 +363,17 @@ function normalizeSourceTypes(value: string[] | undefined): string[] | undefined
     throw new LibraryError('LIBRARY_SEARCH_FAILED', 'Library sourceTypes is invalid.', false);
   }
   return value;
+}
+
+function normalizeStructurePath(value: string[] | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value.length > 20 ||
+    value.some((segment) => typeof segment !== 'string' || !segment.trim() || segment.length > 200)
+  ) {
+    throw new LibraryError('LIBRARY_SEARCH_FAILED', 'Library structurePath is invalid.', false);
+  }
+  return value.map((segment) => segment.normalize('NFC').trim());
 }
 
 function boundedInteger(

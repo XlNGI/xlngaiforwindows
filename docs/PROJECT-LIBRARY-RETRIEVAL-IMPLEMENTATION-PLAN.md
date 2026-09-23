@@ -64,7 +64,7 @@ Worker 只注入：短助理身份 + 有界资料目录（标题/类型/状态�
 
 ## 4. 当前基线与问题
 
-当前项目 Schema 为 v38。已有能力：
+本计划起点的项目 Schema 为 v38；当前实现已推进到 v41。已有能力：
 
 - 文档工作指针 `current_version_id` 与权威指针 `published_version_id`
 - 小说保存/导入时重建 `novel_rag_chunks`
@@ -709,6 +709,30 @@ Desktop 刷新对应工作区列表
 - 检索服务、工具序列化及真实业务服务链集成测试合计 28 项通过。集成测试导入三章，读取跨多个切片的第一章全文，再创建带来源关联的镜头提示词文档草稿；初始上下文不含正文，任务没有 `selectedChapterIds`。模型响应由 faux 模拟，未调用真实模型；该验证不代表结构化场次/镜头写入或真实模型效果已经实测。
 - 补充分页复现覆盖 Emoji 位于 UTF-16 页边界、JSON 转义触发 64 KiB 截断及多字节混排；各页拼接等于原文，hash 稳定，续读偏移严格前进，版本更新后旧句柄明确失效。
 - 全仓 `pnpm test` 837 项通过（context 8、contracts 12、llm 32、generation-adapters 18、persistence 40、desktop 250、worker 477）；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build` 及 `git diff --check` 通过。Vite 构建仅提示主包超过 500 kB 的体积警告。
+
+### 2026-09-23 项目结构解析与导航（已验证）
+
+在统一切片之上增加确定性的本地结构解析器。Markdown 标题生成文档内层级；卷/章、场次/镜头和文档绑定来自现有数据库关系，导航时读取最新关系，不由模型猜测。`project_structure_nodes`（Schema v41）是可重建索引，业务正文仍在原 store。
+
+合同：`library.search` 增加 `searchMode=structure`，查询仅匹配结构元数据。`query="*"` 浏览来源根节点；给出 `sourceId` 后展开该对象的标题树。可按 `structurePath`（路径数组的精确前缀）和原有类型/状态过滤，`offset/nextOffset` 分页。每项仍签发任务内句柄，可调用原有 `library.read` 读取来源正文；结构结果不返回正文摘录。默认 `searchMode=content` 保持原有内容检索。无需新增 Agent 权限或工具名。
+
+不变量与所有权：路径只用于定位，不能代替正文证据；每个节点绑定当前项目、来源和版本；重复标题用 sourceId/versionId 区分；代码围栏里的标题不进入结构。保存/发布时与切片同事务重建节点，失败整体回滚；迁移只回填当前/已发布版本，失败不推进 schema。导航实时排除归档来源，项目切换、过期或来源重建后旧句柄不得读新内容。只读导航不写索引；附件不入库。导航没有独立异步状态机，沿用检索的任务预算/TTL/64 KiB 结果上限；分页基于当前目录，目录变化后从 offset=0 重新浏览。
+
+顺序及追踪：
+
+- [x] S1 结构解析与持久化：标题层级、精确 UTF-16 范围、代码围栏、v40→v41 回填、版本隔离和保存回滚测试。
+- [x] S2 结构导航工具：元数据查询、数据库关系路径、稳定分页、归档/项目隔离及 Worker search→read 集成测试。
+- [x] S3 界面与门禁：引用路径展示、提示词说明、聚焦测试与全仓质量门禁；无真实模型效果承诺。
+
+- [x] 新增确定性的 Markdown 结构解析器，保留无标题文档的根节点。
+- [x] Schema v41 增加结构节点表、来源/版本隔离和路径索引；迁移回填当前工作版本与已发布版本。
+- [x] 文档、记忆、约束、会话、场次、镜头、素材和任务摘要的索引维护同步生成结构节点。
+- [x] `library.search/read` 返回结构节点类型与路径；路径来自同一次检索句柄，版本变化仍按原有句柄失效规则处理。
+- 最终验证：persistence 45 项、worker 479 项、desktop 250 项及其他 workspace 测试通过，共 844 项；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build` 及 `git diff --check` 通过。Vite 仍仅提示主包超过 500 kB 的体积警告。
+
+### 2026-09-23 系统级 Agent 资源解析链路（进行中）
+
+会话继续保持整个项目的 System Agent 定位。`agentMode` 仅作为旧 Desktop 请求的兼容元数据，不再决定小说、短剧或其他产品身份；章节目标仍可由 Worker 预解析并冻结，但运行时统一经过同一套结构解析和工具授权。`project.structure.get` 返回结构节点类型、真实工作区、文档/版本/行版本和素材、会话、设置入口。文档写工具允许模型回传 `resourceId`、`documentId`、`structureNodeId`、`versionId`、`expectedRevision`、`expectedRowVersion`，Executor 在事务内重新校验项目归属、结构节点和当前版本，冲突时拒绝写入。聚焦验证覆盖统一路由、结构节点、章节保存以及资源版本校验；完整仓库门禁待本阶段收尾后执行。
 
 ### 2026-09-21 章节位置检索
 

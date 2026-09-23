@@ -30,11 +30,16 @@ use super::{
 const REQUEST_BODY_LIMIT: usize = 4 * 1024 * 1024;
 const ERROR_BODY_LIMIT: usize = 64 * 1024;
 const STREAM_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const CHAT_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Agent steps can include a long chapter response after several bounded tool
+/// calls. Keep ordinary chat at two minutes while allowing those steps five
+/// minutes before declaring the provider stalled.
+const AGENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 /// WinHTTP receive timeout in milliseconds. Covers waiting for response headers
 /// (first byte) and each body read. 2026-08-25: raised to 240s after observed
 /// first-token latency of ~100s at 50k tokens on UniCompAPI gpt-5.6-sol; a
-/// stalled stream is still bounded by TOTAL_TIMEOUT after the first byte.
+/// stalled stream is still bounded by the selected total timeout after the
+/// first byte.
 const LLM_RECEIVE_TIMEOUT_MS: i32 = 240_000;
 const CHAT_TOOL_NAME_DOT_MARKER: &str = "__dot__";
 const AGENT_RUNTIME_EVENT_LIMIT: usize = 512;
@@ -1243,7 +1248,7 @@ where
             if cancellation.is_cancelled() {
                 return Err(StreamFailure::cancelled());
             }
-            if started_at.elapsed() > TOTAL_TIMEOUT {
+            if started_at.elapsed() > total_timeout(&runtime) {
                 return Err(
                     StreamFailure::new("LLM stream exceeded the total timeout.", true)
                         .with_outcome(Outcome::Failure),
@@ -1310,6 +1315,14 @@ where
     };
     permit.finish(outcome);
     result
+}
+
+fn total_timeout(runtime: &LlmRuntimeRequest) -> Duration {
+    if runtime.tools.is_empty() {
+        CHAT_TOTAL_TIMEOUT
+    } else {
+        AGENT_TOTAL_TIMEOUT
+    }
 }
 
 fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFailure> {

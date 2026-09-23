@@ -681,7 +681,7 @@ export function ChatPanel({
         <div className="agent-progress" role="status">
           <div className="agent-progress-heading">
             <span>
-              短剧任务 · {agentTask.task.phase === 'waiting_review' ? '等待审核' : '执行中'}
+              项目任务 · {agentTask.task.phase === 'waiting_review' ? '等待审核' : '执行中'}
             </span>
             <span>
               {
@@ -1326,10 +1326,12 @@ function AgentToolTimeline({
                         : source.status === 'published'
                           ? '已发布'
                           : source.status}
+                      {source.structurePath?.length ? ` · ${source.structurePath.join(' / ')}` : ''}
                     </button>
                   ) : (
                     <span>
                       {source.citationLabel} {source.title} · {source.status}
+                      {source.structurePath?.length ? ` · ${source.structurePath.join(' / ')}` : ''}
                     </span>
                   )}
                 </li>

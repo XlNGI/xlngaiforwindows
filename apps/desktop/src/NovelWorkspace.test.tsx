@@ -92,6 +92,22 @@ describe('NovelWorkspace', () => {
     );
   });
 
+  it('reloads the bound chapter after an Agent writes the chapter draft', async () => {
+    let body = 'Draft';
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list')
+        return [{ ...chapter, documentRowVersion: body === 'Draft' ? 0 : 1 }];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail(body);
+      return {};
+    });
+    const view = render(<NovelWorkspace projectId="project-1" writable refreshToken={0} />);
+    expect(await screen.findByDisplayValue('Draft')).toBeInTheDocument();
+    body = 'Generated chapter body';
+    view.rerender(<NovelWorkspace projectId="project-1" writable refreshToken={1} />);
+    expect(await screen.findByDisplayValue('Generated chapter body')).toBeInTheDocument();
+  });
+
   it('selects chapters and emits the selected chapter IDs for episode generation', async () => {
     const chapter2 = {
       ...chapter,
@@ -294,7 +310,7 @@ describe('NovelWorkspace', () => {
     confirm.mockRestore();
   });
 
-  it('opens a chapter in the shared document workspace for detached-window reuse', async () => {
+  it('keeps a chapter in the novel workspace when locating its bound document', async () => {
     const onOpenDocument = vi.fn();
     mockWorker((method) => {
       if (method === 'novel.chapter.list') return [chapter];
@@ -304,7 +320,7 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable onOpenDocument={onOpenDocument} />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByRole('button', { name: /在文档工作区打开/ }));
+    fireEvent.click(screen.getByRole('button', { name: /定位到小说章节/ }));
     expect(onOpenDocument).toHaveBeenCalledWith('document-1');
   });
 

@@ -12,7 +12,6 @@ import {
 import {
   handleRequest,
   inferAgentDocumentIntent,
-  inferConversationTaskMode,
   inferUnifiedAgentCapability,
   resolveAgentRunWorkflow,
   modelMatchesUnifiedAgentRequest,
@@ -57,35 +56,24 @@ describe('inferAgentDocumentIntent', () => {
 });
 
 describe('resolveAgentRunWorkflow', () => {
-  it('does not block the model on novel-looking language', () => {
-    expect(resolveAgentRunWorkflow({ prompt: '续写小说下一章' })).toBe('document');
-    expect(resolveAgentRunWorkflow({ prompt: '根据小说第一章生成系统中对应的文档材料' })).toBe(
-      'document',
-    );
-    expect(resolveAgentRunWorkflow({ prompt: '根据项目资料写一份制作说明' })).toBe('document');
-    expect(inferConversationTaskMode('续写小说下一章')).toBe('document');
-  });
-
-  it('starts novel orchestration only when the client already supplied a novelIntent', () => {
+  it('uses one System Agent workflow for every project resource request', () => {
+    const prompts = [
+      '续写小说下一章',
+      '根据项目资料写一份制作说明',
+      '把选中的章节改编成短剧分镜',
+      '查看 Provider 设置',
+    ];
+    for (const prompt of prompts) {
+      expect(resolveAgentRunWorkflow({ prompt, selectedChapterIds: ['chapter-1'] })).toBe(
+        'document',
+      );
+    }
     expect(
       resolveAgentRunWorkflow({
         prompt: '续写小说下一章',
         novelIntent: { action: 'continue_chapter', chapterId: 'chapter-1' },
       }),
-    ).toBe('novel-writing');
-  });
-
-  it('treats selected chapters as explicit short-drama context', () => {
-    expect(
-      resolveAgentRunWorkflow({
-        prompt: '根据小说第一章生成系统中对应的文档材料',
-        selectedChapterIds: ['chapter-1'],
-      }),
-    ).toBe('short-drama');
-    expect(inferConversationTaskMode('把选中的章节改编成短剧分镜', ['chapter-1'])).toBe(
-      'short-drama',
-    );
-    expect(inferConversationTaskMode('生成本集内容', ['chapter-1'])).toBe('short-drama');
+    ).toBe('document');
   });
 });
 
@@ -511,7 +499,7 @@ describe('worker handler', () => {
     });
   });
 
-  it('requires a supported target platform only for short-drama Agent requests', async () => {
+  it('treats legacy novel and short-drama fields as optional System Agent metadata', async () => {
     const base = {
       conversationId: 'conversation',
       prompt: 'Generate an AI short drama',
@@ -521,30 +509,30 @@ describe('worker handler', () => {
       documentIntent: { operation: 'novel.episode.submit_draft' as const },
       selectedChapterIds: ['chapter-1'],
     };
-    for (const [id, params] of [
-      ['missing', base],
-      ['invalid', { ...base, targetPlatform: 'untrusted-platform' }],
-      [
-        'document-mode',
-        {
-          ...base,
-          agentMode: 'document',
-          targetPlatform: 'seedance',
-          selectedChapterIds: undefined,
-        },
-      ],
-    ] as const) {
+    const accepted = await handleRequest({
+      id: 'agent-platform-metadata',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.generation.prepare',
+      params: { ...base, targetPlatform: undefined },
+    } as unknown as WorkerRequest);
+    expect(accepted).not.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' },
+    });
+
+    const invalid = { ...base, targetPlatform: 'untrusted-platform' };
+    {
       const response = await handleRequest({
-        id: `agent-platform-${id}`,
+        id: 'agent-platform-invalid',
         protocolVersion: IPC_PROTOCOL_VERSION,
         method: 'agent.generation.prepare',
-        params,
+        params: invalid,
       } as unknown as WorkerRequest);
       expect(response).toMatchObject({
         ok: false,
         error: {
           code: 'INVALID_REQUEST',
-          requestId: `agent-platform-${id}`,
+          requestId: 'agent-platform-invalid',
           operation: 'agent.generation.prepare',
         },
       });

@@ -1191,7 +1191,7 @@ export class TaskPlanService {
       );
     }
     if (
-      snapshot.agentMode !== 'short-drama' ||
+      (snapshot.agentMode !== 'short-drama' && snapshot.agentMode !== 'document') ||
       !['seedance', 'generic-video', 'generic-image'].includes(snapshot.targetPlatform as string) ||
       !Array.isArray(snapshot.selectedChapterIds) ||
       snapshot.selectedChapterIds.length < 1 ||
@@ -1202,7 +1202,7 @@ export class TaskPlanService {
       new Set(snapshot.selectedChapterIds).size !== snapshot.selectedChapterIds.length
     ) {
       throw new TaskPlanServiceError(
-        snapshot.agentMode === 'short-drama'
+        snapshot.agentMode === 'short-drama' || snapshot.agentMode === 'document'
           ? 'TASK_PLAN_SCOPE_INVALID'
           : 'TASK_PLAN_TASK_MODE_MISMATCH',
         'The task does not contain a valid frozen short-drama chapter scope.',

@@ -2625,6 +2625,9 @@ function librarySourcesFromToolCalls(
         status?: string;
         sourceStatus?: string;
         kind?: string;
+        structureKind?: AgentLibrarySourceInfo['structureKind'];
+        structurePath?: string[];
+        structureNodeId?: string;
         sources?: Array<{
           citationLabel?: string;
           title?: string;
@@ -2634,6 +2637,9 @@ function librarySourcesFromToolCalls(
           status?: string;
           sourceStatus?: string;
           kind?: string;
+          structureKind?: AgentLibrarySourceInfo['structureKind'];
+          structurePath?: string[];
+          structureNodeId?: string;
         }>;
       };
       const items = parsed.sources ?? [parsed];
@@ -2649,6 +2655,9 @@ function librarySourcesFromToolCalls(
           versionId: item.versionId,
           status,
           kind: item.kind,
+          structureKind: item.structureKind,
+          structurePath: item.structurePath,
+          structureNodeId: item.structureNodeId,
           toolName: row.tool_name,
         });
       }

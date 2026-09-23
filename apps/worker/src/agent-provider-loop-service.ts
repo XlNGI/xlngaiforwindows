@@ -72,6 +72,14 @@ const RESEARCH_STEP_CALL_LIMIT = 8;
 const LIBRARY_SEARCH_CALL_LIMIT = 4;
 const LIBRARY_READ_CALL_LIMIT = 8;
 const LIBRARY_STEP_CALL_LIMIT = 6;
+const AGENT_DOCUMENT_WRITE_OPERATIONS = new Set<AgentDocumentOperation>([
+  'document.create_draft',
+  'document.update_draft',
+  'novel.chapter.submit_draft',
+  'novel.reference.submit_draft',
+  'novel.episode.submit_draft',
+  'novel.adaptation.submit_proposal',
+]);
 
 type ResearchOperation = 'research.search' | 'research.fetch';
 type LibraryOperation = 'library.search' | 'library.read';
@@ -464,7 +472,7 @@ export class AgentProviderLoopService {
             ),
             JSON.stringify({
               promptHash: requestHash,
-              agentMode: selectedChapterIds ? 'short-drama' : 'document',
+              agentMode: 'document',
               documentOperation: authorization.operation,
               researchMode,
               modelSelection: agentModelSelectionSnapshot(
@@ -1862,6 +1870,7 @@ export class AgentProviderLoopService {
         let args: ReturnType<typeof parseToolArguments>;
         try {
           args = parseToolArguments(call.name, call.argumentsJson);
+          assertResolvedDocumentLocator(database, project.id, call.name, authorization, args);
           if (call.name === 'document.create_draft' || call.name === 'document.update_draft') {
             assertSingleCharacterPromptDocument(
               resolveDocumentToolKind(database, call.name, authorization.targetDocumentId, args),
@@ -2445,11 +2454,14 @@ export class AgentProviderLoopService {
                       taskId: task.id,
                       attemptId: params.attemptId,
                       query: toolArguments.query,
+                      searchMode: toolArguments.searchMode,
                       sourceTypes: toolArguments.sourceTypes,
                       status: toolArguments.status,
                       kind: toolArguments.kind,
                       scopeType: toolArguments.scopeType,
                       scopeId: toolArguments.scopeId,
+                      structurePath: toolArguments.structurePath,
+                      offset: toolArguments.offset,
                       includeArchived: toolArguments.includeArchived,
                       limit: toolArguments.limit,
                     })
@@ -3144,9 +3156,10 @@ export class AgentProviderLoopService {
           .prepare('SELECT content FROM chat_messages WHERE id = ?')
           .get(task.user_message_id) as { content: string } | undefined;
         if (
-          (operation === 'document.create_draft' || operation === 'document.update_draft') &&
+          operation &&
+          AGENT_DOCUMENT_WRITE_OPERATIONS.has(operation as AgentDocumentOperation) &&
           userMessage &&
-          hasExplicitOperationIntent(userMessage.content, operation) &&
+          hasExplicitOperationIntent(userMessage.content, operation as AgentDocumentOperation) &&
           !isMediaOnlyRequest(userMessage.content)
         ) {
           const written = database
@@ -3898,10 +3911,157 @@ function resolveDocumentToolKind(
   return existing?.kind ?? inferDocumentKindFromDraft(args.title ?? '', args.contentMarkdown ?? '');
 }
 
-function parseToolArguments(
+interface ParsedResourceLocator {
+  resourceId?: string;
+  documentId?: string;
+  structureNodeId?: string;
+  versionId?: string;
+  expectedRevision?: string;
+  expectedRowVersion?: number;
+}
+
+type ParsedDocumentToolArguments = ParsedResourceLocator & {
+  title?: string;
+  contentMarkdown?: string;
+  documentKind?: string;
+};
+
+const RESOURCE_LOCATOR_KEYS = [
+  'resourceId',
+  'documentId',
+  'structureNodeId',
+  'versionId',
+  'expectedRevision',
+  'expectedRowVersion',
+] as const;
+
+function parseResourceLocator(record: Record<string, unknown>): ParsedResourceLocator {
+  const locator: ParsedResourceLocator = {};
+  for (const key of RESOURCE_LOCATOR_KEYS) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (key === 'expectedRowVersion') {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+        throw new Error('expectedRowVersion must be a non-negative integer.');
+      }
+      locator.expectedRowVersion = value;
+      continue;
+    }
+    if (typeof value !== 'string' || !value.trim() || value.length > 200) {
+      throw new Error(`${key} must be a non-empty string of at most 200 characters.`);
+    }
+    (locator as Record<string, unknown>)[key] = value.trim();
+  }
+  return locator;
+}
+
+function assertResolvedDocumentLocator(
+  database: Database.Database,
+  projectId: string,
   operation: string,
-  value: string,
-): { title?: string; contentMarkdown?: string; documentKind?: string } {
+  authorization: Pick<
+    AuthorizationSpec,
+    'targetDocumentId' | 'baseVersionId' | 'expectedDocumentRowVersion'
+  >,
+  args: ParsedDocumentToolArguments,
+): void {
+  const locator = args;
+  const isCreate = operation === 'document.create_draft';
+  if (
+    isCreate &&
+    (locator.expectedRevision || locator.expectedRowVersion !== undefined || locator.versionId)
+  ) {
+    throw new Error('A new document draft cannot use an existing document revision.');
+  }
+  if (!authorization.targetDocumentId) return;
+
+  let resolvedDocumentId = locator.documentId;
+  if (locator.structureNodeId) {
+    const node = database
+      .prepare(
+        `SELECT document_id, version_id, updated_at FROM project_structure_nodes
+         WHERE project_id = ? AND id = ?`,
+      )
+      .get(projectId, locator.structureNodeId) as
+      { document_id: string | null; version_id: string | null; updated_at: string } | undefined;
+    if (!node || !node.document_id)
+      throw new Error('The structure node is outside the current project.');
+    if (resolvedDocumentId && resolvedDocumentId !== node.document_id) {
+      throw new Error('The documentId does not match the structureNodeId.');
+    }
+    resolvedDocumentId = node.document_id;
+    if (locator.versionId && locator.versionId !== node.version_id) {
+      throw new Error('The requested document version does not match the structure node.');
+    }
+    if (locator.expectedRevision && locator.expectedRevision !== node.updated_at) {
+      throw new Error('RESOURCE_REVISION_CONFLICT: the structure node has changed.');
+    }
+  }
+  if (locator.resourceId && !resolvedDocumentId) {
+    const document = database
+      .prepare('SELECT id FROM documents WHERE project_id = ? AND id = ?')
+      .get(projectId, locator.resourceId) as { id: string } | undefined;
+    if (document) resolvedDocumentId = document.id;
+    if (!document) {
+      const chapter = database
+        .prepare('SELECT document_id FROM novel_chapters WHERE project_id = ? AND id = ?')
+        .get(projectId, locator.resourceId) as { document_id: string } | undefined;
+      if (chapter) resolvedDocumentId = chapter.document_id;
+    }
+    if (!resolvedDocumentId) {
+      const node = database
+        .prepare(
+          `SELECT document_id FROM project_structure_nodes
+           WHERE project_id = ? AND id = ?`,
+        )
+        .get(projectId, locator.resourceId) as { document_id: string | null } | undefined;
+      if (node?.document_id) resolvedDocumentId = node.document_id;
+    }
+  }
+  if (resolvedDocumentId && resolvedDocumentId !== authorization.targetDocumentId) {
+    throw new Error('RESOURCE_LOCATION_CONFLICT: the requested resource is not authorized.');
+  }
+  const current = database
+    .prepare(
+      `SELECT row_version, current_version_id, updated_at FROM documents
+       WHERE project_id = ? AND id = ?`,
+    )
+    .get(projectId, authorization.targetDocumentId) as
+    { row_version: number; current_version_id: string | null; updated_at: string } | undefined;
+  if (!current) throw new Error('The authorized document is no longer in the current project.');
+  if (
+    locator.expectedRowVersion !== undefined &&
+    locator.expectedRowVersion !== current.row_version
+  ) {
+    throw new Error('RESOURCE_REVISION_CONFLICT: the document row version has changed.');
+  }
+  if (
+    locator.expectedRevision &&
+    !locator.structureNodeId &&
+    locator.expectedRevision !== current.updated_at
+  ) {
+    throw new Error('RESOURCE_REVISION_CONFLICT: the document revision has changed.');
+  }
+  if (locator.versionId && locator.versionId !== current.current_version_id) {
+    throw new Error('RESOURCE_REVISION_CONFLICT: the document version has changed.');
+  }
+  if (
+    locator.expectedRowVersion !== undefined &&
+    authorization.expectedDocumentRowVersion !== undefined &&
+    locator.expectedRowVersion !== authorization.expectedDocumentRowVersion
+  ) {
+    throw new Error('RESOURCE_REVISION_CONFLICT: the requested row version is not frozen.');
+  }
+  if (
+    locator.versionId &&
+    authorization.baseVersionId &&
+    locator.versionId !== authorization.baseVersionId
+  ) {
+    throw new Error('RESOURCE_REVISION_CONFLICT: the requested base version is not frozen.');
+  }
+}
+
+function parseToolArguments(operation: string, value: string): ParsedDocumentToolArguments {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -3916,6 +4076,7 @@ function parseToolArguments(
   if (operation === 'novel.episode.submit_structure') {
     return {};
   }
+  const locator = parseResourceLocator(record);
   const needsContent =
     operation === 'document.create_draft' ||
     operation === 'document.update_draft' ||
@@ -3925,8 +4086,8 @@ function parseToolArguments(
     operation === 'novel.episode.submit_draft';
   const allowedKeys =
     operation === 'document.create_draft'
-      ? ['title', 'contentMarkdown', 'documentKind']
-      : ['title', 'contentMarkdown'];
+      ? ['title', 'contentMarkdown', 'documentKind', ...RESOURCE_LOCATOR_KEYS]
+      : [...['title', 'contentMarkdown'], ...RESOURCE_LOCATOR_KEYS];
   if (needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
     throw new Error('Tool arguments contain unsupported fields.');
   }
@@ -3939,7 +4100,7 @@ function parseToolArguments(
   ) {
     throw new Error('Tool title and contentMarkdown are required.');
   }
-  if (!needsContent) return {};
+  if (!needsContent) return locator;
   const rawTitle = record.title as string;
   const rawContent = record.contentMarkdown as string;
   const title = normalizeTitle(rawTitle);
@@ -3953,7 +4114,7 @@ function parseToolArguments(
   if (documentKind !== undefined && !DOCUMENT_KIND_SET.has(documentKind)) {
     throw new Error('Tool documentKind is invalid.');
   }
-  return { title, contentMarkdown: rawContent, documentKind };
+  return { ...locator, title, contentMarkdown: rawContent, documentKind };
 }
 
 function parseResearchToolArguments(
@@ -4386,6 +4547,7 @@ function systemAuthorizationSpecsForTask(
   const prompt = row?.content?.normalize('NFKC') ?? '';
   const operations: SystemAgentToolOperation[] = [
     'project.get_context',
+    'project.structure.get',
     'project.integrity.check',
     'conversation.search',
   ];
@@ -4580,6 +4742,7 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'project.get_context',
+  'project.structure.get',
   'project.integrity.check',
   'project.backup.prepare',
   'project.export.prepare',
@@ -5075,11 +5238,14 @@ type LibraryToolArguments =
   | {
       operation: 'library.search';
       query: string;
+      searchMode?: 'content' | 'structure';
       sourceTypes?: string[];
       status?: string;
       kind?: string;
       scopeType?: string;
       scopeId?: string;
+      structurePath?: string[];
+      offset?: number;
       includeArchived?: boolean;
       limit?: number;
     }
@@ -5108,11 +5274,14 @@ function parseLibraryToolArguments(
   if (operation === 'library.search') {
     const allowed = new Set([
       'query',
+      'searchMode',
       'sourceTypes',
       'status',
       'kind',
       'scopeType',
       'scopeId',
+      'structurePath',
+      'offset',
       'includeArchived',
       'limit',
     ]);
@@ -5125,17 +5294,42 @@ function parseLibraryToolArguments(
       .replace(/[\0\r\n\t]+/g, ' ')
       .trim();
     if (!query || query.length > 200) throw new Error('Library search query is invalid.');
+    if (
+      record.searchMode !== undefined &&
+      record.searchMode !== 'content' &&
+      record.searchMode !== 'structure'
+    ) {
+      throw new Error('Library search mode is invalid.');
+    }
+    if (
+      record.structurePath !== undefined &&
+      (!Array.isArray(record.structurePath) ||
+        record.structurePath.length > 20 ||
+        record.structurePath.some(
+          (item) => typeof item !== 'string' || !item.trim() || item.length > 200,
+        ))
+    ) {
+      throw new Error('Library structurePath is invalid.');
+    }
     const sourceTypes = Array.isArray(record.sourceTypes)
       ? record.sourceTypes.filter((item): item is string => typeof item === 'string')
       : undefined;
     return {
       operation,
       query,
+      searchMode:
+        record.searchMode === 'structure' || record.searchMode === 'content'
+          ? record.searchMode
+          : undefined,
       sourceTypes,
       status: typeof record.status === 'string' ? record.status : undefined,
       kind: typeof record.kind === 'string' ? record.kind : undefined,
       scopeType: typeof record.scopeType === 'string' ? record.scopeType : undefined,
       scopeId: typeof record.scopeId === 'string' ? record.scopeId : undefined,
+      structurePath: Array.isArray(record.structurePath)
+        ? record.structurePath.filter((item): item is string => typeof item === 'string')
+        : undefined,
+      offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
       includeArchived:
         typeof record.includeArchived === 'boolean' ? record.includeArchived : undefined,
       limit: optionalBoundedInteger(record.limit, 1, 20),
@@ -5172,9 +5366,12 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
       operation: argumentsValue.operation,
       queryHash: hash(argumentsValue.query),
       queryLength: argumentsValue.query.length,
+      searchMode: argumentsValue.searchMode,
       sourceTypes: argumentsValue.sourceTypes,
       status: argumentsValue.status,
       kind: argumentsValue.kind,
+      structurePath: argumentsValue.structurePath,
+      offset: argumentsValue.offset,
       limit: argumentsValue.limit,
     };
   }
@@ -5189,8 +5386,10 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
 
 function summarizeLibraryResult(result: {
   status: string;
+  searchMode?: 'content' | 'structure';
   queryHash?: string;
   resultCount?: number;
+  nextOffset?: number;
   sources?: Array<{
     citationLabel: string;
     title: string;
@@ -5199,6 +5398,9 @@ function summarizeLibraryResult(result: {
     sourceId: string;
     versionId?: string;
     kind?: string;
+    structureKind?: string;
+    structurePath?: string[];
+    structureNodeId?: string;
   }>;
   sourceHandle?: string;
   citationLabel?: string;
@@ -5208,11 +5410,13 @@ function summarizeLibraryResult(result: {
   versionId?: string;
   sourceStatus?: string;
   kind?: string;
+  structureKind?: string;
+  structurePath?: string[];
+  structureNodeId?: string;
   readMode?: 'chunk' | 'source';
   contentHash?: string;
   startOffset?: number;
   endOffset?: number;
-  nextOffset?: number;
   totalCharacters?: number;
   truncated?: boolean;
   characterCount?: number;
@@ -5220,8 +5424,10 @@ function summarizeLibraryResult(result: {
   if (result.status === 'searched') {
     return {
       status: result.status,
+      searchMode: result.searchMode,
       queryHash: result.queryHash,
       resultCount: result.resultCount,
+      nextOffset: result.nextOffset,
       truncated: result.truncated,
       sources: (result.sources ?? []).map((source) => ({
         citationLabel: source.citationLabel,
@@ -5231,6 +5437,9 @@ function summarizeLibraryResult(result: {
         sourceId: source.sourceId,
         versionId: source.versionId,
         kind: source.kind,
+        structureKind: source.structureKind,
+        structurePath: source.structurePath,
+        structureNodeId: source.structureNodeId,
       })),
     };
   }
@@ -5244,6 +5453,9 @@ function summarizeLibraryResult(result: {
     versionId: result.versionId,
     sourceStatus: result.sourceStatus,
     kind: result.kind,
+    structureKind: result.structureKind,
+    structurePath: result.structurePath,
+    structureNodeId: result.structureNodeId,
     readMode: result.readMode,
     contentHash: result.contentHash,
     startOffset: result.startOffset,

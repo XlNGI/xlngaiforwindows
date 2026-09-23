@@ -7,6 +7,7 @@ import type {
 
 export type SystemAgentToolOperation =
   | 'project.get_context'
+  | 'project.structure.get'
   | 'project.integrity.check'
   | 'project.backup.prepare'
   | 'project.export.prepare'
@@ -89,6 +90,20 @@ export const SCHEMA_AGENT_TOOLS: LlmToolDefinition[] = [
   },
 ];
 
+/**
+ * Resolver output echoed by a write call. The fields are optional for legacy
+ * Desktop callers, but the System Agent is instructed to provide them after
+ * `project.structure.get`; the executor validates every supplied field.
+ */
+const RESOURCE_LOCATOR_PROPERTIES = {
+  resourceId: { type: 'string', minLength: 1, maxLength: 200 },
+  documentId: { type: 'string', minLength: 1, maxLength: 200 },
+  structureNodeId: { type: 'string', minLength: 1, maxLength: 200 },
+  versionId: { type: 'string', minLength: 1, maxLength: 200 },
+  expectedRevision: { type: 'string', minLength: 1, maxLength: 200 },
+  expectedRowVersion: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+} as const;
+
 export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.create_draft',
@@ -105,6 +120,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
           type: 'string',
           enum: ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'],
         },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -128,6 +144,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -135,13 +152,21 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
     name: 'document.archive',
     description:
       'Request archival of the Worker-authorized document. User confirmation is required.',
-    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: RESOURCE_LOCATOR_PROPERTIES,
+    },
   },
   {
     name: 'document.restore',
     description:
       'Request restoration of the Worker-authorized document. User confirmation is required.',
-    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: RESOURCE_LOCATOR_PROPERTIES,
+    },
   },
   {
     name: 'novel.chapter.submit_draft',
@@ -153,6 +178,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -167,6 +193,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -181,6 +208,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -235,6 +263,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -333,6 +362,24 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     name: 'project.get_context',
     description: 'Get a bounded summary of the currently open project. This is read-only.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'project.structure.get',
+    description:
+      'Resolve the current project structure before choosing a resource tool. Returns bounded resource locators for the novel, chapters and volumes, project documents, character and scene prompts, scenes and shots, assets, conversations, and safe settings entry points. It includes document structure nodes, document IDs, row versions, and a project revision. This is read-only; use library.search/read for正文 and the authorized domain tool for changes.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        query: { type: 'string', maxLength: 200 },
+        workspace: {
+          type: 'string',
+          enum: ['novel', 'documents', 'characters', 'shots', 'assets', 'tasks', 'settings'],
+        },
+        resourceId: { type: 'string', maxLength: 200 },
+        maxDepth: { type: 'integer', minimum: 0, maximum: 8 },
+      },
+    },
   },
   {
     name: 'project.integrity.check',
@@ -785,13 +832,14 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.search',
     description:
-      'Search the current project library for facts, character bibles, novel drafts, and guidelines. By default searches authoritative documents, novel chapters, memories, and constraints. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
+      'Search the current project library for facts, character bibles, novel drafts, and guidelines. Default searchMode="content" searches text. Use searchMode="structure" to browse the deterministic document tree without body text: query="*" lists nodes, query text matches node titles/paths, structurePath filters an exact path prefix, and offset/nextOffset paginate large trees. Use the returned sourceHandle with library.read (readMode="source" for the corresponding document/chapter). By default searches authoritative documents, novel chapters, memories, and constraints. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       required: ['query'],
       properties: {
         query: { type: 'string', minLength: 1, maxLength: 200 },
+        searchMode: { type: 'string', enum: ['content', 'structure'] },
         sourceTypes: {
           type: 'array',
           items: {
@@ -829,6 +877,12 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
         kind: { type: 'string', minLength: 1, maxLength: 64 },
         scopeType: { type: 'string', enum: ['project', 'scene', 'shot'] },
         scopeId: { type: 'string', minLength: 1, maxLength: 200 },
+        structurePath: {
+          type: 'array',
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+          maxItems: 20,
+        },
+        offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
         includeArchived: { type: 'boolean' },
         limit: { type: 'integer', minimum: 1, maximum: 20 },
       },
@@ -891,6 +945,7 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'task.plan.submit': writePolicy(),
   'task.package.complete': writePolicy(),
   'project.get_context': readPolicy(),
+  'project.structure.get': readPolicy(),
   'project.integrity.check': readPolicy(),
   'project.backup.prepare': protectedPolicy(),
   'project.export.prepare': protectedPolicy(),

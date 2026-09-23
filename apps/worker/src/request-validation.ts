@@ -1168,28 +1168,12 @@ export function validateSessionRequestParams(
       optionalEnum(params, 'researchMode', agentResearchModes);
       optionalString(params, 'title', MAX_TITLE_LENGTH);
       validateSelectedChapterIds(params);
-      if (params.agentMode === 'document' || params.agentMode === 'short-drama') {
-        validateAgentDocumentIntent(params.documentIntent);
-        if (params.novelIntent !== undefined) {
-          throw new RequestValidationError('novelIntent is only allowed in novel-writing mode.');
-        }
-        if (params.agentMode === 'short-drama' && params.selectedChapterIds === undefined) {
-          throw new RequestValidationError('selectedChapterIds is required in short-drama mode.');
-        }
-        if (params.agentMode === 'short-drama') {
-          requireEnum(params, 'targetPlatform', conversationTargetPlatforms);
-        } else if (params.targetPlatform !== undefined) {
-          throw new RequestValidationError('targetPlatform is only allowed in short-drama mode.');
-        }
-      } else {
-        if (params.documentIntent !== undefined) {
-          throw new RequestValidationError('documentIntent is not allowed in novel-writing mode.');
-        }
-        validateNovelWritingIntent(params.novelIntent);
-        if (params.targetPlatform !== undefined) {
-          throw new RequestValidationError('targetPlatform is only allowed in short-drama mode.');
-        }
-      }
+      // `agentMode` is a legacy UI hint. It must not select an Agent persona
+      // or force a novel/short-drama workflow. All optional resolver metadata
+      // is validated independently and the System Agent remains authoritative.
+      validateAgentDocumentIntent(params.documentIntent);
+      validateNovelWritingIntent(params.novelIntent);
+      optionalEnum(params, 'targetPlatform', conversationTargetPlatforms);
       break;
     case 'agent.run':
       rejectUnknown(params, [

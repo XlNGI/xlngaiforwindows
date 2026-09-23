@@ -1791,8 +1791,8 @@ describe('ChatPanel attempt metadata', () => {
       />,
     );
 
-    // Selected chapters turn every following turn into a short-drama task, so
-    // the state has to stay visible after the chapter workspace is left.
+    // Selected chapters are request scope metadata, so the state stays visible
+    // after the chapter workspace is left.
     expect(screen.getByRole('status')).toHaveTextContent('下次发送将带上 2 个章节作为本集范围');
     fireEvent.click(screen.getByRole('button', { name: '清除' }));
     expect(onClearSelectedChapters).toHaveBeenCalledOnce();

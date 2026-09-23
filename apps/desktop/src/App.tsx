@@ -63,6 +63,7 @@ import type {
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
   AgentProtectedUiHandoff,
+  NovelWritingIntent,
   VideoGenerationJobInfo,
   ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
@@ -498,6 +499,31 @@ export function inferAgentCapability(prompt: string): UnifiedAgentCapability {
 }
 
 /**
+ * A selected novel chapter is only a target when the user explicitly asks to
+ * write or save chapter prose. Reading or discussing a chapter stays in the
+ * ordinary document workflow.
+ */
+export function inferNovelWritingIntent(
+  prompt: string,
+  chapterId?: string,
+): NovelWritingIntent | undefined {
+  if (!chapterId) return undefined;
+  const value = prompt.normalize('NFC').trim();
+  if (!value || !/(小说|章节|正文|本章|此章|稿件)/u.test(value)) return undefined;
+  if (
+    !/(?:生成|创作|撰写|写作|续写|继续写|继续创作|重写|改写|修改|更新|保存|存入|写入|替换|覆盖|generate|write|continue|rewrite|save|update)/iu.test(
+      value,
+    )
+  ) {
+    return undefined;
+  }
+  const action = /(?:续写|继续写|继续创作|continue)/iu.test(value)
+    ? 'continue_chapter'
+    : 'rewrite_chapter';
+  return { action, chapterId };
+}
+
+/**
  * Combines the user's direct image request with the most relevant generated
  * prompt document. Image adapters only receive their `prompt` parameter, so
  * without this bridge a request such as “直接生成角色三视图” would silently
@@ -663,6 +689,12 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const [activeNovelChapter, setActiveNovelChapter] = useState<{
+    id: string;
+    title: string;
+  }>();
+  const [pendingNovelIntent, setPendingNovelIntent] = useState<NovelWritingIntent>();
+  const [novelRefreshToken, setNovelRefreshToken] = useState(0);
   const [chatMessage, setChatMessage] = useState('');
   const [agentModelSelection, setAgentModelSelection] =
     useState<UnifiedAgentModelSelectionRequest>();
@@ -1189,7 +1221,10 @@ export function App() {
     poll.timer = window.setInterval(readEvents, 400);
   };
 
-  const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
+  const launchPreparedGeneration = (
+    prepared: LlmGenerationPrepareResult,
+    options: { refreshNovelChapter?: boolean } = {},
+  ) => {
     confirmationResolverRef.current?.(false);
     paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
@@ -1253,6 +1288,7 @@ export function App() {
     });
     if (!isGenerationActive(prepared.generation)) {
       setChatMessage(prepared.generation.error ?? '生成已完成');
+      if (options.refreshNovelChapter) setNovelRefreshToken((value) => value + 1);
       refreshAgentDocuments();
       return;
     }
@@ -1292,6 +1328,7 @@ export function App() {
           activeMediaInputsRef.current = [];
           if (next.error) lastGenerationErrorRef.current = next.error;
           setChatMessage(readableGenerationError(next.error) ?? '生成完成');
+          if (options.refreshNovelChapter) setNovelRefreshToken((value) => value + 1);
           refreshAgentDocuments();
         }
       },
@@ -2015,6 +2052,9 @@ export function App() {
           agentPrompt = composeImageGenerationPrompt(promptForAgent, promptDocument);
         }
         const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
+        const novelIntent =
+          pendingNovelIntent ??
+          (view === 'novel' ? inferNovelWritingIntent(prompt, activeNovelChapter?.id) : undefined);
         const runModel = resolveAgentRunModelSelection(
           capability,
           modelSelection
@@ -2047,6 +2087,7 @@ export function App() {
             : {}),
           ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
           researchMode,
+          ...(novelIntent ? { novelIntent } : {}),
           ...(episodeChapterIds.length > 0
             ? { selectedChapterIds: episodeChapterIds, targetPlatform: 'seedance' as const }
             : {}),
@@ -2056,6 +2097,7 @@ export function App() {
         if (unified.status !== 'needs_model_selection' && episodeChapterIds.length > 0) {
           setEpisodeChapterIds([]);
         }
+        if (unified.status !== 'needs_model_selection') setPendingNovelIntent(undefined);
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
@@ -2162,7 +2204,7 @@ export function App() {
           setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
           return;
         }
-        launchPreparedGeneration(unified);
+        launchPreparedGeneration(unified, { refreshNovelChapter: Boolean(novelIntent) });
       } catch (reason) {
         setComposer(prompt);
         setChatMessage(readableFailure(reason, '生成启动失败'));
@@ -2372,6 +2414,15 @@ export function App() {
   };
 
   const openNovelDocument = async (documentId: string) => {
+    const chapters = await callWorker('novel.chapter.list', { includeArchived: true }).catch(
+      () => [],
+    );
+    const chapter = chapters.find((item) => item.documentId === documentId);
+    if (chapter) {
+      setLibraryFocusChapterId(chapter.id);
+      openProjectView('novel');
+      return;
+    }
     await openDocumentById(documentId);
     const existingLabel = Object.values(detachedRegistryRef.current).find(
       (registration) =>
@@ -2933,7 +2984,7 @@ export function App() {
         setView('tasks');
       }}
       onContinueAgentTask={() => {
-        const prompt = '请继续完成尚未成功的短剧交付物，并调用已授权工具。';
+        const prompt = '请继续完成尚未成功的项目交付物，并调用已授权工具。';
         setComposer(prompt);
         if (conversation) void sendMessage(prompt);
       }}
@@ -3744,7 +3795,17 @@ export function App() {
                 projectId={project?.id}
                 writable={writable}
                 focusChapterId={libraryFocusChapterId}
+                refreshToken={novelRefreshToken}
+                onChapterSelected={(chapter) =>
+                  setActiveNovelChapter({ id: chapter.id, title: chapter.title })
+                }
                 onOpenDocument={(documentId) => void openNovelDocument(documentId)}
+                onGenerateChapter={(chapter) => {
+                  setPendingNovelIntent({ action: 'rewrite_chapter', chapterId: chapter.id });
+                  setComposer(`请生成并保存“${chapter.title}”的小说正文。`);
+                  workspaceDispatch({ type: 'open', panelId: 'conversation' });
+                  setChatMessage(`已指定章节“${chapter.title}”，下次发送会将正文写回对应文档。`);
+                }}
                 onGenerateEpisode={(chapterIds) => {
                   setEpisodeChapterIds(chapterIds);
                   workspaceDispatch({ type: 'open', panelId: 'conversation' });

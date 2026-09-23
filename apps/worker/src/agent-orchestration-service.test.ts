@@ -122,6 +122,60 @@ describe('AgentOrchestrationService', () => {
     ).toEqual({ tasks: { count: 0 }, pending: { count: 1 } });
   });
 
+  it('resolves an explicit chapter reference before starting the writing task', async () => {
+    const { project, conversation, orchestration } = await setup();
+    const initial = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '创作第一章。',
+      intent: { action: 'create_chapter', chapterTitle: '雨夜来客', displayLabel: '第一章' },
+    });
+    if ('pendingIntent' in initial) throw new Error('Expected an initial chapter.');
+
+    project.access(true, (database) => {
+      database
+        .prepare(
+          "UPDATE agent_tasks SET status = 'failed', completed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run('2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z', initial.taskId);
+    });
+
+    const resolved = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '将第一章正文保存到小说中。',
+    });
+    expect(resolved).toMatchObject({
+      chapterId: initial.chapterId,
+      documentId: initial.documentId,
+      documentIntent: { operation: 'novel.chapter.submit_draft' },
+    });
+  });
+
+  it('creates the first chapter placeholder for an explicit save request in an empty novel', async () => {
+    const { project, conversation, orchestration } = await setup();
+    const prepared = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '将生成的正文保存为小说第一章。',
+    });
+    expect('pendingIntent' in prepared).toBe(false);
+    if ('pendingIntent' in prepared) return;
+    expect(
+      project.access(false, (database) =>
+        database
+          .prepare(
+            `SELECT chapters.display_label, documents.title, targets.created_placeholder
+             FROM novel_chapters chapters
+             INNER JOIN documents ON documents.id = chapters.document_id
+             INNER JOIN agent_task_targets targets ON targets.chapter_id = chapters.id
+             WHERE targets.task_id = ?`,
+          )
+          .get(prepared.taskId),
+      ),
+    ).toEqual({ display_label: '第一章', title: '第一章', created_placeholder: 1 });
+  });
+
   it('permits only one active task per chapter and releases the lock at a terminal task state', async () => {
     const { project, conversation, orchestration } = await setup();
     const initial = orchestration.prepareNovelTask({
