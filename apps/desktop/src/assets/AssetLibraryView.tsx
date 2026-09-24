@@ -12,6 +12,9 @@ import {
   RotateCcw,
   Search,
   Trash2,
+  Archive,
+  CheckSquare,
+  Square,
   Video,
   X,
 } from 'lucide-react';
@@ -84,6 +87,7 @@ export function AssetLibraryView({
   const [groupEditor, setGroupEditor] = useState<Partial<AssetGroupInfo>>();
   const [bulkTagId, setBulkTagId] = useState('');
   const selectionAnchor = useRef<string | undefined>(undefined);
+  const [aliasSavedId, setAliasSavedId] = useState<string | null>(null);
 
   const kind = mediaFilter === 'all' ? undefined : mediaFilter;
   const selected = assets.find((asset) => asset.id === selectedIds.at(-1));
@@ -244,6 +248,32 @@ export function AssetLibraryView({
     await Promise.all([loadAssets(), loadTags(), loadGroups()]);
   };
 
+  const batchDeleteSelected = async () => {
+    if (!selectedAssets.length) return;
+    if (!window.confirm(`确定将选中的 ${selectedAssets.length} 项素材移到回收站吗？`)) return;
+    try {
+      for (const asset of selectedAssets) {
+        await callWorker('asset.delete', { assetId: asset.id });
+      }
+    } catch (error) {
+      if (
+        String(error).includes('referenced by') &&
+        window.confirm(`${String(error)}\n仍要移到回收站吗？`)
+      ) {
+        for (const asset of selectedAssets) {
+          try {
+            await callWorker('asset.delete', { assetId: asset.id, confirm: true });
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        setMessage(String(error));
+      }
+    }
+    await reloadCurrent();
+  };
+
   const deleteAsset = async (asset: AssetInfo) => {
     try {
       await callWorker('asset.delete', { assetId: asset.id });
@@ -300,16 +330,19 @@ export function AssetLibraryView({
   };
 
   return (
-    <div className="asset-library-shell">
+    <div className="asset-library-shell asset-library-opt-theme">
       <section className="asset-library-main">
-        <header className="asset-library-toolbar">
-          <div>
-            <span className="eyebrow">项目素材</span>
+        <header className="asset-library-toolbar opt-top-header">
+          <div className="opt-title-zone">
+            <Archive size={18} className="opt-title-icon" />
             <h1>{showTrash ? '回收站' : '素材库'}</h1>
+            <span className="opt-scope-badge">
+              当前项目{assets[0]?.projectId ? `: ${assets[0].projectId}` : ''}
+            </span>
           </div>
-          <div className="asset-toolbar-actions">
-            <label className="asset-search">
-              <Search size={16} />
+          <div className="opt-toolbar-center">
+            <label className="asset-search opt-search-wrap">
+              <Search size={15} />
               <input
                 aria-label="搜索"
                 value={keyword}
@@ -317,49 +350,16 @@ export function AssetLibraryView({
                 placeholder="搜索别名、文件名或标签"
               />
             </label>
-            <button
-              type="button"
-              className={showTrash ? 'button danger active' : 'button subtle'}
-              onClick={() => {
-                setShowTrash((current) => !current);
-                setSelectedIds([]);
-              }}
-            >
-              {showTrash ? <RotateCcw size={15} /> : <Trash2 size={15} />}
-              {showTrash ? '返回素材库' : '回收站'}
-            </button>
-          </div>
-        </header>
-
-        <div className="asset-filter-bar">
-          <label className="asset-type-select">
-            {mediaFilter === 'image' ? (
-              <Image size={14} />
-            ) : mediaFilter === 'video' ? (
-              <Video size={14} />
-            ) : (
-              <Images size={14} />
-            )}
-            <select
-              aria-label="素材类型"
-              value={mediaFilter}
-              onChange={(event) => setMediaFilter(event.target.value as MediaFilter)}
-            >
-              <option value="all">全部素材</option>
-              <option value="image">图片</option>
-              <option value="video">视频</option>
-            </select>
-            <ChevronDown size={13} />
-          </label>
-          {!showTrash && (
-            <>
-              <details className="asset-filter-menu asset-manager-menu">
-                <summary>
-                  <FolderOpen size={14} />
-                  素材组{selectedGroupId ? ' (1)' : ''}
+            {!showTrash && (
+              <details className="asset-filter-menu asset-manager-menu opt-group-menu">
+                <summary className="opt-compact-btn opt-group-trigger">
+                  <FolderOpen size={14} style={{ color: '#fbbf24' }} />
+                  <span>
+                    素材组{selectedGroupId ? ' (1)' : groups.length ? ` (${groups.length})` : ''}
+                  </span>
                   <ChevronDown size={13} />
                 </summary>
-                <div>
+                <div className="opt-group-dropdown">
                   <button
                     type="button"
                     className={
@@ -425,8 +425,48 @@ export function AssetLibraryView({
                   </button>
                 </div>
               </details>
-            </>
-          )}
+            )}
+          </div>
+          <div className="opt-toolbar-right">
+            <button
+              type="button"
+              className={
+                showTrash
+                  ? 'opt-compact-btn opt-danger-active'
+                  : 'opt-compact-btn opt-danger-outline'
+              }
+              onClick={() => {
+                setShowTrash((current) => !current);
+                setSelectedIds([]);
+              }}
+            >
+              {showTrash ? <RotateCcw size={14} /> : <Trash2 size={14} />}
+              {showTrash ? '返回素材库' : '回收站'}
+            </button>
+          </div>
+        </header>
+
+        <div className="asset-filter-bar opt-subbar">
+          <label className="asset-type-select opt-type-select-accessible">
+            {mediaFilter === 'image' ? (
+              <Image size={14} />
+            ) : mediaFilter === 'video' ? (
+              <Video size={14} />
+            ) : (
+              <Images size={14} />
+            )}
+            <select
+              aria-label="素材类型"
+              value={mediaFilter}
+              onChange={(event) => setMediaFilter(event.target.value as MediaFilter)}
+            >
+              <option value="all">全部素材</option>
+              <option value="image">图片</option>
+              <option value="video">视频</option>
+            </select>
+            <ChevronDown size={13} />
+          </label>
+
           <div className="asset-filter-spacer" />
           <label>
             起始日期
@@ -457,6 +497,10 @@ export function AssetLibraryView({
               <option value="created-asc">最早优先</option>
             </select>
           </label>
+          <span className="asset-result-count" aria-live="polite">
+            {assets.length}
+            {hasMore ? '+' : ''} 项素材
+          </span>
           {(keyword ||
             mediaFilter !== 'all' ||
             createdFrom ||
@@ -467,51 +511,87 @@ export function AssetLibraryView({
               清空筛选
             </button>
           )}
-          {!showTrash && selectedIds.length > 0 && (
-            <span className="asset-selection-count">已选 {selectedIds.length} 项</span>
+          {!showTrash && (
+            <button
+              type="button"
+              className="opt-compact-btn opt-selection-toggle-btn"
+              title={
+                selectedIds.length === assets.length && assets.length > 0
+                  ? '取消全选'
+                  : '全选当前页'
+              }
+              onClick={() => {
+                if (selectedIds.length === assets.length && assets.length > 0) {
+                  setSelectedIds([]);
+                } else {
+                  setSelectedIds(assets.map((a) => a.id));
+                }
+              }}
+            >
+              {selectedIds.length === assets.length && assets.length > 0 ? (
+                <CheckSquare size={13} />
+              ) : (
+                <Square size={13} />
+              )}
+              {selectedIds.length === assets.length && assets.length > 0 ? '取消全选' : '全选'}
+            </button>
           )}
-          {!showTrash && selectedIds.length > 0 && writable && (
-            <div className="asset-bulk-tags">
-              <select
-                aria-label="批量标签"
-                value={bulkTagId}
-                onChange={(event) => setBulkTagId(event.target.value)}
-              >
-                <option value="">选择标签</option>
-                {tags.map((tag) => (
-                  <option key={tag.id} value={tag.id}>
-                    {tag.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                disabled={!bulkTagId}
-                onClick={() =>
-                  void callWorker('asset.tags.add', {
-                    assetIds: selectedIds,
-                    tagIds: [bulkTagId],
-                  })
-                    .then(reloadCurrent)
-                    .catch((error) => setMessage(String(error)))
-                }
-              >
-                添加
-              </button>
-              <button
-                type="button"
-                disabled={!bulkTagId}
-                onClick={() =>
-                  void callWorker('asset.tags.remove', {
-                    assetIds: selectedIds,
-                    tagIds: [bulkTagId],
-                  })
-                    .then(reloadCurrent)
-                    .catch((error) => setMessage(String(error)))
-                }
-              >
-                移除
-              </button>
+          {!showTrash && selectedIds.length > 0 && (
+            <div className="opt-batch-float-bar">
+              <span className="asset-selection-count">已选 {selectedIds.length} 项</span>
+              {writable && (
+                <div className="asset-bulk-tags opt-batch-inner">
+                  <select
+                    aria-label="批量标签"
+                    value={bulkTagId}
+                    onChange={(event) => setBulkTagId(event.target.value)}
+                  >
+                    <option value="">选择标签</option>
+                    {tags.map((tag) => (
+                      <option key={tag.id} value={tag.id}>
+                        {tag.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={!bulkTagId}
+                    onClick={() =>
+                      void callWorker('asset.tags.add', {
+                        assetIds: selectedIds,
+                        tagIds: [bulkTagId],
+                      })
+                        .then(reloadCurrent)
+                        .catch((error) => setMessage(String(error)))
+                    }
+                  >
+                    添加
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!bulkTagId}
+                    onClick={() =>
+                      void callWorker('asset.tags.remove', {
+                        assetIds: selectedIds,
+                        tagIds: [bulkTagId],
+                      })
+                        .then(reloadCurrent)
+                        .catch((error) => setMessage(String(error)))
+                    }
+                  >
+                    移除
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    title="批量移入回收站"
+                    onClick={() => void batchDeleteSelected()}
+                  >
+                    <Trash2 size={13} />
+                    删除
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -670,7 +750,30 @@ export function AssetLibraryView({
                     }
                   }}
                 >
-                  <div className="asset-thumb">
+                  <div className="asset-thumb opt-card-thumb">
+                    <button
+                      type="button"
+                      className="asset-card-select-toggle opt-card-check"
+                      aria-label={isSelected ? '取消选择' : '选择'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedIds((curr) =>
+                          curr.includes(asset.id)
+                            ? curr.filter((id) => id !== asset.id)
+                            : [...curr, asset.id],
+                        );
+                      }}
+                    >
+                      {isSelected ? <CheckSquare size={13} /> : <Square size={13} />}
+                    </button>
+                    <span className="asset-card-type-badge opt-type-pill">
+                      {asset.kind.includes('video') ? (
+                        <Video size={10} style={{ color: '#60a5fa' }} />
+                      ) : (
+                        <Image size={10} style={{ color: '#34d399' }} />
+                      )}
+                      {asset.kind.includes('video') ? '视频' : '图片'}
+                    </span>
                     {!asset.kind.includes('video') && mediaSourceById[asset.id] ? (
                       <img src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)} alt="" />
                     ) : asset.kind.includes('video') && mediaSourceById[asset.id] ? (
@@ -686,18 +789,48 @@ export function AssetLibraryView({
                       <Image size={30} />
                     )}
                   </div>
-                  <strong title={displayName(asset)}>{displayName(asset)}</strong>
-                  <div className="asset-card-tags">
+                  <strong title={displayName(asset)} className="opt-card-title">
+                    {displayName(asset)}
+                  </strong>
+                  <div className="asset-card-tags opt-card-tags">
                     {asset.tags?.slice(0, 2).map((tag) => (
-                      <span key={tag.id}>{tag.name}</span>
+                      <span key={tag.id} className="opt-tag-mini">
+                        {tag.name}
+                      </span>
                     ))}
-                    {(asset.tags?.length ?? 0) > 2 && <span>+{asset.tags!.length - 2}</span>}
+                    {(asset.tags?.length ?? 0) > 2 && (
+                      <span className="opt-tag-mini">+{asset.tags!.length - 2}</span>
+                    )}
                   </div>
-                  <small>{new Date(asset.createdAt).toLocaleDateString()}</small>
+                  <div className="asset-card-footer opt-card-meta-line">
+                    <small>{new Date(asset.createdAt).toLocaleDateString()}</small>
+                    <span className="asset-card-size">
+                      {(asset.sizeBytes / 1024).toFixed(0)} KB
+                    </span>
+                  </div>
                 </div>
               );
             })}
-            {assets.length === 0 && <div className="asset-empty">没有匹配的素材</div>}
+            {assets.length === 0 && (
+              <div className="asset-empty" role="status">
+                <Archive size={26} aria-hidden="true" />
+                <strong>{showTrash ? '回收站为空' : '没有匹配的素材'}</strong>
+                <span>
+                  {showTrash
+                    ? '移入回收站的素材会显示在这里'
+                    : '生成图片或视频后，素材会自动出现在这里'}
+                </span>
+                {(keyword ||
+                  mediaFilter !== 'all' ||
+                  createdFrom ||
+                  createdTo ||
+                  tagFilter.length > 0) && (
+                  <button type="button" className="button subtle" onClick={clearFilters}>
+                    <X size={14} /> 清空筛选
+                  </button>
+                )}
+              </div>
+            )}
             {hasMore && (
               <button
                 type="button"
@@ -732,20 +865,36 @@ export function AssetLibraryView({
                   )}
                 </div>
                 <label>
-                  别名
+                  <span className="asset-inspector-label-row">
+                    <span>素材别名 (可检索)</span>
+                    {aliasSavedId === selected.id && (
+                      <span className="asset-save-success opt-save-badge">
+                        <Check size={11} /> 已保存
+                      </span>
+                    )}
+                  </span>
                   <input
                     key={`${selected.id}-${selected.alias}`}
                     defaultValue={selected.alias}
                     maxLength={120}
                     disabled={!writable || showTrash}
                     onBlur={(event) => {
-                      if (event.target.value.trim() !== (selected.alias ?? ''))
+                      const nextAlias = event.target.value.trim();
+                      if (nextAlias !== (selected.alias ?? '')) {
                         void callWorker('asset.alias.update', {
                           assetId: selected.id,
-                          alias: event.target.value,
+                          alias: nextAlias,
                         })
-                          .then(reloadCurrent)
+                          .then(() => {
+                            setAliasSavedId(selected.id);
+                            window.setTimeout(
+                              () => setAliasSavedId((curr) => (curr === selected.id ? null : curr)),
+                              2000,
+                            );
+                            return reloadCurrent();
+                          })
                           .catch((error) => setMessage(String(error)));
+                      }
                     }}
                   />
                 </label>
