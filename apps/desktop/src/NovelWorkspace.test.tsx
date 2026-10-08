@@ -92,6 +92,35 @@ describe('NovelWorkspace', () => {
     );
   });
 
+  it('focuses and reloads the chapter selected by an Agent result', async () => {
+    let documentReads = 0;
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [chapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') {
+        documentReads += 1;
+        return documentDetail(documentReads > 1 ? 'Agent latest draft' : 'Draft');
+      }
+      return {};
+    });
+    const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByDisplayValue('Draft');
+
+    rerender(
+      <NovelWorkspace
+        projectId="project-1"
+        writable
+        focusChapterId="chapter-1"
+        refreshToken={1}
+      />,
+    );
+
+    expect(await screen.findByDisplayValue('Agent latest draft')).toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.get'),
+    ).toHaveLength(2);
+  });
+
   it('writes selected chapter titles into a retrievable prompt', () => {
     expect(
       composeEpisodeChapterPrompt([

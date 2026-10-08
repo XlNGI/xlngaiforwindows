@@ -15,6 +15,7 @@ import {
   inferUnifiedAgentCapability,
   resolveAgentRunWorkflow,
   modelMatchesUnifiedAgentRequest,
+  inferNovelWritingIntent,
   parseRequest,
   resolveMediaProviderRegion,
 } from './handler.js';
@@ -33,16 +34,22 @@ describe('inferUnifiedAgentCapability', () => {
 });
 
 describe('resolveAgentRunWorkflow', () => {
-  it('does not block the model on novel-looking language', () => {
-    expect(resolveAgentRunWorkflow({ prompt: '续写小说下一章' })).toBe('document');
+  it('routes explicit novel writing language through the unified intent gateway', () => {
+    expect(resolveAgentRunWorkflow({ prompt: '续写小说下一章' })).toBe('novel-writing');
     expect(resolveAgentRunWorkflow({ prompt: '根据小说第一章生成系统中对应的文档材料' })).toBe(
       'document',
     );
     expect(resolveAgentRunWorkflow({ prompt: '根据项目资料写一份制作说明' })).toBe('document');
-    expect(inferConversationTaskMode('续写小说下一章')).toBe('document');
+    expect(inferConversationTaskMode('续写小说下一章')).toBe('novel-writing');
+    expect(inferNovelWritingIntent('不要保存，只讨论小说第一章')).toBeUndefined();
+    expect(inferNovelWritingIntent('帮我生成小说第一章')).toMatchObject({
+      action: 'create_chapter',
+      displayLabel: '第一章',
+    });
+    expect(inferNovelWritingIntent('写一份小说章节分析')).toBeUndefined();
   });
 
-  it('starts novel orchestration only when the client already supplied a novelIntent', () => {
+  it('accepts a trusted target hint when the client already supplied a novelIntent', () => {
     expect(
       resolveAgentRunWorkflow({
         prompt: '续写小说下一章',

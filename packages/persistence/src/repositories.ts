@@ -1239,7 +1239,7 @@ class SqliteConversationRepository
 
   listPageByProject(
     projectId: string,
-    options: import("@ai-video/domain").ConversationPageOptions,
+    options: import('@ai-video/domain').ConversationPageOptions,
   ): ConversationRecord[] {
     const conditions: string[] = ['project_id = ?'];
     const params: unknown[] = [projectId];
@@ -3190,6 +3190,12 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         'INSERT INTO asset_group_tags (group_id, tag_id) VALUES (?, ?)',
       );
       for (const tagId of [...new Set(record.tagIds)]) insert.run(record.id, tagId);
+      this.database.prepare('DELETE FROM asset_group_assets WHERE group_id = ?').run(record.id);
+      const assetInsert = this.database.prepare(
+        'INSERT INTO asset_group_assets (group_id, asset_id) SELECT ?, id FROM assets WHERE id = ? AND project_id = ?',
+      );
+      for (const assetId of [...new Set(record.assetIds)])
+        assetInsert.run(record.id, assetId, record.projectId);
     })();
   }
   deleteGroup(id: string): void {
@@ -3197,7 +3203,19 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
   }
   resolveGroup(groupId: string): AssetRecord[] {
     const group = this.getGroup(groupId);
-    if (!group || !group.tagIds.length) return [];
+    if (!group) return [];
+    if (group.assetIds.length) {
+      return (
+        this.database
+          .prepare(
+            `SELECT a.* FROM assets a JOIN asset_group_assets aga ON aga.asset_id = a.id
+             WHERE aga.group_id = ? AND a.project_id = ? AND a.deleted_at IS NULL
+             ORDER BY a.created_at ASC, a.id ASC LIMIT 200`,
+          )
+          .all(groupId, group.projectId) as AssetRow[]
+      ).map((row) => mapAsset(row));
+    }
+    if (!group.tagIds.length) return [];
     return this.queryByProject(group.projectId, {
       tagIds: group.tagIds,
       deleted: 'active',
@@ -3241,12 +3259,18 @@ function mapAssetGroup(database: Database.Database, row: AssetGroupRow): AssetGr
       .prepare('SELECT tag_id AS id FROM asset_group_tags WHERE group_id = ? ORDER BY tag_id')
       .all(row.id) as Array<{ id: string }>
   ).map((x) => x.id);
+  const assetIds = (
+    database
+      .prepare('SELECT asset_id AS id FROM asset_group_assets WHERE group_id = ? ORDER BY asset_id')
+      .all(row.id) as Array<{ id: string }>
+  ).map((x) => x.id);
   return {
     id: row.id,
     projectId: row.project_id,
     name: row.name,
     normalizedName: row.normalized_name,
     tagIds,
+    assetIds,
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

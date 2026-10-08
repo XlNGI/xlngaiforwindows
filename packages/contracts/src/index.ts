@@ -32,6 +32,120 @@ export interface ProjectInfo {
   schemaVersion: number;
 }
 
+/**
+ * A bounded, read-only projection of the current project structure. This is
+ * derived from the project database on every read; it is never a second
+ * source of truth and deliberately contains no document body.
+ */
+export interface ProjectStructureSnapshot {
+  version: 1;
+  revision: number;
+  project: {
+    id: string;
+    name: string;
+    mode?: ProjectOpenMode;
+    schemaVersion?: number;
+    updatedAt?: string;
+  };
+  domains: {
+    documents: {
+      enabled: boolean;
+      count: number;
+    };
+    novel?: {
+      enabled: boolean;
+      novelId?: string;
+      volumeCount: number;
+      chapterCount: number;
+    };
+    shortDrama?: {
+      enabled: boolean;
+      sceneCount: number;
+      shotCount: number;
+    };
+    assets?: {
+      enabled: boolean;
+      count: number;
+    };
+  };
+  sources: ProjectStructureSource[];
+  novel?: NovelStructureSnapshot;
+  truncated?: boolean;
+}
+
+export interface ProjectStructureSource {
+  id: string;
+  type: string;
+  sourceId: string;
+  title: string;
+  role?: string;
+  kind?: string;
+  status: string;
+  documentId?: string;
+  versionId?: string;
+  draftVersionId?: string;
+  canonicalVersionId?: string;
+  scopeType?: ConversationScopeType;
+  scopeId?: string;
+  updatedAt?: string;
+}
+
+export type NovelStructureChapterStatus = 'empty' | 'draft' | 'canonical';
+
+/** A bounded, metadata-only tree for the current project's novel. */
+export interface NovelStructureSnapshot {
+  version: 1;
+  revision: number;
+  novelId: string;
+  profile: {
+    id: string;
+    title: string;
+    language?: string;
+    status?: string;
+  };
+  volumes: NovelStructureVolume[];
+  unassignedChapters: NovelStructureChapter[];
+  references: NovelStructureReference[];
+  truncated?: boolean;
+}
+
+export interface NovelStructureVolume {
+  id: string;
+  title: string;
+  position: number;
+  status?: string;
+  chapters: NovelStructureChapter[];
+}
+
+export interface NovelStructureChapter {
+  id: string;
+  volumeId?: string;
+  displayLabel?: string;
+  title: string;
+  position: number;
+  documentId: string;
+  draftVersionId?: string;
+  canonicalVersionId?: string;
+  status: NovelStructureChapterStatus;
+  lifecycleStatus?: string;
+  archiveReason?: string;
+  documentRowVersion?: number;
+  updatedAt?: string;
+}
+
+export interface NovelStructureReference {
+  id: string;
+  documentId: string;
+  title: string;
+  role: string;
+  domainScope?: string;
+  status: string;
+  volumeId?: string;
+  draftVersionId?: string;
+  canonicalVersionId?: string;
+  updatedAt?: string;
+}
+
 export interface RecentProjectInfo {
   name: string;
   rootPath: string;
@@ -676,6 +790,15 @@ export interface NovelProfileGetParams {
   createIfMissing?: boolean;
 }
 
+export interface ProjectStructureGetParams {
+  includeArchived?: boolean;
+}
+
+export interface NovelStructureGetParams {
+  novelId?: string;
+  includeArchived?: boolean;
+}
+
 export interface NovelProfileUpdateParams {
   language?: string;
   status?: NovelProfileStatus;
@@ -1191,6 +1314,15 @@ export interface AgentTaskDocumentArtifact {
   createdAt: string;
 }
 
+/** Worker-verified domain target for routing completed Agent work in Desktop. */
+export interface AgentTaskTargetInfo {
+  targetKind: 'novel-chapter' | 'novel-reference';
+  action: NovelWritingAction | 'update_reference';
+  chapterId?: string;
+  documentId: string;
+  documentVersionId?: string;
+}
+
 /** A redacted, task-scoped view of one Provider request/response step. */
 export interface AgentProviderStepInfo {
   id: string;
@@ -1233,6 +1365,7 @@ export interface AgentResearchSourceInfo {
 
 export interface AgentTaskDetail {
   task: AgentTaskInfo;
+  target?: AgentTaskTargetInfo;
   pendingConfirmation?: AgentTaskPendingConfirmationInfo;
   pendingSchemaConfirmation?: AgentTaskPendingSchemaConfirmationInfo;
   plan?: ConversationTaskPlanInfo;
@@ -1736,6 +1869,8 @@ export interface ProductionContextInfo {
   budgetTokens: number;
   sources: ContextSourceInfo[];
   catalog?: LibraryCatalogItem[];
+  /** Metadata-only structure directory; bodies remain on-demand. */
+  structure?: ProjectStructureSnapshot;
 }
 
 export interface ContextPreviewParams {
@@ -3145,6 +3280,7 @@ export interface AssetGroupInfo {
   projectId: string;
   name: string;
   tagIds: string[];
+  assetIds: string[];
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -3172,12 +3308,14 @@ export interface AssetGroupListParams {
 }
 export interface AssetGroupCreateParams {
   name: string;
-  tagIds: string[];
+  tagIds?: string[];
+  assetIds?: string[];
 }
 export interface AssetGroupUpdateParams {
   groupId: string;
   name: string;
-  tagIds: string[];
+  tagIds?: string[];
+  assetIds?: string[];
 }
 export interface AssetGroupDeleteParams {
   groupId: string;
@@ -3245,6 +3383,10 @@ export interface WorkerMethodMap {
   'project.open': { params: ProjectOpenParams; result: ProjectInfo };
   'project.close': { params: Record<string, never>; result: { closed: true } };
   'project.current': { params: Record<string, never>; result: ProjectInfo | null };
+  'project.structure.get': {
+    params: ProjectStructureGetParams;
+    result: ProjectStructureSnapshot;
+  };
   'project.recent': { params: Record<string, never>; result: RecentProjectInfo[] };
   'project.integrity': { params: Record<string, never>; result: ProjectIntegrityResult };
   'project.backup': { params: ProjectBackupParams; result: PathResult };
@@ -3340,6 +3482,10 @@ export interface WorkerMethodMap {
   };
   'document.list': { params: Record<string, never>; result: DocumentSummary[] };
   'novel.profile.get': { params: NovelProfileGetParams; result: NovelProfileInfo | null };
+  'novel.structure.get': {
+    params: NovelStructureGetParams;
+    result: NovelStructureSnapshot | null;
+  };
   'novel.profile.update': { params: NovelProfileUpdateParams; result: NovelProfileInfo };
   'novel.volume.list': { params: NovelVolumeListParams; result: NovelVolumeInfo[] };
   'novel.volume.save': { params: NovelVolumeSaveParams; result: NovelVolumeInfo };

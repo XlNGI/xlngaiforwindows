@@ -88,6 +88,8 @@ import {
   type NovelChapterSaveParams,
   type NovelImportParams,
   type NovelProfileUpdateParams,
+  type ProjectStructureGetParams,
+  type NovelStructureGetParams,
   type NovelVolumeSaveParams,
   type NovelMarkdownExportPrepareParams,
   type SceneSaveParams,
@@ -154,6 +156,7 @@ import { MediaOrchestrationService } from './media-orchestration-service.js';
 import { ProjectTaskRuntime } from './project-task-runtime.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
+import { ProjectStructureCompiler } from './structure-compiler.js';
 import {
   adapterBindsCatalogModel,
   getAdapter,
@@ -296,24 +299,55 @@ export function inferConversationTaskMode(
   prompt: string,
   selectedChapterIds?: readonly string[],
 ): ConversationTaskMode {
-  return resolveAgentRunWorkflow({ prompt, selectedChapterIds });
+  return resolveAgentRunWorkflow({
+    prompt,
+    novelIntent: inferNovelWritingIntent(prompt),
+    selectedChapterIds,
+  });
+}
+
+/**
+ * Extract only an explicit chapter-writing request. This is a candidate for
+ * the Worker policy, never an authorization decision and never a target ID.
+ */
+export function inferNovelWritingIntent(prompt: string): NovelWritingIntent | undefined {
+  const value = prompt.normalize('NFC').trim();
+  if (/(不要|不需要|只讨论|只分析|给我建议|不要保存)/u.test(value)) return undefined;
+  if (/(文档材料|项目资料|短剧|剧本|分镜|改编|总结|分析|说明|提纲|大纲)/u.test(value))
+    return undefined;
+  const hasNovelScope = /(小说|章节|第一章|第二章|下一章|本章)/u.test(value);
+  if (!hasNovelScope) return undefined;
+  if (/(续写|继续写|继续创作)/u.test(value)) return { action: 'continue_chapter' };
+  if (/(重写|改写|润色本章|修改本章)/u.test(value)) return { action: 'rewrite_chapter' };
+  if (!/(生成|创作|写|创建|新建)/u.test(value)) return undefined;
+  const label = value.match(/第\s*[一二三四五六七八九十百千万零〇0-9]+\s*章/u)?.[0]?.replace(/\s+/gu, '');
+  const title = value
+    .replace(/^.*?第\s*[一二三四五六七八九十百千万零〇0-9]+\s*章/u, '')
+    .replace(/^(?:的|：|:|、|\s)+/u, '')
+    .split(/[。！？!?\n]/u, 1)[0]
+    ?.trim();
+  return {
+    action: 'create_chapter',
+    ...(title ? { chapterTitle: title } : {}),
+    ...(label ? { displayLabel: label } : {}),
+  };
 }
 
 /**
  * Choose the Worker workflow for `agent.run`.
  *
- * The model sees authorized tools and picks among them. Language in the prompt
- * is not a hard router and must not return pending_intent before the LLM runs.
- * Novel-writing orchestration starts only when the client already supplied a
- * novelIntent; selected chapters remain explicit short-drama context.
+ * The model sees authorized tools and picks among them. Prompt language only
+ * creates a candidate intent; orchestration remains authoritative for target,
+ * policy, pending clarification, and all side effects.
  */
 export function resolveAgentRunWorkflow(input: {
   prompt?: string;
   novelIntent?: NovelWritingIntent;
   selectedChapterIds?: readonly string[];
 }): ConversationTaskMode {
-  void input.prompt;
-  if (input.novelIntent) return 'novel-writing';
+  if (input.novelIntent || (input.prompt && inferNovelWritingIntent(input.prompt))) {
+    return 'novel-writing';
+  }
   if ((input.selectedChapterIds?.length ?? 0) > 0) return 'short-drama';
   return 'document';
 }
@@ -528,6 +562,8 @@ const methods = new Set<WorkerMethod>([
   'maintenance.diagnostics.export',
   'maintenance.diagnostics.reveal',
   'document.list',
+  'project.structure.get',
+  'novel.structure.get',
   'novel.profile.get',
   'novel.profile.update',
   'novel.volume.list',
@@ -713,7 +749,8 @@ const videoGenerationService = new VideoGenerationService(
 );
 const maintenanceService = new MaintenanceService(projectService);
 const sampleProjectService = new SampleProjectService(projectService);
-const contextService = new ContextService(projectService);
+const structureCompiler = new ProjectStructureCompiler();
+const contextService = new ContextService(projectService, structureCompiler);
 const novelContextService = new NovelContextService(projectService);
 const usageService = new UsageService(projectService, appSettingsService, {
   nativeBinding: packagedSqliteBinding,
@@ -770,6 +807,7 @@ const agentSystemToolService = new AgentSystemToolService(
   mediaPreparationService,
   documentWorkflowService,
   maintenanceService,
+  structureCompiler,
 );
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
@@ -1081,6 +1119,24 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       switch (request.method) {
         case 'document.list':
           result = documentWorkflowService.listDocuments();
+          break;
+        case 'project.structure.get':
+          result = projectService.access(false, (database, project) =>
+            structureCompiler.compileFromDatabase(
+              database,
+              project,
+              params as unknown as ProjectStructureGetParams,
+            ),
+          );
+          break;
+        case 'novel.structure.get':
+          result = projectService.access(false, (database, project) =>
+            structureCompiler.compileNovel(
+              database,
+              project,
+              params as unknown as NovelStructureGetParams,
+            ),
+          );
           break;
         case 'novel.profile.get':
           result = novelService.getProfile(params) ?? null;
@@ -1451,7 +1507,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           assertAgentToolLoopSelection(profile, model);
           const requestedTaskMode = resolveAgentRunWorkflow({
             prompt: agentParams.prompt,
-            novelIntent: agentParams.novelIntent,
+            novelIntent: agentParams.novelIntent ?? inferNovelWritingIntent(agentParams.prompt),
             selectedChapterIds: agentParams.selectedChapterIds,
           });
           const provenance = {
@@ -1461,11 +1517,13 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           };
 
           if (requestedTaskMode === 'novel-writing') {
+            const novelIntent =
+              agentParams.novelIntent ?? inferNovelWritingIntent(agentParams.prompt);
             const orchestration = agentOrchestrationService.prepareNovelTask({
               conversationId: agentParams.conversationId,
               projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
               prompt: agentParams.prompt,
-              intent: agentParams.novelIntent,
+              intent: novelIntent,
               idempotencyKey: agentParams.idempotencyKey,
             });
             if ('pendingIntent' in orchestration) {
@@ -1488,7 +1546,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
                 agentMode: 'novel-writing',
                 researchMode: agentParams.researchMode,
                 novelIntent: {
-                  ...agentParams.novelIntent,
+                  ...novelIntent,
                   chapterId: orchestration.chapterId,
                 },
               });
@@ -2236,14 +2294,16 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'assetGroup.create':
           result = imageGenerationService.createGroup(
             requireString(params, 'name'),
-            requireStringArray(params, 'tagIds'),
+            Array.isArray(params.tagIds) ? requireStringArray(params, 'tagIds') : [],
+            Array.isArray(params.assetIds) ? requireStringArray(params, 'assetIds') : [],
           );
           break;
         case 'assetGroup.update':
           result = imageGenerationService.updateGroup(
             requireString(params, 'groupId'),
             requireString(params, 'name'),
-            requireStringArray(params, 'tagIds'),
+            Array.isArray(params.tagIds) ? requireStringArray(params, 'tagIds') : [],
+            Array.isArray(params.assetIds) ? requireStringArray(params, 'assetIds') : [],
           );
           break;
         case 'assetGroup.delete':

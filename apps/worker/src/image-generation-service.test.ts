@@ -618,7 +618,7 @@ describe('ImageGenerationService', () => {
     expect(existsSync(join(project.current()!.rootPath, originalPath))).toBe(true);
   });
 
-  it('resolves dynamic asset groups with AND tag semantics', async () => {
+  it('resolves manual asset groups independently from tag changes', async () => {
     const { service } = await setup();
     const job = service.prepare({
       adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
@@ -630,13 +630,12 @@ describe('ImageGenerationService', () => {
       providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
     });
     const asset = completed.results[0]!.asset!;
-    const character = service.createTag('Character');
     const hero = service.createTag('Hero');
-    service.replaceAssetTags([asset.id], [character.id, hero.id]);
-    const group = service.createGroup('Hero characters', [character.id, hero.id]);
+    service.replaceAssetTags([asset.id], [hero.id]);
+    const group = service.createGroup('Hero characters', [], [asset.id]);
     expect(service.resolveGroup(group.id).map((item) => item.id)).toEqual([asset.id]);
-    service.replaceAssetTags([asset.id], [character.id]);
-    expect(service.resolveGroup(group.id)).toHaveLength(0);
+    service.replaceAssetTags([asset.id], []);
+    expect(service.resolveGroup(group.id).map((item) => item.id)).toEqual([asset.id]);
   });
 
   it('returns tag metadata and stable cursor pages with accurate entity counts', async () => {
@@ -666,7 +665,7 @@ describe('ImageGenerationService', () => {
     });
     const hero = service.createTag('Hero');
     service.replaceAssetTags([first.id], [hero.id]);
-    const group = service.createGroup('Heroes', [hero.id]);
+    const group = service.createGroup('Heroes', [], [first.id]);
 
     expect(service.listTags()[0]).toMatchObject({ id: hero.id, assetCount: 1 });
     expect(service.listGroups()[0]).toMatchObject({ id: group.id, assetCount: 1 });

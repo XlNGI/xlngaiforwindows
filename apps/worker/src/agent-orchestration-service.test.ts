@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { ContentService } from './content-service.js';
+import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 
 const directories: string[] = [];
@@ -76,6 +77,13 @@ describe('AgentOrchestrationService', () => {
     });
     expect(persisted.lock).toEqual({ task_id: prepared.taskId });
     expect(persisted.task).toEqual({ status: 'queued', phase: 'intent_resolving' });
+    const taskDetail = new DocumentWorkflowService(project).getTask({ taskId: prepared.taskId });
+    expect(taskDetail.target).toMatchObject({
+      targetKind: 'novel-chapter',
+      action: 'create_chapter',
+      chapterId: prepared.chapterId,
+      documentId: prepared.documentId,
+    });
   });
 
   it('keeps ambiguous or negated writing requests out of business tables', async () => {

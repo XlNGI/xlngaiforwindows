@@ -19,6 +19,7 @@ import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-reg
 import { ContentService } from './content-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
+import { ProjectStructureCompiler } from './structure-compiler.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -30,8 +31,8 @@ export interface AgentAssetToolService {
   deleteTag(tagId: string): { deleted: true };
   changeAssetTags(assetIds: string[], tagIds: string[], operation: 'add' | 'remove'): AssetInfo[];
   listGroups(keyword?: string): AssetGroupInfo[];
-  createGroup(name: string, tagIds: string[]): AssetGroupInfo;
-  updateGroup(groupId: string, name: string, tagIds: string[]): AssetGroupInfo;
+  createGroup(name: string, tagIds: string[], assetIds: string[]): AssetGroupInfo;
+  updateGroup(groupId: string, name: string, tagIds: string[], assetIds: string[]): AssetGroupInfo;
   deleteGroup(groupId: string): { deleted: true };
   resolveGroup(groupId: string): AssetInfo[];
   deleteAsset(assetId: string, confirm?: boolean): { deleted: true; referenceCount: number };
@@ -78,6 +79,7 @@ export class AgentSystemToolService {
     private readonly mediaTasks?: AgentMediaTaskService,
     private readonly documents?: Pick<DocumentWorkflowService, 'getDocument' | 'selfPublish'>,
     private readonly maintenance?: AgentMaintenanceToolService,
+    private readonly structureCompiler?: ProjectStructureCompiler,
   ) {}
 
   execute(
@@ -91,6 +93,10 @@ export class AgentSystemToolService {
       case 'project.get_context':
         rejectUnknown(args, []);
         return this.projectContext();
+      case 'project.structure.get':
+        return this.projectStructure(args);
+      case 'novel.structure.get':
+        return this.novelStructure(args);
       case 'project.integrity.check':
         rejectUnknown(args, []);
         return this.projectIntegrity();
@@ -352,21 +358,55 @@ export class AgentSystemToolService {
   }
 
   private projectContext(): Record<string, unknown> {
+    return this.projects.access(false, (database, project) => {
+      const structure = this.structureCompiler?.compileFromDatabase(database, project, {
+        includeArchived: false,
+      });
+      return {
+        version: 1,
+        status: 'succeeded',
+        project: {
+          id: project.id,
+          name: project.name,
+          mode: project.mode,
+          schemaVersion: project.schemaVersion,
+          updatedAt: project.updatedAt,
+        },
+        counts: {
+          conversations: scalarCount(database, 'conversations', project.id),
+          documents: scalarCount(database, 'documents', project.id),
+          assets: scalarCount(database, 'assets', project.id),
+        },
+        ...(structure ? { structure } : {}),
+      };
+    });
+  }
+
+  private projectStructure(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['includeArchived']);
+    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    if (!this.structureCompiler) throw unavailable('Project structure');
     return this.projects.access(false, (database, project) => ({
       version: 1,
       status: 'succeeded',
-      project: {
-        id: project.id,
-        name: project.name,
-        mode: project.mode,
-        schemaVersion: project.schemaVersion,
-        updatedAt: project.updatedAt,
-      },
-      counts: {
-        conversations: scalarCount(database, 'conversations', project.id),
-        documents: scalarCount(database, 'documents', project.id),
-        assets: scalarCount(database, 'assets', project.id),
-      },
+      structure: this.structureCompiler!.compileFromDatabase(database, project, {
+        includeArchived,
+      }),
+    }));
+  }
+
+  private novelStructure(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['novelId', 'includeArchived']);
+    const novelId = optionalString(args.novelId, 'novelId', 200);
+    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    if (!this.structureCompiler) throw unavailable('Novel structure');
+    return this.projects.access(false, (database, project) => ({
+      version: 1,
+      status: 'succeeded',
+      structure: this.structureCompiler!.compileNovel(database, project, {
+        ...(novelId ? { novelId } : {}),
+        includeArchived,
+      }),
     }));
   }
 
@@ -544,21 +584,22 @@ export class AgentSystemToolService {
   }
 
   private createGroup(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['name', 'tagIds']);
+    rejectUnknown(args, ['name', 'assetIds']);
     return {
       version: 1,
       status: 'succeeded',
       group: toGroupSummary(
         this.assets.createGroup(
           requiredString(args.name, 'name', 120),
-          requiredStringArray(args.tagIds, 'tagIds', 100),
+          [],
+          requiredStringArray(args.assetIds, 'assetIds', 200),
         ),
       ),
     };
   }
 
   private updateGroup(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['groupId', 'name', 'tagIds']);
+    rejectUnknown(args, ['groupId', 'name', 'assetIds']);
     return {
       version: 1,
       status: 'succeeded',
@@ -566,7 +607,8 @@ export class AgentSystemToolService {
         this.assets.updateGroup(
           requiredString(args.groupId, 'groupId', 200),
           requiredString(args.name, 'name', 120),
-          requiredStringArray(args.tagIds, 'tagIds', 100),
+          [],
+          requiredStringArray(args.assetIds, 'assetIds', 200),
         ),
       ),
     };
@@ -954,7 +996,7 @@ function toGroupSummary(group: AssetGroupInfo): Record<string, unknown> {
   return {
     id: group.id,
     name: group.name,
-    tagIds: group.tagIds.slice(0, 100),
+    assetIds: group.assetIds.slice(0, 200),
     assetCount: group.assetCount ?? 0,
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,

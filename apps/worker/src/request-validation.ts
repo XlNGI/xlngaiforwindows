@@ -38,6 +38,8 @@ const sessionMethods = new Set<WorkerMethod>([
   'chat.message.toMemory',
   'chat.message.toConstraint',
   'document.list',
+  'project.structure.get',
+  'novel.structure.get',
   'document.get',
   'document.save',
   'document.draft.save',
@@ -522,6 +524,15 @@ export function validateSessionRequestParams(
   switch (method) {
     case 'document.list':
       rejectUnknown(params, []);
+      break;
+    case 'project.structure.get':
+      rejectUnknown(params, ['includeArchived']);
+      optionalBoolean(params, 'includeArchived');
+      break;
+    case 'novel.structure.get':
+      rejectUnknown(params, ['novelId', 'includeArchived']);
+      optionalId(params, 'novelId');
+      optionalBoolean(params, 'includeArchived');
       break;
     case 'novel.profile.get':
       rejectUnknown(params, ['createIfMissing']);

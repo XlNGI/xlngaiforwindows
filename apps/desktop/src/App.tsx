@@ -837,6 +837,32 @@ export function App() {
     workspaceDispatch({ type: 'open', panelId: 'document' });
   };
 
+  /** Routes a completed Agent chapter artifact to the novel editor. */
+  const focusNovelArtifact = async (
+    detail: import('@ai-video/contracts').AgentTaskDetail | undefined,
+    expectedProjectId: string,
+  ): Promise<boolean> => {
+    if (
+      !detail ||
+      detail.target?.targetKind !== 'novel-chapter' ||
+      !detail.target.chapterId ||
+      !detail.target.documentVersionId ||
+      !detail.documents.some(
+        (artifact) =>
+          artifact.documentId === detail.target?.documentId &&
+          artifact.documentVersionId === detail.target.documentVersionId,
+      ) ||
+      activeProjectIdRef.current !== expectedProjectId
+    ) {
+      return false;
+    }
+    if (activeProjectIdRef.current !== expectedProjectId) return false;
+    setNovelFocusChapterId(detail.target.chapterId);
+    setNovelRefreshRevision((revision) => revision + 1);
+    openProjectView('novel');
+    return true;
+  };
+
   const docs = useDocumentWorkspace({
     writable,
     syncDetachedPanel: (entityId) => syncDetachedPanelForEntity('document', entityId),
@@ -949,6 +975,8 @@ export function App() {
   >(undefined);
   const activeProjectIdRef = useRef(project?.id);
   const [taskCompletionRevision, setTaskCompletionRevision] = useState(0);
+  const [novelFocusChapterId, setNovelFocusChapterId] = useState<string>();
+  const [novelRefreshRevision, setNovelRefreshRevision] = useState(0);
   activeProjectIdRef.current = project?.id;
 
   useEffect(() => {
@@ -1203,23 +1231,43 @@ export function App() {
       if (!isAgentGeneration || agentDocumentRefreshStarted) return;
       agentDocumentRefreshStarted = true;
       const projectId = prepared.stream.projectId;
-      void callWorker('document.list', {})
-        .then((nextDocuments) => {
-          if (generationPollOwner.current.projectId === projectId) {
-            setDocuments(nextDocuments);
-            const created = nextDocuments.filter((item) => !previousDocumentIds.has(item.id));
-            const createdWorkspace = created.filter(isWorkspaceDocument);
-            const createdWorkspaceDocument = createdWorkspace[0];
-            if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
-              openWorkspaceForDocumentKind(createdWorkspaceDocument.kind);
-              setDocumentKindFilter(createdWorkspaceDocument.kind);
-            } else if (createdWorkspace.length > 1) {
-              openProjectView('documents');
-              setDocumentKindFilter('all');
-            }
-            const createdDocument = createdWorkspaceDocument ?? created[0];
-            if (createdDocument) void openDocumentById(createdDocument.id);
+      const refreshDocumentList = () =>
+        callWorker('document.list', {}).then((nextDocuments) => {
+          if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
+          setDocuments(nextDocuments);
+          const created = nextDocuments.filter((item) => !previousDocumentIds.has(item.id));
+          const createdWorkspace = created.filter(isWorkspaceDocument);
+          const createdWorkspaceDocument = createdWorkspace[0];
+          if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
+            openWorkspaceForDocumentKind(createdWorkspaceDocument.kind);
+            setDocumentKindFilter(createdWorkspaceDocument.kind);
+          } else if (createdWorkspace.length > 1) {
+            openProjectView('documents');
+            setDocumentKindFilter('all');
           }
+          const createdDocument = createdWorkspaceDocument ?? created[0];
+          if (createdDocument) void openDocumentById(createdDocument.id);
+        });
+      const runtimeMode = (prepared as LlmGenerationPrepareResult & {
+        runtimeMode?: string;
+      }).runtimeMode;
+      if (runtimeMode !== 'novel-writing') {
+        void refreshDocumentList().catch((reason) => {
+          if (generationPollOwner.current.projectId === projectId) {
+            setContentMessage(reason instanceof Error ? reason.message : '文档列表刷新失败');
+          }
+        });
+        return;
+      }
+      void callWorker('agent.task.get', { taskId: agentTaskId! })
+        .catch(() => undefined)
+        .then(async (detail) => {
+          if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
+          if (detail) {
+            rememberAgentTask(detail);
+            if (await focusNovelArtifact(detail, projectId)) return;
+          }
+          return refreshDocumentList();
         })
         .catch((reason) => {
           if (generationPollOwner.current.projectId === projectId) {
@@ -1325,7 +1373,9 @@ export function App() {
           const detail = await callWorker('agent.task.get', { taskId: agentTaskId }).catch(
             () => undefined,
           );
-          if (detail && nativeRunIsCurrent(run)) rememberAgentTask(detail);
+          if (detail && nativeRunIsCurrent(run)) {
+            rememberAgentTask(detail);
+          }
         }
         stopAgentTaskEventPolling();
         if (nativeRunIsCurrent(run)) setLiveAgentActions([]);
@@ -3717,6 +3767,8 @@ export function App() {
               <NovelWorkspace
                 projectId={project?.id}
                 writable={writable}
+                focusChapterId={novelFocusChapterId}
+                refreshToken={novelRefreshRevision || undefined}
                 onOpenDocument={(documentId) => void openNovelDocument(documentId)}
                 onGenerateEpisode={(chapters) => {
                   const prompt = composeEpisodeChapterPrompt(chapters);

@@ -35,6 +35,10 @@ export interface NovelEpisodeChapterRef {
 interface NovelWorkspaceProps {
   projectId?: string;
   writable: boolean;
+  /** Select and re-read the chapter produced by an Agent task. */
+  focusChapterId?: string;
+  /** Monotonic token used to force a fresh chapter/document read. */
+  refreshToken?: number;
   onOpenDocument?: (documentId: string) => void;
   /** Puts selected chapter titles into the current conversation prompt. */
   onGenerateEpisode?: (chapters: NovelEpisodeChapterRef[]) => void;
@@ -101,6 +105,8 @@ function consistencyIssueLabel(code: NovelConsistencyReport['issues'][number]['c
 export function NovelWorkspace({
   projectId,
   writable,
+  focusChapterId,
+  refreshToken,
   onOpenDocument,
   onGenerateEpisode,
 }: NovelWorkspaceProps) {
@@ -167,7 +173,7 @@ export function NovelWorkspace({
     </div>
   );
 
-  const loadChapters = async (preferredId?: string) => {
+  const loadChapters = async (preferredId?: string, forceOpen = false) => {
     if (!projectId) return;
     const [rows, volumeRows] = await Promise.all([
       callWorker('novel.chapter.list', { includeArchived }),
@@ -176,7 +182,7 @@ export function NovelWorkspace({
     setChapters(rows);
     setVolumes(volumeRows);
     const next = rows.find((row) => row.id === preferredId) ?? rows[0];
-    if (next && next.id !== selected?.id) await openChapter(next);
+    if (next && (forceOpen || next.id !== selected?.id)) await openChapter(next);
     else if (next) setSelected(next);
     if (!next) {
       setSelected(undefined);
@@ -187,8 +193,8 @@ export function NovelWorkspace({
   };
 
   useEffect(() => {
-    void loadChapters();
-  }, [projectId, includeArchived]);
+    void loadChapters(focusChapterId, Boolean(focusChapterId || refreshToken !== undefined));
+  }, [projectId, includeArchived, focusChapterId, refreshToken]);
 
   const openChapter = async (chapter: NovelChapterInfo) => {
     setBusy(true);
@@ -407,7 +413,7 @@ export function NovelWorkspace({
           type="button"
           title="刷新章节"
           disabled={busy}
-          onClick={() => void loadChapters(selected?.id)}
+          onClick={() => void loadChapters(selected?.id, true)}
         >
           <RefreshCw size={14} />
         </button>

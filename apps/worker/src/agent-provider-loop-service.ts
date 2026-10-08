@@ -4578,6 +4578,8 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'project.get_context',
+  'project.structure.get',
+  'novel.structure.get',
   'project.integrity.check',
   'project.backup.prepare',
   'project.export.prepare',
@@ -4616,6 +4618,8 @@ const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
 ]);
 
 const SYSTEM_CONTEXTUAL_READ_OPERATIONS = [
+  'project.structure.get',
+  'novel.structure.get',
   'asset.get',
   'asset.search',
   'tag.list',
@@ -4631,6 +4635,9 @@ function hasSystemReadIntent(
   operation: (typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number],
 ): boolean {
   const patterns: Record<(typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number], RegExp> = {
+    'project.structure.get': /(?:项目|工程).{0,20}(?:结构|架构|目录|树)|project.{0,20}structure/iu,
+    'novel.structure.get':
+      /(?:小说|章节|卷章|大纲).{0,20}(?:结构|架构|目录|树)|novel.{0,20}structure/iu,
     'asset.get': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
     'asset.search': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
     'tag.list': /(?:标签|\btags?\b)/iu,

@@ -4,6 +4,7 @@ import type {
   AgentTaskCreateDocumentDraftParams,
   AgentTaskCreateDocumentDraftResult,
   AgentTaskDetail,
+  AgentTaskTargetInfo,
   AgentTaskEventInfo,
   AgentTaskGetParams,
   AgentProviderStepInfo,
@@ -1328,6 +1329,36 @@ export class DocumentWorkflowService {
   getTask(params: AgentTaskGetParams): AgentTaskDetail {
     return this.projects.access(false, (database, project) => {
       const task = this.requireTask(database, project, params.taskId);
+      const targetRow = database
+        .prepare(
+          `SELECT targets.target_kind, targets.action, targets.chapter_id, targets.document_id,
+                  (SELECT artifacts.document_version_id
+                     FROM agent_task_document_artifacts artifacts
+                    WHERE artifacts.task_id = targets.task_id
+                    ORDER BY artifacts.updated_at DESC, artifacts.id DESC LIMIT 1) AS document_version_id
+             FROM agent_task_targets targets
+            WHERE targets.task_id = ? AND targets.project_id = ?`,
+        )
+        .get(task.id, project.id) as
+        | {
+            target_kind: AgentTaskTargetInfo['targetKind'];
+            action: AgentTaskTargetInfo['action'];
+            chapter_id: string | null;
+            document_id: string;
+            document_version_id: string | null;
+          }
+        | undefined;
+      const target: AgentTaskTargetInfo | undefined = targetRow
+        ? {
+            targetKind: targetRow.target_kind,
+            action: targetRow.action,
+            ...(targetRow.chapter_id ? { chapterId: targetRow.chapter_id } : {}),
+            documentId: targetRow.document_id,
+            ...(targetRow.document_version_id
+              ? { documentVersionId: targetRow.document_version_id }
+              : {}),
+          }
+        : undefined;
       const planRow = database
         .prepare('SELECT * FROM agent_task_plans WHERE task_id = ? AND project_id = ?')
         .get(task.id, project.id) as
@@ -1554,6 +1585,7 @@ export class DocumentWorkflowService {
       }
       return {
         task: toTask(task),
+        ...(target ? { target } : {}),
         ...(pendingConfirmation ? { pendingConfirmation } : {}),
         ...(pendingSchemaConfirmation ? { pendingSchemaConfirmation } : {}),
         ...(plan ? { plan } : {}),

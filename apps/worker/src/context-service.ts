@@ -13,9 +13,13 @@ import {
 } from '@ai-video/context';
 import { createRepositories, listProjectLibraryCatalog } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
+import { ProjectStructureCompiler, renderProjectStructure } from './structure-compiler.js';
 
 export class ContextService {
-  constructor(private readonly projects: ProjectService) {}
+  constructor(
+    private readonly projects: ProjectService,
+    private readonly structureCompiler?: ProjectStructureCompiler,
+  ) {}
 
   compile(conversationId: string, budgetTokens?: number): ProductionContext {
     return this.projects.access(false, (database, project) => {
@@ -50,6 +54,20 @@ export class ContextService {
           priority: 10,
         },
       ];
+      if (this.structureCompiler) {
+        const structure = this.structureCompiler.compileFromDatabase(database, project, {
+          includeArchived: false,
+        });
+        sources.push({
+          id: `${project.id}:structure`,
+          type: 'catalog',
+          scopeType: 'project',
+          label: '项目结构目录',
+          content: renderProjectStructure(structure),
+          updatedAt: project.updatedAt,
+          priority: 20,
+        });
+      }
       const messages = repositories.chatMessages.listPage(conversation.id, 12).reverse();
       if (messages.length > 0) {
         sources.push({
@@ -75,7 +93,15 @@ export class ContextService {
   }
 
   preview(conversationId: string, budgetTokens?: number): ProductionContextInfo {
-    return toContextInfo(this.compile(conversationId, budgetTokens));
+    const context = this.compile(conversationId, budgetTokens);
+    const structure = this.structureCompiler
+      ? this.projects.access(false, (database, project) =>
+          this.structureCompiler!.compileFromDatabase(database, project, {
+            includeArchived: false,
+          }),
+        )
+      : undefined;
+    return toContextInfo(context, structure);
   }
 
   saveSnapshot(context: ProductionContext, purpose: string): string {
@@ -93,7 +119,10 @@ export class ContextService {
   }
 }
 
-export function toContextInfo(context: ProductionContext): ProductionContextInfo {
+export function toContextInfo(
+  context: ProductionContext,
+  structure?: ProductionContextInfo['structure'],
+): ProductionContextInfo {
   return {
     version: 1,
     scopeType: context.scope.type,
@@ -114,6 +143,7 @@ export function toContextInfo(context: ProductionContext): ProductionContextInfo
       truncated: source.truncated,
     })),
     catalog: context.catalog as LibraryCatalogItem[],
+    ...(structure ? { structure } : {}),
   };
 }
 
