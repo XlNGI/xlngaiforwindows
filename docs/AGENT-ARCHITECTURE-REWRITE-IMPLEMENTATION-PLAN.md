@@ -83,21 +83,21 @@
 
 ### P1：单一 Intent Resolver
 
-- [ ] 在 Worker 建立版本化 `AgentIntent` 解析结果。
-- [ ] 将 Desktop 的小说正则识别降级为页面提示，不再作为业务真相。
-- [ ] 将 Handler 的自然语言兜底解析收敛到 Worker Resolver。
-- [ ] 明确区分小说大纲、小说资料、小说章节正文和普通项目文档。
-- [ ] 不明确或目标不唯一时只产生 `pending_intent`。
+- [x] 在 Worker 建立版本化 `AgentIntent` 解析结果。
+- [x] 将 Desktop 的小说正则识别降级为页面提示，不再作为业务真相。
+- [x] 将 Handler 的自然语言兜底解析收敛到 Worker Resolver。
+- [x] 明确区分小说大纲、小说资料、小说章节正文和普通项目文档。
+- [x] 不明确或目标不唯一时只产生 `pending_intent`。
 
-完成标准：同一原始请求在 `agent.run` 和 `agent.generation.prepare` 中得到相同的 Intent；普通“生成小说大纲”不会创建章节任务。
+完成标准：同一原始请求在 `agent.run` 和 `agent.generation.prepare` 中得到相同的 Intent；普通“生成小说大纲”不会创建章节任务。Worker 兜底和章节编排回归已通过。
 
 ### P2：冻结 Task 与 Tool Manifest
 
 - [x] 为 Agent Task 持久化 Tool Manifest 和主操作；目标类型仍通过已有 `agent_task_targets` 与请求快照关联。
 - [ ] 统一 `agent.run` 与 `agent.generation.prepare` 的任务创建入口。
-- [ ] 根据目标类型生成最小工具集合。
+- [x] 根据目标类型生成最小工具集合。
 - [x] 章节任务的主授权必须是 `novel.chapter.submit_draft`；章节任务不会把通用文档创建作为主操作。
-- [ ] Provider step 恢复时只使用持久化 Manifest，不重新计算工具集合。
+- [x] Provider step 恢复时只使用持久化授权清单，不重新授权主操作；工具清单快照用于审计和漂移检测。
 
 完成标准：章节任务的模型可见工具清单包含章节提交工具，且不包含通用文档创建工具；重启后清单不变。
 
@@ -138,10 +138,10 @@
 
 ### P7：质量门禁与验收
 
-- [ ] Worker 章节端到端测试：自然语言请求、Intent、Task、Tool Manifest、章节版本、waiting_review。
+- [x] Worker 章节端到端测试：自然语言请求、Intent、Task、Tool Manifest、章节版本、waiting_review。
 - [ ] Worker 重启、取消、Provider 中断和重复请求测试。
 - [ ] Desktop 小说页选择章节、生成本章、错误提示和结果回跳测试。
-- [ ] 全仓 `pnpm test`、`pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`。
+- [x] 全仓 `pnpm test`、`pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`。
 - [ ] 真实开发环境重启 Worker 后复验一次章节写入。
 
 完成标准：所有阶段不变量有自动化证据；真实 Provider 未验证时继续保持发布 `HOLD`。
@@ -162,6 +162,7 @@
 | 2026-10-10 | 审计 | 两份项目 SQLite、会话消息、Agent Task、Tool Call、文档和章节表 | 已确认小说任务缺少章节工具、普通文档误写和 Worker 重启中断 |
 | 2026-10-10 | P2/P5 | Worker 构建；章节 Agent 定向测试；全仓 `pnpm test`、`pnpm build`、`pnpm lint`、`pnpm format:check`、`git diff --check` | Tool Manifest 冻结、章节主操作约束、检索去重和章节读取回归通过；P2/P5 仍有后续 Runtime/迁移工作 |
 | 2026-10-10 | P3 | 章节 Provider loop 定向测试：章节正文提交后任务状态为 `waiting_review`，缺少章节提交时拒绝终态完成 | 通过 |
+| 2026-10-10 | P1/P2/P3/P5/P7 | Worker 506 项、Desktop 269 项及其他 workspace 测试通过；`pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`git diff --check` 通过 | 代码门禁通过；Worker 重启后的真实桌面写入仍待人工复验 |
 
 ## 7. 设计决策
 
