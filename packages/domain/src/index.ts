@@ -624,6 +624,7 @@ export interface AssetGroupRecord {
   name: string;
   normalizedName: string;
   tagIds: string[];
+  assetIds: string[];
   createdBy: string;
   createdAt: string;
   updatedAt: string;

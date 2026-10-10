@@ -7,6 +7,7 @@ import type { LlmProvider } from '@ai-video/llm';
 import { AGENT_TOOL_RESULT_LIMITS } from '@ai-video/contracts';
 import {
   AgentProviderLoopService,
+  inferNovelReference,
   type AgentMediaSubmissionExecutor,
 } from './agent-provider-loop-service.js';
 import { ChangeSetService } from './change-set-service.js';
@@ -50,6 +51,7 @@ async function setup(
   project.create(join(directory, 'project'), 'Agent Tool Project');
   const content = new ContentService(project);
   const conversation = content.createConversation({ scopeType: 'project' });
+  const novels = new NovelService(project);
   const provider: LlmProvider = {
     status: () => ({ key: 'unused', name: 'Unused', model: 'unused', configured: false }),
     stream: () => Promise.reject(new Error('native provider is used for this test')),
@@ -74,7 +76,7 @@ async function setup(
   );
   const workflow = new DocumentWorkflowService(project);
   const loop = new AgentProviderLoopService(project, workflow, research);
-  return { conversation, generations, loop, project, workflow };
+  return { conversation, generations, loop, project, workflow, novels };
 }
 
 async function setupMedia(ready = true) {
@@ -137,7 +139,11 @@ async function setupMedia(ready = true) {
   };
 }
 
-function createSystemLoop(project: ProjectService, workflow: DocumentWorkflowService) {
+function createSystemLoop(
+  project: ProjectService,
+  workflow: DocumentWorkflowService,
+  novels?: NovelService,
+) {
   return new AgentProviderLoopService(
     project,
     workflow,
@@ -180,6 +186,11 @@ function createSystemLoop(project: ProjectService, workflow: DocumentWorkflowSer
         },
       },
       { listProfiles: () => [], listModels: () => [] },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novels,
     ),
   );
 }
@@ -194,6 +205,19 @@ function taskSnapshot(project: ProjectService, taskId: string): Record<string, u
 }
 
 describe('AgentProviderLoopService', () => {
+  it('classifies novel reference requests separately from screenplay documents', () => {
+    expect(inferNovelReference('请生成小说大纲')).toEqual({
+      role: 'work-outline',
+      kind: 'outline',
+    });
+    expect(inferNovelReference('整理小说人物设定')).toEqual({
+      role: 'character-bible',
+      kind: 'character',
+    });
+    expect(inferNovelReference('生成短剧大纲')).toBeUndefined();
+    expect(inferNovelReference('写一份项目大纲')).toBeUndefined();
+  });
+
   it('pauses a natural-language video request for media selection and resumes with a local draft', async () => {
     const { conversation, generations, loop, project } = await setupMedia();
     const prompt = '帮我生成龙在天空翱翔的视频';
@@ -1062,6 +1086,424 @@ describe('AgentProviderLoopService', () => {
     expect(seeded.currentVersion?.contentMarkdown).toBe('旧稿。');
   });
 
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'requires and saves the first chapter draft through %s',
+    async (protocol) => {
+      const { conversation, generations, loop, project, workflow, novels } = await setup(protocol);
+      const prompt = '写小说第一章《意外重逢》';
+      const target = new AgentOrchestrationService(project).prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt,
+        intent: { action: 'create_chapter', chapterTitle: '意外重逢' },
+      });
+      if ('pendingIntent' in target) throw new Error('Expected a reserved chapter.');
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(
+        prepared.stream,
+        prompt,
+        undefined,
+        target.documentIntent,
+        'project_only',
+        target.taskId,
+      );
+      generations.configureAgentTools(prepared.stream, agent.tools);
+      const runtime = generations.runtime(prepared.stream);
+      expect(runtime.systemInstruction).toContain('# Agent novel chapter write policy');
+      expect(runtime.systemInstruction).toContain('novel.chapter.submit_draft 保存完整正文');
+      expect(runtime.systemInstruction).not.toContain('# Agent document write policy');
+      expect(
+        project.access(false, (database) =>
+          database
+            .prepare('SELECT user_message_id, context_snapshot_id FROM agent_tasks WHERE id = ?')
+            .get(target.taskId),
+        ),
+      ).toEqual({
+        user_message_id: prepared.generation.userMessage.id,
+        context_snapshot_id: prepared.generation.snapshotId,
+      });
+      loop.startProviderStep(prepared.stream);
+      expect(() => loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+        'AGENT_CHAPTER_NOT_WRITTEN',
+      );
+      const tool = agent.tools.find((item) => item.name === 'novel.chapter.submit_draft')!;
+      await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'chapter-write',
+        calls: [
+          {
+            id: 'chapter-write-call',
+            name: tool.name,
+            authorizationHandle: tool.authorizationHandle,
+            argumentsJson: JSON.stringify({
+              title: '意外重逢',
+              contentMarkdown: '苏念推开咖啡馆的门。',
+            }),
+          },
+        ],
+      });
+      loop.startProviderStep(prepared.stream);
+      expect(() =>
+        loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+      ).not.toThrow();
+      const document = workflow.getDocument(target.documentId);
+      expect(document.currentVersion?.contentMarkdown).toBe('苏念推开咖啡馆的门。');
+      expect(document.currentVersion?.baseVersionId).toBeUndefined();
+      expect(novels.listChapters()).toMatchObject([
+        { id: target.chapterId, lifecycleStatus: 'active' },
+      ]);
+      expect(workflow.getTask({ taskId: target.taskId })).toMatchObject({
+        task: { status: 'waiting_review' },
+        target: { chapterId: target.chapterId, documentVersionId: document.currentVersion?.id },
+      });
+      expect(
+        project.access(false, (database) =>
+          database
+            .prepare('SELECT COUNT(*) AS count FROM novel_rag_chunks WHERE chapter_id = ?')
+            .get(target.chapterId),
+        ),
+      ).toMatchObject({ count: 1 });
+    },
+  );
+
+  it.each(['continue_chapter', 'rewrite_chapter'] as const)(
+    'does not count an existing draft as the result of a %s task',
+    async (action) => {
+      const { conversation, generations, loop, project, workflow, novels } = await setup();
+      const chapter = novels.saveChapter({ title: '意外重逢' });
+      workflow.saveDraft({
+        documentId: chapter.documentId,
+        title: chapter.title,
+        contentMarkdown: '已有正文。',
+        expectedDocumentRowVersion: chapter.documentRowVersion,
+      });
+      const prompt = action === 'continue_chapter' ? '续写本章' : '重写本章';
+      const target = new AgentOrchestrationService(project).prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt,
+        intent: { action, chapterId: chapter.id },
+      });
+      if ('pendingIntent' in target) throw new Error('Expected an existing chapter target.');
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      loop.prepare(
+        prepared.stream,
+        prompt,
+        undefined,
+        target.documentIntent,
+        'project_only',
+        target.taskId,
+      );
+      loop.startProviderStep(prepared.stream);
+      expect(() => loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+        'AGENT_CHAPTER_NOT_WRITTEN',
+      );
+      loop.terminateGeneration(prepared.generation.generationId, 'failed');
+      expect(novels.listChapters()).toMatchObject([{ id: chapter.id, lifecycleStatus: 'active' }]);
+      expect(workflow.getDocument(chapter.documentId).currentVersion?.contentMarkdown).toBe(
+        '已有正文。',
+      );
+    },
+  );
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'saves a numbered second chapter with a model-supplied title through %s',
+    async (protocol) => {
+      const { conversation, generations, loop, project, workflow, novels } = await setup(protocol);
+      const firstChapter = novels.saveChapter({ title: '意外重逢', displayLabel: '第一章' });
+      const firstDraft = workflow.saveDraft({
+        documentId: firstChapter.documentId,
+        title: firstChapter.title,
+        contentMarkdown: '苏念答应与沈逸见面。',
+        expectedDocumentRowVersion: firstChapter.documentRowVersion,
+      });
+      const prompt = '帮我生成第二章';
+      const target = new AgentOrchestrationService(project).prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt,
+        intent: { action: 'create_chapter', displayLabel: '第二章' },
+      });
+      if ('pendingIntent' in target) throw new Error('Numbered chapter request should start.');
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(
+        prepared.stream,
+        prompt,
+        undefined,
+        target.documentIntent,
+        'project_only',
+        target.taskId,
+      );
+      generations.configureAgentTools(prepared.stream, agent.tools);
+      expect(generations.runtime(prepared.stream).systemInstruction).toContain(
+        '根据正文拟定正式章名',
+      );
+      loop.startProviderStep(prepared.stream);
+      const tool = agent.tools.find((item) => item.name === 'novel.chapter.submit_draft')!;
+      await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'second-chapter-write',
+        calls: [
+          {
+            id: 'second-chapter-call',
+            name: tool.name,
+            authorizationHandle: tool.authorizationHandle,
+            argumentsJson: JSON.stringify({
+              title: '旧约重逢',
+              contentMarkdown: '沈逸已经在约定的街口等她。',
+            }),
+          },
+        ],
+      });
+      loop.startProviderStep(prepared.stream);
+      expect(() =>
+        loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+      ).not.toThrow();
+      expect(novels.listChapters()).toMatchObject([
+        { id: firstChapter.id, title: '意外重逢', displayLabel: '第一章' },
+        {
+          id: target.chapterId,
+          title: '旧约重逢',
+          displayLabel: '第二章',
+          lifecycleStatus: 'active',
+        },
+      ]);
+      expect(workflow.getDocument(target.documentId).currentVersion?.titleSnapshot).toBe(
+        '旧约重逢',
+      );
+      expect(workflow.getDocument(target.documentId).currentVersion?.contentMarkdown).toBe(
+        '沈逸已经在约定的街口等她。',
+      );
+      expect(workflow.getDocument(firstChapter.documentId).currentVersion?.id).toBe(
+        firstDraft.currentVersion?.id,
+      );
+      expect(workflow.getTask({ taskId: target.taskId }).target).toMatchObject({
+        chapterId: target.chapterId,
+        documentId: target.documentId,
+      });
+    },
+  );
+
+  it.each(['failed', 'cancelled', 'interrupted'] as const)(
+    'archives an empty reserved chapter after generation is %s',
+    async (reason) => {
+      const { conversation, generations, loop, project, workflow, novels } = await setup();
+      const prompt = '写小说第一章《意外重逢》';
+      const target = new AgentOrchestrationService(project).prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt,
+        intent: { action: 'create_chapter', chapterTitle: '意外重逢' },
+      });
+      if ('pendingIntent' in target) throw new Error('Expected a reserved chapter.');
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      loop.prepare(
+        prepared.stream,
+        prompt,
+        undefined,
+        target.documentIntent,
+        'project_only',
+        target.taskId,
+      );
+      loop.terminateGeneration(prepared.generation.generationId, reason);
+      expect(novels.listChapters()).toEqual([]);
+      expect(novels.listChapters({ includeArchived: true })).toMatchObject([
+        {
+          id: target.chapterId,
+          lifecycleStatus: 'archived',
+          archiveReason: 'generation_placeholder',
+        },
+      ]);
+      expect(workflow.getDocument(target.documentId).lifecycleStatus).toBe('archived');
+      expect(
+        project.access(false, (database) =>
+          database
+            .prepare('SELECT COUNT(*) AS count FROM novel_chapter_task_locks WHERE task_id = ?')
+            .get(target.taskId),
+        ),
+      ).toEqual({ count: 0 });
+    },
+  );
+
+  it('preserves user edits made after the first chapter write authorization was frozen', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const prompt = '写小说第一章《意外重逢》';
+    const target = new AgentOrchestrationService(project).prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt,
+      intent: { action: 'create_chapter', chapterTitle: '意外重逢' },
+    });
+    if ('pendingIntent' in target) throw new Error('Expected a reserved chapter.');
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(
+      prepared.stream,
+      prompt,
+      undefined,
+      target.documentIntent,
+      'project_only',
+      target.taskId,
+    );
+    workflow.saveDraft({
+      documentId: target.documentId,
+      title: '用户标题',
+      contentMarkdown: '用户正文。',
+      expectedDocumentRowVersion: 0,
+    });
+    loop.startProviderStep(prepared.stream);
+    const tool = agent.tools.find((item) => item.name === 'novel.chapter.submit_draft')!;
+    await expect(
+      loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'stale-chapter-write',
+        calls: [
+          {
+            id: 'stale-write',
+            name: tool.name,
+            authorizationHandle: tool.authorizationHandle,
+            argumentsJson: JSON.stringify({ title: '模型标题', contentMarkdown: '模型正文。' }),
+          },
+        ],
+      }),
+    ).rejects.toThrow('Document was changed in another window.');
+    loop.terminateGeneration(prepared.generation.generationId, 'failed');
+    expect(workflow.getDocument(target.documentId).currentVersion?.contentMarkdown).toBe(
+      '用户正文。',
+    );
+    expect(workflow.getDocument(target.documentId).lifecycleStatus).toBe('active');
+  });
+
+  it.each([true, false])(
+    'Pi validates a saved chapter after library lookup (write=%s)',
+    async (write) => {
+      const { conversation, generations, loop, project, workflow, novels } = await setup();
+      workflow.saveDraft({ title: '已有故事设定', contentMarkdown: '苏念在咖啡馆遇见陆屿。' });
+      const prompt = '写小说第一章《意外重逢》';
+      const target = new AgentOrchestrationService(project).prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt,
+        intent: { action: 'create_chapter', chapterTitle: '意外重逢' },
+      });
+      if ('pendingIntent' in target) throw new Error('Expected a reserved chapter.');
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(
+        prepared.stream,
+        prompt,
+        undefined,
+        target.documentIntent,
+        'project_only',
+        target.taskId,
+      );
+      generations.configureAgentTools(prepared.stream, agent.tools);
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      faux.setResponses([
+        fauxAssistantMessage(
+          [fauxToolCall('library.search', { query: '已有故事设定' }, { id: 'lookup' })],
+          { stopReason: 'toolUse', responseId: 'lookup-response' },
+        ),
+        ...(write
+          ? [
+              fauxAssistantMessage(
+                [
+                  fauxToolCall(
+                    'novel.chapter.submit_draft',
+                    {
+                      title: '意外重逢',
+                      contentMarkdown: '苏念推开咖啡馆的门，陆屿抬头看向她。',
+                    },
+                    { id: 'write' },
+                  ),
+                ],
+                { stopReason: 'toolUse', responseId: 'written' },
+              ),
+              fauxAssistantMessage('已保存第一章《意外重逢》。'),
+            ]
+          : [fauxAssistantMessage('已了解背景。你想续写还是重写？')]),
+      ]);
+      const runtime = new PiConversationRuntime({
+        generation: generations,
+        plans: {} as never,
+        providerTools: loop,
+        streamFn: faux.streamSimple,
+        createGateway: () => {
+          throw new Error('Unexpected planner');
+        },
+      });
+      await runtime.start({
+        ...prepared.stream,
+        identity: prepared.stream,
+        taskId: target.taskId,
+        mode: 'novel-writing',
+        prompt,
+      });
+      await runtime.wait(prepared.stream.generationId);
+      const result = generations.get(prepared.stream.generationId);
+      expect(result.status).toBe(write ? 'complete' : 'failed');
+      expect(novels.listChapters()).toHaveLength(write ? 1 : 0);
+      if (write) {
+        expect(workflow.getDocument(target.documentId).currentVersion?.contentMarkdown).toContain(
+          '苏念推开咖啡馆',
+        );
+      } else {
+        expect(result.error).toContain('AGENT_CHAPTER_NOT_WRITTEN');
+        expect(novels.listChapters({ includeArchived: true })).toMatchObject([
+          {
+            id: target.chapterId,
+            lifecycleStatus: 'archived',
+            archiveReason: 'generation_placeholder',
+          },
+        ]);
+      }
+      expect(
+        project.access(false, (database) =>
+          database
+            .prepare(
+              'SELECT tool_name, status FROM agent_tool_calls WHERE task_id = ? ORDER BY created_at',
+            )
+            .all(target.taskId),
+        ),
+      ).toEqual(
+        write
+          ? [
+              { tool_name: 'library.search', status: 'succeeded' },
+              { tool_name: 'novel.chapter.submit_draft', status: 'succeeded' },
+            ]
+          : [{ tool_name: 'library.search', status: 'succeeded' }],
+      );
+    },
+  );
+
   it('creates an adaptation proposal from a published chapter without creating drama structure', async () => {
     const { conversation, generations, loop, project, workflow } = await setup();
     const novel = new NovelService(project);
@@ -1841,6 +2283,42 @@ describe('AgentProviderLoopService', () => {
         totalTokens: 14,
       }),
     ]);
+  });
+
+  it('stores a novel outline as a novel reference instead of a screenplay document', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '生成小说大纲',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, '生成小说大纲');
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'novel-outline-response',
+      calls: [
+        {
+          id: 'novel-outline-call',
+          name: 'document.create_draft',
+          authorizationHandle: agent.tools.find((tool) => tool.name === 'document.create_draft')
+            ?.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            title: '都市小说大纲',
+            contentMarkdown: '# 都市小说大纲\n\n- 第一幕：相遇',
+          }),
+        },
+      ],
+    });
+    project.access(false, (database) => {
+      expect(database.prepare('SELECT domain_scope, role FROM document_bindings').get()).toEqual({
+        domain_scope: 'novel',
+        role: 'work-outline',
+      });
+      expect(database.prepare('SELECT kind FROM documents').get()).toEqual({ kind: 'outline' });
+    });
   });
 
   it('prepares a Chat Completions tool-message continuation without the authorization handle', async () => {
@@ -3027,6 +3505,98 @@ describe('AgentProviderLoopService', () => {
     });
   });
 
+  it('lists and confirms novel chapter archive with a current row version', async () => {
+    const { conversation, generations, project, workflow, novels } = await setup();
+    novels.getProfile({ createIfMissing: true });
+    const chapter = novels.saveChapter({ title: '第一章 雾港' });
+    const loop = createSystemLoop(project, workflow, novels);
+    const prompt = `请查看小说章节列表，然后归档章节 ${chapter.id}`;
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    const list = agent.tools.find((tool) => tool.name === 'novel.chapter.list')!;
+    const archive = agent.tools.find((tool) => tool.name === 'novel.chapter.archive')!;
+    expect(list).toBeDefined();
+    expect(archive).toBeDefined();
+    loop.startProviderStep(prepared.stream);
+
+    const listed = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'novel-list-response',
+      calls: [
+        {
+          id: 'novel-list-call',
+          name: 'novel.chapter.list',
+          authorizationHandle: list.authorizationHandle,
+          argumentsJson: '{}',
+        },
+      ],
+    });
+    expect(JSON.parse(listed.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'succeeded',
+      chapters: [expect.objectContaining({ id: chapter.id, rowVersion: chapter.rowVersion })],
+    });
+
+    const pending = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'novel-archive-response',
+      calls: [
+        {
+          id: 'novel-archive-call',
+          name: 'novel.chapter.archive',
+          authorizationHandle: archive.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            chapterId: chapter.id,
+            expectedRowVersion: chapter.rowVersion,
+          }),
+        },
+      ],
+    });
+    expect(pending.confirmation).toMatchObject({
+      operation: 'novel.chapter.archive',
+      affectedEntities: [{ type: 'novel-chapter', id: chapter.id }],
+    });
+    expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('active');
+
+    const confirmed = loop.confirmTool({
+      ...prepared.stream,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(JSON.parse(confirmed.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'archived',
+      chapter: { id: chapter.id, lifecycleStatus: 'archived' },
+    });
+    expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('archived');
+    expect(() =>
+      loop.confirmTool({
+        ...prepared.stream,
+        confirmationToken: pending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).toThrow('AGENT_TOOL_CONFIRMATION_REPLAYED');
+  });
+
+  it('does not grant novel chapter lifecycle tools for a negated request', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prompt = '不要删除第一章';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('novel.chapter.archive');
+    expect(agent.tools.map((tool) => tool.name)).not.toContain('novel.chapter.restore');
+  });
+
   it('does not grant asset catalog tools for a character prompt draft', async () => {
     const { conversation, generations, project, workflow } = await setup();
     const loop = createSystemLoop(project, workflow);
@@ -3378,10 +3948,14 @@ describe('AgentProviderLoopService', () => {
     project.access(false, (database) => {
       expect(database.prepare('SELECT status, error_code FROM agent_tasks').get()).toEqual({
         status: 'failed',
-        error_code: 'failed',
+        error_code: 'interrupted',
       });
+      expect(database.prepare('SELECT retryable FROM agent_tasks').get()).toEqual({ retryable: 1 });
       expect(database.prepare('SELECT status FROM agent_tool_authorizations').get()).toEqual({
         status: 'revoked',
+      });
+      expect(database.prepare('SELECT status FROM llm_provider_steps').get()).toEqual({
+        status: 'interrupted',
       });
     });
   });

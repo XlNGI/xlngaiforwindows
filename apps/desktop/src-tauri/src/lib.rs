@@ -3062,8 +3062,8 @@ fn worker_request(
 }
 
 fn interrupt_native_agent_runtimes(app: tauri::AppHandle, exit_state: NativeRuntimeExitState) {
-    let generation_ids = app.state::<LlmStreamState>().interrupt_agent_runtimes();
-    if generation_ids.is_empty() {
+    let identities = app.state::<LlmStreamState>().interrupt_agent_runtimes();
+    if identities.is_empty() {
         exit_state.completed.store(true, Ordering::Release);
         app.exit(0);
         return;
@@ -3073,12 +3073,43 @@ fn interrupt_native_agent_runtimes(app: tauri::AppHandle, exit_state: NativeRunt
     let worker_exit_state = exit_state.clone();
     thread::spawn(move || {
         let worker = worker_app.state::<WorkerState>();
-        for generation_id in generation_ids {
+        for mut identity in identities {
+            let Some(generation_id) = identity
+                .get("generationId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let content = worker
+                .request(&serde_json::json!({
+                    "id": format!("native-agent-exit-read-{generation_id}"),
+                    "protocolVersion": 1,
+                    "method": "llm.generation.get",
+                    "params": { "generationId": generation_id },
+                }))
+                .ok()
+                .and_then(|response| response.get("result").cloned())
+                .and_then(|result| result.get("assistantMessage").cloned())
+                .and_then(|message| {
+                    message
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            identity["content"] = serde_json::Value::String(content);
+            identity["error"] = serde_json::Value::String(
+                "Generation was interrupted because the application is closing.".to_string(),
+            );
+            identity["retryable"] = serde_json::Value::Bool(true);
+            identity["failureKind"] = serde_json::Value::String("interrupted".to_string());
+            identity["usage"] = serde_json::Value::Null;
             let _ = worker.request(&serde_json::json!({
                 "id": format!("native-agent-exit-{generation_id}"),
                 "protocolVersion": 1,
-                "method": "llm.generation.cancel",
-                "params": { "generationId": generation_id },
+                "method": "llm.generation.fail",
+                "params": identity,
             }));
         }
         if !worker_exit_state.completed.swap(true, Ordering::AcqRel) {

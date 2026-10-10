@@ -2,7 +2,7 @@
 
 版本：0.7  
 日期：2026-08-16  
-状态：P0 决策与业务合同完成，P1 已实现，P2 已实现核心工具边界，P3 已实现意图/目标/章节锁与最小 Desktop 创作模式，P5 partial 采集/恢复基础已实现，P6 小说章节工作区与 Markdown/TXT/EPUB 导入基础已实现，P8 Markdown export v23/job 基础已实现；P3 Native runtime 恢复闭环及 P4-P9 其余工作待实施  
+状态：P0 决策与业务合同完成，P1 已实现，P2 已实现核心工具边界，P3/P6 已实现统一会话意图路由、章节目标 artifact、Desktop 章节定位刷新、章节查询/归档/恢复工具及应用退出 interrupted 持久化核心切片；P3 完整会话 CRUD、Native packaged-app 验收、真实 Provider 与 Windows 实机验收待完成，P5 partial 采集/恢复基础已实现，P6 小说章节工作区与 Markdown/TXT/EPUB 导入基础已实现，P8 Markdown export v23/job 基础已实现；P4、P7-P9 其余工作待实施  
 适用范围：Desktop、Tauri Native、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档定义“用户通过会话或小说工作区发出创作指令，Agent 自动生成可审阅章节草稿”的企业级业务逻辑与实施顺序。本文档只规划尚未完成的小说领域和真实 Provider 工具调用能力，不重复实现现有文档草稿、审核、发布、CAS、幂等、任务事件和不可变审计能力。
@@ -27,7 +27,7 @@
   -> 用户按需导出固定版本的 Markdown
 ```
 
-首期采用以下已确认原则，D1-D17 后续变更必须由用户明确提出：
+首期采用以下已确认原则，D1-D22 后续变更必须由用户明确提出：
 
 - 明确的“创建、续写、重写章节”指令自动生成草稿，不再要求用户点击“保存为草稿”；
 - 普通聊天不产生任何项目数据副作用；
@@ -42,6 +42,10 @@
 - 章节版本标题只保存章名；章节顺序使用 `position`，结构字段 `display_label` 支持“第十二章、序章、终章、番外一”等标签；
 - 项目资料默认排除章节正文，但所有内容继续复用统一文档版本和编辑器；
 - 面板或独立窗口关闭不取消后台任务；应用进程退出时持久化恢复状态，不启动脱离应用的守护进程。
+- 所有会话都可以提出小说意图；小说模式只是快捷入口，不是小说能力的唯一入口。
+- 自然语言只产生候选意图，Worker 的 Intent Gateway 才能决定执行、澄清或拒绝。
+- 只有明确的创建、续写、重写、修改、归档或恢复意图允许产生项目副作用；讨论、建议和“不要保存”保持零写入。
+- Agent 产物按 `projectId + chapterId` 等领域目标路由，禁止按标题、`document.kind` 或文档差集猜测页面。
 
 ## 2. 与现有计划的关系
 
@@ -180,6 +184,11 @@
 | D15 | 后台任务生命周期 | UI 视图关闭后继续；应用退出有界取消并保存恢复点；首期不创建脱离应用进程的后台服务 | 已确认 | P3 |
 | D16 | Markdown 多章导出的组织方式 | 每次导出创建不可变 job 目录和 manifest；默认输出多章文件目录，同时提供单一合并 Markdown 格式 | 已确认 | P8 |
 | D17 | Agent 文档 CRUD 的“删除”如何实现 | 明确用户意图下允许 Agent 归档/恢复；已发布或关键引用目标需用户确认；purge 永远只允许用户维护入口 | 已确认 | P2 |
+| D18 | 小说能力是否只能从小说模式进入 | 所有会话均可提出小说意图；小说模式保留为快捷入口，不是唯一入口 | 已确认 | P3 |
+| D19 | 自然语言是否直接决定业务路由 | 自然语言只产生候选意图；Worker Intent Gateway 进行最终裁决，目标不唯一或参数不足时进入 pending | 已确认 | P3 |
+| D20 | 哪些会话允许产生小说副作用 | 只有明确创建、续写、重写、修改、归档或恢复意图允许执行；讨论、建议和“不要保存”保持零写入 | 已确认 | P3 |
+| D21 | Agent 删除的统一语义 | 会话中的“删除章节/文档”统一解释为可恢复归档；硬删除永远只属于用户维护入口 | 已确认 | P2 |
+| D22 | 生成结果如何进入界面 | 使用项目和领域对象 ID（如 `chapterId`、`documentVersionId`）导航和刷新，禁止按标题、`document.kind` 或差集猜测页面 | 已确认 | P6 |
 
 ## 7. 术语
 
@@ -380,6 +389,16 @@ received -> chat
 ```
 
 它只解释意图，不执行工具。低置信度、目标不唯一或关键参数缺失时必须创建 `pending intent` 并返回澄清问题，不得预创建 Agent 任务、章节占位或正文草稿。用户回复后创建新的意图版本并将原 pending 记录原子转换为 `resolved`；取消、超时和项目切换分别进入 `cancelled`、`expired` 和 `invalidated`。
+
+统一会话入口的路由顺序固定为：
+
+1. 保存原始会话消息和当前项目作用域；
+2. 仅生成候选意图，不把“小说”“章节”等关键词当作最终路由；
+3. Worker 校验否定表达、动作、目标唯一性、项目可写性和模型能力；
+4. `allow` 时创建小说任务并冻结 `chapterId/documentId/baseVersionId`，`clarify` 时只创建 pending intent，`deny` 或普通讨论时只返回会话回答；
+5. 完成后返回领域产物目标，Desktop 通过目标 ID 打开小说工作区并刷新最新版本。
+
+小说 Agent 的公开意图集合为 `novel.chapter.list`、`novel.chapter.read`、`novel.chapter.create`、`novel.chapter.continue`、`novel.chapter.rewrite`、`novel.chapter.revise`、`novel.chapter.archive` 和 `novel.chapter.restore`。章节结构字段（卷、position、display label、生命周期）由 Worker 管理；Agent 只提交章名和正文草稿，不直接调用 UI 层的聚合保存接口。
 
 ### 11.2 PendingIntentService
 
@@ -970,6 +989,8 @@ idempotencyKey
 ## 15. 端到端业务流程
 
 ### 15.1 创建新章节
+
+“我要写一部小说”“我现在要写小说”等开放式目标进入普通会话，由模型继续询问题材和设定，不因缺少章名进入小说 pending。明确的新建章节指令提供章序（如“帮我生成第二章”）时，章名可以在正文生成后由模型提交，不因未预先填写章名而进入 pending。Worker 先预留带指定 `display_label` 的章节和临时标题“未命名章节”，首个 `novel.chapter.submit_draft` 同时保存正式章名与正文。明确章节创作但没有章序也没有章名的请求仍澄清目标；否定、目标不唯一和项目权限校验继续适用。
 
 1. Desktop 保存用户原始消息、conversation mode、页面作用域和可选 action hint。
 2. Worker 生成 `AgentIntentV1` 并执行策略校验。
@@ -1721,7 +1742,7 @@ export.completed
 
 ### P3：显式创作模式与 Agent 任务编排
 
-目标：在模型调用前确定意图、目标和副作用，并创建可恢复任务。
+目标：在模型调用前由统一会话 Intent Gateway 确定意图、目标和副作用，并创建可恢复任务。
 
 主要文件：
 
@@ -1738,7 +1759,10 @@ export.completed
 
 工作项：
 
-- 增加普通聊天/小说创作模式；创作模式中的明确文本指令直接执行，按钮只提供 action hint；
+- 所有会话均允许提出小说意图；普通聊天、小说模式和页面快捷入口统一进入 Intent Gateway，小说模式只作为快捷入口；
+- 自然语言只生成候选意图，Worker 最终判断 `chat/executable/pending/rejected`，否定表达优先；
+- 明确的创建、续写、重写和修改直接进入草稿任务，讨论、建议和“不要保存”保持零写入；
+- [x] 开放式写小说目标进入普通会话，明确章节操作继续走 Intent Gateway；Handler 路由回归及打包 Worker 隔离空项目验证通过（2026-10-10）；
 - 使用当前项目、卷和章节作为稳定作用域，作品由项目唯一确定；
 - 实现否定表达、目标唯一性和模型能力策略；
 - 明确指令自动允许草稿副作用，歧义请求持久化 `agent_pending_intents`；
@@ -1748,8 +1772,9 @@ export.completed
 - executable 时原子创建章节占位、空文档、Agent 任务和目标关联；pending 阶段不创建业务实体；
 - 建立应用级 Native runtime state 和 `start/subscribe/query/cancel`/有界事件补播；面板关闭只取消订阅，应用退出有界持久化 interrupted，项目重开重新订阅；
 - 用 `novel_chapter_task_locks` 的事务化唯一插入限制同章一个活动任务，并与项目级并发领取、单任务一个主产物在同一写事务中完成。
+- 返回结构化领域目标 artifact（`targetKind`, `chapterId`, `documentId`, `documentVersionId`），供 Desktop 按 ID 导航；
 
-测试门禁：普通聊天零写入、创作文本直接建任务、按钮 action hint、否定表达、pending 创建/回复/取消/过期/失效、pending 零业务写入、不支持 tools、只读项目、同项目但错 chapter/document/binding 的精确目标 FK mismatch、原子占位、重复提交、同章锁并发/终态释放/启动恢复、UI channel 断开、面板关闭、事件补播、应用退出恢复和项目切换通过。
+测试门禁：普通聊天零写入、任意会话的明确小说指令、按钮 action hint、否定表达、pending 创建/回复/取消/过期/失效、pending 零业务写入、不支持 tools、只读项目、同项目但错 chapter/document/binding 的精确目标 FK mismatch、原子占位、重复提交、同章锁并发/终态释放/启动恢复、UI channel 断开、面板关闭、事件补播、应用退出恢复、项目切换和按 chapterId 自动导航刷新通过。
 
 ### P4：Responses 原生工具调用循环
 
@@ -1829,14 +1854,16 @@ export.completed
 - 章节树按 position 排序并显示 display label 与版本章名；项目资料默认排除章节，提供“全部文档”筛选；
 - 提供文档 list/read、显式归档/恢复和已发布/关键引用确认卡；purge 只存在于用户维护入口；
 - 草稿成功后自动打开编辑器；
+- Agent 草稿成功后通过 `chapterId` 定位小说工作区、刷新章节树并读取最新正文；
+- 章节内容变更触发项目内小说工作区刷新，不依赖通用文档列表差集；
 - 当前编辑不中断、不强抢焦点；
 - 同一章节聚焦现有窗口；
 - 不同章节独立窗口互不影响；
 - 冲突、只读和项目切换有稳定 UI；
 - 按 D6 实现一次“发布”调用的原子自审、publication、权威指针和审计事务；
-- 将旧按钮定位为“从回复创建草稿”。
+- 将旧按钮定位为“从回复创建草稿”，不再把它作为 Agent 小说写入的唯一入口。
 
-测试门禁：导航排序、自动打开、焦点规则、多窗口、关闭/重开、项目切换、只读、冲突、窄屏、长标题和键盘操作通过；Windows 实机验收记录完成。
+测试门禁：导航排序、按领域目标自动打开、内容变更刷新、焦点规则、多窗口、关闭/重开、项目切换、只读、冲突、窄屏、长标题和键盘操作通过；Windows 实机验收记录完成。
 
 ### P7：小说上下文、摘要与一致性
 
@@ -2065,10 +2092,10 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 - [x] P0 产品决策与 ADR 冻结
 - [x] P1 小说领域与 Schema v20（原计划 v15，因通用计划已推进至 v19 顺延）
 - [x] P2 Agent Intent、Tool Schema 与 Tool Gateway（核心小说草稿工具边界；确认/领域目标迁移随 P3）
-- [ ] P3 显式创作模式与任务编排（核心编排已实现，Native runtime 恢复闭环待完成）
+- [ ] P3 统一会话 Intent Gateway 与任务编排（统一会话路由、领域产物目标、章节查询/归档/恢复工具、退出中断持久化与 Worker 重启恢复已有核心切片；完整会话 CRUD 和 Native packaged-app 验收待完成）
 - [ ] P4 Responses 原生工具调用循环
 - [ ] P5 章节草稿自动落库与失败恢复（partial 采集、恢复、丢弃、过期基础已实现，完整重启/取消/UI 待完成）
-- [ ] P6 小说工作区与编辑器闭环（新建、导入、搜索、查看、CAS 编辑、软删除/恢复及“保存并切片”主流程已实现；多窗口与实机验收待完成）
+- [ ] P6 小说工作区与编辑器闭环（新建、导入、搜索、查看、CAS 编辑、软删除/恢复、“保存并切片”、Agent 按章节目标自动定位刷新及页面内容隔离核心流程已实现；多窗口与实机验收待完成）
 - [ ] P7 小说上下文、摘要与一致性（Schema v30 本地切片、旧项目回填、已保存草稿检索、摘要缓存、动态预算和一致性报告已实现；向量召回与长篇性能验收待完成）
 - [ ] P8 Markdown 导出与同项目短剧改编（v23 export job/item、files/merged、路径/输出完整性和 adaptation proposal 基础已实现；Windows 句柄竞态与完整人工验收待完成）
 - [ ] P9 企业级硬化与发布门禁
@@ -2077,7 +2104,9 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 只有以下条件全部满足，本计划才可标记完成：
 
-- 用户明确写作指令能自动生成章节草稿并打开编辑器；
+- 任意会话中的明确写作指令能自动生成章节草稿，并按 `chapterId` 打开小说工作区对应章节；
+- 生成完成后章节树和正文读取到最新 `documentVersionId`，不会落入剧本或普通文档页面；
+- 目标不明确时只产生 pending intent，普通讨论和否定请求保持零业务写入；
 - 创作模式纯文本指令可直接执行，歧义请求通过 pending intent 澄清且保持零业务副作用；
 - 普通聊天和否定请求在自动化测试中保持零业务写入；
 - Provider 使用真实原生工具调用，不解析普通文本伪造工具；
@@ -2098,6 +2127,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 | 日期 | 阶段 | 状态 | 验证命令/证据 | 未验证边界 | 负责人 |
 |---|---|---|---|---|---|
+| 2026-10-10 | P6 页面内容边界修复 | 核心切片完成 | 制作页独占可见工作区，项目编辑器隐藏并保留未保存内容，制作页与项目页分别保存布局；浮动文档不覆盖制作页；剧本与角色页过滤当前文档的页面归属，并禁用异页文档的保存/发布/分离操作；小说页移除通用文档入口，任务日志章节产物按 `documentId` 对应的 `chapterId` 回到小说页。Desktop 全套测试 261 项、typecheck、相关源文件 ESLint、Prettier、`git diff --check`、`pnpm.cmd tauri:build`（Release/x64 NSIS）及 Release Native preflight（窗口/Worker 启动、优雅退出/Worker 清理）通过；Playwright 使用隔离 RPC 测试数据在 1440x900、1280x720、390x844 验证小说/制作切换、未保存修改保留、正文隔离和无页面异常，截图与报告在 `.m2-ui-page-boundaries/`。 | 本次未重新执行安装/卸载烟测，避免影响现有安装目录；真实 Provider、多窗口人工验收及 P6 剩余项目仍未完成；全仓 lint 仍有既有 App.test/TaskPlan 三项错误。 | Codex |
 | 2026-08-28 | P6/P7 小说草稿 CRUD 与本地 RAG | 部分完成 | Schema v30 新增 `novel_rag_chunks` 及项目/章节/版本归属触发器；导入、用户保存、Agent 修订和版本恢复在正文事务内替换当前切片；v29 升级自动回填。小说上下文改为检索当前已保存草稿切片，短剧仅使用用户所选章节；Desktop 主流程提供新建、导入、标题搜索、查看、编辑、软删除/恢复和切片状态。Persistence 23 项、Worker 236 项、Desktop 148 项测试通过，三端聚焦 typecheck 通过。 | 当前召回为确定性本地词项相关性 + 首尾锚点，尚未接入 embedding/向量索引；长篇性能、真实 Windows Tauri、多窗口并发与正式发布门禁待验收。 | Codex |
 | 2026-08-19 | P3 Native runtime event replay slice | Partial | Added `agent.task.events` contract, project-scoped Worker query with cursor and bounded paging, request validation and handler dispatch; Desktop Native Agent generation now polls by task ID and clears the subscription on terminal state. Worker/Desktop focused tests and typechecks passed. | Native runtime start/subscribe/query/cancel, bounded interrupted recovery on app exit, real Provider and Windows acceptance remain open. | Codex |
 | 2026-08-19 | P5 partial cleanup audit slice | Partial | Partial expiry now uses the planned 7-day default and emits a task event without正文泄露; focused partial-artifact tests cover expiry state and audit summary. Worker typecheck and focused tests passed. | Tool-linked partials, complete restart/recovery races, cleanup accounting audit and full cancellation semantics remain open. | Codex |
@@ -2118,6 +2148,11 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-16 | 计划审计 | 完成 | 审阅 Contracts、GenerationService、DocumentWorkflowService、ContextService、Schema v13 和 Native LLM stream | 真实 Provider 工具调用尚未实现 | Codex |
 | 2026-08-16 | P0 决策登记 | 完成 | D1-D17 全部确认；本文第 5-9、12-23 节固化项目/作品、命名、binding、约束、pending、受控 CRUD、后台任务、自审发布和导出合同 | 代码和跨计划实现仍由 P1-P9 执行 | 用户 / Codex |
 | 2026-08-16 | P0 | 完成 | 决策表、CRUD 矩阵、不变量、迁移顺序、阶段门禁和完成定义已同步 | 尚未开始代码实现 | Codex |
+| 2026-10-08 | P3/P6 | 计划调整 | 用户确认统一会话驱动小说 Agent：新增 D18-D22；Intent Gateway 负责最终裁决，明确意图才产生副作用，删除统一解释为可恢复归档，结果按领域对象 ID 导航；补充章节目标 artifact、自动定位、内容变更刷新和冲突验收标准 | 统一会话路由、章节专用归档/恢复、Native runtime 重启恢复、真实 Provider 和 Windows 实机验收仍待完成 | Codex |
+| 2026-10-08 | P3/P6 | 核心切片完成 | Worker 已将所有会话的明确小说写作请求送入 Intent Gateway，pending/否定请求保持零业务写入；任务详情返回 `targetKind/chapterId/documentId/documentVersionId`，Desktop 按章节目标刷新小说工作区；普通文档任务继续使用文档列表刷新。Contracts build、Worker 编排/Handler 39 项、Desktop App/NovelWorkspace 53 项和 Desktop typecheck 通过 | 会话中的小说查询/归档/恢复工具、Native runtime 重启恢复、真实 Provider 和 Windows 实机验收仍待完成 | Codex |
+| 2026-10-10 | P3 | 章节会话工具核心切片完成 | 新增 Worker Agent 工具 `novel.chapter.list`、`novel.chapter.archive`、`novel.chapter.restore`；列表只返回有界章节元数据，归档/恢复复用 `NovelService` 的项目隔离与 `rowVersion` CAS，并统一走一次性用户确认；补充否定请求不授权、跨项目目标拒绝、过期版本拒绝和确认重放拒绝回归。Worker 聚焦 AgentSystem/ProviderLoop 测试 81 项、Worker typecheck、相关文件 Prettier 检查通过 | Native runtime 重启恢复、完整小说会话 CRUD、真实 Provider 和 Windows 实机验收仍待完成；仓库级 lint 仍有既有 Desktop/TaskPlan 错误 | Codex |
+| 2026-10-10 | P3/P5 | 小说空正文与任务误完成修复 | 只读核对用户项目：本次任务仅执行 `library.search/read`，没有章节版本，却被标为 completed/read-only 并遗留 reserved 占位。新增章节保存要求和终态校验，必须由本任务成功调用 `novel.chapter.submit_draft` 写入冻结目标；新章首次保存允许空基础版本，并保留 rowVersion/基础版本 CAS；预创建任务补齐源消息与上下文快照关联；失败、取消和中断时仅归档没有任何版本的 reserved 占位。章名解析不再把完整创作请求当成标题，缺标题进入 pending 且不建空章。聚焦 159 项、Worker 全套 477 项、Desktop 全套 261 项、全仓 typecheck、相关文件 ESLint/Prettier、`git diff --check` 和 `pnpm.cmd tauri:build`（Release/x64 NSIS）通过；覆盖 Responses/Chat Completions 首次落稿、续写/重写无新版本、Pi 检索后反问/成功保存、用户并发修改和占位清理。 | 未调用用户真实 Provider，未修改用户项目数据；P3/P5 整体不标完成。首轮全仓 test 因素材页既有测试超时停止，Desktop 限制 2 个并发测试进程复跑全部通过，Worker 独立全套通过；全仓 lint 仍有既有 App.test/TaskPlan 三项错误。 | Codex |
+| 2026-10-10 | P3 | Native 退出中断与恢复核心切片完成 | Tauri 退出时标记 Native Agent transport 为中断、取消 Provider 请求，由 Worker 保存当前回复、采集可恢复 partial、失败 generation 并撤销 step 授权；活动 Provider step 标记 `interrupted`，Agent task 标记可重试失败。Worker 重启按已有 step/task/tool 事实收敛活动任务，不重放状态不明的工具调用。Desktop 为关联 Agent task 的失败消息隐藏普通 generation 重试，明确重新提交会创建新任务，并保留任务日志恢复入口。Worker 全套测试 465 项、Desktop 全套测试 250 项、Rust Native stream 29 项、Worker/Desktop typecheck、Contracts build、Prettier、`cargo fmt --check`、`git diff --check`、`pnpm.cmd tauri:build`（Release/x64 NSIS）、`validate-nsis-install.ps1`（干净安装/启动/优雅关闭/Worker 清理/卸载）、Release Native preflight（窗口/Worker/优雅关闭）、`validate:m4-sidecar` 和 `validate:m7-sidecar` 通过 | Windows packaged-app 强退恢复、多窗口故障注入、窗口尺寸/分离面板人工验收、真实 Provider 和完整会话 CRUD 待完成 | Codex |
 | 2026-08-19 | P1 小说领域与 Schema v20 | 完成 | 新增一对一 `novel_profiles`、卷、章节、非章节 `document_bindings`、旧文档固定 scope/kind 映射；章节位置 partial unique 与事务化重排；Worker `NovelService` 提供懒初始化、CAS CRUD、归档/恢复、binding；章节发布由 SQLite trigger 生成不可变结构快照。`pnpm.cmd --filter @ai-video/persistence test`（22 项）、`pnpm.cmd --filter @ai-video/worker test -- novel-service.test.ts project-service.test.ts`（177 项总套件通过）、Worker typecheck 通过 | Windows 原生小说工作区 UI、P3-P9 仍未实施；v20 迁移已通过新库及旧 v1-v13 fixture 完整性测试 | Codex |
 | 2026-08-19 | P2 小说 Agent 工具核心切片 | 完成 | Contracts/请求校验新增 `novel.chapter.submit_draft` 与 `novel.reference.submit_draft`；Native Provider tool registry 使用严格 `additionalProperties=false` Schema；Worker 复用 step-local authorization、参数规范化 hash、scoped provider-call 去重和 CAS；chapter 工具强制目标 document 必须精确映射 `novel_chapters.document_id`，reference 工具仅允许已授权资料文档。Agent loop 测试覆盖 14 个文件/178 项总套件通过，Worker typecheck 通过 | P3 尚未接入结构化小说意图、pending intent、`agent_task_targets`、chapter locks、桌面创作模式和真实 Provider 工具链；P2 的完整 archive/restore confirmation 仍复用通用文档路径 | Codex |
 | 2026-08-19 | P3 意图与任务编排核心 | 部分完成 | Schema v21 新增 `agent_pending_intents`、`agent_task_targets`、`novel_chapter_task_locks` 与工具目标字段/触发器；Worker 在 generation 之前原子创建章节占位、任务目标与同章锁，歧义/否定请求只持久化 pending，任务终态释放锁；小说工具调用对 v21 task 执行精确 chapter/document target 校验。Desktop 增加持久化的会话/文档/小说创作模式，小说创作文字请求直达 Worker，创建章节动作只提供目标 hint。Persistence 22 项、Worker 181 项、Desktop 101 项测试及三端 typecheck 通过 | Native runtime 的 start/subscribe/query/cancel、事件补播、应用退出 interrupted 恢复、完整章节树/自动打开编辑器和 Windows 实机验收仍待完成；P3 不标记完成 | Codex |
@@ -2128,6 +2163,10 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 2026-08-19 | P7 小说上下文、摘要与一致性基础 | 部分完成 | Schema v25 新增 `novel_chapter_summaries`，已发布章节按内容 hash/version 生成确定性摘要并由 publication trigger 标记旧摘要 stale；小说 Agent generation 使用专用 system instruction。上下文默认预算按来源规模和选中章节数动态计算，章节选择聚焦最新章节、前四章和会话命中的相关章节；新增只读 `novel.context.consistencyReport` Worker 查询。`pnpm.cmd test`（全仓通过，Worker 197 项）、`pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`cargo fmt --check`、`git diff --check` 均通过 | 章节相关性仍为确定性标题命中，尚未完成任务意图驱动选择、长篇性能基准、完整一致性规则和 Desktop context.preview 展示增强 | Codex |
 | 2026-08-23 | P6 工作区关闭与 Markdown 小说导入基础 | 部分完成 | 停靠文档/会话面板提供明确关闭按钮，文档未保存关闭保留确认流程；小说工作区支持多选 Markdown、按 H1/H2 预览拆章、可选卷名、事务化导入 profile/volume/chapter/document/draft version，并校验 1 MiB 单章、32 MiB 总量和内容 hash。新增解析、持久化、回滚、UI 交互和 IPC 边界测试；全仓 JS/TS 测试 395 项、Rust 测试 55 项及类型/Lint/格式/构建门禁通过；sidecar、M4/M7 校验、Tauri Release/NSIS 构建、干净安装启动/优雅退出/卸载和同包覆盖烟测通过 | 原生多窗口人工验收、Native runtime 崩溃恢复、真实 Provider、正式签名/SmartScreen、真实旧版本升级和干净 Windows 虚拟机仍待完成；同包覆盖烟测不替代上一正式版本升级；P3-P9 不标记全部完成 | Codex |
 | 2026-08-24 | P6 TXT/EPUB 小说导入 | 部分完成 | 小说工作区“导入小说”现支持 `.md`/`.markdown`/`.txt`/`.epub` 多选：Tauri 原生新增 `novel_import` 命令（TXT 支持 UTF-8/UTF-16 BOM/GB18030 解码，32 MiB 上限；EPUB 按 container/OPF/spine 解析 XHTML 转 Markdown，64 MiB 上限，标题取 OPF `dc:title`，缺 H1 时用 XHTML `<title>` 补 `#` 标题，无标题时按 spine 顺序补 `# 第 N 章`）；前端拆章以 `第*章` 为主判断（出现 `第*章` 就只按它切分，正文中的 `（一）/一、` 不误判），支持「章名行 + `第*章` 编号行」两行式标题（如 `我叫白三妮` + `　　第一章`）自动合并，避免把下一章章名切进上一章正文；无 `第*章` 时才用 `normalizeNovelText` 宽泛标记（`（一）/一、/1./Chapter One/上篇/第二部` 等）兜底；前端新增 `readNovelDocument` 客户端与 `normalizeNovelText`（把纯文本章节标记提升为 `#` 标题）/ `parseNovelSource` 拆章。新增 Rust 5 项解析测试与 Desktop 组件/单测；`cargo test novel_import`、Desktop 131 项 vitest、typecheck、lint、prettier、`cargo fmt --check` 通过 | 真实下载的 EPUB/TXT 语料人工验收、EPUB3 nav 目录解析、超大/加密 EPUB，以及 P6 剩余人工验收仍待完成 | Codex |
+| 2026-10-10 | P3 | 编号章节请求被标题校验拦截的修复 | 只读项目记录确认“帮我生成第二章”在 Provider 调用前因缺章名进入 `TARGET_REQUIRED`。明确指定 `displayLabel` 的新建请求现在允许先预留临时标题，模型保存正文时提交正式章名；未指定章序与章名的请求仍保持 pending。章号识别覆盖中文、数字和带空格的任意章号，否定生成仍零业务写入。聚焦 135 项、Worker 全套 485 项、全仓 typecheck、相关文件 ESLint/Prettier、`git diff --check` 和 `pnpm.cmd tauri:build`（Release/x64 NSIS）通过；Responses/Chat Completions 回归验证第二章正式章名和正文落库、章序保留及第一章版本不变。 | 未调用真实 Provider，未修改用户项目数据；P3 整体不标完成。 | Codex |
+| 2026-10-10 | P3 | 开放式小说目标路由修复 | “我要写一部小说”“我现在要写小说”“我想写个故事”“想创作一本小说”及带题材的开放式目标回到普通会话，由模型继续询问题材和设定；新建章节候选要求明确章节信号，编号、章名、续写和重写请求保留原路由。Handler 51 项、Worker 全套 496 项、全仓 typecheck、相关文件 ESLint/Prettier、`git diff --check` 及 `pnpm.cmd tauri:build`（Release/x64 NSIS）通过；打包 Worker 隔离空项目 RPC 验证 4 种开放式表达均返回 `started/document`，章节、文档、pending intent 和章节目标记录均为 0，脚本和证据保存在 `.m2-ui-novel-open-goal/`。 | 未调用真实 Provider，未修改用户项目数据；未重复安装/卸载和人工 UI 验收；P3 整体不标完成。 | Codex |
+| 2026-10-10 | P6/P3 | 小说资料归属与页面隔离修复 | 小说大纲/人物设定/世界观/时间线/风格指南等 Agent 资料请求现在保存为 `document_bindings.domain_scope='novel'`，仍复用同一套 `documents/document_versions`；文档摘要返回 `domainScope/bindingRole`，剧本/角色页排除小说资料，小说页新增“小说资料”目录与编辑器。任务日志和 `novel-reference` 检索引用按文档 ID 回到小说页；已有项目大纲可用“移至小说资料”迁移，保存正文和版本历史不变。新增 Worker 资料分类与实际工具落库回归，Worker 497 项、Desktop 261 项、两端 typecheck、相关 ESLint/Prettier、`git diff --check` 通过；Release/x64 NSIS 安装包已构建，SHA256 为 `157D69F4928BA0046027853ED0606E621C01E74757EBD119C94D0AA89EA24719`。 | 未调用真实 Provider，未修改用户项目数据；Windows 人工多窗口验收仍待完成。 | Codex |
+| 2026-10-10 | P3/P6 | 章节草稿缺失追问恢复修复 | “第二章我没有看到草稿”“找不到刚才生成的正文”等明确章节草稿恢复追问现在路由到小说章节写入任务，不再降级为只读 `document.list`；小说 Agent 指令要求优先从当前会话恢复上一条完整正文并调用 `novel.chapter.submit_draft` 保存，只有上下文没有正文时才重新生成。新增 Handler 路由回归，Worker 501 项全套测试、typecheck、相关 ESLint/Prettier、`git diff --check` 通过；Release/x64 NSIS 安装包已重新构建，SHA256 为 `907CE4E490E0E3E1AFAB0971703558913859758C5A766B505C667371D11F3945`。 | 未调用真实 Provider，未修改用户项目数据；Windows 人工多窗口验收仍待完成。 | Codex |
 | 待填写 | P2 | 未开始 |  |  |  |
 | 待填写 | P3 | 未开始 |  |  |  |
 | 待填写 | P4 | 未开始 |  |  |  |

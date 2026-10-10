@@ -481,14 +481,17 @@ export function ChatPanel({
       </div>
       <div className="message-list" ref={messageListRef}>
         {canLoadEarlierMessages && (
-          <div className="load-earlier-container" style={{ display: "flex", justifyContent: "center", padding: "8px" }}>
+          <div
+            className="load-earlier-container"
+            style={{ display: 'flex', justifyContent: 'center', padding: '8px' }}
+          >
             <button
               className="button subtle"
               type="button"
               disabled={loadingEarlierMessages}
               onClick={onLoadEarlierMessages}
             >
-              {loadingEarlierMessages ? "正在加载更早消息…" : "加载更早历史消息"}
+              {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早历史消息'}
             </button>
           </div>
         )}
@@ -540,6 +543,7 @@ export function ChatPanel({
                 <p>{message.content}</p>
                 {message.role === 'assistant' &&
                   message.status === 'failed' &&
+                  !timelineByMessageId.has(message.id) &&
                   (generation?.assistantMessage.id !== message.id ||
                     generation.retryable !== false) &&
                   (llmStatus?.configured || llmProfiles.length > 0) && (
@@ -698,7 +702,8 @@ export function ChatPanel({
             <ul className="agent-confirmation-entities" aria-label="受影响对象">
               {displayedConfirmation.affectedEntities.map((entity) => (
                 <li key={`${entity.type}:${entity.id}`}>
-                  {entity.label || entity.id} <small>({entity.type})</small>
+                  {entity.label || entity.id}{' '}
+                  <small>({entity.type === 'novel-chapter' ? '小说章节' : entity.type})</small>
                 </li>
               ))}
             </ul>
@@ -794,7 +799,11 @@ export function ChatPanel({
       )}
       {agentTask?.task.status === 'failed' && agentTask.task.retryable && (
         <div className="agent-recovery-notice" role="status">
-          <span>上次 Agent 任务未完成；可以重试，或先在任务日志中恢复未完成产物。</span>
+          <span>
+            {agentTask.task.errorCode === 'interrupted'
+              ? '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或在任务日志中恢复未完成产物。'
+              : '上次 Agent 任务未完成；可以重新提交请求以创建新任务，或先在任务日志中恢复未完成产物。'}
+          </span>
           {onOpenTaskLog && (
             <button type="button" className="button secondary" onClick={onOpenTaskLog}>
               查看任务日志
@@ -922,8 +931,8 @@ export function ChatPanel({
             isArchived
               ? '当前会话已归档，处于只读状态'
               : conversation
-              ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
-              : '请先新建会话'
+                ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
+                : '请先新建会话'
           }
           rows={3}
           value={composer}
@@ -991,7 +1000,9 @@ export function ChatPanel({
               type="button"
               title="发送消息"
               onClick={onSendMessage}
-              disabled={(!composer.trim() && attachments.length === 0) || !conversation || isArchived}
+              disabled={
+                (!composer.trim() && attachments.length === 0) || !conversation || isArchived
+              }
             >
               <ChevronRight size={18} />
             </button>
@@ -1026,6 +1037,9 @@ function policyRejectionDetail(summary: string): string {
 
 function readableAgentTaskError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  if (/application is closing|worker was restarting/i.test(error)) {
+    return '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或恢复未完成产物。';
+  }
   if (error.includes('AGENT_DOCUMENT_NOT_WRITTEN')) {
     return '助手尚未将文档保存到项目，本次任务未完成。请重试保存。';
   }

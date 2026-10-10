@@ -11,6 +11,8 @@ import {
   Plus,
   RotateCcw,
   Search,
+  SlidersHorizontal,
+  Tags,
   Trash2,
   Archive,
   CheckSquare,
@@ -56,6 +58,10 @@ function mediaSrcFor(assetId: string, absolutePath: string): string | undefined 
   }
 }
 
+function normalizeTagName(value: string) {
+  return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
 export function AssetLibraryView({
   writable,
   selectedAssetId,
@@ -84,13 +90,33 @@ export function AssetLibraryView({
   const [tagManagerOpen, setTagManagerOpen] = useState(false);
   const [newTagName, setNewTagName] = useState('');
   const [editingTag, setEditingTag] = useState<AssetTagInfo>();
+  const [tagDraft, setTagDraft] = useState('');
   const [groupEditor, setGroupEditor] = useState<Partial<AssetGroupInfo>>();
+  const [groupDropActive, setGroupDropActive] = useState(false);
+  const [pointerDraggingIds, setPointerDraggingIds] = useState<string[]>([]);
   const [bulkTagId, setBulkTagId] = useState('');
   const selectionAnchor = useRef<string | undefined>(undefined);
+  const groupMembersRef = useRef<HTMLFieldSetElement>(null);
+  const pointerDragRef = useRef<
+    | {
+        pointerId: number;
+        assetIds: string[];
+        startX: number;
+        startY: number;
+        active: boolean;
+      }
+    | undefined
+  >(undefined);
+  const suppressCardClickRef = useRef(false);
+  const tagCommitRef = useRef(false);
   const [aliasSavedId, setAliasSavedId] = useState<string | null>(null);
 
   const kind = mediaFilter === 'all' ? undefined : mediaFilter;
   const selected = assets.find((asset) => asset.id === selectedIds.at(-1));
+
+  useEffect(() => {
+    setTagDraft('');
+  }, [selected?.id]);
 
   const loadTags = useCallback(async (filter = '') => {
     const result = await callWorker('tag.list', { keyword: filter || undefined });
@@ -112,6 +138,40 @@ export function AssetLibraryView({
 
   const loadAssets = useCallback(
     async (append = false) => {
+      if (selectedGroupId) {
+        const grouped = await callWorker('assetGroup.resolve', { groupId: selectedGroupId });
+        const from = createdFrom ? new Date(`${createdFrom}T00:00:00`).toISOString() : undefined;
+        const to = createdTo ? new Date(`${createdTo}T23:59:59.999`).toISOString() : undefined;
+        const filtered = grouped
+          .filter((asset) => {
+            if (kind && !asset.kind.includes(kind)) return false;
+            if (from && asset.createdAt < from) return false;
+            if (to && asset.createdAt > to) return false;
+            if (
+              keyword &&
+              !`${displayName(asset)} ${asset.relativePath} ${(asset.tags ?? []).map((tag) => tag.name).join(' ')}`
+                .toLocaleLowerCase()
+                .includes(keyword.toLocaleLowerCase())
+            )
+              return false;
+            return true;
+          })
+          .sort((a, b) => {
+            const direction = sort === 'created-asc' ? 1 : -1;
+            return direction * (a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+          });
+        setAssets(filtered);
+        setHasMore(false);
+        if (!append)
+          setSelectedIds((current) =>
+            current.length && filtered.some((asset) => asset.id === current.at(-1))
+              ? current
+              : filtered[0]
+                ? [filtered[0].id]
+                : [],
+          );
+        return;
+      }
       const cursor = append && assets.length ? cursorFor(assets.at(-1)!) : undefined;
       const result = await callWorker('asset.list', {
         keyword: keyword || undefined,
@@ -135,7 +195,7 @@ export function AssetLibraryView({
         });
       }
     },
-    [assets, createdFrom, createdTo, keyword, kind, showTrash, sort, tagFilter],
+    [assets, createdFrom, createdTo, keyword, kind, selectedGroupId, showTrash, sort, tagFilter],
   );
 
   useEffect(() => {
@@ -215,9 +275,76 @@ export function AssetLibraryView({
         createdAt,
       })),
     };
-    event.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload));
-    event.dataTransfer.setData('text/plain', JSON.stringify(payload));
+    const serialized = JSON.stringify(payload);
+    event.dataTransfer.setData('text/plain', serialized);
+    try {
+      event.dataTransfer.setData(DRAG_MIME, serialized);
+    } catch {
+      // Some Windows WebView versions only allow standard drag data types.
+    }
     event.dataTransfer.effectAllowed = 'copy';
+  };
+
+  const pointInGroupMembers = (clientX: number, clientY: number) => {
+    const rect = groupMembersRef.current?.getBoundingClientRect();
+    return Boolean(
+      rect &&
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom,
+    );
+  };
+
+  const resetPointerDrag = () => {
+    pointerDragRef.current = undefined;
+    setPointerDraggingIds([]);
+    setGroupDropActive(false);
+  };
+
+  const beginPointerGroupDrag = (event: React.PointerEvent<HTMLDivElement>, items: AssetInfo[]) => {
+    if (!groupEditor || event.button !== 0) return;
+    if ((event.target as Element).closest('button, input, select, textarea, video')) return;
+    pointerDragRef.current = {
+      pointerId: event.pointerId,
+      assetIds: items.map((item) => item.id),
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const updatePointerGroupDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 6) {
+      drag.active = true;
+      setPointerDraggingIds(drag.assetIds);
+    }
+    if (!drag.active) return;
+    event.preventDefault();
+    setGroupDropActive(pointInGroupMembers(event.clientX, event.clientY));
+  };
+
+  const finishPointerGroupDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.active) {
+      suppressCardClickRef.current = true;
+      if (pointInGroupMembers(event.clientX, event.clientY)) {
+        setGroupEditor((current) =>
+          current
+            ? {
+                ...current,
+                assetIds: [...new Set([...(current.assetIds ?? []), ...drag.assetIds])],
+              }
+            : current,
+        );
+      }
+      event.preventDefault();
+    }
+    resetPointerDrag();
   };
 
   const selectAsset = (event: React.MouseEvent, asset: AssetInfo) => {
@@ -298,13 +425,39 @@ export function AssetLibraryView({
     await reloadCurrent();
   };
 
+  const addTagToSelectedAsset = async () => {
+    if (!selected || !writable || showTrash || tagCommitRef.current) return;
+    const name = tagDraft.normalize('NFKC').trim().replace(/\s+/g, ' ');
+    if (!name) return;
+    tagCommitRef.current = true;
+    setTagDraft('');
+    const normalizedName = normalizeTagName(name);
+    try {
+      const existing = tags.find((tag) => normalizeTagName(tag.name) === normalizedName);
+      const tag = existing ?? (await callWorker('tag.create', { name }));
+      const currentTagIds = selected.tags?.map((tag) => tag.id) ?? [];
+      if (!currentTagIds.includes(tag.id)) {
+        await callWorker('asset.tags.add', {
+          assetIds: [selected.id],
+          tagIds: [tag.id],
+        });
+        await reloadCurrent();
+      }
+    } catch (error) {
+      setTagDraft(name);
+      throw error;
+    } finally {
+      tagCommitRef.current = false;
+    }
+  };
+
   const saveGroup = async () => {
     const name = groupEditor?.name?.trim();
-    const tagIds = groupEditor?.tagIds ?? [];
-    if (!name || !tagIds.length) return;
+    const assetIds = groupEditor?.assetIds ?? [];
+    if (!name || !assetIds.length) return;
     if (groupEditor?.id)
-      await callWorker('assetGroup.update', { groupId: groupEditor.id, name, tagIds });
-    else await callWorker('assetGroup.create', { name, tagIds });
+      await callWorker('assetGroup.update', { groupId: groupEditor.id, name, assetIds });
+    else await callWorker('assetGroup.create', { name, assetIds });
     setGroupEditor(undefined);
     await loadGroups();
   };
@@ -332,15 +485,8 @@ export function AssetLibraryView({
   return (
     <div className="asset-library-shell asset-library-opt-theme">
       <section className="asset-library-main">
-        <header className="asset-library-toolbar opt-top-header">
-          <div className="opt-title-zone">
-            <Archive size={18} className="opt-title-icon" />
-            <h1>{showTrash ? '回收站' : '素材库'}</h1>
-            <span className="opt-scope-badge">
-              当前项目{assets[0]?.projectId ? `: ${assets[0].projectId}` : ''}
-            </span>
-          </div>
-          <div className="opt-toolbar-center">
+        <div className="asset-filter-bar opt-subbar">
+          <div className="opt-filter-leading">
             <label className="asset-search opt-search-wrap">
               <Search size={15} />
               <input
@@ -350,250 +496,296 @@ export function AssetLibraryView({
                 placeholder="搜索别名、文件名或标签"
               />
             </label>
-            {!showTrash && (
-              <details className="asset-filter-menu asset-manager-menu opt-group-menu">
-                <summary className="opt-compact-btn opt-group-trigger">
-                  <FolderOpen size={14} style={{ color: '#fbbf24' }} />
-                  <span>
-                    素材组{selectedGroupId ? ' (1)' : groups.length ? ` (${groups.length})` : ''}
-                  </span>
-                  <ChevronDown size={13} />
-                </summary>
-                <div className="opt-group-dropdown">
-                  <button
-                    type="button"
-                    className={
-                      !selectedGroupId ? 'asset-filter-choice active' : 'asset-filter-choice'
-                    }
-                    onClick={() => selectGroup()}
-                  >
-                    全部素材组
-                  </button>
-                  {groups.map((group) => (
-                    <div
-                      className="asset-filter-option"
-                      key={group.id}
-                      draggable={Boolean(groupAssets[group.id]?.length)}
-                      onDragStart={(event) =>
-                        beginDrag(event, groupAssets[group.id] ?? [], 'asset-group', group.id)
-                      }
+            <details className="asset-filter-menu asset-manager-menu opt-filter-menu">
+              <summary className="opt-compact-btn opt-filter-trigger">
+                <SlidersHorizontal size={14} />
+                <span>筛选</span>
+                {(mediaFilter !== 'all' || selectedGroupId || createdFrom || createdTo) && (
+                  <small>已选</small>
+                )}
+                <ChevronDown size={13} />
+              </summary>
+              <div className="opt-filter-dropdown">
+                <section className="opt-filter-section">
+                  <span className="opt-filter-section-label">时间</span>
+                  <div className="opt-filter-date-row">
+                    <label>
+                      <span>起始日期</span>
+                      <input
+                        aria-label="起始日期"
+                        type="date"
+                        value={createdFrom}
+                        onChange={(event) => setCreatedFrom(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>结束日期</span>
+                      <input
+                        aria-label="结束日期"
+                        type="date"
+                        value={createdTo}
+                        onChange={(event) => setCreatedTo(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                </section>
+                <section className="opt-filter-section">
+                  <span className="opt-filter-section-label">类型</span>
+                  <label className="asset-type-select opt-type-select-accessible">
+                    {mediaFilter === 'image' ? (
+                      <Image size={14} />
+                    ) : mediaFilter === 'video' ? (
+                      <Video size={14} />
+                    ) : (
+                      <Images size={14} />
+                    )}
+                    <span aria-hidden="true">
+                      {mediaFilter === 'image'
+                        ? '图片'
+                        : mediaFilter === 'video'
+                          ? '视频'
+                          : '全部素材'}
+                    </span>
+                    <select
+                      aria-label="素材类型"
+                      value={mediaFilter}
+                      onChange={(event) => setMediaFilter(event.target.value as MediaFilter)}
                     >
-                      <button
-                        type="button"
-                        className={
-                          selectedGroupId === group.id
-                            ? 'asset-filter-choice active'
-                            : 'asset-filter-choice'
+                      <option value="all">全部素材</option>
+                      <option value="image">图片</option>
+                      <option value="video">视频</option>
+                    </select>
+                    <ChevronDown size={13} />
+                  </label>
+                </section>
+                {!showTrash && (
+                  <section className="opt-filter-section">
+                    <span className="opt-filter-section-label">素材组</span>
+                    <button
+                      type="button"
+                      className={
+                        !selectedGroupId ? 'asset-filter-choice active' : 'asset-filter-choice'
+                      }
+                      onClick={() => selectGroup()}
+                    >
+                      全部素材组
+                    </button>
+                    {groups.map((group) => (
+                      <div
+                        className="asset-filter-option"
+                        key={group.id}
+                        draggable={Boolean(groupAssets[group.id]?.length)}
+                        onDragStart={(event) =>
+                          beginDrag(event, groupAssets[group.id] ?? [], 'asset-group', group.id)
                         }
-                        onClick={() => selectGroup(group)}
                       >
-                        <span>{group.name}</span>
-                        <small>{group.assetCount ?? 0}</small>
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-button"
-                        title="编辑素材组"
-                        disabled={!writable}
-                        onClick={() => setGroupEditor(group)}
-                      >
-                        <Pencil size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-button danger"
-                        title="删除素材组"
-                        disabled={!writable}
-                        onClick={() => {
-                          if (window.confirm(`删除素材组“${group.name}”？`))
-                            void callWorker('assetGroup.delete', { groupId: group.id })
-                              .then(reloadCurrent)
-                              .catch((error) => setMessage(String(error)));
-                        }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    className="asset-filter-new"
-                    disabled={!writable}
-                    onClick={() => setGroupEditor({ name: '', tagIds: [] })}
-                  >
-                    <Plus size={13} /> 新建素材组
-                  </button>
-                </div>
-              </details>
-            )}
+                        <button
+                          type="button"
+                          className={
+                            selectedGroupId === group.id
+                              ? 'asset-filter-choice active'
+                              : 'asset-filter-choice'
+                          }
+                          onClick={() => selectGroup(group)}
+                        >
+                          <span>{group.name}</span>
+                          <small>{group.assetCount ?? 0}</small>
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="编辑素材组"
+                          disabled={!writable}
+                          onClick={(event) => {
+                            event.currentTarget.closest('details')?.removeAttribute('open');
+                            setSelectedGroupId('');
+                            setTagFilter([]);
+                            setSelectedIds(groupAssets[group.id]?.map((asset) => asset.id) ?? []);
+                            setGroupEditor({
+                              ...group,
+                              assetIds:
+                                group.assetIds ??
+                                groupAssets[group.id]?.map((asset) => asset.id) ??
+                                [],
+                            });
+                          }}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button danger"
+                          title="删除素材组"
+                          disabled={!writable}
+                          onClick={() => {
+                            if (window.confirm(`删除素材组“${group.name}”？`))
+                              void callWorker('assetGroup.delete', { groupId: group.id })
+                                .then(reloadCurrent)
+                                .catch((error) => setMessage(String(error)));
+                          }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </section>
+                )}
+              </div>
+            </details>
+            <button
+              type="button"
+              className="opt-compact-btn opt-create-group-btn"
+              disabled={!writable}
+              onClick={(event) => {
+                event.currentTarget.parentElement
+                  ?.querySelector('details')
+                  ?.removeAttribute('open');
+                setGroupEditor({ name: '', tagIds: [], assetIds: selectedIds });
+              }}
+            >
+              <Plus size={14} />
+              <span>新建素材组</span>
+            </button>
           </div>
-          <div className="opt-toolbar-right">
+
+          <div className="opt-filter-trailing">
+            <label>
+              排序
+              <select
+                aria-label="排序"
+                value={sort}
+                onChange={(event) => setSort(event.target.value as typeof sort)}
+              >
+                <option value="created-desc">最新优先</option>
+                <option value="created-asc">最早优先</option>
+              </select>
+            </label>
+            <span className="asset-result-count" aria-live="polite">
+              {assets.length}
+              {hasMore ? '+' : ''} 项素材
+            </span>
             <button
               type="button"
               className={
                 showTrash
-                  ? 'opt-compact-btn opt-danger-active'
-                  : 'opt-compact-btn opt-danger-outline'
+                  ? 'opt-compact-btn opt-toolbar-icon-btn opt-danger-active'
+                  : 'opt-compact-btn opt-toolbar-icon-btn opt-danger-outline'
               }
+              aria-label={showTrash ? '返回素材库' : '打开回收站'}
+              title={showTrash ? '返回素材库' : '打开回收站'}
               onClick={() => {
                 setShowTrash((current) => !current);
                 setSelectedIds([]);
               }}
             >
               {showTrash ? <RotateCcw size={14} /> : <Trash2 size={14} />}
-              {showTrash ? '返回素材库' : '回收站'}
             </button>
-          </div>
-        </header>
-
-        <div className="asset-filter-bar opt-subbar">
-          <label className="asset-type-select opt-type-select-accessible">
-            {mediaFilter === 'image' ? (
-              <Image size={14} />
-            ) : mediaFilter === 'video' ? (
-              <Video size={14} />
-            ) : (
-              <Images size={14} />
+            {(keyword ||
+              mediaFilter !== 'all' ||
+              createdFrom ||
+              createdTo ||
+              tagFilter.length > 0) && (
+              <button type="button" className="button subtle" onClick={clearFilters}>
+                <X size={14} />
+                清空筛选
+              </button>
             )}
-            <select
-              aria-label="素材类型"
-              value={mediaFilter}
-              onChange={(event) => setMediaFilter(event.target.value as MediaFilter)}
-            >
-              <option value="all">全部素材</option>
-              <option value="image">图片</option>
-              <option value="video">视频</option>
-            </select>
-            <ChevronDown size={13} />
-          </label>
-
-          <div className="asset-filter-spacer" />
-          <label>
-            起始日期
-            <input
-              aria-label="起始日期"
-              type="date"
-              value={createdFrom}
-              onChange={(event) => setCreatedFrom(event.target.value)}
-            />
-          </label>
-          <label>
-            结束日期
-            <input
-              aria-label="结束日期"
-              type="date"
-              value={createdTo}
-              onChange={(event) => setCreatedTo(event.target.value)}
-            />
-          </label>
-          <label>
-            排序
-            <select
-              aria-label="排序"
-              value={sort}
-              onChange={(event) => setSort(event.target.value as typeof sort)}
-            >
-              <option value="created-desc">最新优先</option>
-              <option value="created-asc">最早优先</option>
-            </select>
-          </label>
-          <span className="asset-result-count" aria-live="polite">
-            {assets.length}
-            {hasMore ? '+' : ''} 项素材
-          </span>
-          {(keyword ||
-            mediaFilter !== 'all' ||
-            createdFrom ||
-            createdTo ||
-            tagFilter.length > 0) && (
-            <button type="button" className="button subtle" onClick={clearFilters}>
-              <X size={14} />
-              清空筛选
-            </button>
-          )}
-          {!showTrash && (
-            <button
-              type="button"
-              className="opt-compact-btn opt-selection-toggle-btn"
-              title={
-                selectedIds.length === assets.length && assets.length > 0
-                  ? '取消全选'
-                  : '全选当前页'
-              }
-              onClick={() => {
-                if (selectedIds.length === assets.length && assets.length > 0) {
-                  setSelectedIds([]);
-                } else {
-                  setSelectedIds(assets.map((a) => a.id));
+            {!showTrash && (
+              <button
+                type="button"
+                className="opt-compact-btn opt-selection-toggle-btn opt-icon-only-btn"
+                aria-label={
+                  selectedIds.length === assets.length && assets.length > 0
+                    ? '取消全选'
+                    : '全选当前页'
                 }
-              }}
-            >
-              {selectedIds.length === assets.length && assets.length > 0 ? (
-                <CheckSquare size={13} />
-              ) : (
-                <Square size={13} />
-              )}
-              {selectedIds.length === assets.length && assets.length > 0 ? '取消全选' : '全选'}
-            </button>
-          )}
-          {!showTrash && selectedIds.length > 0 && (
-            <div className="opt-batch-float-bar">
-              <span className="asset-selection-count">已选 {selectedIds.length} 项</span>
-              {writable && (
-                <div className="asset-bulk-tags opt-batch-inner">
-                  <select
-                    aria-label="批量标签"
-                    value={bulkTagId}
-                    onChange={(event) => setBulkTagId(event.target.value)}
-                  >
-                    <option value="">选择标签</option>
-                    {tags.map((tag) => (
-                      <option key={tag.id} value={tag.id}>
-                        {tag.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    disabled={!bulkTagId}
-                    onClick={() =>
-                      void callWorker('asset.tags.add', {
-                        assetIds: selectedIds,
-                        tagIds: [bulkTagId],
-                      })
-                        .then(reloadCurrent)
-                        .catch((error) => setMessage(String(error)))
-                    }
-                  >
-                    添加
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!bulkTagId}
-                    onClick={() =>
-                      void callWorker('asset.tags.remove', {
-                        assetIds: selectedIds,
-                        tagIds: [bulkTagId],
-                      })
-                        .then(reloadCurrent)
-                        .catch((error) => setMessage(String(error)))
-                    }
-                  >
-                    移除
-                  </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    title="批量移入回收站"
-                    onClick={() => void batchDeleteSelected()}
-                  >
-                    <Trash2 size={13} />
-                    删除
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+                title={
+                  selectedIds.length === assets.length && assets.length > 0
+                    ? '取消全选'
+                    : '全选当前页'
+                }
+                onClick={() => {
+                  if (selectedIds.length === assets.length && assets.length > 0) {
+                    setSelectedIds([]);
+                  } else {
+                    setSelectedIds(assets.map((a) => a.id));
+                  }
+                }}
+              >
+                {selectedIds.length === assets.length && assets.length > 0 ? (
+                  <CheckSquare size={13} />
+                ) : (
+                  <Square size={13} />
+                )}
+              </button>
+            )}
+            {!showTrash && selectedIds.length > 1 && (
+              <div className="opt-batch-float-bar">
+                <span className="asset-selection-count">已选 {selectedIds.length} 项</span>
+                {writable && (
+                  <details className="opt-batch-menu">
+                    <summary className="opt-batch-menu-trigger">
+                      <Tags size={13} />
+                      批量操作
+                      <ChevronDown size={12} />
+                    </summary>
+                    <div className="asset-bulk-tags opt-batch-menu-dropdown">
+                      <select
+                        aria-label="批量标签"
+                        value={bulkTagId}
+                        onChange={(event) => setBulkTagId(event.target.value)}
+                      >
+                        <option value="">选择标签</option>
+                        {tags.map((tag) => (
+                          <option key={tag.id} value={tag.id}>
+                            {tag.name}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="opt-batch-menu-actions">
+                        <button
+                          type="button"
+                          disabled={!bulkTagId}
+                          onClick={() =>
+                            void callWorker('asset.tags.add', {
+                              assetIds: selectedIds,
+                              tagIds: [bulkTagId],
+                            })
+                              .then(reloadCurrent)
+                              .catch((error) => setMessage(String(error)))
+                          }
+                        >
+                          添加
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!bulkTagId}
+                          onClick={() =>
+                            void callWorker('asset.tags.remove', {
+                              assetIds: selectedIds,
+                              tagIds: [bulkTagId],
+                            })
+                              .then(reloadCurrent)
+                              .catch((error) => setMessage(String(error)))
+                          }
+                        >
+                          移除
+                        </button>
+                        <button
+                          type="button"
+                          className="danger"
+                          onClick={() => void batchDeleteSelected()}
+                        >
+                          <Trash2 size={13} />
+                          移到回收站
+                        </button>
+                      </div>
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {groupEditor && (
@@ -613,31 +805,85 @@ export function AssetLibraryView({
                   onChange={(event) => setGroupEditor({ ...groupEditor, name: event.target.value })}
                 />
               </label>
-              <fieldset>
-                <legend>标签条件（同时满足）</legend>
-                {tags.map((tag) => (
-                  <label key={tag.id}>
-                    <input
-                      type="checkbox"
-                      checked={groupEditor.tagIds?.includes(tag.id) ?? false}
-                      onChange={() =>
-                        setGroupEditor({
-                          ...groupEditor,
-                          tagIds: groupEditor.tagIds?.includes(tag.id)
-                            ? groupEditor.tagIds.filter((id) => id !== tag.id)
-                            : [...(groupEditor.tagIds ?? []), tag.id],
-                        })
-                      }
-                    />
-                    {tag.name}
-                  </label>
-                ))}
+              <fieldset
+                ref={groupMembersRef}
+                className={
+                  groupDropActive ? 'asset-group-members is-drag-over' : 'asset-group-members'
+                }
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setGroupDropActive(true);
+                }}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+                    setGroupDropActive(false);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'copy';
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setGroupDropActive(false);
+                  try {
+                    const serialized =
+                      event.dataTransfer.getData(DRAG_MIME) ||
+                      event.dataTransfer.getData('text/plain');
+                    const payload = JSON.parse(serialized) as {
+                      assets?: Array<{ id?: string }>;
+                    };
+                    const dropped = (payload.assets ?? [])
+                      .map((asset) => asset.id)
+                      .filter((id): id is string => Boolean(id));
+                    setGroupEditor({
+                      ...groupEditor,
+                      assetIds: [...new Set([...(groupEditor.assetIds ?? []), ...dropped])],
+                    });
+                  } catch {
+                    setMessage('无法读取拖入的素材。');
+                  }
+                }}
+              >
+                <legend>素材成员</legend>
+                <p>将素材拖入此处，或在网格中勾选后点击“添加当前已选”。</p>
+                <button
+                  type="button"
+                  className="button subtle"
+                  disabled={!selectedIds.length}
+                  onClick={() =>
+                    setGroupEditor({
+                      ...groupEditor,
+                      assetIds: [...new Set([...(groupEditor.assetIds ?? []), ...selectedIds])],
+                    })
+                  }
+                >
+                  <Plus size={13} />
+                  添加当前已选（{selectedIds.length}）
+                </button>
+                {assets
+                  .filter((asset) => groupEditor.assetIds?.includes(asset.id))
+                  .map((asset) => (
+                    <label key={asset.id}>
+                      <input
+                        type="checkbox"
+                        checked
+                        onChange={() =>
+                          setGroupEditor({
+                            ...groupEditor,
+                            assetIds: groupEditor.assetIds?.filter((id) => id !== asset.id),
+                          })
+                        }
+                      />
+                      {displayName(asset)}
+                    </label>
+                  ))}
               </fieldset>
               <div>
                 <button
                   type="submit"
                   className="button primary"
-                  disabled={!groupEditor.name?.trim() || !groupEditor.tagIds?.length}
+                  disabled={!groupEditor.name?.trim() || !groupEditor.assetIds?.length}
                 >
                   <Check size={14} />
                   保存
@@ -736,13 +982,23 @@ export function AssetLibraryView({
                   role="option"
                   tabIndex={0}
                   aria-selected={isSelected}
-                  draggable={!asset.deletedAt}
+                  draggable={!asset.deletedAt && !groupEditor}
                   onDragStart={(event) =>
                     beginDrag(event, dragItems, dragItems.length > 1 ? 'selection' : 'asset')
                   }
                   key={asset.id}
-                  className={isSelected ? 'asset-card selected' : 'asset-card'}
-                  onClick={(event) => selectAsset(event, asset)}
+                  className={`${isSelected ? 'asset-card selected' : 'asset-card'}${groupEditor ? ' group-drag-enabled' : ''}${pointerDraggingIds.includes(asset.id) ? ' is-pointer-dragging' : ''}`}
+                  onPointerDown={(event) => beginPointerGroupDrag(event, dragItems)}
+                  onPointerMove={updatePointerGroupDrag}
+                  onPointerUp={finishPointerGroupDrag}
+                  onPointerCancel={resetPointerDrag}
+                  onClick={(event) => {
+                    if (suppressCardClickRef.current) {
+                      suppressCardClickRef.current = false;
+                      return;
+                    }
+                    selectAsset(event, asset);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
@@ -775,11 +1031,16 @@ export function AssetLibraryView({
                       {asset.kind.includes('video') ? '视频' : '图片'}
                     </span>
                     {!asset.kind.includes('video') && mediaSourceById[asset.id] ? (
-                      <img src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)} alt="" />
+                      <img
+                        src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
+                        alt=""
+                        draggable={false}
+                      />
                     ) : asset.kind.includes('video') && mediaSourceById[asset.id] ? (
                       <video
                         src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
                         controls
+                        draggable={false}
                         preload="metadata"
                         onClick={(event) => event.stopPropagation()}
                       />
@@ -911,28 +1172,47 @@ export function AssetLibraryView({
                         <Pencil size={13} />
                       </button>
                     </legend>
-                    {tags.map((tag) => (
-                      <label key={tag.id}>
-                        <input
-                          type="checkbox"
-                          disabled={!writable}
-                          checked={selected.tags?.some((item) => item.id === tag.id) ?? false}
-                          onChange={() => {
-                            const tagIds = selected.tags?.map((item) => item.id) ?? [];
-                            const next = tagIds.includes(tag.id)
-                              ? tagIds.filter((id) => id !== tag.id)
-                              : [...tagIds, tag.id];
-                            void callWorker('asset.tags.replace', {
-                              assetIds: [selected.id],
-                              tagIds: next,
-                            })
-                              .then(reloadCurrent)
-                              .catch((error) => setMessage(String(error)));
-                          }}
-                        />
-                        {tag.name}
-                      </label>
-                    ))}
+                    <input
+                      className="asset-tag-input"
+                      aria-label="添加标签"
+                      placeholder="输入标签并按 Enter"
+                      maxLength={120}
+                      value={tagDraft}
+                      disabled={!writable}
+                      onChange={(event) => setTagDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter') return;
+                        event.preventDefault();
+                        void addTagToSelectedAsset().catch((error) => setMessage(String(error)));
+                      }}
+                      onBlur={() =>
+                        void addTagToSelectedAsset().catch((error) => setMessage(String(error)))
+                      }
+                    />
+                    <div className="asset-tag-options">
+                      {tags.map((tag) => (
+                        <label key={tag.id}>
+                          <input
+                            type="checkbox"
+                            disabled={!writable}
+                            checked={selected.tags?.some((item) => item.id === tag.id) ?? false}
+                            onChange={() => {
+                              const tagIds = selected.tags?.map((item) => item.id) ?? [];
+                              const next = tagIds.includes(tag.id)
+                                ? tagIds.filter((id) => id !== tag.id)
+                                : [...tagIds, tag.id];
+                              void callWorker('asset.tags.replace', {
+                                assetIds: [selected.id],
+                                tagIds: next,
+                              })
+                                .then(reloadCurrent)
+                                .catch((error) => setMessage(String(error)));
+                            }}
+                          />
+                          <span>{tag.name}</span>
+                        </label>
+                      ))}
+                    </div>
                   </fieldset>
                 )}
                 <dl>
@@ -948,14 +1228,17 @@ export function AssetLibraryView({
                 <div className="asset-inspector-actions">
                   <button
                     type="button"
+                    aria-label="打开位置"
+                    title="打开位置"
                     onClick={() => void callWorker('asset.reveal', { assetId: selected.id })}
                   >
                     <FolderOpen size={15} />
-                    打开位置
                   </button>
                   {!showTrash && (
                     <button
                       type="button"
+                      aria-label="查看来源任务"
+                      title="查看来源任务"
                       onClick={() =>
                         void callWorker('asset.source.locate', { assetId: selected.id })
                           .then((source) => onOpenSource?.(source))
@@ -963,13 +1246,14 @@ export function AssetLibraryView({
                       }
                     >
                       <ExternalLink size={15} />
-                      来源任务
                     </button>
                   )}
                   {showTrash ? (
                     <>
                       <button
                         type="button"
+                        aria-label="恢复素材"
+                        title="恢复素材"
                         disabled={!writable}
                         onClick={() =>
                           void callWorker('asset.restore', { assetId: selected.id })
@@ -978,11 +1262,12 @@ export function AssetLibraryView({
                         }
                       >
                         <RotateCcw size={15} />
-                        恢复
                       </button>
                       <button
                         type="button"
                         className="danger"
+                        aria-label="彻底删除"
+                        title="彻底删除"
                         disabled={!writable}
                         onClick={() => {
                           if (window.confirm('彻底删除后无法恢复，确认继续？'))
@@ -995,19 +1280,20 @@ export function AssetLibraryView({
                         }}
                       >
                         <Trash2 size={15} />
-                        彻底删除
                       </button>
                     </>
                   ) : (
                     <button
                       type="button"
+                      className="danger"
+                      aria-label="移到回收站"
+                      title="移到回收站"
                       disabled={!writable}
                       onClick={() =>
                         void deleteAsset(selected).catch((error) => setMessage(String(error)))
                       }
                     >
                       <Trash2 size={15} />
-                      移到回收站
                     </button>
                   )}
                 </div>

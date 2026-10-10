@@ -498,53 +498,56 @@ export class NovelService {
   }
 
   saveBinding(params: NovelBindingSaveParams): NovelBindingInfo {
-    return this.projects.access(true, (database, project) => {
-      if (!bindingRoles.has(params.role) || !bindingDomains.has(params.domainScope)) {
-        throw new NovelServiceError(
-          'INVALID_PARAMETERS',
-          'Document binding role or domain is invalid.',
-        );
-      }
-      const repositories = createRepositories(database);
-      const existing = params.bindingId
-        ? repositories.documentBindings.get(params.bindingId)
-        : undefined;
-      if (params.bindingId && (!existing || existing.projectId !== project.id)) {
-        throw new NovelServiceError('NOT_FOUND', 'Document binding was not found.');
-      }
-      if (existing && params.expectedRowVersion === undefined) {
-        throw new NovelServiceError(
-          'INVALID_PARAMETERS',
-          'expectedRowVersion is required when updating a binding.',
-        );
-      }
-      const document = repositories.documents.get(params.documentId);
-      if (!document || document.projectId !== project.id) {
-        throw new NovelServiceError('NOT_FOUND', 'Document was not found.');
-      }
-      const now = new Date().toISOString();
-      const record: DocumentBindingRecord = {
-        id: existing?.id ?? randomUUID(),
-        projectId: project.id,
-        documentId: params.documentId,
-        volumeId: params.volumeId,
-        chapterId: params.chapterId,
-        sceneId: params.sceneId,
-        shotId: params.shotId,
-        role: params.role,
-        domainScope: params.domainScope,
-        status: params.status ?? existing?.status ?? 'active',
-        rowVersion: existing?.rowVersion ?? 0,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      };
-      if (!repositories.documentBindings.save(record, params.expectedRowVersion)) {
-        conflict('Document binding was updated elsewhere.');
-      }
-      repositories.projects.touch(now);
-      project.updatedAt = now;
-      return bindingInfo(repositories.documentBindings.get(record.id)!);
-    });
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        if (!bindingRoles.has(params.role) || !bindingDomains.has(params.domainScope)) {
+          throw new NovelServiceError(
+            'INVALID_PARAMETERS',
+            'Document binding role or domain is invalid.',
+          );
+        }
+        const repositories = createRepositories(database);
+        const existing = params.bindingId
+          ? repositories.documentBindings.get(params.bindingId)
+          : undefined;
+        if (params.bindingId && (!existing || existing.projectId !== project.id)) {
+          throw new NovelServiceError('NOT_FOUND', 'Document binding was not found.');
+        }
+        if (existing && params.expectedRowVersion === undefined) {
+          throw new NovelServiceError(
+            'INVALID_PARAMETERS',
+            'expectedRowVersion is required when updating a binding.',
+          );
+        }
+        const document = repositories.documents.get(params.documentId);
+        if (!document || document.projectId !== project.id) {
+          throw new NovelServiceError('NOT_FOUND', 'Document was not found.');
+        }
+        const now = new Date().toISOString();
+        const record: DocumentBindingRecord = {
+          id: existing?.id ?? randomUUID(),
+          projectId: project.id,
+          documentId: params.documentId,
+          volumeId: params.volumeId,
+          chapterId: params.chapterId,
+          sceneId: params.sceneId,
+          shotId: params.shotId,
+          role: params.role,
+          domainScope: params.domainScope,
+          status: params.status ?? existing?.status ?? 'active',
+          rowVersion: existing?.rowVersion ?? 0,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        };
+        if (!repositories.documentBindings.save(record, params.expectedRowVersion)) {
+          conflict('Document binding was updated elsewhere.');
+        }
+        rebuildLibraryChunksForDocument(database, project.id, document.id, now);
+        repositories.projects.touch(now);
+        project.updatedAt = now;
+        return bindingInfo(repositories.documentBindings.get(record.id)!);
+      })(),
+    );
   }
 
   private nextChapterPosition(chapters: NovelChapterRecord[], volumeId?: string): number {

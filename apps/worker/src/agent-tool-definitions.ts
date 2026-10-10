@@ -7,6 +7,11 @@ import type {
 
 export type SystemAgentToolOperation =
   | 'project.get_context'
+  | 'project.structure.get'
+  | 'novel.structure.get'
+  | 'novel.chapter.list'
+  | 'novel.chapter.archive'
+  | 'novel.chapter.restore'
   | 'project.integrity.check'
   | 'project.backup.prepare'
   | 'project.export.prepare'
@@ -336,6 +341,71 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
+    name: 'project.structure.get',
+    description:
+      'Get the metadata-only project structure tree, including document sources and the novel structure when present. Document bodies are not included. This is read-only.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { includeArchived: { type: 'boolean' } },
+    },
+  },
+  {
+    name: 'novel.structure.get',
+    description:
+      'Get the metadata-only novel structure tree of profiles, volumes, chapters, and references. Chapter and document bodies are not included. This is read-only.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        novelId: { type: 'string', minLength: 1, maxLength: 200 },
+        includeArchived: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.list',
+    description:
+      'List bounded novel chapter metadata in the current project. Chapter bodies are not included. Use this to verify a chapter ID and row version before an archive or restore request.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        volumeId: { type: 'string', minLength: 1, maxLength: 200 },
+        includeArchived: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.archive',
+    description:
+      'Request archival of one novel chapter. The user must confirm before the chapter is archived. Use the current chapterId and rowVersion from novel.chapter.list or novel.structure.get.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chapterId', 'expectedRowVersion'],
+      properties: {
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+        reason: { type: 'string', enum: ['user_archive'] },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.restore',
+    description:
+      'Request restoration of one archived novel chapter. The user must confirm before the chapter is restored. Use the current chapterId and rowVersion from novel.chapter.list or novel.structure.get.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chapterId', 'expectedRowVersion'],
+      properties: {
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+      },
+    },
+  },
+  {
     name: 'project.integrity.check',
     description: 'Check the open project database integrity. This is read-only.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
@@ -579,14 +649,14 @@ function assetGroupDefinitions(): LlmToolDefinition[] {
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: includeId ? ['groupId', 'name', 'tagIds'] : ['name', 'tagIds'],
+      required: includeId ? ['groupId', 'name', 'assetIds'] : ['name', 'assetIds'],
       properties: {
         ...(includeId ? { groupId: { type: 'string', minLength: 1, maxLength: 200 } } : {}),
         name: { type: 'string', minLength: 1, maxLength: 120 },
-        tagIds: {
+        assetIds: {
           type: 'array',
           minItems: 1,
-          maxItems: 100,
+          maxItems: 200,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 200 },
         },
@@ -594,9 +664,9 @@ function assetGroupDefinitions(): LlmToolDefinition[] {
     },
   });
   return [
-    listDefinition('assetGroup.list', 'List bounded dynamic asset groups'),
-    groupWrite('assetGroup.create', 'Create a dynamic AND-tag asset group', false),
-    groupWrite('assetGroup.update', 'Update a dynamic AND-tag asset group', true),
+    listDefinition('assetGroup.list', 'List bounded manual asset groups'),
+    groupWrite('assetGroup.create', 'Create a manual asset collection', false),
+    groupWrite('assetGroup.update', 'Update a manual asset collection', true),
     lifecycleDefinition(
       'assetGroup.delete',
       'Delete an asset group after explicit confirmation',
@@ -890,6 +960,11 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'task.plan.submit': writePolicy(),
   'task.package.complete': writePolicy(),
   'project.get_context': readPolicy(),
+  'project.structure.get': readPolicy(),
+  'novel.structure.get': readPolicy(),
+  'novel.chapter.list': readPolicy(),
+  'novel.chapter.archive': confirmedPolicy(),
+  'novel.chapter.restore': confirmedPolicy(),
   'project.integrity.check': readPolicy(),
   'project.backup.prepare': protectedPolicy(),
   'project.export.prepare': protectedPolicy(),

@@ -9,6 +9,10 @@ import type {
   ConversationInfo,
   ContextSnapshotCleanupResult,
   MediaTaskSummary,
+  NovelChapterArchiveParams,
+  NovelChapterInfo,
+  NovelChapterListParams,
+  NovelChapterRestoreParams,
   ProviderModelInfo,
   ProviderProfileInfo,
   ResearchCacheCleanupResult,
@@ -19,6 +23,7 @@ import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-reg
 import { ContentService } from './content-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
+import { ProjectStructureCompiler } from './structure-compiler.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -30,8 +35,8 @@ export interface AgentAssetToolService {
   deleteTag(tagId: string): { deleted: true };
   changeAssetTags(assetIds: string[], tagIds: string[], operation: 'add' | 'remove'): AssetInfo[];
   listGroups(keyword?: string): AssetGroupInfo[];
-  createGroup(name: string, tagIds: string[]): AssetGroupInfo;
-  updateGroup(groupId: string, name: string, tagIds: string[]): AssetGroupInfo;
+  createGroup(name: string, tagIds: string[], assetIds: string[]): AssetGroupInfo;
+  updateGroup(groupId: string, name: string, tagIds: string[], assetIds: string[]): AssetGroupInfo;
   deleteGroup(groupId: string): { deleted: true };
   resolveGroup(groupId: string): AssetInfo[];
   deleteAsset(assetId: string, confirm?: boolean): { deleted: true; referenceCount: number };
@@ -45,6 +50,12 @@ export interface AgentSettingsToolService {
 
 export interface AgentMediaTaskService {
   getTask(taskId: string): MediaTaskSummary;
+}
+
+export interface AgentNovelToolService {
+  listChapters(params?: NovelChapterListParams): NovelChapterInfo[];
+  archiveChapter(params: NovelChapterArchiveParams): NovelChapterInfo;
+  restoreChapter(params: NovelChapterRestoreParams): NovelChapterInfo;
 }
 
 export interface AgentMaintenanceToolService {
@@ -78,6 +89,8 @@ export class AgentSystemToolService {
     private readonly mediaTasks?: AgentMediaTaskService,
     private readonly documents?: Pick<DocumentWorkflowService, 'getDocument' | 'selfPublish'>,
     private readonly maintenance?: AgentMaintenanceToolService,
+    private readonly structureCompiler?: ProjectStructureCompiler,
+    private readonly novels?: AgentNovelToolService,
   ) {}
 
   execute(
@@ -91,6 +104,12 @@ export class AgentSystemToolService {
       case 'project.get_context':
         rejectUnknown(args, []);
         return this.projectContext();
+      case 'project.structure.get':
+        return this.projectStructure(args);
+      case 'novel.structure.get':
+        return this.novelStructure(args);
+      case 'novel.chapter.list':
+        return this.listNovelChapters(args);
       case 'project.integrity.check':
         rejectUnknown(args, []);
         return this.projectIntegrity();
@@ -133,6 +152,8 @@ export class AgentSystemToolService {
       case 'project.restore.prepare':
       case 'conversation.archive':
       case 'conversation.restore':
+      case 'novel.chapter.archive':
+      case 'novel.chapter.restore':
       case 'document.publish':
       case 'asset.move_to_trash':
       case 'asset.restore':
@@ -176,6 +197,9 @@ export class AgentSystemToolService {
       case 'conversation.archive':
       case 'conversation.restore':
         return this.previewConversationLifecycle(operation, args);
+      case 'novel.chapter.archive':
+      case 'novel.chapter.restore':
+        return this.previewNovelChapterLifecycle(operation, args);
       case 'document.publish':
         return this.previewDocumentPublication(args);
       case 'asset.move_to_trash':
@@ -222,6 +246,32 @@ export class AgentSystemToolService {
           version: 1,
           status: operation === 'conversation.archive' ? 'archived' : 'restored',
           conversation: toConversationSummary(conversation),
+        };
+      }
+      case 'novel.chapter.archive':
+      case 'novel.chapter.restore': {
+        const preview = this.previewNovelChapterLifecycle(operation, args);
+        if (!this.novels) throw unavailable('Novel chapter lifecycle');
+        const chapterId = requiredString(args.chapterId, 'chapterId', 200);
+        const expectedRowVersion = requiredInteger(
+          args.expectedRowVersion,
+          'expectedRowVersion',
+          0,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const chapter =
+          operation === 'novel.chapter.archive'
+            ? this.novels.archiveChapter({
+                chapterId,
+                expectedRowVersion,
+                reason: 'user_archive',
+              })
+            : this.novels.restoreChapter({ chapterId, expectedRowVersion });
+        return {
+          version: 1,
+          status: operation === 'novel.chapter.archive' ? 'archived' : 'restored',
+          chapter: toNovelChapterSummary(chapter),
+          summary: preview.summary,
         };
       }
       case 'document.publish': {
@@ -352,22 +402,74 @@ export class AgentSystemToolService {
   }
 
   private projectContext(): Record<string, unknown> {
+    return this.projects.access(false, (database, project) => {
+      const structure = this.structureCompiler?.compileFromDatabase(database, project, {
+        includeArchived: false,
+      });
+      return {
+        version: 1,
+        status: 'succeeded',
+        project: {
+          id: project.id,
+          name: project.name,
+          mode: project.mode,
+          schemaVersion: project.schemaVersion,
+          updatedAt: project.updatedAt,
+        },
+        counts: {
+          conversations: scalarCount(database, 'conversations', project.id),
+          documents: scalarCount(database, 'documents', project.id),
+          assets: scalarCount(database, 'assets', project.id),
+        },
+        ...(structure ? { structure } : {}),
+      };
+    });
+  }
+
+  private projectStructure(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['includeArchived']);
+    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    if (!this.structureCompiler) throw unavailable('Project structure');
     return this.projects.access(false, (database, project) => ({
       version: 1,
       status: 'succeeded',
-      project: {
-        id: project.id,
-        name: project.name,
-        mode: project.mode,
-        schemaVersion: project.schemaVersion,
-        updatedAt: project.updatedAt,
-      },
-      counts: {
-        conversations: scalarCount(database, 'conversations', project.id),
-        documents: scalarCount(database, 'documents', project.id),
-        assets: scalarCount(database, 'assets', project.id),
-      },
+      structure: this.structureCompiler!.compileFromDatabase(database, project, {
+        includeArchived,
+      }),
     }));
+  }
+
+  private novelStructure(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['novelId', 'includeArchived']);
+    const novelId = optionalString(args.novelId, 'novelId', 200);
+    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    if (!this.structureCompiler) throw unavailable('Novel structure');
+    return this.projects.access(false, (database, project) => ({
+      version: 1,
+      status: 'succeeded',
+      structure: this.structureCompiler!.compileNovel(database, project, {
+        ...(novelId ? { novelId } : {}),
+        includeArchived,
+      }),
+    }));
+  }
+
+  private listNovelChapters(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['volumeId', 'includeArchived']);
+    if (!this.novels) throw unavailable('Novel chapter listing');
+    const volumeId = optionalString(args.volumeId, 'volumeId', 200);
+    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    const chapters = this.novels.listChapters({
+      ...(volumeId ? { volumeId } : {}),
+      includeArchived,
+    });
+    const bounded = chapters.slice(0, 200).map(toNovelChapterSummary);
+    return {
+      version: 1,
+      status: 'succeeded',
+      chapters: bounded,
+      truncated: chapters.length > bounded.length,
+    };
   }
 
   private projectIntegrity(): Record<string, unknown> {
@@ -544,21 +646,22 @@ export class AgentSystemToolService {
   }
 
   private createGroup(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['name', 'tagIds']);
+    rejectUnknown(args, ['name', 'assetIds']);
     return {
       version: 1,
       status: 'succeeded',
       group: toGroupSummary(
         this.assets.createGroup(
           requiredString(args.name, 'name', 120),
-          requiredStringArray(args.tagIds, 'tagIds', 100),
+          [],
+          requiredStringArray(args.assetIds, 'assetIds', 200),
         ),
       ),
     };
   }
 
   private updateGroup(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['groupId', 'name', 'tagIds']);
+    rejectUnknown(args, ['groupId', 'name', 'assetIds']);
     return {
       version: 1,
       status: 'succeeded',
@@ -566,7 +669,8 @@ export class AgentSystemToolService {
         this.assets.updateGroup(
           requiredString(args.groupId, 'groupId', 200),
           requiredString(args.name, 'name', 120),
-          requiredStringArray(args.tagIds, 'tagIds', 100),
+          [],
+          requiredStringArray(args.assetIds, 'assetIds', 200),
         ),
       ),
     };
@@ -703,6 +807,59 @@ export class AgentSystemToolService {
       summary: `${operation === 'conversation.archive' ? '归档' : '恢复'}会话“${conversation.title}”`,
       affectedEntities: [{ type: 'conversation', id: conversation.id, label: conversation.title }],
       executionArguments: { conversationId },
+    };
+  }
+
+  private previewNovelChapterLifecycle(
+    operation: 'novel.chapter.archive' | 'novel.chapter.restore',
+    args: Record<string, unknown>,
+  ): AgentSystemToolConfirmationPreview {
+    rejectUnknown(args, ['chapterId', 'expectedRowVersion', 'reason']);
+    if (!this.novels) throw unavailable('Novel chapter lifecycle');
+    const chapterId = requiredString(args.chapterId, 'chapterId', 200);
+    const expectedRowVersion = requiredInteger(
+      args.expectedRowVersion,
+      'expectedRowVersion',
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (
+      operation === 'novel.chapter.archive' &&
+      args.reason !== undefined &&
+      args.reason !== 'user_archive'
+    ) {
+      throw new Error('reason must be user_archive.');
+    }
+    const chapter = this.novels
+      .listChapters({ includeArchived: true })
+      .find((candidate) => candidate.id === chapterId);
+    if (!chapter) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_PROJECT_SCOPE',
+        'The requested novel chapter is not available in the current project.',
+      );
+    }
+    if (chapter.rowVersion !== expectedRowVersion) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_ARGUMENTS_INVALID',
+        'The novel chapter changed. Re-read its current rowVersion before retrying.',
+        true,
+      );
+    }
+    if (operation === 'novel.chapter.archive' && chapter.lifecycleStatus === 'archived') {
+      throw new Error('Novel chapter is already archived.');
+    }
+    if (operation === 'novel.chapter.restore' && chapter.lifecycleStatus !== 'archived') {
+      throw new Error('Novel chapter is not archived.');
+    }
+    return {
+      summary: `${operation === 'novel.chapter.archive' ? '归档' : '恢复'}小说章节“${chapter.displayLabel} ${chapter.title}”`,
+      affectedEntities: [{ type: 'novel-chapter', id: chapter.id, label: chapter.title }],
+      executionArguments: {
+        chapterId: chapter.id,
+        expectedRowVersion: chapter.rowVersion,
+        ...(operation === 'novel.chapter.archive' ? { reason: 'user_archive' } : {}),
+      },
     };
   }
 
@@ -940,6 +1097,25 @@ function toAssetSummary(asset: AssetInfo): Record<string, unknown> {
   };
 }
 
+function toNovelChapterSummary(chapter: NovelChapterInfo): Record<string, unknown> {
+  return {
+    id: chapter.id,
+    volumeId: chapter.volumeId,
+    documentId: chapter.documentId,
+    title: chapter.title,
+    displayLabel: chapter.displayLabel,
+    position: chapter.position,
+    lifecycleStatus: chapter.lifecycleStatus,
+    archiveReason: chapter.archiveReason,
+    rowVersion: chapter.rowVersion,
+    documentRowVersion: chapter.documentRowVersion,
+    ragChunkCount: chapter.ragChunkCount,
+    ragIndexedAt: chapter.ragIndexedAt,
+    createdAt: chapter.createdAt,
+    updatedAt: chapter.updatedAt,
+  };
+}
+
 function toTagSummary(tag: AssetTagInfo): Record<string, unknown> {
   return {
     id: tag.id,
@@ -954,7 +1130,7 @@ function toGroupSummary(group: AssetGroupInfo): Record<string, unknown> {
   return {
     id: group.id,
     name: group.name,
-    tagIds: group.tagIds.slice(0, 100),
+    assetIds: group.assetIds.slice(0, 200),
     assetCount: group.assetCount ?? 0,
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,

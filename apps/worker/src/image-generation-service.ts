@@ -582,11 +582,11 @@ export class ImageGenerationService {
         .map((group) => ({ ...group, assetCount: repo.resolveGroup(group.id).length }));
     });
   }
-  createGroup(name: string, tagIds: string[]) {
-    return this.saveGroup(undefined, name, tagIds);
+  createGroup(name: string, tagIds: string[] = [], assetIds: string[] = []) {
+    return this.saveGroup(undefined, name, tagIds, assetIds);
   }
-  updateGroup(groupId: string, name: string, tagIds: string[]) {
-    return this.saveGroup(groupId, name, tagIds);
+  updateGroup(groupId: string, name: string, tagIds: string[] = [], assetIds: string[] = []) {
+    return this.saveGroup(groupId, name, tagIds, assetIds);
   }
   deleteGroup(groupId: string) {
     return this.projects.access(true, (database, project) => {
@@ -612,14 +612,24 @@ export class ImageGenerationService {
       }));
     });
   }
-  private saveGroup(groupId: string | undefined, name: string, tagIds: string[]) {
-    if (!tagIds.length) throw new Error('Asset group requires at least one tag.');
+  private saveGroup(
+    groupId: string | undefined,
+    name: string,
+    tagIds: string[],
+    assetIds: string[],
+  ) {
+    if (!tagIds.length && !assetIds.length)
+      throw new Error('Asset group requires at least one asset.');
     const normalizedName = normalizeLibraryName(name);
     return this.projects.access(true, (database, project) => {
       const repo = createRepositories(database).assets;
       for (const tagId of tagIds) {
         const tag = repo.getTag(tagId);
         if (!tag || tag.projectId !== project.id) throw new Error('Tag was not found.');
+      }
+      for (const assetId of assetIds) {
+        const asset = repo.get(assetId);
+        if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       }
       const existing = groupId ? repo.getGroup(groupId) : undefined;
       if (groupId && (!existing || existing.projectId !== project.id))
@@ -631,6 +641,7 @@ export class ImageGenerationService {
         name: name.trim(),
         normalizedName,
         tagIds: [...new Set(tagIds)],
+        assetIds: [...new Set(assetIds)],
         createdBy: existing?.createdBy ?? 'local-user',
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
