@@ -59,10 +59,10 @@ export class ConversationRuntimeRouter {
   }
 }
 
-/** Pi is the default runtime; an explicit false value retains the development fallback. */
+/** New tasks always use Pi. Legacy remains available only to explicit migration callers. */
 export function resolvePiConversationRuntimeEnabled(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
-  const value = environment.AI_VIDEO_PI_CONVERSATION_RUNTIME?.trim().toLowerCase();
-  return value !== '0' && value !== 'false';
+  void environment;
+  return true;
 }

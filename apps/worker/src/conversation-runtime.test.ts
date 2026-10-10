@@ -45,13 +45,13 @@ describe('ConversationRuntimeRouter', () => {
     expect(router.select('novel-writing')).toBe(pi);
   });
 
-  it('defaults Pi on and retains an explicit development fallback', () => {
+  it('keeps Pi enabled for new tasks regardless of the legacy fallback variable', () => {
     expect(resolvePiConversationRuntimeEnabled({})).toBe(true);
     expect(resolvePiConversationRuntimeEnabled({ AI_VIDEO_PI_CONVERSATION_RUNTIME: '0' })).toBe(
-      false,
+      true,
     );
     expect(resolvePiConversationRuntimeEnabled({ AI_VIDEO_PI_CONVERSATION_RUNTIME: 'false' })).toBe(
-      false,
+      true,
     );
     expect(resolvePiConversationRuntimeEnabled({ AI_VIDEO_PI_CONVERSATION_RUNTIME: 'true' })).toBe(
       true,
