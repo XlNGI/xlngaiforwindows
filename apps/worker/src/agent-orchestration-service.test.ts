@@ -73,6 +73,9 @@ describe('AgentOrchestrationService', () => {
       task: database
         .prepare('SELECT status, phase FROM agent_tasks WHERE id = ?')
         .get(prepared.taskId),
+      snapshot: database
+        .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
+        .get(prepared.taskId) as { request_snapshot_json: string },
     }));
     expect(persisted.chapter).toMatchObject({
       document_id: prepared.documentId,
@@ -87,6 +90,15 @@ describe('AgentOrchestrationService', () => {
     });
     expect(persisted.lock).toEqual({ task_id: prepared.taskId });
     expect(persisted.task).toEqual({ status: 'queued', phase: 'intent_resolving' });
+    expect(JSON.parse(persisted.snapshot.request_snapshot_json)).toMatchObject({
+      intent: {
+        version: 1,
+        operation: 'novel.chapter.submit_draft',
+        targetKind: 'novel-chapter',
+        chapterId: prepared.chapterId,
+        documentId: prepared.documentId,
+      },
+    });
   });
 
   it('keeps ambiguous or negated writing requests out of business tables', async () => {

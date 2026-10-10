@@ -274,6 +274,15 @@ export class AgentOrchestrationService {
               // Chapter targeting is a resolver hint, not a separate Agent
               // persona. Every project task runs through the System Agent.
               agentMode: 'novel-writing',
+              intent: {
+                version: 1,
+                operation: 'novel.chapter.submit_draft',
+                targetKind: 'novel-chapter',
+                action,
+                chapterId: target.chapterId,
+                documentId: target.documentId,
+                source: 'worker-resolver',
+              },
               action,
               promptHash: sha256(prompt),
               chapterId: target.chapterId,
