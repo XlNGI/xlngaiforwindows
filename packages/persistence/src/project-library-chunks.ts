@@ -82,6 +82,9 @@ export interface LibrarySearchHit {
   chunk: ProjectLibraryChunkRecord;
   score: number;
   structure?: ProjectStructureNodeRecord;
+  kindLabel?: string;
+  sourceTypeLabel?: string;
+  matchKind?: 'title' | 'body';
 }
 
 export interface LibrarySearchPage {

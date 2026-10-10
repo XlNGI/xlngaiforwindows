@@ -42,6 +42,10 @@ export type SystemAgentToolOperation =
   | 'maintenance.cleanup_research_cache'
   | 'maintenance.cleanup_context_snapshots'
   | 'maintenance.diagnostics.prepare'
+  | 'novel.structure.get'
+  | 'novel.chapter.list'
+  | 'novel.chapter.archive'
+  | 'novel.chapter.restore'
   | 'media.task.get';
 
 export type MediaPrepareToolOperation = 'media.image.prepare' | 'media.video.prepare';
