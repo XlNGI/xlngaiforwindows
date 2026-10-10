@@ -13,6 +13,8 @@ import type {
   AgentResearchMode,
   ConversationTargetPlatform,
   DocumentDetail,
+  DocumentBindingRole,
+  DocumentKind,
   AgentProviderStepCompleteParams,
   LlmGenerationIdentity,
   LlmToolCall,
@@ -28,7 +30,10 @@ import type {
   MediaSubmissionResult,
   MediaTaskCancelParams,
 } from '@ai-video/contracts';
-import { rebuildLibraryChunksForAdaptation } from '@ai-video/persistence';
+import {
+  rebuildLibraryChunksForAdaptation,
+  rebuildLibraryChunksForDocument,
+} from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -72,14 +77,6 @@ const RESEARCH_STEP_CALL_LIMIT = 8;
 const LIBRARY_SEARCH_CALL_LIMIT = 4;
 const LIBRARY_READ_CALL_LIMIT = 8;
 const LIBRARY_STEP_CALL_LIMIT = 6;
-const AGENT_DOCUMENT_WRITE_OPERATIONS = new Set<AgentDocumentOperation>([
-  'document.create_draft',
-  'document.update_draft',
-  'novel.chapter.submit_draft',
-  'novel.reference.submit_draft',
-  'novel.episode.submit_draft',
-  'novel.adaptation.submit_proposal',
-]);
 
 type ResearchOperation = 'research.search' | 'research.fetch';
 type LibraryOperation = 'library.search' | 'library.read';
@@ -402,10 +399,11 @@ export class AgentProviderLoopService {
             .run(task.id, identity.generationId, now);
           const started = database
             .prepare(
-              `UPDATE agent_tasks SET status = 'running', phase = 'model_running', started_at = ?,
+              `UPDATE agent_tasks SET status = 'running', phase = 'model_running',
+               user_message_id = ?, context_snapshot_id = ?, started_at = ?,
                updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'queued'`,
             )
-            .run(now, now, task.id);
+            .run(generation.user_message_id, generation.context_snapshot_id, now, now, task.id);
           if (started.changes !== 1) throw new Error('Novel task could not be started.');
           this.appendEvent(
             database,
@@ -472,8 +470,12 @@ export class AgentProviderLoopService {
             ),
             JSON.stringify({
               promptHash: requestHash,
-              agentMode: 'document',
+              agentMode: selectedChapterIds ? 'short-drama' : 'document',
               documentOperation: authorization.operation,
+              novelReference:
+                authorization.operation === 'document.create_draft'
+                  ? inferNovelReference(prompt)
+                  : undefined,
               researchMode,
               modelSelection: agentModelSelectionSnapshot(
                 generation,
@@ -1870,7 +1872,6 @@ export class AgentProviderLoopService {
         let args: ReturnType<typeof parseToolArguments>;
         try {
           args = parseToolArguments(call.name, call.argumentsJson);
-          assertResolvedDocumentLocator(database, project.id, call.name, authorization, args);
           if (call.name === 'document.create_draft' || call.name === 'document.update_draft') {
             assertSingleCharacterPromptDocument(
               resolveDocumentToolKind(database, call.name, authorization.targetDocumentId, args),
@@ -2039,11 +2040,17 @@ export class AgentProviderLoopService {
         let result: string;
         let resultSummary: string;
         if (call.name === 'document.create_draft') {
+          const reference = (
+            JSON.parse(task.request_snapshot_json) as {
+              novelReference?: { role: DocumentBindingRole; kind: DocumentKind };
+            }
+          ).novelReference;
           document = this.documents.writeTrustedAgentDraftInTransaction(database, project, {
             taskId: task.id,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
             kind:
+              reference?.kind ??
               (args.documentKind as DocumentDetail['kind'] | undefined) ??
               inferDocumentKindFromDraft(
                 String(args.title ?? ''),
@@ -2054,6 +2061,16 @@ export class AgentProviderLoopService {
             sourceMessageId: task.user_message_id ?? undefined,
             contextSnapshotId: task.context_snapshot_id ?? undefined,
           });
+          if (reference) {
+            database
+              .prepare(
+                `INSERT INTO document_bindings
+               (id, project_id, document_id, role, domain_scope, status, row_version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'novel', 'active', 0, ?, ?)`,
+              )
+              .run(randomUUID(), project.id, document.id, reference.role, now, now);
+            rebuildLibraryChunksForDocument(database, project.id, document.id, now);
+          }
           linkResearchCitations(
             database,
             project.id,
@@ -2066,6 +2083,7 @@ export class AgentProviderLoopService {
             status: 'draft_created',
             documentId: document.id,
             documentVersionId: document.currentVersion?.id,
+            ...(reference ? { domainScope: 'novel', bindingRole: reference.role } : {}),
             reviewRequired: true,
           });
           resultSummary = result;
@@ -2158,7 +2176,7 @@ export class AgentProviderLoopService {
         ) {
           if (
             !authorization.targetDocumentId ||
-            !authorization.baseVersionId ||
+            (!authorization.baseVersionId && call.name !== 'novel.chapter.submit_draft') ||
             authorization.expectedDocumentRowVersion === undefined
           ) {
             throw new Error('Update authorization is missing its trusted target or CAS.');
@@ -2173,7 +2191,7 @@ export class AgentProviderLoopService {
             taskId: task.id,
             documentId: authorization.targetDocumentId,
             expectedDocumentRowVersion: authorization.expectedDocumentRowVersion,
-            baseVersionId: authorization.baseVersionId,
+            baseVersionId: authorization.baseVersionId ?? null,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
             scopeType: task.scope_type,
@@ -2454,14 +2472,11 @@ export class AgentProviderLoopService {
                       taskId: task.id,
                       attemptId: params.attemptId,
                       query: toolArguments.query,
-                      searchMode: toolArguments.searchMode,
                       sourceTypes: toolArguments.sourceTypes,
                       status: toolArguments.status,
                       kind: toolArguments.kind,
                       scopeType: toolArguments.scopeType,
                       scopeId: toolArguments.scopeId,
-                      structurePath: toolArguments.structurePath,
-                      offset: toolArguments.offset,
                       includeArchived: toolArguments.includeArchived,
                       limit: toolArguments.limit,
                     })
@@ -2470,9 +2485,8 @@ export class AgentProviderLoopService {
                       attemptId: params.attemptId,
                       sourceHandle: toolArguments.sourceHandle,
                       maxChars: toolArguments.maxChars,
-                      readMode: toolArguments.readMode,
-                      offset: toolArguments.offset,
                     });
+              resultSummary = summarizeLibraryResult(result);
               output = {
                 callId: call.id,
                 output:
@@ -2484,7 +2498,6 @@ export class AgentProviderLoopService {
                       )
                     : unifiedAgentToolRegistry.serializeResult(result),
               };
-              resultSummary = summarizeLibraryResult(JSON.parse(output.output) as typeof result);
             } catch (error) {
               const code = error instanceof LibraryError ? error.code : 'LIBRARY_SEARCH_FAILED';
               const message = (
@@ -3150,16 +3163,45 @@ export class AgentProviderLoopService {
       database.transaction(() => {
         const task = this.requireTask(database, project.id, params.generationId);
         const step = this.requireOpenStep(database, params.attemptId);
-        const request = JSON.parse(task.request_snapshot_json) as { documentOperation?: string };
+        const request = JSON.parse(task.request_snapshot_json) as {
+          agentMode?: string;
+          documentOperation?: string;
+        };
+        if (
+          request.agentMode === 'novel-writing' ||
+          request.documentOperation === 'novel.chapter.submit_draft'
+        ) {
+          const written = database
+            .prepare(
+              `SELECT 1 FROM agent_tool_calls calls
+               INNER JOIN document_versions versions ON versions.id = calls.result_document_version_id
+               INNER JOIN novel_chapters chapters ON chapters.document_id = versions.document_id
+               INNER JOIN agent_tool_authorizations authorization ON authorization.id = calls.authorization_id
+               LEFT JOIN agent_task_targets targets ON targets.task_id = calls.task_id
+               WHERE calls.task_id = ? AND calls.tool_name = 'novel.chapter.submit_draft'
+                 AND calls.status = 'succeeded' AND chapters.project_id = ?
+                 AND versions.source_task_id = calls.task_id
+                 AND versions.document_id = calls.result_document_id
+                 AND versions.document_id = authorization.target_document_id
+                 AND (targets.task_id IS NULL OR
+                   (targets.target_kind = 'novel-chapter' AND targets.chapter_id = chapters.id
+                    AND targets.document_id = versions.document_id)) LIMIT 1`,
+            )
+            .get(task.id, project.id);
+          if (!written) {
+            throw new Error(
+              'AGENT_CHAPTER_NOT_WRITTEN: 小说正文尚未保存，请调用 novel.chapter.submit_draft 写入完整正文后再结束任务。',
+            );
+          }
+        }
         const operation = request.documentOperation;
         const userMessage = database
           .prepare('SELECT content FROM chat_messages WHERE id = ?')
           .get(task.user_message_id) as { content: string } | undefined;
         if (
-          operation &&
-          AGENT_DOCUMENT_WRITE_OPERATIONS.has(operation as AgentDocumentOperation) &&
+          (operation === 'document.create_draft' || operation === 'document.update_draft') &&
           userMessage &&
-          hasExplicitOperationIntent(userMessage.content, operation as AgentDocumentOperation) &&
+          requiresPersistedDocumentWrite(userMessage.content, operation) &&
           !isMediaOnlyRequest(userMessage.content)
         ) {
           const written = database
@@ -3210,7 +3252,7 @@ export class AgentProviderLoopService {
 
   terminateGeneration(
     generationId: string,
-    reason: 'cancelled' | 'failed',
+    reason: 'cancelled' | 'failed' | 'interrupted',
     errorMessage?: string,
   ): number {
     this.cancelGeneration(generationId);
@@ -3233,13 +3275,22 @@ export class AgentProviderLoopService {
           .all(generationId, project.id) as Array<{ id: string }>;
         const detail = errorMessage?.trim() || `Provider generation ${reason}.`;
         for (const task of tasks) {
+          const taskStatus = reason === 'cancelled' ? 'cancelled' : 'failed';
           database
             .prepare(
               `UPDATE agent_tasks SET status = ?, phase = 'recovering', error_code = ?,
-               error_message = ?, completed_at = ?, updated_at = ?, row_version = row_version + 1
+              error_message = ?, retryable = COALESCE(?, retryable), completed_at = ?, updated_at = ?, row_version = row_version + 1
                WHERE id = ? AND status = 'running'`,
             )
-            .run(reason, reason, detail.slice(0, 1000), now, now, task.id);
+            .run(
+              taskStatus,
+              reason,
+              detail.slice(0, 1000),
+              reason === 'interrupted' ? 1 : null,
+              now,
+              now,
+              task.id,
+            );
           database
             .prepare(
               `UPDATE agent_tool_authorizations SET status = 'revoked', revoked_at = ?,
@@ -3270,7 +3321,36 @@ export class AgentProviderLoopService {
                WHERE task_id = ? AND status = 'pending'`,
             )
             .run(now, task.id);
-          this.appendEvent(database, project.id, task.id, 'agent.task.interrupted', detail, now);
+          const eventType =
+            reason === 'interrupted'
+              ? 'agent.task.interrupted'
+              : reason === 'cancelled'
+                ? 'agent.task.cancelled'
+                : 'agent.task.failed';
+          this.appendEvent(database, project.id, task.id, eventType, detail, now);
+          const placeholder = database
+            .prepare(
+              `SELECT targets.chapter_id, targets.document_id FROM agent_task_targets targets
+               INNER JOIN novel_chapters chapters ON chapters.id = targets.chapter_id
+               WHERE targets.task_id = ? AND targets.project_id = ? AND targets.created_placeholder = 1
+                 AND chapters.lifecycle_status = 'reserved'
+                 AND NOT EXISTS (SELECT 1 FROM document_versions WHERE document_id = targets.document_id)`,
+            )
+            .get(task.id, project.id) as { chapter_id: string; document_id: string } | undefined;
+          if (placeholder) {
+            database
+              .prepare(
+                `UPDATE novel_chapters SET lifecycle_status = 'archived', archive_reason = 'generation_placeholder',
+                 updated_at = ?, row_version = row_version + 1 WHERE id = ? AND project_id = ?`,
+              )
+              .run(now, placeholder.chapter_id, project.id);
+            database
+              .prepare(
+                `UPDATE documents SET lifecycle_status = 'archived', updated_at = ?, row_version = row_version + 1
+                 WHERE id = ? AND project_id = ?`,
+              )
+              .run(now, placeholder.document_id, project.id);
+          }
         }
         for (const openStep of openSteps) this.openStepHandles.delete(openStep.id);
         return tasks.length;
@@ -3294,7 +3374,13 @@ export class AgentProviderLoopService {
           .all(project.id) as Array<{ generation_id: string }>,
     );
     return generationIds.reduce(
-      (count, generation) => count + this.terminateGeneration(generation.generation_id, 'failed'),
+      (count, generation) =>
+        count +
+        this.terminateGeneration(
+          generation.generation_id,
+          'interrupted',
+          'Agent runtime was interrupted while the Worker was restarting.',
+        ),
       0,
     );
   }
@@ -3911,157 +3997,10 @@ function resolveDocumentToolKind(
   return existing?.kind ?? inferDocumentKindFromDraft(args.title ?? '', args.contentMarkdown ?? '');
 }
 
-interface ParsedResourceLocator {
-  resourceId?: string;
-  documentId?: string;
-  structureNodeId?: string;
-  versionId?: string;
-  expectedRevision?: string;
-  expectedRowVersion?: number;
-}
-
-type ParsedDocumentToolArguments = ParsedResourceLocator & {
-  title?: string;
-  contentMarkdown?: string;
-  documentKind?: string;
-};
-
-const RESOURCE_LOCATOR_KEYS = [
-  'resourceId',
-  'documentId',
-  'structureNodeId',
-  'versionId',
-  'expectedRevision',
-  'expectedRowVersion',
-] as const;
-
-function parseResourceLocator(record: Record<string, unknown>): ParsedResourceLocator {
-  const locator: ParsedResourceLocator = {};
-  for (const key of RESOURCE_LOCATOR_KEYS) {
-    const value = record[key];
-    if (value === undefined) continue;
-    if (key === 'expectedRowVersion') {
-      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-        throw new Error('expectedRowVersion must be a non-negative integer.');
-      }
-      locator.expectedRowVersion = value;
-      continue;
-    }
-    if (typeof value !== 'string' || !value.trim() || value.length > 200) {
-      throw new Error(`${key} must be a non-empty string of at most 200 characters.`);
-    }
-    (locator as Record<string, unknown>)[key] = value.trim();
-  }
-  return locator;
-}
-
-function assertResolvedDocumentLocator(
-  database: Database.Database,
-  projectId: string,
+function parseToolArguments(
   operation: string,
-  authorization: Pick<
-    AuthorizationSpec,
-    'targetDocumentId' | 'baseVersionId' | 'expectedDocumentRowVersion'
-  >,
-  args: ParsedDocumentToolArguments,
-): void {
-  const locator = args;
-  const isCreate = operation === 'document.create_draft';
-  if (
-    isCreate &&
-    (locator.expectedRevision || locator.expectedRowVersion !== undefined || locator.versionId)
-  ) {
-    throw new Error('A new document draft cannot use an existing document revision.');
-  }
-  if (!authorization.targetDocumentId) return;
-
-  let resolvedDocumentId = locator.documentId;
-  if (locator.structureNodeId) {
-    const node = database
-      .prepare(
-        `SELECT document_id, version_id, updated_at FROM project_structure_nodes
-         WHERE project_id = ? AND id = ?`,
-      )
-      .get(projectId, locator.structureNodeId) as
-      { document_id: string | null; version_id: string | null; updated_at: string } | undefined;
-    if (!node || !node.document_id)
-      throw new Error('The structure node is outside the current project.');
-    if (resolvedDocumentId && resolvedDocumentId !== node.document_id) {
-      throw new Error('The documentId does not match the structureNodeId.');
-    }
-    resolvedDocumentId = node.document_id;
-    if (locator.versionId && locator.versionId !== node.version_id) {
-      throw new Error('The requested document version does not match the structure node.');
-    }
-    if (locator.expectedRevision && locator.expectedRevision !== node.updated_at) {
-      throw new Error('RESOURCE_REVISION_CONFLICT: the structure node has changed.');
-    }
-  }
-  if (locator.resourceId && !resolvedDocumentId) {
-    const document = database
-      .prepare('SELECT id FROM documents WHERE project_id = ? AND id = ?')
-      .get(projectId, locator.resourceId) as { id: string } | undefined;
-    if (document) resolvedDocumentId = document.id;
-    if (!document) {
-      const chapter = database
-        .prepare('SELECT document_id FROM novel_chapters WHERE project_id = ? AND id = ?')
-        .get(projectId, locator.resourceId) as { document_id: string } | undefined;
-      if (chapter) resolvedDocumentId = chapter.document_id;
-    }
-    if (!resolvedDocumentId) {
-      const node = database
-        .prepare(
-          `SELECT document_id FROM project_structure_nodes
-           WHERE project_id = ? AND id = ?`,
-        )
-        .get(projectId, locator.resourceId) as { document_id: string | null } | undefined;
-      if (node?.document_id) resolvedDocumentId = node.document_id;
-    }
-  }
-  if (resolvedDocumentId && resolvedDocumentId !== authorization.targetDocumentId) {
-    throw new Error('RESOURCE_LOCATION_CONFLICT: the requested resource is not authorized.');
-  }
-  const current = database
-    .prepare(
-      `SELECT row_version, current_version_id, updated_at FROM documents
-       WHERE project_id = ? AND id = ?`,
-    )
-    .get(projectId, authorization.targetDocumentId) as
-    { row_version: number; current_version_id: string | null; updated_at: string } | undefined;
-  if (!current) throw new Error('The authorized document is no longer in the current project.');
-  if (
-    locator.expectedRowVersion !== undefined &&
-    locator.expectedRowVersion !== current.row_version
-  ) {
-    throw new Error('RESOURCE_REVISION_CONFLICT: the document row version has changed.');
-  }
-  if (
-    locator.expectedRevision &&
-    !locator.structureNodeId &&
-    locator.expectedRevision !== current.updated_at
-  ) {
-    throw new Error('RESOURCE_REVISION_CONFLICT: the document revision has changed.');
-  }
-  if (locator.versionId && locator.versionId !== current.current_version_id) {
-    throw new Error('RESOURCE_REVISION_CONFLICT: the document version has changed.');
-  }
-  if (
-    locator.expectedRowVersion !== undefined &&
-    authorization.expectedDocumentRowVersion !== undefined &&
-    locator.expectedRowVersion !== authorization.expectedDocumentRowVersion
-  ) {
-    throw new Error('RESOURCE_REVISION_CONFLICT: the requested row version is not frozen.');
-  }
-  if (
-    locator.versionId &&
-    authorization.baseVersionId &&
-    locator.versionId !== authorization.baseVersionId
-  ) {
-    throw new Error('RESOURCE_REVISION_CONFLICT: the requested base version is not frozen.');
-  }
-}
-
-function parseToolArguments(operation: string, value: string): ParsedDocumentToolArguments {
+  value: string,
+): { title?: string; contentMarkdown?: string; documentKind?: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -4076,7 +4015,6 @@ function parseToolArguments(operation: string, value: string): ParsedDocumentToo
   if (operation === 'novel.episode.submit_structure') {
     return {};
   }
-  const locator = parseResourceLocator(record);
   const needsContent =
     operation === 'document.create_draft' ||
     operation === 'document.update_draft' ||
@@ -4086,8 +4024,8 @@ function parseToolArguments(operation: string, value: string): ParsedDocumentToo
     operation === 'novel.episode.submit_draft';
   const allowedKeys =
     operation === 'document.create_draft'
-      ? ['title', 'contentMarkdown', 'documentKind', ...RESOURCE_LOCATOR_KEYS]
-      : [...['title', 'contentMarkdown'], ...RESOURCE_LOCATOR_KEYS];
+      ? ['title', 'contentMarkdown', 'documentKind']
+      : ['title', 'contentMarkdown'];
   if (needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
     throw new Error('Tool arguments contain unsupported fields.');
   }
@@ -4100,7 +4038,7 @@ function parseToolArguments(operation: string, value: string): ParsedDocumentToo
   ) {
     throw new Error('Tool title and contentMarkdown are required.');
   }
-  if (!needsContent) return locator;
+  if (!needsContent) return {};
   const rawTitle = record.title as string;
   const rawContent = record.contentMarkdown as string;
   const title = normalizeTitle(rawTitle);
@@ -4114,7 +4052,7 @@ function parseToolArguments(operation: string, value: string): ParsedDocumentToo
   if (documentKind !== undefined && !DOCUMENT_KIND_SET.has(documentKind)) {
     throw new Error('Tool documentKind is invalid.');
   }
-  return { ...locator, title, contentMarkdown: rawContent, documentKind };
+  return { title, contentMarkdown: rawContent, documentKind };
 }
 
 function parseResearchToolArguments(
@@ -4547,7 +4485,6 @@ function systemAuthorizationSpecsForTask(
   const prompt = row?.content?.normalize('NFKC') ?? '';
   const operations: SystemAgentToolOperation[] = [
     'project.get_context',
-    'project.structure.get',
     'project.integrity.check',
     'conversation.search',
   ];
@@ -4743,6 +4680,10 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'project.get_context',
   'project.structure.get',
+  'novel.structure.get',
+  'novel.chapter.list',
+  'novel.chapter.archive',
+  'novel.chapter.restore',
   'project.integrity.check',
   'project.backup.prepare',
   'project.export.prepare',
@@ -4781,6 +4722,9 @@ const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
 ]);
 
 const SYSTEM_CONTEXTUAL_READ_OPERATIONS = [
+  'project.structure.get',
+  'novel.structure.get',
+  'novel.chapter.list',
   'asset.get',
   'asset.search',
   'tag.list',
@@ -4796,6 +4740,11 @@ function hasSystemReadIntent(
   operation: (typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number],
 ): boolean {
   const patterns: Record<(typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number], RegExp> = {
+    'project.structure.get': /(?:项目|工程).{0,20}(?:结构|架构|目录|树)|project.{0,20}structure/iu,
+    'novel.structure.get':
+      /(?:小说|章节|卷章|大纲).{0,20}(?:结构|架构|目录|树)|novel.{0,20}structure/iu,
+    'novel.chapter.list':
+      /(?:列出|查看|查询|显示|有哪些).{0,20}(?:小说章节|章节|卷章)|(?:novel|chapter).{0,20}(?:list|show|query)/iu,
     'asset.get': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
     'asset.search': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
     'tag.list': /(?:标签|\btags?\b)/iu,
@@ -4816,6 +4765,8 @@ const SYSTEM_MUTATING_OPERATIONS = [
   'conversation.rename',
   'conversation.archive',
   'conversation.restore',
+  'novel.chapter.archive',
+  'novel.chapter.restore',
   'document.publish',
   'asset.update_alias',
   'asset.update_tags',
@@ -4851,6 +4802,10 @@ function hasSystemOperationIntent(
     'conversation.archive': /(?:归档).{0,12}(?:会话|对话)|archive.{0,12}(?:conversation|chat)/iu,
     'conversation.restore':
       /(?:恢复|取消归档).{0,12}(?:会话|对话)|(?:restore|unarchive).{0,12}(?:conversation|chat)/iu,
+    'novel.chapter.archive':
+      /(?:(?:归档|删除|移除|隐藏).{0,24}(?:小说章节|章节|卷章|第.{0,8}章)|(?:小说章节|章节|卷章|第.{0,8}章).{0,16}(?:归档|删除|移除|隐藏))|archive.{0,20}(?:novel\s+)?chapter/iu,
+    'novel.chapter.restore':
+      /(?:(?:恢复|取消归档|还原).{0,24}(?:小说章节|章节|卷章|第.{0,8}章)|(?:小说章节|章节|卷章|第.{0,8}章).{0,16}(?:恢复|取消归档|还原))|(?:restore|unarchive).{0,20}(?:novel\s+)?chapter/iu,
     'document.publish': /(?:发布).{0,12}(?:文档|草稿)|publish.{0,12}(?:document|draft)/iu,
     'asset.update_alias':
       /(?:素材|资源).{0,32}(?:别名|改名|重命名)|(?:alias|rename).{0,32}(?:asset|media)/iu,
@@ -4881,7 +4836,14 @@ function hasSystemOperationIntent(
     'maintenance.diagnostics.prepare':
       /(?:导出|生成).{0,12}(?:诊断包|诊断信息)|(?:export|create).{0,12}diagnostic/iu,
   };
-  return patterns[operation].test(prompt);
+  const normalized = prompt.normalize('NFKC');
+  const match = patterns[operation].exec(normalized);
+  if (!match) return false;
+  if (operation !== 'novel.chapter.archive' && operation !== 'novel.chapter.restore') return true;
+  const context = normalized.slice(Math.max(0, match.index - 20), match.index + match[0].length);
+  return !/(?:不要|别|不需要|不用|无需|暂不|先不|不必|取消).{0,32}(?:归档|删除|移除|隐藏|恢复|还原)/iu.test(
+    context,
+  );
 }
 
 function parseConfirmationContinuationDescriptor(
@@ -4942,17 +4904,58 @@ function parseConfirmationContinuationDescriptor(
   return descriptor as unknown as SystemConfirmationContinuationDescriptor;
 }
 
-function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {
+function requiresPersistedDocumentWrite(prompt: string, operation: AgentToolOperation): boolean {
+  if (operation !== 'document.create_draft' && operation !== 'document.update_draft') return false;
+  if (!hasExplicitOperationIntent(prompt, operation)) return false;
+  const value = prompt.normalize('NFKC');
+  if (isOpenEndedStoryGoal(value)) return false;
+  return isNamedDocumentWrite(value) || hasSaveIntent(value);
+}
+
+function hasSaveIntent(prompt: string): boolean {
   const value = prompt.normalize('NFKC');
   const mentionsSave = /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value);
   const saveIsNotRequested =
     /(?:不要|不用|无需|别|不需要|暂不|先不|如何|怎么|怎样|是否).{0,12}(?:保存|存为|存成|存到|存入)|(?:do not|don't|how (?:do|to)).{0,20}\bsave\b/iu.test(
       value,
     );
-  const saveIntent = mentionsSave && !saveIsNotRequested;
+  return mentionsSave && !saveIsNotRequested;
+}
+
+export function inferNovelReference(
+  prompt: string,
+): { role: DocumentBindingRole; kind: DocumentKind } | undefined {
+  const value = prompt.normalize('NFKC');
+  if (!/(小说|故事|novel)/iu.test(value) || /(短剧|剧本|分镜|改编|screenplay)/iu.test(value))
+    return undefined;
+  if (/(大纲|提纲|outline)/iu.test(value)) return { role: 'work-outline', kind: 'outline' };
+  if (/(人物设定|角色设定|人物小传|character.*bible)/iu.test(value))
+    return { role: 'character-bible', kind: 'character' };
+  if (/(世界观|世界设定|world.*bible)/iu.test(value)) return { role: 'world-bible', kind: 'note' };
+  if (/(时间线|timeline)/iu.test(value)) return { role: 'timeline', kind: 'note' };
+  if (/(风格指南|style.*guide)/iu.test(value)) return { role: 'style-guide', kind: 'note' };
+  return undefined;
+}
+
+function isOpenEndedStoryGoal(prompt: string): boolean {
+  return (
+    /(?:想|要|帮我|请)?(?:写|创作|编)(?:一)?(?:部|本|个)?(?:小说|故事)/u.test(prompt) &&
+    !isNamedDocumentWrite(prompt)
+  );
+}
+
+function isNamedDocumentWrite(prompt: string): boolean {
+  return /(?:文档|草稿|大纲|计划|分镜|剧本|提示词|角色设定|人物设定|场景设定|章节|下一章|第[0-9零〇一二两三四五六七八九十百]+章|document|draft|outline|plan|storyboard|script|prompt)/iu.test(
+    prompt,
+  );
+}
+
+function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {
+  const value = prompt.normalize('NFKC');
+  const saveIntent = hasSaveIntent(value);
   if (
-    mentionsSave &&
-    saveIsNotRequested &&
+    /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value) &&
+    !saveIntent &&
     (operation === 'document.create_draft' || operation === 'document.update_draft')
   )
     return false;
@@ -4974,10 +4977,7 @@ function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperatio
   ) {
     return (
       saveIntent ||
-      /(?:创建|生成|起草|撰写|整理成|做成|续写|改写|create|generate|draft|compose|continue|rewrite)/iu.test(
-        value,
-      ) ||
-      /(?:写|write).{0,12}(?:文档|草稿|大纲|计划|说明|提示词|分镜|剧本|章节)|(?:文档|草稿|大纲|计划|说明|提示词|分镜|剧本|章节).{0,12}(?:写|write)/iu.test(
+      /(?:创建|生成|写|起草|撰写|整理成|做成|续写|改写|create|generate|write|draft|compose|continue|rewrite)/iu.test(
         value,
       )
     );
@@ -5238,24 +5238,15 @@ type LibraryToolArguments =
   | {
       operation: 'library.search';
       query: string;
-      searchMode?: 'content' | 'structure';
       sourceTypes?: string[];
       status?: string;
       kind?: string;
       scopeType?: string;
       scopeId?: string;
-      structurePath?: string[];
-      offset?: number;
       includeArchived?: boolean;
       limit?: number;
     }
-  | {
-      operation: 'library.read';
-      sourceHandle: string;
-      maxChars?: number;
-      readMode?: 'chunk' | 'source';
-      offset?: number;
-    };
+  | { operation: 'library.read'; sourceHandle: string; maxChars?: number };
 
 function parseLibraryToolArguments(
   operation: LibraryOperation,
@@ -5274,14 +5265,11 @@ function parseLibraryToolArguments(
   if (operation === 'library.search') {
     const allowed = new Set([
       'query',
-      'searchMode',
       'sourceTypes',
       'status',
       'kind',
       'scopeType',
       'scopeId',
-      'structurePath',
-      'offset',
       'includeArchived',
       'limit',
     ]);
@@ -5294,52 +5282,23 @@ function parseLibraryToolArguments(
       .replace(/[\0\r\n\t]+/g, ' ')
       .trim();
     if (!query || query.length > 200) throw new Error('Library search query is invalid.');
-    if (
-      record.searchMode !== undefined &&
-      record.searchMode !== 'content' &&
-      record.searchMode !== 'structure'
-    ) {
-      throw new Error('Library search mode is invalid.');
-    }
-    if (
-      record.structurePath !== undefined &&
-      (!Array.isArray(record.structurePath) ||
-        record.structurePath.length > 20 ||
-        record.structurePath.some(
-          (item) => typeof item !== 'string' || !item.trim() || item.length > 200,
-        ))
-    ) {
-      throw new Error('Library structurePath is invalid.');
-    }
     const sourceTypes = Array.isArray(record.sourceTypes)
       ? record.sourceTypes.filter((item): item is string => typeof item === 'string')
       : undefined;
     return {
       operation,
       query,
-      searchMode:
-        record.searchMode === 'structure' || record.searchMode === 'content'
-          ? record.searchMode
-          : undefined,
       sourceTypes,
       status: typeof record.status === 'string' ? record.status : undefined,
       kind: typeof record.kind === 'string' ? record.kind : undefined,
       scopeType: typeof record.scopeType === 'string' ? record.scopeType : undefined,
       scopeId: typeof record.scopeId === 'string' ? record.scopeId : undefined,
-      structurePath: Array.isArray(record.structurePath)
-        ? record.structurePath.filter((item): item is string => typeof item === 'string')
-        : undefined,
-      offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
       includeArchived:
         typeof record.includeArchived === 'boolean' ? record.includeArchived : undefined,
       limit: optionalBoundedInteger(record.limit, 1, 20),
     };
   }
-  if (
-    Object.keys(record).some(
-      (key) => !['sourceHandle', 'maxChars', 'readMode', 'offset'].includes(key),
-    )
-  ) {
+  if (Object.keys(record).some((key) => !['sourceHandle', 'maxChars'].includes(key))) {
     throw new Error('Library read arguments contain unsupported fields.');
   }
   if (typeof record.sourceHandle !== 'string' || !record.sourceHandle.trim()) {
@@ -5347,16 +5306,10 @@ function parseLibraryToolArguments(
   }
   const sourceHandle = record.sourceHandle.trim();
   if (sourceHandle.length > 128) throw new Error('Library sourceHandle is invalid.');
-  const readMode = record.readMode;
-  if (readMode !== undefined && readMode !== 'chunk' && readMode !== 'source') {
-    throw new Error('Library read mode is invalid.');
-  }
   return {
     operation,
     sourceHandle,
     maxChars: optionalBoundedInteger(record.maxChars, 1, 20_000),
-    readMode,
-    offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 
@@ -5366,12 +5319,9 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
       operation: argumentsValue.operation,
       queryHash: hash(argumentsValue.query),
       queryLength: argumentsValue.query.length,
-      searchMode: argumentsValue.searchMode,
       sourceTypes: argumentsValue.sourceTypes,
       status: argumentsValue.status,
       kind: argumentsValue.kind,
-      structurePath: argumentsValue.structurePath,
-      offset: argumentsValue.offset,
       limit: argumentsValue.limit,
     };
   }
@@ -5379,28 +5329,24 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
     operation: argumentsValue.operation,
     sourceHandleHash: hash(argumentsValue.sourceHandle),
     maxChars: argumentsValue.maxChars,
-    readMode: argumentsValue.readMode,
-    offset: argumentsValue.offset,
   };
 }
 
 function summarizeLibraryResult(result: {
   status: string;
-  searchMode?: 'content' | 'structure';
   queryHash?: string;
   resultCount?: number;
-  nextOffset?: number;
   sources?: Array<{
     citationLabel: string;
     title: string;
     status: string;
     sourceType: string;
+    sourceTypeLabel?: string;
     sourceId: string;
     versionId?: string;
     kind?: string;
-    structureKind?: string;
-    structurePath?: string[];
-    structureNodeId?: string;
+    kindLabel?: string;
+    matchKind?: string;
   }>;
   sourceHandle?: string;
   citationLabel?: string;
@@ -5410,36 +5356,25 @@ function summarizeLibraryResult(result: {
   versionId?: string;
   sourceStatus?: string;
   kind?: string;
-  structureKind?: string;
-  structurePath?: string[];
-  structureNodeId?: string;
-  readMode?: 'chunk' | 'source';
-  contentHash?: string;
-  startOffset?: number;
-  endOffset?: number;
-  totalCharacters?: number;
   truncated?: boolean;
   characterCount?: number;
 }): Record<string, unknown> {
   if (result.status === 'searched') {
     return {
       status: result.status,
-      searchMode: result.searchMode,
       queryHash: result.queryHash,
       resultCount: result.resultCount,
-      nextOffset: result.nextOffset,
-      truncated: result.truncated,
       sources: (result.sources ?? []).map((source) => ({
         citationLabel: source.citationLabel,
         title: source.title,
         status: source.status,
         sourceType: source.sourceType,
+        sourceTypeLabel: source.sourceTypeLabel,
         sourceId: source.sourceId,
         versionId: source.versionId,
         kind: source.kind,
-        structureKind: source.structureKind,
-        structurePath: source.structurePath,
-        structureNodeId: source.structureNodeId,
+        kindLabel: source.kindLabel,
+        matchKind: source.matchKind,
       })),
     };
   }
@@ -5453,15 +5388,6 @@ function summarizeLibraryResult(result: {
     versionId: result.versionId,
     sourceStatus: result.sourceStatus,
     kind: result.kind,
-    structureKind: result.structureKind,
-    structurePath: result.structurePath,
-    structureNodeId: result.structureNodeId,
-    readMode: result.readMode,
-    contentHash: result.contentHash,
-    startOffset: result.startOffset,
-    endOffset: result.endOffset,
-    nextOffset: result.nextOffset,
-    totalCharacters: result.totalCharacters,
     truncated: result.truncated,
     characterCount: result.characterCount,
   };
