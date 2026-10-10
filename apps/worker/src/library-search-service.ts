@@ -3,6 +3,7 @@ import type {
   LibraryErrorCode,
   LibraryReadResult,
   LibrarySearchResult,
+  LibrarySearchMatchKind,
   LibrarySearchMode,
   LibrarySourceStatus,
 } from '@ai-video/contracts';
@@ -129,6 +130,11 @@ export class LibrarySearchService {
           structureNodeId: structure?.id,
           expiresAt: Date.now() + SOURCE_HANDLE_TTL_MS,
         });
+        const matchKind: LibrarySearchMatchKind =
+          searchMode === 'structure' ||
+          chunk.title.toLocaleLowerCase('zh-CN').includes(query.toLocaleLowerCase('zh-CN'))
+            ? 'title'
+            : 'body';
         return {
           sourceHandle,
           sourceType: chunk.sourceType,
@@ -137,11 +143,7 @@ export class LibrarySearchService {
           status: chunk.status as LibrarySourceStatus,
           kind: chunk.kind,
           title: chunk.title,
-          matchKind:
-            searchMode === 'structure' ||
-            chunk.title.toLocaleLowerCase('zh-CN').includes(query.toLocaleLowerCase('zh-CN'))
-              ? 'title'
-              : 'body',
+          matchKind,
           snippet: 'node' in hit ? '' : librarySnippet(chunk.contentText, query),
           citationLabel,
           updatedAt: chunk.updatedAt,
