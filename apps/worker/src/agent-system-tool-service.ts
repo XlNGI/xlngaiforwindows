@@ -9,21 +9,19 @@ import type {
   ConversationInfo,
   ContextSnapshotCleanupResult,
   MediaTaskSummary,
-  NovelChapterArchiveParams,
-  NovelChapterInfo,
-  NovelChapterListParams,
-  NovelChapterRestoreParams,
   ProviderModelInfo,
   ProviderProfileInfo,
+  ProjectStructureResource,
+  ProjectStructureResult,
   ResearchCacheCleanupResult,
   WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
+import type Database from 'better-sqlite3';
 import type { SystemAgentToolOperation } from './agent-tool-definitions.js';
 import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { ContentService } from './content-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
-import { ProjectStructureCompiler } from './structure-compiler.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -35,8 +33,8 @@ export interface AgentAssetToolService {
   deleteTag(tagId: string): { deleted: true };
   changeAssetTags(assetIds: string[], tagIds: string[], operation: 'add' | 'remove'): AssetInfo[];
   listGroups(keyword?: string): AssetGroupInfo[];
-  createGroup(name: string, tagIds: string[], assetIds: string[]): AssetGroupInfo;
-  updateGroup(groupId: string, name: string, tagIds: string[], assetIds: string[]): AssetGroupInfo;
+  createGroup(name: string, tagIds: string[]): AssetGroupInfo;
+  updateGroup(groupId: string, name: string, tagIds: string[]): AssetGroupInfo;
   deleteGroup(groupId: string): { deleted: true };
   resolveGroup(groupId: string): AssetInfo[];
   deleteAsset(assetId: string, confirm?: boolean): { deleted: true; referenceCount: number };
@@ -50,12 +48,6 @@ export interface AgentSettingsToolService {
 
 export interface AgentMediaTaskService {
   getTask(taskId: string): MediaTaskSummary;
-}
-
-export interface AgentNovelToolService {
-  listChapters(params?: NovelChapterListParams): NovelChapterInfo[];
-  archiveChapter(params: NovelChapterArchiveParams): NovelChapterInfo;
-  restoreChapter(params: NovelChapterRestoreParams): NovelChapterInfo;
 }
 
 export interface AgentMaintenanceToolService {
@@ -89,8 +81,6 @@ export class AgentSystemToolService {
     private readonly mediaTasks?: AgentMediaTaskService,
     private readonly documents?: Pick<DocumentWorkflowService, 'getDocument' | 'selfPublish'>,
     private readonly maintenance?: AgentMaintenanceToolService,
-    private readonly structureCompiler?: ProjectStructureCompiler,
-    private readonly novels?: AgentNovelToolService,
   ) {}
 
   execute(
@@ -105,11 +95,8 @@ export class AgentSystemToolService {
         rejectUnknown(args, []);
         return this.projectContext();
       case 'project.structure.get':
-        return this.projectStructure(args);
-      case 'novel.structure.get':
-        return this.novelStructure(args);
-      case 'novel.chapter.list':
-        return this.listNovelChapters(args);
+        rejectUnknown(args, ['query', 'workspace', 'resourceId', 'maxDepth']);
+        return this.projectStructure(args) as unknown as Record<string, unknown>;
       case 'project.integrity.check':
         rejectUnknown(args, []);
         return this.projectIntegrity();
@@ -152,8 +139,6 @@ export class AgentSystemToolService {
       case 'project.restore.prepare':
       case 'conversation.archive':
       case 'conversation.restore':
-      case 'novel.chapter.archive':
-      case 'novel.chapter.restore':
       case 'document.publish':
       case 'asset.move_to_trash':
       case 'asset.restore':
@@ -197,9 +182,6 @@ export class AgentSystemToolService {
       case 'conversation.archive':
       case 'conversation.restore':
         return this.previewConversationLifecycle(operation, args);
-      case 'novel.chapter.archive':
-      case 'novel.chapter.restore':
-        return this.previewNovelChapterLifecycle(operation, args);
       case 'document.publish':
         return this.previewDocumentPublication(args);
       case 'asset.move_to_trash':
@@ -246,32 +228,6 @@ export class AgentSystemToolService {
           version: 1,
           status: operation === 'conversation.archive' ? 'archived' : 'restored',
           conversation: toConversationSummary(conversation),
-        };
-      }
-      case 'novel.chapter.archive':
-      case 'novel.chapter.restore': {
-        const preview = this.previewNovelChapterLifecycle(operation, args);
-        if (!this.novels) throw unavailable('Novel chapter lifecycle');
-        const chapterId = requiredString(args.chapterId, 'chapterId', 200);
-        const expectedRowVersion = requiredInteger(
-          args.expectedRowVersion,
-          'expectedRowVersion',
-          0,
-          Number.MAX_SAFE_INTEGER,
-        );
-        const chapter =
-          operation === 'novel.chapter.archive'
-            ? this.novels.archiveChapter({
-                chapterId,
-                expectedRowVersion,
-                reason: 'user_archive',
-              })
-            : this.novels.restoreChapter({ chapterId, expectedRowVersion });
-        return {
-          version: 1,
-          status: operation === 'novel.chapter.archive' ? 'archived' : 'restored',
-          chapter: toNovelChapterSummary(chapter),
-          summary: preview.summary,
         };
       }
       case 'document.publish': {
@@ -402,74 +358,418 @@ export class AgentSystemToolService {
   }
 
   private projectContext(): Record<string, unknown> {
+    return this.projects.access(false, (database, project) => ({
+      version: 1,
+      status: 'succeeded',
+      project: {
+        id: project.id,
+        name: project.name,
+        mode: project.mode,
+        schemaVersion: project.schemaVersion,
+        updatedAt: project.updatedAt,
+      },
+      counts: {
+        conversations: scalarCount(database, 'conversations', project.id),
+        documents: scalarCount(database, 'documents', project.id),
+        assets: scalarCount(database, 'assets', project.id),
+      },
+    }));
+  }
+
+  private projectStructure(args: Record<string, unknown>): ProjectStructureResult {
+    const query = optionalString(args.query, 'query', 200)?.toLocaleLowerCase('zh-CN');
+    const workspace = optionalWorkspace(args.workspace);
+    const resourceId = optionalString(args.resourceId, 'resourceId', 200);
+    const maxDepth = optionalInteger(args.maxDepth, 'maxDepth', 0, 8) ?? 5;
     return this.projects.access(false, (database, project) => {
-      const structure = this.structureCompiler?.compileFromDatabase(database, project, {
-        includeArchived: false,
-      });
+      const resources: ProjectStructureResource[] = [];
+      let truncated = false;
+      let includedResourceCount = 0;
+      const matches = (resource: ProjectStructureResource): boolean => {
+        if (workspace && resource.locator.workspace !== workspace) return false;
+        if (resourceId && resource.id !== resourceId && resource.documentId !== resourceId)
+          return false;
+        if (
+          query &&
+          !`${resource.title} ${resource.kind}`.toLocaleLowerCase('zh-CN').includes(query)
+        ) {
+          return false;
+        }
+        return true;
+      };
+      const hasMatch = (resource: ProjectStructureResource): boolean =>
+        matches(resource) || (resource.children?.some((child) => hasMatch(child)) ?? false);
+      const boundTree = (
+        resource: ProjectStructureResource,
+      ): ProjectStructureResource | undefined => {
+        if (includedResourceCount >= 500) {
+          truncated = true;
+          return undefined;
+        }
+        includedResourceCount += 1;
+        const children = resource.children
+          ?.map((child) => boundTree(child))
+          .filter((child): child is ProjectStructureResource => Boolean(child));
+        return {
+          ...resource,
+          ...(children ? { children } : {}),
+        };
+      };
+      const add = (resource: ProjectStructureResource): void => {
+        const bounded = boundTree(resource);
+        if (bounded) resources.push(bounded);
+      };
+      const projectResource: ProjectStructureResource = {
+        id: project.id,
+        kind: 'project',
+        title: project.name,
+        revision: project.updatedAt,
+        locator: { workspace: 'documents', resourceId: project.id },
+        children: [],
+      };
+      const workspaces: ProjectStructureResource[] = [
+        {
+          id: 'workspace:novel',
+          kind: 'workspace',
+          title: '小说',
+          locator: { workspace: 'novel', resourceId: 'workspace:novel' },
+          children: [],
+        },
+        {
+          id: 'workspace:documents',
+          kind: 'workspace',
+          title: '项目文档',
+          locator: { workspace: 'documents', resourceId: 'workspace:documents' },
+          children: [],
+        },
+        {
+          id: 'workspace:characters',
+          kind: 'workspace',
+          title: '角色与场景',
+          locator: { workspace: 'characters', resourceId: 'workspace:characters' },
+          children: [],
+        },
+        {
+          id: 'workspace:shots',
+          kind: 'workspace',
+          title: '场次与镜头',
+          locator: { workspace: 'shots', resourceId: 'workspace:shots' },
+          children: [],
+        },
+        {
+          id: 'workspace:assets',
+          kind: 'workspace',
+          title: '素材库',
+          locator: { workspace: 'assets', resourceId: 'workspace:assets' },
+          children: [],
+        },
+        {
+          id: 'workspace:tasks',
+          kind: 'workspace',
+          title: '会话与任务',
+          locator: { workspace: 'tasks', resourceId: 'workspace:tasks' },
+          children: [],
+        },
+        {
+          id: 'workspace:settings',
+          kind: 'workspace',
+          title: '系统设置',
+          locator: { workspace: 'settings', resourceId: 'workspace:settings' },
+          children: [
+            {
+              id: 'settings:providers',
+              kind: 'settings',
+              title: 'Provider 连接与模型',
+              parentId: 'workspace:settings',
+              locator: { workspace: 'settings', resourceId: 'settings:providers' },
+            },
+            {
+              id: 'settings:application',
+              kind: 'settings',
+              title: '应用设置',
+              parentId: 'workspace:settings',
+              locator: { workspace: 'settings', resourceId: 'settings:application' },
+            },
+          ],
+        },
+      ];
+      const novel = workspaces[0]!.children!;
+      const documents = workspaces[1]!.children!;
+      const characters = workspaces[2]!.children!;
+      const shots = workspaces[3]!.children!;
+      const novelVolumes = database
+        .prepare(
+          `SELECT id, title, position, status, row_version, updated_at FROM novel_volumes WHERE project_id = ? AND status != 'archived' ORDER BY position, id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        title: string;
+        position: number;
+        status: string;
+        row_version: number;
+        updated_at: string;
+      }>;
+      for (const volume of novelVolumes) {
+        novel.push({
+          id: volume.id,
+          kind: 'novel-volume',
+          title: volume.title,
+          parentId: 'workspace:novel',
+          lifecycleStatus: volume.status as 'active' | 'archived',
+          rowVersion: volume.row_version,
+          revision: volume.updated_at,
+          locator: { workspace: 'novel', resourceId: volume.id },
+        });
+      }
+      const chapters = database
+        .prepare(
+          `SELECT chapters.id, chapters.document_id, chapters.volume_id, chapters.display_label, chapters.position, chapters.lifecycle_status, chapters.row_version, documents.title, documents.updated_at, documents.current_version_id
+                  FROM novel_chapters chapters INNER JOIN documents ON documents.id = chapters.document_id
+                  WHERE chapters.project_id = ? AND chapters.lifecycle_status != 'archived' ORDER BY chapters.position, chapters.id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        document_id: string;
+        volume_id: string | null;
+        display_label: string;
+        position: number;
+        lifecycle_status: string;
+        row_version: number;
+        title: string;
+        updated_at: string;
+        current_version_id: string | null;
+      }>;
+      for (const chapter of chapters) {
+        novel.push({
+          id: chapter.id,
+          kind: 'novel-chapter',
+          title: `${chapter.display_label} ${chapter.title}`.trim(),
+          parentId: chapter.volume_id ?? 'workspace:novel',
+          documentId: chapter.document_id,
+          sourceType: 'novel-chapter',
+          lifecycleStatus: chapter.lifecycle_status as 'active' | 'archived',
+          rowVersion: chapter.row_version,
+          revision: chapter.updated_at,
+          versionId: chapter.current_version_id ?? undefined,
+          locator: {
+            workspace: 'novel',
+            resourceId: chapter.id,
+            documentId: chapter.document_id,
+            versionId: chapter.current_version_id ?? undefined,
+          },
+          children: this.structureNodes(
+            database,
+            project.id,
+            chapter.document_id,
+            chapter.id,
+            maxDepth,
+            'novel',
+          ),
+        });
+      }
+      const docRows = database
+        .prepare(
+          `SELECT id, kind, title, scope_type, scope_id, lifecycle_status, row_version, updated_at, current_version_id FROM documents WHERE project_id = ? AND lifecycle_status != 'archived' ORDER BY updated_at DESC, id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        kind: string;
+        title: string;
+        scope_type: string;
+        scope_id: string | null;
+        lifecycle_status: string;
+        row_version: number;
+        updated_at: string;
+        current_version_id: string | null;
+      }>;
+      for (const document of docRows) {
+        const kind = document.kind as ProjectStructureResource['documentKind'];
+        const target = kind === 'character' || kind === 'scene' ? characters : documents;
+        if (chapters.some((chapter) => chapter.document_id === document.id)) continue;
+        target.push({
+          id: document.id,
+          kind: 'document',
+          title: document.title,
+          parentId: target === characters ? 'workspace:characters' : 'workspace:documents',
+          documentId: document.id,
+          documentKind: kind,
+          sourceType: document.kind === 'storyboard' ? 'storyboard' : 'document',
+          lifecycleStatus: document.lifecycle_status as 'active' | 'archived',
+          rowVersion: document.row_version,
+          revision: document.updated_at,
+          versionId: document.current_version_id ?? undefined,
+          locator: {
+            workspace: target === characters ? 'characters' : 'documents',
+            resourceId: document.id,
+            documentId: document.id,
+            versionId: document.current_version_id ?? undefined,
+          },
+          children: this.structureNodes(
+            database,
+            project.id,
+            document.id,
+            document.id,
+            maxDepth,
+            target === characters ? 'characters' : 'documents',
+          ),
+        });
+      }
+      const sceneRows = database
+        .prepare(
+          `SELECT id, title, position, row_version, updated_at FROM scenes WHERE project_id = ? ORDER BY position, id`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        title: string;
+        position: number;
+        row_version: number;
+        updated_at: string;
+      }>;
+      for (const scene of sceneRows) {
+        const sceneResource: ProjectStructureResource = {
+          id: scene.id,
+          kind: 'scene',
+          title: scene.title,
+          parentId: 'workspace:shots',
+          rowVersion: scene.row_version,
+          revision: scene.updated_at,
+          locator: { workspace: 'shots', resourceId: scene.id },
+          children: [],
+        };
+        const sceneChildren = sceneResource.children!;
+        const shotRows = database
+          .prepare(
+            `SELECT id, title, position, row_version, updated_at FROM shots WHERE scene_id = ? ORDER BY position, id`,
+          )
+          .all(scene.id) as Array<{
+          id: string;
+          title: string;
+          position: number;
+          row_version: number;
+          updated_at: string;
+        }>;
+        for (const shot of shotRows)
+          sceneChildren.push({
+            id: shot.id,
+            kind: 'shot',
+            title: shot.title,
+            parentId: scene.id,
+            rowVersion: shot.row_version,
+            revision: shot.updated_at,
+            locator: { workspace: 'shots', resourceId: shot.id },
+          });
+        shots.push(sceneResource);
+      }
+      const conversationRows = database
+        .prepare(
+          `SELECT id, title, updated_at, archived_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id LIMIT 100`,
+        )
+        .all(project.id) as Array<{
+        id: string;
+        title: string;
+        updated_at: string;
+        archived_at: string | null;
+      }>;
+      const conversations = workspaces[5]!.children!;
+      for (const conversation of conversationRows)
+        conversations.push({
+          id: conversation.id,
+          kind: 'conversation',
+          title: conversation.title || '新会话',
+          parentId: 'workspace:tasks',
+          lifecycleStatus: conversation.archived_at ? 'archived' : 'active',
+          revision: conversation.updated_at,
+          locator: { workspace: 'tasks', resourceId: conversation.id },
+        });
+      const assets = workspaces[4]!.children!;
+      for (const asset of this.assets.listAssets({ deleted: 'active', limit: 501 })) {
+        assets.push({
+          id: asset.id,
+          kind: 'asset',
+          title: asset.alias || asset.kind || '未命名素材',
+          parentId: 'workspace:assets',
+          lifecycleStatus: 'active',
+          revision: asset.updatedAt ?? asset.createdAt,
+          locator: { workspace: 'assets', resourceId: asset.id },
+        });
+      }
+      projectResource.children = workspaces.filter(
+        (item) => !workspace || item.locator.workspace === workspace,
+      );
+      const filtered = projectResource.children.filter((item) => hasMatch(item));
+      for (const resource of filtered) add(resource);
       return {
         version: 1,
-        status: 'succeeded',
-        project: {
-          id: project.id,
-          name: project.name,
-          mode: project.mode,
-          schemaVersion: project.schemaVersion,
-          updatedAt: project.updatedAt,
-        },
-        counts: {
-          conversations: scalarCount(database, 'conversations', project.id),
-          documents: scalarCount(database, 'documents', project.id),
-          assets: scalarCount(database, 'assets', project.id),
-        },
-        ...(structure ? { structure } : {}),
+        projectId: project.id,
+        projectName: project.name,
+        revision: project.updatedAt,
+        resources,
+        truncated,
       };
     });
   }
 
-  private projectStructure(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['includeArchived']);
-    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
-    if (!this.structureCompiler) throw unavailable('Project structure');
-    return this.projects.access(false, (database, project) => ({
-      version: 1,
-      status: 'succeeded',
-      structure: this.structureCompiler!.compileFromDatabase(database, project, {
-        includeArchived,
-      }),
-    }));
-  }
-
-  private novelStructure(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['novelId', 'includeArchived']);
-    const novelId = optionalString(args.novelId, 'novelId', 200);
-    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
-    if (!this.structureCompiler) throw unavailable('Novel structure');
-    return this.projects.access(false, (database, project) => ({
-      version: 1,
-      status: 'succeeded',
-      structure: this.structureCompiler!.compileNovel(database, project, {
-        ...(novelId ? { novelId } : {}),
-        includeArchived,
-      }),
-    }));
-  }
-
-  private listNovelChapters(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['volumeId', 'includeArchived']);
-    if (!this.novels) throw unavailable('Novel chapter listing');
-    const volumeId = optionalString(args.volumeId, 'volumeId', 200);
-    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
-    const chapters = this.novels.listChapters({
-      ...(volumeId ? { volumeId } : {}),
-      includeArchived,
-    });
-    const bounded = chapters.slice(0, 200).map(toNovelChapterSummary);
-    return {
-      version: 1,
-      status: 'succeeded',
-      chapters: bounded,
-      truncated: chapters.length > bounded.length,
-    };
+  private structureNodes(
+    database: Database.Database,
+    projectId: string,
+    documentId: string,
+    parentId: string,
+    maxDepth: number,
+    workspace: ProjectStructureResource['locator']['workspace'],
+  ): ProjectStructureResource[] {
+    if (maxDepth <= 0) return [];
+    const rows = database
+      .prepare(
+        `SELECT id, node_kind, title, path_json, level, version_id, updated_at
+         FROM project_structure_nodes
+         WHERE project_id = ? AND document_id = ?
+           AND version_id IS (
+             SELECT current_version_id FROM documents
+             WHERE project_id = ? AND id = ?
+           )
+         ORDER BY ordinal LIMIT 100`,
+      )
+      .all(projectId, documentId, projectId, documentId) as Array<{
+      id: string;
+      node_kind: string;
+      title: string;
+      path_json: string;
+      level: number;
+      version_id: string | null;
+      updated_at: string;
+    }>;
+    const stack: Array<{ level: number; id: string }> = [];
+    return rows
+      .filter((row) => row.level <= maxDepth)
+      .map((row) => {
+        let path: string[] = [];
+        try {
+          path = JSON.parse(row.path_json) as string[];
+        } catch {
+          path = [row.title];
+        }
+        while (stack.length > 0 && stack[stack.length - 1]!.level >= row.level) stack.pop();
+        const resolvedParentId = stack.at(-1)?.id ?? parentId;
+        const resource: ProjectStructureResource = {
+          id: row.id,
+          kind: 'structure-node',
+          title: row.title,
+          parentId: resolvedParentId,
+          versionId: row.version_id ?? undefined,
+          structureKind: row.node_kind as ProjectStructureResource['structureKind'],
+          revision: row.updated_at,
+          locator: {
+            workspace,
+            resourceId: documentId,
+            documentId,
+            versionId: row.version_id ?? undefined,
+            structureNodeId: row.id,
+            structurePath: path,
+          },
+        };
+        stack.push({ level: row.level, id: row.id });
+        return resource;
+      });
   }
 
   private projectIntegrity(): Record<string, unknown> {
@@ -646,22 +946,21 @@ export class AgentSystemToolService {
   }
 
   private createGroup(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['name', 'assetIds']);
+    rejectUnknown(args, ['name', 'tagIds']);
     return {
       version: 1,
       status: 'succeeded',
       group: toGroupSummary(
         this.assets.createGroup(
           requiredString(args.name, 'name', 120),
-          [],
-          requiredStringArray(args.assetIds, 'assetIds', 200),
+          requiredStringArray(args.tagIds, 'tagIds', 100),
         ),
       ),
     };
   }
 
   private updateGroup(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['groupId', 'name', 'assetIds']);
+    rejectUnknown(args, ['groupId', 'name', 'tagIds']);
     return {
       version: 1,
       status: 'succeeded',
@@ -669,8 +968,7 @@ export class AgentSystemToolService {
         this.assets.updateGroup(
           requiredString(args.groupId, 'groupId', 200),
           requiredString(args.name, 'name', 120),
-          [],
-          requiredStringArray(args.assetIds, 'assetIds', 200),
+          requiredStringArray(args.tagIds, 'tagIds', 100),
         ),
       ),
     };
@@ -807,59 +1105,6 @@ export class AgentSystemToolService {
       summary: `${operation === 'conversation.archive' ? '归档' : '恢复'}会话“${conversation.title}”`,
       affectedEntities: [{ type: 'conversation', id: conversation.id, label: conversation.title }],
       executionArguments: { conversationId },
-    };
-  }
-
-  private previewNovelChapterLifecycle(
-    operation: 'novel.chapter.archive' | 'novel.chapter.restore',
-    args: Record<string, unknown>,
-  ): AgentSystemToolConfirmationPreview {
-    rejectUnknown(args, ['chapterId', 'expectedRowVersion', 'reason']);
-    if (!this.novels) throw unavailable('Novel chapter lifecycle');
-    const chapterId = requiredString(args.chapterId, 'chapterId', 200);
-    const expectedRowVersion = requiredInteger(
-      args.expectedRowVersion,
-      'expectedRowVersion',
-      0,
-      Number.MAX_SAFE_INTEGER,
-    );
-    if (
-      operation === 'novel.chapter.archive' &&
-      args.reason !== undefined &&
-      args.reason !== 'user_archive'
-    ) {
-      throw new Error('reason must be user_archive.');
-    }
-    const chapter = this.novels
-      .listChapters({ includeArchived: true })
-      .find((candidate) => candidate.id === chapterId);
-    if (!chapter) {
-      throw new AgentToolPolicyError(
-        'AGENT_TOOL_PROJECT_SCOPE',
-        'The requested novel chapter is not available in the current project.',
-      );
-    }
-    if (chapter.rowVersion !== expectedRowVersion) {
-      throw new AgentToolPolicyError(
-        'AGENT_TOOL_ARGUMENTS_INVALID',
-        'The novel chapter changed. Re-read its current rowVersion before retrying.',
-        true,
-      );
-    }
-    if (operation === 'novel.chapter.archive' && chapter.lifecycleStatus === 'archived') {
-      throw new Error('Novel chapter is already archived.');
-    }
-    if (operation === 'novel.chapter.restore' && chapter.lifecycleStatus !== 'archived') {
-      throw new Error('Novel chapter is not archived.');
-    }
-    return {
-      summary: `${operation === 'novel.chapter.archive' ? '归档' : '恢复'}小说章节“${chapter.displayLabel} ${chapter.title}”`,
-      affectedEntities: [{ type: 'novel-chapter', id: chapter.id, label: chapter.title }],
-      executionArguments: {
-        chapterId: chapter.id,
-        expectedRowVersion: chapter.rowVersion,
-        ...(operation === 'novel.chapter.archive' ? { reason: 'user_archive' } : {}),
-      },
     };
   }
 
@@ -1097,25 +1342,6 @@ function toAssetSummary(asset: AssetInfo): Record<string, unknown> {
   };
 }
 
-function toNovelChapterSummary(chapter: NovelChapterInfo): Record<string, unknown> {
-  return {
-    id: chapter.id,
-    volumeId: chapter.volumeId,
-    documentId: chapter.documentId,
-    title: chapter.title,
-    displayLabel: chapter.displayLabel,
-    position: chapter.position,
-    lifecycleStatus: chapter.lifecycleStatus,
-    archiveReason: chapter.archiveReason,
-    rowVersion: chapter.rowVersion,
-    documentRowVersion: chapter.documentRowVersion,
-    ragChunkCount: chapter.ragChunkCount,
-    ragIndexedAt: chapter.ragIndexedAt,
-    createdAt: chapter.createdAt,
-    updatedAt: chapter.updatedAt,
-  };
-}
-
 function toTagSummary(tag: AssetTagInfo): Record<string, unknown> {
   return {
     id: tag.id,
@@ -1130,7 +1356,7 @@ function toGroupSummary(group: AssetGroupInfo): Record<string, unknown> {
   return {
     id: group.id,
     name: group.name,
-    assetIds: group.assetIds.slice(0, 200),
+    tagIds: group.tagIds.slice(0, 100),
     assetCount: group.assetCount ?? 0,
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
@@ -1174,6 +1400,25 @@ function optionalString(value: unknown, name: string, maximum: number): string |
 function optionalBoolean(value: unknown, name: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw new Error(`${name} must be a boolean.`);
+  return value;
+}
+
+type ProjectStructureWorkspace =
+  'novel' | 'documents' | 'characters' | 'shots' | 'assets' | 'tasks' | 'settings';
+
+function optionalWorkspace(value: unknown): ProjectStructureWorkspace | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value !== 'novel' &&
+    value !== 'documents' &&
+    value !== 'characters' &&
+    value !== 'shots' &&
+    value !== 'assets' &&
+    value !== 'tasks' &&
+    value !== 'settings'
+  ) {
+    throw new Error('workspace is invalid.');
+  }
   return value;
 }
 

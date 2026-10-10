@@ -188,6 +188,7 @@ export class AgentToolRegistry {
   }
 
   serializeResultWithBoundedText(value: object, field: string, text: string): string {
+    const metadata = value as Record<string, unknown>;
     const originalTextBytes = Buffer.byteLength(text, 'utf8');
     let textBudget = Math.min(
       originalTextBytes,
@@ -195,11 +196,26 @@ export class AgentToolRegistry {
     );
     while (textBudget >= 0) {
       const bounded = truncateUtf8Text(text, textBudget);
+      const pagedRead =
+        field === 'content' &&
+        metadata.status === 'read' &&
+        typeof metadata.startOffset === 'number' &&
+        typeof metadata.totalCharacters === 'number';
+      const endOffset = pagedRead ? (metadata.startOffset as number) + bounded.length : 0;
       try {
         return this.serializeResult({
           ...value,
           [field]: bounded,
-          truncated: bounded !== text,
+          truncated: metadata.truncated === true || bounded !== text,
+          ...(pagedRead
+            ? {
+                characterCount: bounded.length,
+                endOffset,
+                ...(endOffset < (metadata.totalCharacters as number)
+                  ? { nextOffset: endOffset }
+                  : {}),
+              }
+            : {}),
           originalTextBytes,
         });
       } catch (error) {

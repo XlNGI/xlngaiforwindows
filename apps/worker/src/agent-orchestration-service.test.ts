@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { ContentService } from './content-service.js';
-import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 
 const directories: string[] = [];
@@ -77,13 +76,6 @@ describe('AgentOrchestrationService', () => {
     });
     expect(persisted.lock).toEqual({ task_id: prepared.taskId });
     expect(persisted.task).toEqual({ status: 'queued', phase: 'intent_resolving' });
-    const taskDetail = new DocumentWorkflowService(project).getTask({ taskId: prepared.taskId });
-    expect(taskDetail.target).toMatchObject({
-      targetKind: 'novel-chapter',
-      action: 'create_chapter',
-      chapterId: prepared.chapterId,
-      documentId: prepared.documentId,
-    });
   });
 
   it('keeps ambiguous or negated writing requests out of business tables', async () => {
@@ -130,32 +122,42 @@ describe('AgentOrchestrationService', () => {
     ).toEqual({ tasks: { count: 0 }, pending: { count: 1 } });
   });
 
-  it('requests a missing chapter title before reserving a new chapter', async () => {
+  it('resolves an explicit chapter reference before starting the writing task', async () => {
     const { project, conversation, orchestration } = await setup();
-    expect(
-      orchestration.prepareNovelTask({
-        conversationId: conversation.id,
-        projectSessionId: project.currentSessionId()!,
-        prompt: '我现在要测试写一章小说正文',
-        intent: { action: 'create_chapter' },
-      }),
-    ).toMatchObject({ pendingIntent: { reasonCode: 'TARGET_REQUIRED' } });
-    expect(
-      project.access(false, (database) => ({
-        tasks: database.prepare('SELECT COUNT(*) AS count FROM agent_tasks').get(),
-        chapters: database.prepare('SELECT COUNT(*) AS count FROM novel_chapters').get(),
-        documents: database.prepare('SELECT COUNT(*) AS count FROM documents').get(),
-      })),
-    ).toEqual({ tasks: { count: 0 }, chapters: { count: 0 }, documents: { count: 0 } });
+    const initial = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '创作第一章。',
+      intent: { action: 'create_chapter', chapterTitle: '雨夜来客', displayLabel: '第一章' },
+    });
+    if ('pendingIntent' in initial) throw new Error('Expected an initial chapter.');
+
+    project.access(true, (database) => {
+      database
+        .prepare(
+          "UPDATE agent_tasks SET status = 'failed', completed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run('2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z', initial.taskId);
+    });
+
+    const resolved = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '将第一章正文保存到小说中。',
+    });
+    expect(resolved).toMatchObject({
+      chapterId: initial.chapterId,
+      documentId: initial.documentId,
+      documentIntent: { operation: 'novel.chapter.submit_draft' },
+    });
   });
 
-  it('accepts a numbered new chapter before the model supplies its prose title', async () => {
+  it('creates the first chapter placeholder for an explicit save request in an empty novel', async () => {
     const { project, conversation, orchestration } = await setup();
     const prepared = orchestration.prepareNovelTask({
       conversationId: conversation.id,
       projectSessionId: project.currentSessionId()!,
-      prompt: '帮我生成第二章',
-      intent: { action: 'create_chapter', displayLabel: '第二章' },
+      prompt: '将生成的正文保存为小说第一章。',
     });
     expect('pendingIntent' in prepared).toBe(false);
     if ('pendingIntent' in prepared) return;
@@ -163,30 +165,15 @@ describe('AgentOrchestrationService', () => {
       project.access(false, (database) =>
         database
           .prepare(
-            `SELECT documents.title, chapters.display_label, chapters.lifecycle_status
-           FROM documents INNER JOIN novel_chapters chapters ON chapters.document_id = documents.id
-           WHERE documents.id = ?`,
+            `SELECT chapters.display_label, documents.title, targets.created_placeholder
+             FROM novel_chapters chapters
+             INNER JOIN documents ON documents.id = chapters.document_id
+             INNER JOIN agent_task_targets targets ON targets.chapter_id = chapters.id
+             WHERE targets.task_id = ?`,
           )
-          .get(prepared.documentId),
+          .get(prepared.taskId),
       ),
-    ).toEqual({ title: '未命名章节', display_label: '第二章', lifecycle_status: 'reserved' });
-  });
-
-  it('keeps a negated numbered creation request pending without reserving a chapter', async () => {
-    const { project, conversation, orchestration } = await setup();
-    expect(
-      orchestration.prepareNovelTask({
-        conversationId: conversation.id,
-        projectSessionId: project.currentSessionId()!,
-        prompt: '不要生成第二章',
-        intent: { action: 'create_chapter', displayLabel: '第二章' },
-      }),
-    ).toMatchObject({ pendingIntent: { reasonCode: 'NEGATED_ACTION' } });
-    expect(
-      project.access(false, (database) =>
-        database.prepare('SELECT COUNT(*) AS count FROM novel_chapters').get(),
-      ),
-    ).toEqual({ count: 0 });
+    ).toEqual({ display_label: '第一章', title: '第一章', created_placeholder: 1 });
   });
 
   it('permits only one active task per chapter and releases the lock at a terminal task state', async () => {

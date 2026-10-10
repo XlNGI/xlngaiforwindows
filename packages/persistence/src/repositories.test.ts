@@ -2,7 +2,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRepositories, migrateDatabase, openProjectDatabase } from './index.js';
+import {
+  createRepositories,
+  listProjectStructureNodes,
+  migrateDatabase,
+  openProjectDatabase,
+} from './index.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -141,6 +146,12 @@ describe('repositories', () => {
       rowVersion: 0,
       createdAt: 'now',
       updatedAt: 'now',
+    });
+    expect(
+      listProjectStructureNodes(database, { projectId: 'project', sourceType: 'shot' })[0],
+    ).toMatchObject({
+      kind: 'document',
+      path: ['Scene 1', 'Shot 1'],
     });
     repositories.memories.save({
       id: 'memory',

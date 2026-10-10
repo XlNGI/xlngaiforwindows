@@ -37,6 +37,7 @@ import { createRepositories } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
 import { multiplyDecimalStrings } from './usage-cost.js';
+import { withNetworkResponse } from './network-transfer.js';
 
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const OFF_PEAK_POLL_TIMEOUT_MS = 48 * 60 * 60 * 1000;
@@ -1230,56 +1231,70 @@ async function downloadVideo(
     );
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), VIDEO_DOWNLOAD_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('Video download timed out.', 'TimeoutError')),
+    VIDEO_DOWNLOAD_TIMEOUT_MS,
+  );
   const signal = AbortSignal.any([controller.signal, cancellationSignal]);
   let descriptor: number | undefined;
   try {
-    const response = await fetch(source, { signal, redirect: 'error' });
-    if (!response.ok) throw new Error(`Video download failed with HTTP ${response.status}.`);
-    const contentType =
-      response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
-    const extension = videoExtension(contentType, source);
-    const declaredSizeValue = response.headers.get('content-length');
-    const declaredSize = declaredSizeValue === null ? undefined : Number(declaredSizeValue);
-    if (declaredSize !== undefined) {
-      if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
-        throw new Error('Video download returned an invalid Content-Length.');
-      }
-      if (declaredSize > MAX_VIDEO_BYTES) {
-        throw new Error('Video download exceeds the 512 MiB limit.');
-      }
-      storageCapacityCheck(dirname(temporaryPath), declaredSize);
-    }
-    if (!response.body) throw new Error('Video download returned an empty body.');
-    descriptor = openSync(temporaryPath, 'wx');
-    const hash = createHash('sha256');
-    const reader = response.body.getReader();
-    let sizeBytes = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sizeBytes += value.byteLength;
-      if (sizeBytes > MAX_VIDEO_BYTES) throw new Error('Video download exceeds the 512 MiB limit.');
-      storageCapacityCheck(dirname(temporaryPath), value.byteLength);
-      hash.update(value);
-      writeSync(descriptor, value);
-    }
-    closeSync(descriptor);
-    descriptor = undefined;
-    if (sizeBytes === 0 || statSync(temporaryPath).size !== sizeBytes) {
-      throw new Error('Video download was empty or truncated.');
-    }
-    validateVideoSignature(temporaryPath, extension);
-    return {
-      temporaryPath,
-      extension,
-      contentHash: hash.digest('hex'),
-      sizeBytes,
-    };
+    return await withNetworkResponse(
+      source,
+      { signal, redirect: 'error' },
+      async (response, read) => {
+        if (!response.ok) throw new Error(`Video download failed with HTTP ${response.status}.`);
+        const contentType =
+          response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
+        const extension = videoExtension(contentType, source);
+        const declaredSizeValue = response.headers.get('content-length');
+        const declaredSize = declaredSizeValue === null ? undefined : Number(declaredSizeValue);
+        if (declaredSize !== undefined) {
+          if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
+            throw new Error('Video download returned an invalid Content-Length.');
+          }
+          if (declaredSize > MAX_VIDEO_BYTES) {
+            throw new Error('Video download exceeds the 512 MiB limit.');
+          }
+          storageCapacityCheck(dirname(temporaryPath), declaredSize);
+        }
+        if (!response.body) throw new Error('Video download returned an empty body.');
+        descriptor = openSync(temporaryPath, 'wx');
+        const hash = createHash('sha256');
+        const reader = response.body.getReader();
+        let sizeBytes = 0;
+        try {
+          while (true) {
+            const { done, value } = await read(() => reader.read());
+            if (done) break;
+            sizeBytes += value.byteLength;
+            if (sizeBytes > MAX_VIDEO_BYTES)
+              throw new Error('Video download exceeds the 512 MiB limit.');
+            storageCapacityCheck(dirname(temporaryPath), value.byteLength);
+            hash.update(value);
+            writeSync(descriptor, value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        closeSync(descriptor);
+        descriptor = undefined;
+        if (sizeBytes === 0 || statSync(temporaryPath).size !== sizeBytes) {
+          throw new Error('Video download was empty or truncated.');
+        }
+        validateVideoSignature(temporaryPath, extension);
+        return {
+          temporaryPath,
+          extension,
+          contentHash: hash.digest('hex'),
+          sizeBytes,
+        };
+      },
+    );
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor);
     rmSync(temporaryPath, { force: true });
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (cancellationSignal.aborted) throw new Error('Video download was cancelled.');
+    if (controller.signal.aborted) {
       throw new Error('Video download timed out.');
     }
     throw error;

@@ -3,7 +3,7 @@ use serde::Deserialize;
 use super::{
     credential_store::{credential_read, ensure_credential_subject, CredentialSecret},
     provider_http::{request_json, JsonHttpErrorKind, JsonHttpRequest, JsonHttpResponse},
-    WorkerState,
+    request_guard, WorkerState,
 };
 
 const MODEL_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -91,6 +91,7 @@ pub(crate) async fn provider_test_connection(
     profile_id: String,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<serde_json::Value, String> {
+    let dispatch = request_guard::try_dispatch().map_err(|error| error.to_string())?;
     ensure_credential_subject(&profile_id, &state)?;
     let begin = state.request(&serde_json::json!({
         "id": format!("provider-connection-begin-{profile_id}"),
@@ -105,11 +106,12 @@ pub(crate) async fn provider_test_connection(
     }
 
     let outcome = match credential_read(&profile_id) {
-        Ok(secret) => {
-            tauri::async_runtime::spawn_blocking(move || test_connection(runtime, secret))
-                .await
-                .map_err(|_| "Provider connection task could not be joined".to_string())?
-        }
+        Ok(secret) => tauri::async_runtime::spawn_blocking(move || {
+            let _dispatch = dispatch;
+            test_connection(runtime, secret)
+        })
+        .await
+        .map_err(|_| "Provider connection task could not be joined".to_string())?,
         Err(_) => ProviderTestOutcome::failed(
             "auth-failed",
             "credential-missing",
@@ -178,6 +180,9 @@ fn test_connection(
 
 fn classify_request_error(kind: JsonHttpErrorKind, message: String) -> ProviderTestOutcome {
     match kind {
+        JsonHttpErrorKind::Admission => {
+            ProviderTestOutcome::failed("network-failed", "REQUEST_NOT_SENT", message)
+        }
         JsonHttpErrorKind::InvalidRequest => {
             ProviderTestOutcome::failed("protocol-failed", "invalid-provider-endpoint", message)
         }

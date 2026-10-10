@@ -8,10 +8,6 @@ import type {
 export type SystemAgentToolOperation =
   | 'project.get_context'
   | 'project.structure.get'
-  | 'novel.structure.get'
-  | 'novel.chapter.list'
-  | 'novel.chapter.archive'
-  | 'novel.chapter.restore'
   | 'project.integrity.check'
   | 'project.backup.prepare'
   | 'project.export.prepare'
@@ -94,6 +90,20 @@ export const SCHEMA_AGENT_TOOLS: LlmToolDefinition[] = [
   },
 ];
 
+/**
+ * Resolver output echoed by a write call. The fields are optional for legacy
+ * Desktop callers, but the System Agent is instructed to provide them after
+ * `project.structure.get`; the executor validates every supplied field.
+ */
+const RESOURCE_LOCATOR_PROPERTIES = {
+  resourceId: { type: 'string', minLength: 1, maxLength: 200 },
+  documentId: { type: 'string', minLength: 1, maxLength: 200 },
+  structureNodeId: { type: 'string', minLength: 1, maxLength: 200 },
+  versionId: { type: 'string', minLength: 1, maxLength: 200 },
+  expectedRevision: { type: 'string', minLength: 1, maxLength: 200 },
+  expectedRowVersion: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+} as const;
+
 export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.create_draft',
@@ -110,6 +120,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
           type: 'string',
           enum: ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'],
         },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -133,6 +144,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -140,13 +152,21 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
     name: 'document.archive',
     description:
       'Request archival of the Worker-authorized document. User confirmation is required.',
-    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: RESOURCE_LOCATOR_PROPERTIES,
+    },
   },
   {
     name: 'document.restore',
     description:
       'Request restoration of the Worker-authorized document. User confirmation is required.',
-    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: RESOURCE_LOCATOR_PROPERTIES,
+    },
   },
   {
     name: 'novel.chapter.submit_draft',
@@ -158,6 +178,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -172,6 +193,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -186,6 +208,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -240,6 +263,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        ...RESOURCE_LOCATOR_PROPERTIES,
       },
     },
   },
@@ -336,72 +360,24 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'project.get_context',
-    description:
-      'Get a bounded catalog of the currently open project. Document bodies are not included. Prefer library.search / library.read for facts; the catalog is already in context.',
+    description: 'Get a bounded summary of the currently open project. This is read-only.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
     name: 'project.structure.get',
     description:
-      'Get the metadata-only project structure tree, including document sources and the novel structure when present. Document bodies are not included. This is read-only.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: { includeArchived: { type: 'boolean' } },
-    },
-  },
-  {
-    name: 'novel.structure.get',
-    description:
-      'Get the metadata-only novel structure tree of profiles, volumes, chapters, and references. Chapter and document bodies are not included. This is read-only.',
+      'Resolve the current project structure before choosing a resource tool. Returns bounded resource locators for the novel, chapters and volumes, project documents, character and scene prompts, scenes and shots, assets, conversations, and safe settings entry points. It includes document structure nodes, document IDs, row versions, and a project revision. This is read-only; use library.search/read for正文 and the authorized domain tool for changes.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        novelId: { type: 'string', minLength: 1, maxLength: 200 },
-        includeArchived: { type: 'boolean' },
-      },
-    },
-  },
-  {
-    name: 'novel.chapter.list',
-    description:
-      'List bounded novel chapter metadata in the current project. Chapter bodies are not included. Use this to verify a chapter ID and row version before an archive or restore request.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        volumeId: { type: 'string', minLength: 1, maxLength: 200 },
-        includeArchived: { type: 'boolean' },
-      },
-    },
-  },
-  {
-    name: 'novel.chapter.archive',
-    description:
-      'Request archival of one novel chapter. The user must confirm before the chapter is archived. Use the current chapterId and rowVersion from novel.chapter.list or novel.structure.get.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['chapterId', 'expectedRowVersion'],
-      properties: {
-        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
-        expectedRowVersion: { type: 'integer', minimum: 0 },
-        reason: { type: 'string', enum: ['user_archive'] },
-      },
-    },
-  },
-  {
-    name: 'novel.chapter.restore',
-    description:
-      'Request restoration of one archived novel chapter. The user must confirm before the chapter is restored. Use the current chapterId and rowVersion from novel.chapter.list or novel.structure.get.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['chapterId', 'expectedRowVersion'],
-      properties: {
-        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
-        expectedRowVersion: { type: 'integer', minimum: 0 },
+        query: { type: 'string', maxLength: 200 },
+        workspace: {
+          type: 'string',
+          enum: ['novel', 'documents', 'characters', 'shots', 'assets', 'tasks', 'settings'],
+        },
+        resourceId: { type: 'string', maxLength: 200 },
+        maxDepth: { type: 'integer', minimum: 0, maximum: 8 },
       },
     },
   },
@@ -649,14 +625,14 @@ function assetGroupDefinitions(): LlmToolDefinition[] {
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: includeId ? ['groupId', 'name', 'assetIds'] : ['name', 'assetIds'],
+      required: includeId ? ['groupId', 'name', 'tagIds'] : ['name', 'tagIds'],
       properties: {
         ...(includeId ? { groupId: { type: 'string', minLength: 1, maxLength: 200 } } : {}),
         name: { type: 'string', minLength: 1, maxLength: 120 },
-        assetIds: {
+        tagIds: {
           type: 'array',
           minItems: 1,
-          maxItems: 200,
+          maxItems: 100,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 200 },
         },
@@ -664,9 +640,9 @@ function assetGroupDefinitions(): LlmToolDefinition[] {
     },
   });
   return [
-    listDefinition('assetGroup.list', 'List bounded manual asset groups'),
-    groupWrite('assetGroup.create', 'Create a manual asset collection', false),
-    groupWrite('assetGroup.update', 'Update a manual asset collection', true),
+    listDefinition('assetGroup.list', 'List bounded dynamic asset groups'),
+    groupWrite('assetGroup.create', 'Create a dynamic AND-tag asset group', false),
+    groupWrite('assetGroup.update', 'Update a dynamic AND-tag asset group', true),
     lifecycleDefinition(
       'assetGroup.delete',
       'Delete an asset group after explicit confirmation',
@@ -856,13 +832,14 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.search',
     description:
-      'Search the current project library. Title, chapter label (第N章), 《title》, and filename rank above body text. Results include matchKind (title|body), kindLabel, and sourceTypeLabel so you can verify identity before writing. Prefer a short identity query such as a name or 第一章, not the whole user sentence. Conversation history is excluded unless sourceTypes includes conversation.',
+      'Search the current project library for facts, character bibles, novel drafts, and guidelines. Default searchMode="content" searches text. Use searchMode="structure" to browse the deterministic document tree without body text: query="*" lists nodes, query text matches node titles/paths, structurePath filters an exact path prefix, and offset/nextOffset paginate large trees. Use the returned sourceHandle with library.read (readMode="source" for the corresponding document/chapter). By default searches authoritative documents, novel chapters, memories, and constraints. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       required: ['query'],
       properties: {
         query: { type: 'string', minLength: 1, maxLength: 200 },
+        searchMode: { type: 'string', enum: ['content', 'structure'] },
         sourceTypes: {
           type: 'array',
           items: {
@@ -900,6 +877,12 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
         kind: { type: 'string', minLength: 1, maxLength: 64 },
         scopeType: { type: 'string', enum: ['project', 'scene', 'shot'] },
         scopeId: { type: 'string', minLength: 1, maxLength: 200 },
+        structurePath: {
+          type: 'array',
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+          maxItems: 20,
+        },
+        offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
         includeArchived: { type: 'boolean' },
         limit: { type: 'integer', minimum: 1, maximum: 20 },
       },
@@ -908,7 +891,7 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.read',
     description:
-      'Read one project library source returned by library.search. Default is a single chunk. Draft content is labeled candidate material, never published authority.',
+      'Read project content using a library.search handle. Use readMode="source" for a complete novel chapter or document, with bounded pages (default 20000 characters); default chunk mode reads one matching chunk (4000 characters). If truncated, continue with the same handle, readMode and offset=nextOffset. Verify title and draft/published status before using the source.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -916,6 +899,8 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         sourceHandle: { type: 'string', minLength: 1, maxLength: 128 },
         maxChars: { type: 'integer', minimum: 1, maximum: 20_000 },
+        readMode: { type: 'string', enum: ['chunk', 'source'] },
+        offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
       },
     },
   },
@@ -961,10 +946,6 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'task.package.complete': writePolicy(),
   'project.get_context': readPolicy(),
   'project.structure.get': readPolicy(),
-  'novel.structure.get': readPolicy(),
-  'novel.chapter.list': readPolicy(),
-  'novel.chapter.archive': confirmedPolicy(),
-  'novel.chapter.restore': confirmedPolicy(),
   'project.integrity.check': readPolicy(),
   'project.backup.prepare': protectedPolicy(),
   'project.export.prepare': protectedPolicy(),

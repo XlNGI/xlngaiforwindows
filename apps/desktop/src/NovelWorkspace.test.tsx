@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentDetail, NovelChapterInfo, WorkerMethod } from '@ai-video/contracts';
-import { NovelWorkspace, composeEpisodeChapterPrompt } from './NovelWorkspace';
+import { NovelWorkspace } from './NovelWorkspace';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readNovelDocument } from './novel-import-client';
@@ -92,94 +92,23 @@ describe('NovelWorkspace', () => {
     );
   });
 
-  it('lists and edits novel reference documents separately from chapters', async () => {
-    const reference = {
-      id: 'reference-1',
-      projectId: 'project-1',
-      kind: 'outline' as const,
-      title: '都市小说大纲',
-      domainScope: 'novel' as const,
-      bindingRole: 'work-outline' as const,
-      scopeType: 'project' as const,
-      lifecycleStatus: 'active' as const,
-      rowVersion: 0,
-      createdAt: '2026-08-19T00:00:00.000Z',
-      updatedAt: '2026-08-19T00:00:00.000Z',
-    };
-    const referenceDetail = {
-      ...documentDetail('原小说大纲'),
-      id: reference.id,
-      kind: 'outline' as const,
-      title: reference.title,
-      domainScope: 'novel' as const,
-      bindingRole: 'work-outline' as const,
-      currentVersion: {
-        ...documentDetail('原小说大纲').currentVersion!,
-        documentId: reference.id,
-        contentMarkdown: '原小说大纲',
-      },
-    };
+  it('reloads the bound chapter after an Agent writes the chapter draft', async () => {
+    let body = 'Draft';
     mockWorker((method) => {
-      if (method === 'novel.chapter.list') return [];
+      if (method === 'novel.chapter.list')
+        return [{ ...chapter, documentRowVersion: body === 'Draft' ? 0 : 1 }];
       if (method === 'novel.volume.list') return [];
-      if (method === 'document.get') return referenceDetail;
-      if (method === 'document.draft.save') return { ...referenceDetail, rowVersion: 1 };
+      if (method === 'document.get') return documentDetail(body);
       return {};
     });
-    render(
-      <NovelWorkspace
-        projectId="project-1"
-        writable
-        referenceDocuments={[reference]}
-        onReferencesChanged={async () => undefined}
-      />,
-    );
-    fireEvent.click(await screen.findByRole('button', { name: /都市小说大纲/ }));
-    expect(await screen.findByDisplayValue('原小说大纲')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('小说资料内容'), { target: { value: '更新后的大纲' } });
-    fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith(
-        'document.draft.save',
-        expect.objectContaining({ documentId: reference.id, contentMarkdown: '更新后的大纲' }),
-      ),
-    );
+    const view = render(<NovelWorkspace projectId="project-1" writable refreshToken={0} />);
+    expect(await screen.findByDisplayValue('Draft')).toBeInTheDocument();
+    body = 'Generated chapter body';
+    view.rerender(<NovelWorkspace projectId="project-1" writable refreshToken={1} />);
+    expect(await screen.findByDisplayValue('Generated chapter body')).toBeInTheDocument();
   });
 
-  it('focuses and reloads the chapter selected by an Agent result', async () => {
-    let documentReads = 0;
-    mockWorker((method) => {
-      if (method === 'novel.chapter.list') return [chapter];
-      if (method === 'novel.volume.list') return [];
-      if (method === 'document.get') {
-        documentReads += 1;
-        return documentDetail(documentReads > 1 ? 'Agent latest draft' : 'Draft');
-      }
-      return {};
-    });
-    const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByDisplayValue('Draft');
-
-    rerender(
-      <NovelWorkspace projectId="project-1" writable focusChapterId="chapter-1" refreshToken={1} />,
-    );
-
-    expect(await screen.findByDisplayValue('Agent latest draft')).toBeInTheDocument();
-    expect(
-      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.get'),
-    ).toHaveLength(2);
-  });
-
-  it('writes selected chapter titles into a retrievable prompt', () => {
-    expect(
-      composeEpisodeChapterPrompt([
-        { id: 'chapter-1', displayLabel: '第一章', title: '开篇' },
-        { id: 'chapter-2', displayLabel: '第二章', title: '风暴' },
-      ]),
-    ).toContain('第一章《开篇》、第二章《风暴》');
-  });
-
-  it('selects chapters and emits chapter refs for the conversation prompt', async () => {
+  it('selects chapters and emits the selected chapter IDs for episode generation', async () => {
     const chapter2 = {
       ...chapter,
       id: 'chapter-2',
@@ -200,10 +129,7 @@ describe('NovelWorkspace', () => {
     fireEvent.click(screen.getByLabelText('选择 Chapter 1 Opening'));
     fireEvent.click(screen.getByLabelText('选择 Chapter 2 Storm'));
     fireEvent.click(screen.getByRole('button', { name: /生成短剧内容/ }));
-    expect(onGenerateEpisode).toHaveBeenCalledWith([
-      { id: 'chapter-1', displayLabel: 'Chapter 1', title: 'Opening' },
-      { id: 'chapter-2', displayLabel: 'Chapter 2', title: 'Storm' },
-    ]);
+    expect(onGenerateEpisode).toHaveBeenCalledWith(['chapter-1', 'chapter-2']);
   });
 
   it('exports the immutable work package through Worker', async () => {
@@ -384,7 +310,7 @@ describe('NovelWorkspace', () => {
     confirm.mockRestore();
   });
 
-  it('opens a chapter in the shared document workspace for detached-window reuse', async () => {
+  it('keeps a chapter in the novel workspace when locating its bound document', async () => {
     const onOpenDocument = vi.fn();
     mockWorker((method) => {
       if (method === 'novel.chapter.list') return [chapter];
@@ -394,7 +320,7 @@ describe('NovelWorkspace', () => {
     });
     render(<NovelWorkspace projectId="project-1" writable onOpenDocument={onOpenDocument} />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByRole('button', { name: /在文档工作区打开/ }));
+    fireEvent.click(screen.getByRole('button', { name: /定位到小说章节/ }));
     expect(onOpenDocument).toHaveBeenCalledWith('document-1');
   });
 
@@ -447,6 +373,36 @@ describe('NovelWorkspace', () => {
     await waitFor(() => expect(screen.getByText(/已载入服务器版本/)).toBeInTheDocument());
     expect(screen.getByDisplayValue('Local edits')).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: 'document-1' });
+  });
+
+  it('opens the focused chapter from a library citation', async () => {
+    const chapter2: NovelChapterInfo = {
+      ...chapter,
+      id: 'chapter-2',
+      documentId: 'document-2',
+      title: 'Fog Harbor',
+      position: 1,
+      displayLabel: 'Chapter 2',
+    };
+    mockWorker((method, params) => {
+      if (method === 'novel.chapter.list') return [chapter, chapter2];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') {
+        const documentId = (params as { documentId?: string } | undefined)?.documentId;
+        return {
+          ...documentDetail(documentId === 'document-2' ? 'Fog Harbor body' : 'Draft'),
+          id: documentId ?? 'document-1',
+          title: documentId === 'document-2' ? 'Fog Harbor' : 'Opening',
+        };
+      }
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable focusChapterId="chapter-2" />);
+    expect(await screen.findByText(/Chapter 2 Fog Harbor/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: 'document-2' }),
+    );
+    expect(screen.getByLabelText('章节内容')).toHaveValue('Fog Harbor body');
   });
 
   it('offers explicit server-version and local-edit conflict actions', async () => {

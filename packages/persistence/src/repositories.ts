@@ -74,6 +74,7 @@ import type {
 import {
   rebuildLibraryChunksForAsset,
   rebuildLibraryChunksForMediaTask,
+  rebuildLibraryChunksForRecord,
 } from './project-library-chunks.js';
 
 export class SqliteProjectRepository implements ProjectRepository {
@@ -1078,6 +1079,46 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.rowVersion,
       );
     if (result.changes !== 1) throw new Error('SCENE_ROW_VERSION_CONFLICT');
+    rebuildLibraryChunksForRecord(
+      this.database,
+      record.projectId,
+      {
+        sourceType: 'scene',
+        sourceId: record.id,
+        status: 'active',
+        title: record.title,
+        content: record.title,
+        structurePath: [record.title],
+        scopeType: 'scene',
+        scopeId: record.id,
+      },
+      record.updatedAt ?? record.createdAt,
+    );
+    const shots = this.database
+      .prepare('SELECT id, title, status, prompt FROM shots WHERE scene_id = ?')
+      .all(record.id) as Array<{
+      id: string;
+      title: string;
+      status: string;
+      prompt: string | null;
+    }>;
+    for (const shot of shots) {
+      rebuildLibraryChunksForRecord(
+        this.database,
+        record.projectId,
+        {
+          sourceType: 'shot',
+          sourceId: shot.id,
+          status: shot.status || 'active',
+          title: shot.title,
+          content: [shot.title, shot.prompt?.trim()].filter(Boolean).join('\n'),
+          structurePath: [record.title, shot.title],
+          scopeType: 'shot',
+          scopeId: shot.id,
+        },
+        record.updatedAt ?? record.createdAt,
+      );
+    }
   }
 
   get(id: string): SceneRecord | undefined {
@@ -1142,6 +1183,26 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
         record.rowVersion,
       );
     if (result.changes !== 1) throw new Error('SHOT_ROW_VERSION_CONFLICT');
+    const scene = this.database
+      .prepare('SELECT project_id, title FROM scenes WHERE id = ?')
+      .get(record.sceneId) as { project_id: string; title: string } | undefined;
+    if (scene) {
+      rebuildLibraryChunksForRecord(
+        this.database,
+        scene.project_id,
+        {
+          sourceType: 'shot',
+          sourceId: record.id,
+          status: record.status || 'active',
+          title: record.title,
+          content: [record.title, record.prompt?.trim()].filter(Boolean).join('\n'),
+          structurePath: [scene.title, record.title],
+          scopeType: 'shot',
+          scopeId: record.id,
+        },
+        record.updatedAt ?? record.createdAt,
+      );
+    }
   }
 
   get(id: string): ShotRecord | undefined {

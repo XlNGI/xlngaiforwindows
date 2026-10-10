@@ -47,7 +47,7 @@ type MediaSelectionRequester = (
 type MediaSubmissionRequester = (request: MediaSubmissionConfirmationRequest) => Promise<boolean>;
 
 export interface AgentProviderPlanHooks {
-  begin(operation: string): string;
+  begin(operation: string): string | undefined;
   succeed(stepId: string, operation: string, resultText: string): boolean;
   fail(stepId: string, operation: string, error: unknown): void;
 }
@@ -78,14 +78,20 @@ export class AgentProviderToolGateway {
   tools(allowedOperations?: readonly string[]): AgentTool[] {
     const allowed = allowedOperations ? new Set(allowedOperations) : undefined;
     return this.definitions
-      .filter((definition) => !allowed || allowed.has(definition.name))
+      .filter(
+        (definition) =>
+          !allowed || allowed.has(definition.name) || isLibraryRetrievalOperation(definition.name),
+      )
       .map((definition) => this.tool(definition));
   }
 
   currentDefinitions(allowedOperations?: readonly string[]): LlmToolDefinition[] {
     const allowed = allowedOperations ? new Set(allowedOperations) : undefined;
     return cloneDefinitions(
-      this.definitions.filter((definition) => !allowed || allowed.has(definition.name)),
+      this.definitions.filter(
+        (definition) =>
+          !allowed || allowed.has(definition.name) || isLibraryRetrievalOperation(definition.name),
+      ),
     );
   }
 
@@ -225,6 +231,10 @@ export class AgentProviderToolGateway {
       throw error;
     }
   }
+}
+
+export function isLibraryRetrievalOperation(operation: string): boolean {
+  return operation === 'library.search' || operation === 'library.read';
 }
 
 function cloneDefinitions(definitions: LlmToolDefinition[]): LlmToolDefinition[] {

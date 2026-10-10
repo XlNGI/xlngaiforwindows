@@ -63,6 +63,75 @@ describe('LibrarySearchService', () => {
     expect(read.content).toContain('旧码头');
   });
 
+  it('returns the structural path used to locate a matching section', async () => {
+    const { content, library } = await setup();
+    content.saveDocument({
+      kind: 'scene',
+      title: '雾港剧本',
+      contentMarkdown: '# 第一章 雨夜来客\n## 场景一 旧码头\n林澈在潮声里回头。',
+    });
+    const result = library.search({ taskId: 'structure-task', attemptId: 'a', query: '林澈' });
+    expect(result.sources[0]).toMatchObject({
+      structureKind: 'scene',
+      structurePath: ['雾港剧本', '第一章 雨夜来客', '场景一 旧码头'],
+    });
+    const read = library.read({
+      taskId: 'structure-task',
+      attemptId: 'a',
+      sourceHandle: result.sources[0]!.sourceHandle,
+    });
+    expect(read).toMatchObject({
+      structureKind: 'scene',
+      structurePath: ['雾港剧本', '第一章 雨夜来客', '场景一 旧码头'],
+    });
+  });
+
+  it('browses structure metadata before reading the same source', async () => {
+    const { content, library } = await setup();
+    content.saveDocument({
+      kind: 'scene',
+      title: '结构导航文档',
+      contentMarkdown: '# 第一章\n## 场景一 旧码头\n林澈在潮声里回头。\n## 场景二 灯塔\n雾散。',
+    });
+    const tree = library.search({
+      taskId: 'structure-browse',
+      attemptId: 'a',
+      query: '*',
+      searchMode: 'structure',
+      structurePath: ['结构导航文档', '第一章'],
+      status: 'draft',
+      limit: 2,
+    });
+    expect(tree.searchMode).toBe('structure');
+    expect(tree.sources.map((source) => source.structurePath)).toEqual([
+      ['结构导航文档', '第一章'],
+      ['结构导航文档', '第一章', '场景一 旧码头'],
+    ]);
+    expect(tree.nextOffset).toBe(2);
+    expect(tree.sources.every((source) => source.snippet === '')).toBe(true);
+    const nextTree = library.search({
+      taskId: 'structure-browse',
+      attemptId: 'a',
+      query: '*',
+      searchMode: 'structure',
+      structurePath: ['结构导航文档', '第一章'],
+      status: 'draft',
+      offset: tree.nextOffset,
+      limit: 2,
+    });
+    expect(nextTree.sources.map((source) => source.structurePath)).toEqual([
+      ['结构导航文档', '第一章', '场景二 灯塔'],
+    ]);
+    const read = library.read({
+      taskId: 'structure-browse',
+      attemptId: 'a',
+      sourceHandle: tree.sources[1]!.sourceHandle,
+      readMode: 'source',
+    });
+    expect(read.content).toContain('林澈在潮声里回头');
+    expect(read.structurePath).toEqual(['结构导航文档', '第一章', '场景一 旧码头']);
+  });
+
   it('indexes imported novel drafts without publishing', async () => {
     const { novels, library } = await setup();
     novels.importNovel({
@@ -82,10 +151,42 @@ describe('LibrarySearchService', () => {
     expect(result.sources[0]).toMatchObject({
       sourceType: 'novel-chapter',
       status: 'draft',
-      title: '第一章',
+      title: '第一章 雾港',
+    });
+    expect(
+      library.search({ taskId: 'task', attemptId: 'title-query', query: '雾港' }).sources[0],
+    ).toMatchObject({
+      sourceType: 'novel-chapter',
+      title: '第一章 雾港',
     });
   });
 
+  it('finds a chapter by title even when the body does not repeat the location name', async () => {
+    const { novels, library } = await setup();
+    novels.importNovel({
+      chapters: [
+        {
+          title: '灯塔',
+          displayLabel: '第 2 章',
+          contentMarkdown: '雨落在石阶上，只有潮声。',
+        },
+      ],
+    });
+    const result = library.search({
+      taskId: 'task',
+      attemptId: 'attempt',
+      query: '灯塔',
+    });
+    expect(result.sources[0]).toMatchObject({
+      sourceType: 'novel-chapter',
+      title: '第 2 章 灯塔',
+    });
+    expect(
+      library.search({ taskId: 'task', attemptId: 'compact', query: '第2章' }).sources[0],
+    ).toMatchObject({
+      title: '第 2 章 灯塔',
+    });
+  });
   it('rejects expired and cross-task handles', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -248,38 +349,72 @@ describe('LibrarySearchService', () => {
     expect(read.content.length).toBe(12);
   });
 
-  it('prefers the named chapter when the query is a generation request', async () => {
-    const { novels, content, library } = await setup();
+  it('reads a novel chapter as an ordered source when requested', async () => {
+    const { novels, library } = await setup();
+    const chapterBody = `  开头线索。\n\n${'海雾中的灯塔。\n\n'.repeat(500)}结尾线索。  `;
     novels.importNovel({
       chapters: [
         {
           title: '雾港',
-          displayLabel: '第一章',
-          contentMarkdown: '雾港的雨落在石阶上，林澈提着马灯走向旧码头。',
-        },
-        {
-          title: '余波',
-          displayLabel: '第十一章',
-          contentMarkdown: '第一章的余波还在旧码头回响。',
+          displayLabel: '第 1 章',
+          contentMarkdown: chapterBody,
         },
       ],
     });
+    const searched = library.search({
+      taskId: 'source-task',
+      attemptId: 'source-attempt',
+      query: '第一章',
+      sourceTypes: ['novel-chapter'],
+    });
+    const read = library.read({
+      taskId: 'source-task',
+      attemptId: 'source-attempt',
+      sourceHandle: searched.sources[0]!.sourceHandle,
+      readMode: 'source',
+      maxChars: 20_000,
+    });
+    expect(read.readMode).toBe('source');
+    expect(read.content.trimStart().startsWith('开头线索。')).toBe(true);
+    expect(read.content).toContain('结尾线索。');
+    expect(read.content).toBe(chapterBody.trim());
+    expect(read.truncated).toBe(false);
+  });
+
+  it('continues long source reads without gaps, overlaps, or crossing versions', async () => {
+    const { content, library } = await setup();
+    const body = '序章\n\n' + '这是带有段落的证据🧭。\n\n'.repeat(2400) + '最后的线索。';
+    const document = content.saveDocument({
+      kind: 'note',
+      title: '长篇证据',
+      contentMarkdown: body,
+    });
+    const searched = library.search({ taskId: 't', attemptId: 'a', query: '长篇证据' });
+    const args = {
+      taskId: 't',
+      attemptId: 'a',
+      sourceHandle: searched.sources[0]!.sourceHandle,
+      readMode: 'source' as const,
+    };
+    const first = library.read(args);
+    expect(first).toMatchObject({ truncated: true, startOffset: 0, totalCharacters: body.length });
+    expect(first.nextOffset).toBe(first.endOffset);
+    const second = library.read({ ...args, offset: first.nextOffset });
+    expect(first.content + second.content).toBe(body);
+    expect(second).toMatchObject({
+      truncated: false,
+      contentHash: first.contentHash,
+      versionId: first.versionId,
+    });
+    expect(second.nextOffset).toBeUndefined();
     content.saveDocument({
-      kind: 'plan',
-      title: '本集计划',
-      contentMarkdown: '根据第一章生成剧本，把第一章改成短剧场次。'.repeat(8),
+      documentId: document.id,
+      kind: 'note',
+      title: document.title,
+      contentMarkdown: '另一个版本',
+      expectedDocumentRowVersion: document.rowVersion,
     });
-    const result = library.search({
-      taskId: 'task',
-      attemptId: 'attempt',
-      query: '根据第一章生成剧本',
-    });
-    expect(result.sources[0]).toMatchObject({
-      title: '第一章',
-      sourceType: 'novel-chapter',
-      matchKind: 'title',
-      sourceTypeLabel: '小说章节',
-    });
+    expect(() => library.read(args)).toThrow('Library source is no longer available');
   });
 
   it('does not index incomplete streaming chat messages', async () => {
@@ -292,5 +427,31 @@ describe('LibrarySearchService', () => {
       status: 'streaming',
     });
     expect(library.search({ taskId: 't', attemptId: 'a', query: '灯塔正文' }).resultCount).toBe(0);
+  });
+
+  it('reports truncated search results and chunk positions without unrelated filler', async () => {
+    const { novels, library } = await setup();
+    novels.importNovel({
+      chapters: [1, 2, 3].map((number) => ({
+        title: `线索${number}`,
+        contentMarkdown: '候选章节正文。',
+      })),
+    });
+    const common = { taskId: 't', attemptId: 'a', sourceTypes: ['novel-chapter'] };
+    const first = library.search({ ...common, query: '第一章', limit: 1 });
+    expect(first).toMatchObject({ resultCount: 1, truncated: false });
+    expect(first.sources[0]).toMatchObject({
+      title: '第 1 章 线索1',
+      chunkOrdinal: 0,
+      startOffset: 0,
+    });
+    expect(library.search({ ...common, query: '候选章节', limit: 1 })).toMatchObject({
+      resultCount: 1,
+      truncated: true,
+    });
+    expect(library.search({ ...common, query: '月球空间站' })).toMatchObject({
+      resultCount: 0,
+      truncated: false,
+    });
   });
 });

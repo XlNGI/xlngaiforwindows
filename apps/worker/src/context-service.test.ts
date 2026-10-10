@@ -44,10 +44,29 @@ describe('ContextService', () => {
     expect(context.systemInstruction).toContain('工作助理');
     expect(context.rendered).toContain('林澈');
     expect(context.rendered).toContain('draft');
+    expect(context.rendered).toContain('资料目录仅为有界预览，可能不完整；未列出不代表不存在');
     expect(context.rendered).not.toContain('这段正文不应进入普通会话');
     expect(preview.catalog?.some((item) => item.title === '林澈' && item.status === 'draft')).toBe(
       true,
     );
+  });
+
+  it('keeps the retrieval notice when the catalog omits entries beyond its preview limit', async () => {
+    const { content, contexts } = await setup();
+    for (let index = 1; index <= 21; index += 1) {
+      content.saveDocument({
+        kind: 'character',
+        title: `人物 ${index}`,
+        contentMarkdown: `人物 ${index} 的独立正文，不应自动注入。`,
+      });
+    }
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const context = contexts.compile(conversation.id);
+
+    expect(context.catalog.filter((item) => item.sourceType === 'document')).toHaveLength(20);
+    expect(context.rendered).toContain('未列出不代表不存在');
+    expect(context.rendered).toContain('library.search / library.read');
+    expect(context.rendered).not.toContain('独立正文');
   });
 
   it('lists published and draft catalog entries without injecting memories or constraints', async () => {

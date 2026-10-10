@@ -356,6 +356,7 @@ describe('MediaOrchestrationService', () => {
     ['INTERNAL_ERROR', 'submission_unknown'],
     ['INVALID_PARAMETERS', 'failed'],
     ['METHOD_NOT_FOUND', 'failed'],
+    ['REQUEST_NOT_SENT', 'failed'],
   ] as const)('maps Native %s to %s without retrying', async (code, mediaState) => {
     const { videos, request, service } = await setup();
     const job = prepareVideo(videos);

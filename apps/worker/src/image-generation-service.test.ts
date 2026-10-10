@@ -2,7 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NetworkAdmission, sharedNetworkAdmission } from '@ai-video/llm';
 import { ContentService } from './content-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { ProjectService } from './project-service.js';
@@ -10,7 +11,15 @@ import { ProjectService } from './project-service.js';
 const roots: string[] = [];
 const services: ProjectService[] = [];
 
+beforeEach(() => {
+  const admission = new NetworkAdmission();
+  vi.spyOn(sharedNetworkAdmission, 'acquire').mockImplementation((url, signal) =>
+    admission.acquire(url, signal),
+  );
+});
+
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   for (const service of services.splice(0)) service.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));

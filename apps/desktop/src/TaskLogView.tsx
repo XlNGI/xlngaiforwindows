@@ -488,6 +488,7 @@ function AgentTaskDetailPanel({
                 <div className="task-log-research-meta">
                   <span>{source.sourceType}</span>
                   {source.kind && <span>{source.kind}</span>}
+                  {source.structurePath?.length && <span>{source.structurePath.join(' / ')}</span>}
                 </div>
               </li>
             ))}

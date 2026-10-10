@@ -78,6 +78,29 @@ describe('JsonLineWriter', () => {
 });
 
 describe('NativeProviderBridge', () => {
+  it('preserves an unsent admission refusal for both request and stream callers', async () => {
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value);
+    const error = {
+      code: 'REQUEST_NOT_SENT' as const,
+      message: 'REQUEST_QUEUE_FULL: 当前请求较多，请稍后重试。',
+      retryable: true,
+    };
+    const request = bridge.request('provider.media.submit', {});
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: io.sent[0]!.requestId,
+      ok: false,
+      error,
+    });
+    await expect(request).rejects.toMatchObject({ hostError: error });
+    const stream = bridge.start(params, { onEvent: vi.fn() });
+    bridge.handleEnvelope(
+      event(stream.requestId, 0, { type: 'failed', projectSessionId: 'session', error }),
+    );
+    await expect(stream.done).resolves.toMatchObject({ type: 'failed', error });
+  });
+
   it('correlates concurrent requests and ignores duplicate sequences', async () => {
     const io = transport();
     const ids = ['request-a', 'request-b'];

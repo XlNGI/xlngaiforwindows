@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@ai-video/persistence';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NetworkAdmission, sharedNetworkAdmission } from '@ai-video/llm';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import {
@@ -14,7 +15,15 @@ import {
 const roots: string[] = [];
 const projects: ProjectService[] = [];
 
+beforeEach(() => {
+  const admission = new NetworkAdmission();
+  vi.spyOn(sharedNetworkAdmission, 'acquire').mockImplementation((url, signal) =>
+    admission.acquire(url, signal),
+  );
+});
+
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   for (const project of projects.splice(0)) project.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -281,9 +290,11 @@ describe('VideoGenerationService', () => {
       },
     });
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      signedOutput,
-      expect.objectContaining({ redirect: 'error' }),
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        signedOutput,
+        expect.objectContaining({ redirect: 'manual' }),
+      ),
     );
     expect(downloading).toMatchObject({
       status: 'downloading',

@@ -1773,6 +1773,9 @@ export type LibrarySourceType =
 export type LibrarySourceStatus =
   'draft' | 'published' | 'conversation' | 'memory' | 'constraint' | 'active' | 'trash';
 
+/** Deterministic Markdown/project hierarchy attached to a retrieval hit. */
+export type ProjectStructureKind = 'document' | 'volume' | 'chapter' | 'scene' | 'shot' | 'section';
+
 /** Ordinary assistant sessions retrieve on demand; episode generation freezes confirmed chapters. */
 export type AssistantRecallMode = 'on-demand' | 'episode-frozen-scope';
 
@@ -1781,6 +1784,8 @@ export type LibraryErrorCode =
   | 'LIBRARY_HANDLE_INVALID'
   | 'LIBRARY_BUDGET_EXCEEDED'
   | 'LIBRARY_READ_BLOCKED';
+
+export type LibrarySearchMode = 'content' | 'structure';
 
 export interface LibraryCatalogItem {
   id: string;
@@ -1809,19 +1814,28 @@ export interface LibrarySearchSource {
   snippet: string;
   citationLabel: string;
   updatedAt: string;
+  chunkOrdinal?: number;
+  startOffset?: number;
+  endOffset?: number;
+  structureKind?: ProjectStructureKind;
+  structurePath?: string[];
+  structureNodeId?: string;
 }
 
 export interface LibrarySearchResult {
   status: 'searched';
+  searchMode?: LibrarySearchMode;
   queryHash: string;
   resultCount: number;
   truncated: boolean;
+  nextOffset?: number;
   sources: LibrarySearchSource[];
 }
 
 export interface LibraryReadResult {
   status: 'read';
   sourceHandle: string;
+  readMode?: 'chunk' | 'source';
   sourceType: LibrarySourceType;
   sourceId: string;
   versionId?: string;
@@ -1834,6 +1848,15 @@ export interface LibraryReadResult {
   citationLabel: string;
   untrusted: false;
   candidateNote?: string;
+  /** UTF-16 offsets in the selected chunk or source, suitable for continuation reads. */
+  startOffset?: number;
+  endOffset?: number;
+  nextOffset?: number;
+  totalCharacters?: number;
+  contentHash?: string;
+  structureKind?: ProjectStructureKind;
+  structurePath?: string[];
+  structureNodeId?: string;
 }
 
 export interface AgentLibrarySourceInfo {
@@ -1844,6 +1867,9 @@ export interface AgentLibrarySourceInfo {
   versionId?: string;
   status: LibrarySourceStatus;
   kind?: string;
+  structureKind?: ProjectStructureKind;
+  structurePath?: string[];
+  structureNodeId?: string;
   toolName: 'library.search' | 'library.read';
 }
 
@@ -1873,6 +1899,54 @@ export interface ProductionContextInfo {
   catalog?: LibraryCatalogItem[];
   /** Metadata-only structure directory; bodies remain on-demand. */
   structure?: ProjectStructureSnapshot;
+}
+
+/** Project-wide resource map exposed to the System Agent before it selects a tool. */
+export type ProjectResourceKind =
+  | 'project'
+  | 'workspace'
+  | 'document'
+  | 'structure-node'
+  | 'novel-volume'
+  | 'novel-chapter'
+  | 'scene'
+  | 'shot'
+  | 'asset'
+  | 'conversation'
+  | 'settings';
+
+export interface ProjectStructureResource {
+  id: string;
+  kind: ProjectResourceKind;
+  title: string;
+  parentId?: string;
+  documentId?: string;
+  /** The immutable document version represented by this resource, when applicable. */
+  versionId?: string;
+  documentKind?: DocumentKind;
+  structureKind?: ProjectStructureKind;
+  sourceType?: LibrarySourceType;
+  lifecycleStatus?: DocumentLifecycleStatus | 'active' | 'archived' | 'trash';
+  rowVersion?: number;
+  revision?: string;
+  locator: {
+    workspace: 'novel' | 'documents' | 'characters' | 'shots' | 'assets' | 'tasks' | 'settings';
+    resourceId: string;
+    documentId?: string;
+    versionId?: string;
+    structureNodeId?: string;
+    structurePath?: string[];
+  };
+  children?: ProjectStructureResource[];
+}
+
+export interface ProjectStructureResult {
+  version: 1;
+  projectId: string;
+  projectName: string;
+  revision: string;
+  resources: ProjectStructureResource[];
+  truncated: boolean;
 }
 
 export interface ContextPreviewParams {
@@ -2128,6 +2202,7 @@ export interface HostError {
     | 'INVALID_PARAMETERS'
     | 'PROVIDER_UNAVAILABLE'
     | 'PROVIDER_FAILED'
+    | 'REQUEST_NOT_SENT'
     | 'INTERRUPTED'
     | 'CANCELLED'
     | 'STALE_SESSION'
@@ -2171,10 +2246,11 @@ export type SidecarEnvelope =
   | { kind: 'host.response'; requestId: string; ok: false; error: HostError };
 
 export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
+  /** Legacy Desktop hint. Runtime always uses the project System Agent. */
   agentMode: 'document' | 'novel-writing' | 'short-drama';
-  /** Frozen chapter scope for short-drama episode generation (max 50). */
+  /** Optional frozen chapter scope metadata (max 50). */
   selectedChapterIds?: string[];
-  /** Trusted Desktop selection. Required for short-drama and frozen into its task snapshot. */
+  /** Optional trusted platform metadata, frozen into the task snapshot when supplied. */
   targetPlatform?: ConversationTargetPlatform;
   /**
    * External research is opt-out for explicit Agent document tasks. The Worker

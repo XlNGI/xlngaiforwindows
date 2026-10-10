@@ -11,45 +11,15 @@ import {
 } from '@ai-video/contracts';
 import {
   handleRequest,
-  inferConversationTaskMode,
+  inferAgentDocumentIntent,
   inferUnifiedAgentCapability,
   resolveAgentRunWorkflow,
   modelMatchesUnifiedAgentRequest,
-  inferNovelWritingIntent,
   parseRequest,
   resolveMediaProviderRegion,
 } from './handler.js';
-import { validateSessionRequestParams } from './request-validation.js';
 
 const temporaryDirectories: string[] = [];
-
-describe('LLM generation interruption validation', () => {
-  const identity = {
-    generationId: 'generation',
-    attemptId: 'attempt',
-    projectId: 'project',
-    projectSessionId: 'session',
-    conversationId: 'conversation',
-    content: '',
-    error: 'Application is closing.',
-    retryable: true,
-  };
-
-  it('accepts the explicit interrupted failure kind and rejects other failure kinds', () => {
-    expect(() =>
-      validateSessionRequestParams('llm.generation.fail', {
-        ...identity,
-        failureKind: 'interrupted',
-      }),
-    ).not.toThrow();
-    expect(() =>
-      validateSessionRequestParams('llm.generation.fail', {
-        ...identity,
-        failureKind: 'cancelled',
-      }),
-    ).toThrow();
-  });
-});
 
 describe('inferUnifiedAgentCapability', () => {
   it('does not confuse media prompt writing with media generation', () => {
@@ -62,111 +32,48 @@ describe('inferUnifiedAgentCapability', () => {
   });
 });
 
-describe('resolveAgentRunWorkflow', () => {
-  it('routes explicit novel writing language through the unified intent gateway', () => {
-    expect(resolveAgentRunWorkflow({ prompt: '续写小说下一章' })).toBe('novel-writing');
-    expect(resolveAgentRunWorkflow({ prompt: '根据小说第一章生成系统中对应的文档材料' })).toBe(
-      'document',
-    );
-    expect(resolveAgentRunWorkflow({ prompt: '根据项目资料写一份制作说明' })).toBe('document');
-    expect(inferConversationTaskMode('续写小说下一章')).toBe('novel-writing');
-    expect(inferNovelWritingIntent('不要保存，只讨论小说第一章')).toBeUndefined();
-    expect(inferNovelWritingIntent('帮我生成小说第一章')).toMatchObject({
-      action: 'create_chapter',
-      displayLabel: '第一章',
+describe('inferAgentDocumentIntent', () => {
+  it('routes explicit adapter parameter questions to the read-only schema tool', () => {
+    expect(inferAgentDocumentIntent('查看当前视频模型支持哪些参数')).toEqual({
+      operation: 'adapter.schema.get',
     });
-    expect(inferNovelWritingIntent('写一份小说章节分析')).toBeUndefined();
+    expect(inferAgentDocumentIntent('What fields does this adapter schema expose?')).toEqual({
+      operation: 'adapter.schema.get',
+    });
+    expect(inferAgentDocumentIntent('修改这个模型的参数 Schema')).toEqual({
+      operation: 'adapter.schema.propose',
+    });
+    expect(inferAgentDocumentIntent('查看这个适配器的 Schema 修改历史')).toEqual({
+      operation: 'adapter.schema.audit.list',
+    });
   });
 
-  it('accepts a trusted target hint when the client already supplied a novelIntent', () => {
+  it('keeps ordinary drafting prompts on the document tool', () => {
+    expect(inferAgentDocumentIntent('根据这些参数写一份视频分镜文档')).toEqual({
+      operation: 'document.create_draft',
+    });
+  });
+});
+
+describe('resolveAgentRunWorkflow', () => {
+  it('uses one System Agent workflow for every project resource request', () => {
+    const prompts = [
+      '续写小说下一章',
+      '根据项目资料写一份制作说明',
+      '把选中的章节改编成短剧分镜',
+      '查看 Provider 设置',
+    ];
+    for (const prompt of prompts) {
+      expect(resolveAgentRunWorkflow({ prompt, selectedChapterIds: ['chapter-1'] })).toBe(
+        'document',
+      );
+    }
     expect(
       resolveAgentRunWorkflow({
         prompt: '续写小说下一章',
         novelIntent: { action: 'continue_chapter', chapterId: 'chapter-1' },
       }),
-    ).toBe('novel-writing');
-  });
-
-  it('extracts chapter names without using the writing request as a title', () => {
-    expect(inferNovelWritingIntent('我现在要测试写一章小说正文')).toEqual({
-      action: 'create_chapter',
-    });
-    expect(inferNovelWritingIntent('帮我生成小说第一章正文')).toEqual({
-      action: 'create_chapter',
-      displayLabel: '第一章',
-    });
-    expect(inferNovelWritingIntent('写小说第一章《意外重逢》，描写咖啡馆相遇')).toEqual({
-      action: 'create_chapter',
-      displayLabel: '第一章',
-      chapterTitle: '意外重逢',
-    });
-    expect(inferNovelWritingIntent('写一章小说正文，章名为《雨夜来客》')).toEqual({
-      action: 'create_chapter',
-      chapterTitle: '雨夜来客',
-    });
-    expect(inferNovelWritingIntent('写小说第一章，描写雨夜')).toEqual({
-      action: 'create_chapter',
-      displayLabel: '第一章',
-    });
-  });
-
-  it.each([
-    '我要写一部小说',
-    '我现在要写小说',
-    '我现在要写写小说',
-    '我想写个故事',
-    '想创作一本小说',
-    '我要写一部悬疑小说',
-    '帮我写玄幻小说',
-    '我要创作一部长篇小说',
-  ])('keeps an open-ended novel goal in ordinary conversation: %s', (prompt) => {
-    expect(inferNovelWritingIntent(prompt)).toBeUndefined();
-    expect(resolveAgentRunWorkflow({ prompt })).toBe('document');
-  });
-
-  it.each([
-    ['创建小说章节', 'create_chapter'],
-    ['续写小说下一章', 'continue_chapter'],
-    ['重写第一章', 'rewrite_chapter'],
-  ])('preserves explicit chapter operations: %s', (prompt, action) => {
-    expect(inferNovelWritingIntent(prompt)).toEqual({ action });
-    expect(resolveAgentRunWorkflow({ prompt })).toBe('novel-writing');
-  });
-
-  it.each([
-    ['帮我生成第二章', '第二章'],
-    ['帮我生成第三章', '第三章'],
-    ['生成第12章', '第12章'],
-    ['写第 二 章正文', '第二章'],
-  ])(
-    'recognizes a numbered new-chapter request without a supplied title: %s',
-    (prompt, displayLabel) => {
-      expect(inferNovelWritingIntent(prompt)).toEqual({ action: 'create_chapter', displayLabel });
-      expect(resolveAgentRunWorkflow({ prompt })).toBe('novel-writing');
-    },
-  );
-
-  it.each(['第二章我没有看到草稿呢？', '我找不到刚才生成的第三章正文', '第一章草稿没有显示出来'])(
-    'routes a missing chapter draft follow-up to recovery: %s',
-    (prompt) => {
-      expect(inferNovelWritingIntent(prompt)).toMatchObject({
-        action: 'create_chapter',
-      });
-      expect(resolveAgentRunWorkflow({ prompt })).toBe('novel-writing');
-    },
-  );
-
-  it('treats selected chapters as explicit short-drama context', () => {
-    expect(
-      resolveAgentRunWorkflow({
-        prompt: '根据小说第一章生成系统中对应的文档材料',
-        selectedChapterIds: ['chapter-1'],
-      }),
-    ).toBe('short-drama');
-    expect(inferConversationTaskMode('把选中的章节改编成短剧分镜', ['chapter-1'])).toBe(
-      'short-drama',
-    );
-    expect(inferConversationTaskMode('生成本集内容', ['chapter-1'])).toBe('short-drama');
+    ).toBe('document');
   });
 });
 
@@ -592,7 +499,7 @@ describe('worker handler', () => {
     });
   });
 
-  it('requires a supported target platform only for short-drama Agent requests', async () => {
+  it('treats legacy novel and short-drama fields as optional System Agent metadata', async () => {
     const base = {
       conversationId: 'conversation',
       prompt: 'Generate an AI short drama',
@@ -602,30 +509,30 @@ describe('worker handler', () => {
       documentIntent: { operation: 'novel.episode.submit_draft' as const },
       selectedChapterIds: ['chapter-1'],
     };
-    for (const [id, params] of [
-      ['missing', base],
-      ['invalid', { ...base, targetPlatform: 'untrusted-platform' }],
-      [
-        'document-mode',
-        {
-          ...base,
-          agentMode: 'document',
-          targetPlatform: 'seedance',
-          selectedChapterIds: undefined,
-        },
-      ],
-    ] as const) {
+    const accepted = await handleRequest({
+      id: 'agent-platform-metadata',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'agent.generation.prepare',
+      params: { ...base, targetPlatform: undefined },
+    } as unknown as WorkerRequest);
+    expect(accepted).not.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' },
+    });
+
+    const invalid = { ...base, targetPlatform: 'untrusted-platform' };
+    {
       const response = await handleRequest({
-        id: `agent-platform-${id}`,
+        id: 'agent-platform-invalid',
         protocolVersion: IPC_PROTOCOL_VERSION,
         method: 'agent.generation.prepare',
-        params,
+        params: invalid,
       } as unknown as WorkerRequest);
       expect(response).toMatchObject({
         ok: false,
         error: {
           code: 'INVALID_REQUEST',
-          requestId: `agent-platform-${id}`,
+          requestId: 'agent-platform-invalid',
           operation: 'agent.generation.prepare',
         },
       });

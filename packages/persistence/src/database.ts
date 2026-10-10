@@ -39,14 +39,19 @@ import {
   MIGRATION_V36,
   MIGRATION_V38,
   MIGRATION_V39,
-  MIGRATION_V40,
+  MIGRATION_V41,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
 import { backfillCurrentNovelRagChunks } from './novel-rag-chunks.js';
-import { backfillProjectLibraryChunks, createProjectLibraryFts } from './project-library-chunks.js';
+import {
+  backfillProjectLibraryChunks,
+  backfillProjectStructureNodes,
+  createProjectLibraryFts,
+  rebuildLibraryChunksForDocument,
+} from './project-library-chunks.js';
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -423,10 +428,19 @@ export function migrateDatabase(
   }
   if (getSchemaVersion(database) === 39) {
     database.transaction(() => {
-      database.exec(MIGRATION_V40);
+      applyMigrationV40(database, now);
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(40, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 40) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V41);
+      backfillProjectStructureNodes(database, now);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(41, now);
     })();
   }
   return getSchemaVersion(database);
@@ -436,6 +450,16 @@ function applyMigrationV39(database: Database.Database, now: string): void {
   database.exec(MIGRATION_V39);
   createProjectLibraryFts(database);
   backfillProjectLibraryChunks(database, now);
+}
+
+function applyMigrationV40(database: Database.Database, now: string): void {
+  const rows = database.prepare('SELECT id, project_id FROM documents').all() as Array<{
+    id: string;
+    project_id: string;
+  }>;
+  for (const row of rows) {
+    rebuildLibraryChunksForDocument(database, row.project_id, row.id, now);
+  }
 }
 
 function applyMigrationV37(database: Database.Database): void {

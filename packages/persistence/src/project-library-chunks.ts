@@ -2,15 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { splitNovelRagChunks } from './novel-rag-chunks.js';
 import {
-  analyzeLibraryQuery,
-  escapeLibraryLike,
-  libraryFtsMatchQuery,
-  libraryKindLabel,
-  libraryQueryTerms,
-  librarySourceTypeLabel,
-  scoreLibraryChunk,
-  type LibraryQueryMatchKind,
-} from './project-library-query.js';
+  parseProjectStructure,
+  type ProjectStructureKind,
+  type ProjectStructureNodeDraft,
+} from './project-structure.js';
 
 export const LIBRARY_SOURCE_TYPES = [
   'document',
@@ -52,6 +47,26 @@ export interface ProjectLibraryChunkRecord {
   updatedAt: string;
 }
 
+export interface ProjectStructureNodeRecord {
+  id: string;
+  projectId: string;
+  sourceType: LibraryChunkSourceType;
+  sourceId: string;
+  documentId?: string;
+  versionId?: string;
+  kind: ProjectStructureKind;
+  title: string;
+  path: string[];
+  pathText: string;
+  level: number;
+  ordinal: number;
+  startOffset: number;
+  endOffset: number;
+  contentHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface LibraryCatalogRecord {
   id: string;
   sourceType: LibraryChunkSourceType;
@@ -66,9 +81,23 @@ export interface LibraryCatalogRecord {
 export interface LibrarySearchHit {
   chunk: ProjectLibraryChunkRecord;
   score: number;
-  matchKind: LibraryQueryMatchKind;
-  kindLabel?: string;
-  sourceTypeLabel: string;
+  structure?: ProjectStructureNodeRecord;
+}
+
+export interface LibrarySearchPage {
+  hits: LibrarySearchHit[];
+  truncated: boolean;
+}
+
+export interface ProjectStructureSearchHit {
+  node: ProjectStructureNodeRecord;
+  chunk: ProjectLibraryChunkRecord;
+  score: number;
+}
+
+export interface ProjectStructureSearchPage {
+  hits: ProjectStructureSearchHit[];
+  truncated: boolean;
 }
 
 export interface LibrarySearchQuery {
@@ -83,6 +112,20 @@ export interface LibrarySearchQuery {
   limit?: number;
 }
 
+export interface ProjectStructureSearchQuery {
+  projectId: string;
+  query?: string;
+  sourceTypes?: readonly string[];
+  status?: string;
+  kind?: string;
+  scopeType?: string;
+  scopeId?: string;
+  includeArchived?: boolean;
+  structurePath?: readonly string[];
+  offset?: number;
+  limit?: number;
+}
+
 interface LibraryChunkWrite {
   sourceType: LibraryChunkSourceType;
   sourceId: string;
@@ -94,11 +137,30 @@ interface LibraryChunkWrite {
   scopeId?: string;
   title: string;
   content: string;
+  structurePath?: string[];
 }
 
 const CATALOG_LIMIT_PER_TYPE = 20;
 const CATALOG_LIMIT_CONVERSATIONS = 5;
 const LIBRARY_FTS_NAME = 'project_library_fts';
+
+export function libraryChapterTitle(
+  displayLabel: string | null | undefined,
+  title: string,
+): string {
+  const label = displayLabel?.trim() ?? '';
+  const name = title.trim();
+  if (label && name && label !== name) {
+    if (name.includes(label)) return name;
+    if (label.includes(name)) return label;
+    return `${label} ${name}`;
+  }
+  return name || label;
+}
+
+function collapseLibraryText(value: string): string {
+  return value.replace(/\s+/g, '');
+}
 
 export function projectLibraryFtsEnabled(database: Database.Database): boolean {
   return Boolean(
@@ -159,6 +221,21 @@ export function deleteLibrarySourceChunks(
       'DELETE FROM project_library_chunks WHERE project_id = ? AND source_type = ? AND source_id = ?',
     )
     .run(projectId, sourceType, sourceId);
+  deleteLibrarySourceStructure(database, projectId, sourceType, sourceId);
+}
+
+export function deleteLibrarySourceStructure(
+  database: Database.Database,
+  projectId: string,
+  sourceType: LibraryChunkSourceType,
+  sourceId: string,
+): void {
+  if (!hasProjectStructureTable(database)) return;
+  database
+    .prepare(
+      'DELETE FROM project_structure_nodes WHERE project_id = ? AND source_type = ? AND source_id = ?',
+    )
+    .run(projectId, sourceType, sourceId);
 }
 
 export function rebuildLibraryChunksForDocument(
@@ -193,6 +270,11 @@ export function rebuildLibraryChunksForDocument(
   database
     .prepare('DELETE FROM project_library_chunks WHERE project_id = ? AND document_id = ?')
     .run(projectId, documentId);
+  if (hasProjectStructureTable(database)) {
+    database
+      .prepare('DELETE FROM project_structure_nodes WHERE project_id = ? AND document_id = ?')
+      .run(projectId, documentId);
+  }
   if (!document) return 0;
   const source = resolveDocumentSource(database, document);
   const versionIds = [document.current_version_id, document.published_version_id].filter(
@@ -219,6 +301,7 @@ export function rebuildLibraryChunksForDocument(
           scopeId: document.scope_id ?? undefined,
           title: source.title,
           content: version.content_markdown,
+          structurePath: source.structurePath,
         },
       ],
       now,
@@ -431,47 +514,54 @@ export function searchProjectLibraryChunks(
   database: Database.Database,
   params: LibrarySearchQuery,
 ): LibrarySearchHit[] {
+  return searchProjectLibraryChunksPage(database, params).hits;
+}
+
+export function searchProjectLibraryChunksPage(
+  database: Database.Database,
+  params: LibrarySearchQuery,
+): LibrarySearchPage {
   const query = params.query.trim();
-  if (!query) return [];
+  if (!query) return { hits: [], truncated: false };
   const limit = Math.min(Math.max(params.limit ?? 8, 1), 20);
-  const rows = loadSearchCandidates(database, params, query);
-  const scored = rows
-    .map((row) => {
-      const ranked = scoreLibraryChunk(
-        {
-          title: row.title,
-          content: row.content_text,
-          sourceType: row.source_type,
-          status: row.status,
-          kind: row.kind ?? undefined,
-        },
-        query,
-      );
-      return {
-        chunk: toChunkRecord(row),
-        score: ranked.score,
-        matchKind: ranked.matchKind,
-        kindLabel: libraryKindLabel(row.kind ?? undefined),
-        sourceTypeLabel: librarySourceTypeLabel(row.source_type),
-      };
-    })
-    .filter((item) => item.score > 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        right.chunk.updatedAt.localeCompare(left.chunk.updatedAt) ||
-        left.chunk.id.localeCompare(right.chunk.id),
-    );
-  const seen = new Set<string>();
+  const requestedChapters = new Set(chapterNumbersFromText(query));
   const hits: LibrarySearchHit[] = [];
-  for (const item of scored) {
-    const key = `${item.chunk.sourceType}:${item.chunk.sourceId}:${item.chunk.versionId ?? ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+  // Scan without a recency cutoff, but retain only the best result per source
+  // among the top limit + 1. The extra distinct source proves truncation.
+  for (const row of loadSearchCandidates(database, params, query, requestedChapters)) {
+    const score = libraryChunkScore(row, query, requestedChapters);
+    if (score <= 0) continue;
+    const chunk = toChunkRecord(row);
+    const item = {
+      chunk,
+      score,
+      structure: getProjectStructureForChunk(database, chunk, structureMatchOffset(chunk, query)),
+    };
+    const existingIndex = hits.findIndex(
+      (hit) =>
+        hit.chunk.sourceType === item.chunk.sourceType &&
+        hit.chunk.sourceId === item.chunk.sourceId &&
+        hit.chunk.versionId === item.chunk.versionId,
+    );
+    if (existingIndex >= 0) {
+      if (compareLibraryHits(hits[existingIndex]!, item) <= 0) continue;
+      hits.splice(existingIndex, 1);
+    }
     hits.push(item);
-    if (hits.length >= limit) break;
+    hits.sort(compareLibraryHits);
+    if (hits.length > limit + 1) hits.pop();
   }
-  return hits;
+  return { hits: hits.slice(0, limit), truncated: hits.length > limit };
+}
+
+function compareLibraryHits(left: LibrarySearchHit, right: LibrarySearchHit): number {
+  return (
+    right.score - left.score ||
+    compareChapterOrder(left.chunk, right.chunk) ||
+    left.chunk.ordinal - right.chunk.ordinal ||
+    right.chunk.updatedAt.localeCompare(left.chunk.updatedAt) ||
+    left.chunk.id.localeCompare(right.chunk.id)
+  );
 }
 
 export function getProjectLibraryChunk(
@@ -483,6 +573,218 @@ export function getProjectLibraryChunk(
     .prepare('SELECT * FROM project_library_chunks WHERE project_id = ? AND id = ?')
     .get(projectId, chunkId) as LibraryChunkRow | undefined;
   return row ? toChunkRecord(row) : undefined;
+}
+
+export function getProjectStructureForChunk(
+  database: Database.Database,
+  chunk: ProjectLibraryChunkRecord,
+  atOffset = chunk.startOffset,
+): ProjectStructureNodeRecord | undefined {
+  if (!hasProjectStructureTable(database)) return undefined;
+  const row = database
+    .prepare(
+      `SELECT * FROM project_structure_nodes
+       WHERE project_id = ? AND source_type = ? AND source_id = ? AND version_id IS ?
+         AND start_offset <= ? AND end_offset > ?
+       ORDER BY level DESC, start_offset DESC, ordinal ASC, id ASC LIMIT 1`,
+    )
+    .get(
+      chunk.projectId,
+      chunk.sourceType,
+      chunk.sourceId,
+      chunk.versionId ?? null,
+      atOffset,
+      atOffset,
+    ) as ProjectStructureNodeRow | undefined;
+  return row ? toProjectStructureNodeRecord(row) : undefined;
+}
+
+function structureMatchOffset(chunk: ProjectLibraryChunkRecord, query: string): number {
+  const haystack = chunk.contentText.toLocaleLowerCase('zh-CN');
+  const needle = query.trim().toLocaleLowerCase('zh-CN');
+  let local = needle ? haystack.indexOf(needle) : -1;
+  if (local < 0) {
+    const term = libraryQueryTerms(query)[0];
+    local = term ? haystack.indexOf(term) : -1;
+  }
+  return chunk.startOffset + Math.max(0, local);
+}
+
+export function listProjectStructureNodes(
+  database: Database.Database,
+  params: {
+    projectId: string;
+    sourceType?: LibraryChunkSourceType;
+    sourceId?: string;
+    versionId?: string;
+  },
+): ProjectStructureNodeRecord[] {
+  if (!hasProjectStructureTable(database)) return [];
+  const rows = database
+    .prepare(
+      `SELECT * FROM project_structure_nodes
+       WHERE project_id = ?
+         AND (? IS NULL OR source_type = ?)
+         AND (? IS NULL OR source_id = ?)
+         AND (? IS NULL OR version_id IS ?)
+       ORDER BY source_type, source_id, version_id, ordinal, id`,
+    )
+    .all(
+      params.projectId,
+      params.sourceType ?? null,
+      params.sourceType ?? null,
+      params.sourceId ?? null,
+      params.sourceId ?? null,
+      params.versionId ?? null,
+      params.versionId ?? null,
+    ) as ProjectStructureNodeRow[];
+  return rows.map(toProjectStructureNodeRecord);
+}
+
+/** Search only the deterministic structure metadata, without returning body text. */
+export function searchProjectStructureNodesPage(
+  database: Database.Database,
+  params: ProjectStructureSearchQuery,
+): ProjectStructureSearchPage {
+  if (!hasProjectStructureTable(database)) return { hits: [], truncated: false };
+  const query = params.query?.trim() ?? '*';
+  const limit = Math.min(Math.max(params.limit ?? 20, 1), 20);
+  const offset = Math.max(params.offset ?? 0, 0);
+  const filters = ['nodes.project_id = ?'];
+  const values: unknown[] = [params.projectId];
+  if (params.sourceTypes && params.sourceTypes.length > 0) {
+    filters.push(`nodes.source_type IN (${params.sourceTypes.map(() => '?').join(', ')})`);
+    values.push(...params.sourceTypes);
+  } else {
+    filters.push("nodes.source_type <> 'conversation'");
+  }
+  if (!params.includeArchived) {
+    filters.push(`NOT EXISTS (
+      SELECT 1 FROM documents archived
+      WHERE archived.id = nodes.document_id AND archived.lifecycle_status = 'archived'
+    )`);
+  }
+  const chunkFilters = [
+    'chunks.project_id = nodes.project_id',
+    'chunks.source_type = nodes.source_type',
+    'chunks.source_id = nodes.source_id',
+    'chunks.version_id IS nodes.version_id',
+  ];
+  const chunkValues: unknown[] = [];
+  if (params.status && params.status !== 'any') {
+    chunkFilters.push('chunks.status = ?');
+    chunkValues.push(params.status);
+  } else if (params.status !== 'any') {
+    chunkFilters.push("chunks.status <> 'trash'");
+  }
+  if (params.kind) {
+    chunkFilters.push('chunks.kind = ?');
+    chunkValues.push(params.kind);
+  }
+  if (params.scopeType) {
+    chunkFilters.push('chunks.scope_type = ?');
+    chunkValues.push(params.scopeType);
+  }
+  if (params.scopeId) {
+    chunkFilters.push('chunks.scope_id = ?');
+    chunkValues.push(params.scopeId);
+  }
+  filters.push(
+    `EXISTS (SELECT 1 FROM project_library_chunks chunks WHERE ${chunkFilters.join(' AND ')})`,
+  );
+  const rows = database
+    .prepare(
+      `SELECT nodes.*,
+              (SELECT chunks.id FROM project_library_chunks chunks
+               WHERE ${chunkFilters.join(' AND ')}
+               ORDER BY chunks.ordinal ASC, chunks.id ASC LIMIT 1) AS chunk_id
+       FROM project_structure_nodes nodes
+       WHERE ${filters.join(' AND ')}
+       ORDER BY nodes.level ASC, nodes.ordinal ASC, nodes.updated_at DESC, nodes.id ASC`,
+    )
+    .all(...chunkValues, ...values, ...chunkValues) as Array<
+    ProjectStructureNodeRow & { chunk_id: string | null }
+  >;
+  const normalizedQuery = query.normalize('NFKC').toLocaleLowerCase('zh-CN');
+  const requestedPath = (params.structurePath ?? []).map((item) => item.trim()).filter(Boolean);
+  const hits: ProjectStructureSearchHit[] = [];
+  const chunkCache = new Map<string, ProjectLibraryChunkRecord | undefined>();
+  for (const row of rows) {
+    const node = toProjectStructureNodeRecord(row);
+    if (
+      requestedPath.length > 0 &&
+      (requestedPath.length > node.path.length ||
+        requestedPath.some(
+          (segment, index) =>
+            segment.normalize('NFKC').toLocaleLowerCase('zh-CN') !==
+            node.path[index]?.normalize('NFKC').toLocaleLowerCase('zh-CN'),
+        ))
+    ) {
+      continue;
+    }
+    const score = structureNodeScore(node, normalizedQuery);
+    if (score <= 0 || !row.chunk_id) continue;
+    if (!chunkCache.has(row.chunk_id)) {
+      chunkCache.set(
+        row.chunk_id,
+        getProjectLibraryChunk(database, params.projectId, row.chunk_id),
+      );
+    }
+    const chunk = chunkCache.get(row.chunk_id);
+    if (!chunk) continue;
+    hits.push({ node, chunk, score });
+    hits.sort(compareStructureHits);
+    if (hits.length > offset + limit + 1) hits.pop();
+  }
+  return {
+    hits: hits.slice(offset, offset + limit),
+    truncated: hits.length > offset + limit,
+  };
+}
+
+function structureNodeScore(node: ProjectStructureNodeRecord, query: string): number {
+  if (!query || query === '*') return 1;
+  const haystack = `${node.title}\n${node.pathText}`.normalize('NFKC').toLocaleLowerCase('zh-CN');
+  if (haystack.includes(query)) return 100 + query.length;
+  let score = 0;
+  for (const term of libraryQueryTerms(query)) if (haystack.includes(term)) score += term.length;
+  return score;
+}
+
+function compareStructureHits(
+  left: ProjectStructureSearchHit,
+  right: ProjectStructureSearchHit,
+): number {
+  return (
+    right.score - left.score ||
+    left.node.sourceId.localeCompare(right.node.sourceId) ||
+    left.node.ordinal - right.node.ordinal ||
+    left.node.level - right.node.level ||
+    left.node.pathText.localeCompare(right.node.pathText, 'zh-CN')
+  );
+}
+
+/**
+ * Load all chunks for one immutable source version in document order. The
+ * caller can use the stored offsets to join overlapping RAG chunks without
+ * duplicating the overlap text.
+ */
+export function listProjectLibrarySourceChunks(
+  database: Database.Database,
+  projectId: string,
+  sourceType: LibraryChunkSourceType,
+  sourceId: string,
+  versionId?: string,
+): ProjectLibraryChunkRecord[] {
+  const rows = database
+    .prepare(
+      `SELECT * FROM project_library_chunks
+       WHERE project_id = ? AND source_type = ? AND source_id = ?
+         AND version_id IS ?
+       ORDER BY ordinal ASC, start_offset ASC, id ASC`,
+    )
+    .all(projectId, sourceType, sourceId, versionId ?? null) as LibraryChunkRow[];
+  return rows.map(toChunkRecord);
 }
 
 export function librarySnippet(content: string, query: string, maxChars = 400): string {
@@ -497,6 +799,27 @@ export function librarySnippet(content: string, query: string, maxChars = 400): 
   const start = Math.max(0, index - Math.floor(maxChars / 4));
   const snippet = content.slice(start, start + maxChars).trim();
   return snippet.length < content.length && start > 0 ? `…${snippet}` : snippet;
+}
+
+export function libraryQueryTerms(query: string): string[] {
+  const terms = new Set<string>();
+  const segments =
+    query
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN')
+      .match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  for (const segment of segments) {
+    if (/^[\u3400-\u9fff]+$/u.test(segment)) {
+      if (segment.length === 1) terms.add(segment);
+      for (let index = 0; index < segment.length - 1 && terms.size < 64; index += 1) {
+        terms.add(segment.slice(index, index + 2));
+      }
+    } else if (segment.length >= 2) {
+      terms.add(segment);
+    }
+    if (terms.size >= 64) break;
+  }
+  return [...terms];
 }
 
 function insertLibraryWrites(
@@ -514,6 +837,7 @@ function insertLibraryWrites(
   );
   let count = 0;
   for (const write of writes) {
+    writeProjectStructureNodes(database, projectId, write, now);
     const pieces = splitLibraryContent(write.content);
     for (const piece of pieces) {
       insert.run(
@@ -543,6 +867,198 @@ function insertLibraryWrites(
   return count;
 }
 
+function hasProjectStructureTable(database: Database.Database): boolean {
+  return Boolean(
+    database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project_structure_nodes'",
+      )
+      .get(),
+  );
+}
+
+function writeProjectStructureNodes(
+  database: Database.Database,
+  projectId: string,
+  write: LibraryChunkWrite,
+  now: string,
+): number {
+  if (!hasProjectStructureTable(database) || !write.content.trim()) return 0;
+  database
+    .prepare(
+      `DELETE FROM project_structure_nodes
+       WHERE project_id = ? AND source_type = ? AND source_id = ? AND version_id IS ?`,
+    )
+    .run(projectId, write.sourceType, write.sourceId, write.versionId ?? null);
+  const nodes = parseProjectStructure(write.content, write.title).map((node) =>
+    write.structurePath ? { ...node, path: [...write.structurePath, ...node.path.slice(1)] } : node,
+  );
+  const insert = database.prepare(
+    `INSERT INTO project_structure_nodes
+     (id, project_id, source_type, source_id, document_id, version_id, node_kind, title,
+      path_json, path_text, level, ordinal, start_offset, end_offset, content_hash, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const node of nodes) {
+    insert.run(
+      structureNodeId(projectId, write, node),
+      projectId,
+      write.sourceType,
+      write.sourceId,
+      write.documentId ?? null,
+      write.versionId ?? null,
+      node.kind,
+      node.title,
+      JSON.stringify(node.path),
+      node.path.join(' / '),
+      node.level,
+      node.ordinal,
+      node.startOffset,
+      node.endOffset,
+      node.contentHash,
+      now,
+      now,
+    );
+  }
+  return nodes.length;
+}
+
+function structureNodeId(
+  projectId: string,
+  write: LibraryChunkWrite,
+  node: ProjectStructureNodeDraft,
+): string {
+  return createHash('sha256')
+    .update(
+      [
+        projectId,
+        write.sourceType,
+        write.sourceId,
+        write.versionId ?? '',
+        String(node.ordinal),
+        String(node.startOffset),
+        String(node.endOffset),
+      ].join('\u001f'),
+      'utf8',
+    )
+    .digest('hex');
+}
+
+export function backfillProjectStructureNodes(database: Database.Database, now: string): number {
+  if (!hasProjectStructureTable(database)) return 0;
+  let count = 0;
+  const documents = database
+    .prepare(
+      `SELECT documents.id, documents.project_id, documents.kind, documents.title,
+              documents.current_version_id, documents.published_version_id,
+              documents.scope_type, documents.scope_id,
+              chapters.id AS chapter_id, chapters.display_label AS chapter_label
+       FROM documents
+       LEFT JOIN novel_chapters chapters ON chapters.document_id = documents.id
+       WHERE documents.current_version_id IS NOT NULL`,
+    )
+    .all() as Array<{
+    id: string;
+    project_id: string;
+    kind: string;
+    title: string;
+    current_version_id: string | null;
+    published_version_id: string | null;
+    scope_type: string | null;
+    scope_id: string | null;
+    chapter_id: string | null;
+    chapter_label: string | null;
+  }>;
+  const indexedDocumentSources = new Set<string>();
+  for (const document of documents) {
+    const source = resolveDocumentSource(database, document);
+    const versionIds = [document.current_version_id, document.published_version_id].filter(
+      (value, index, all): value is string => Boolean(value) && all.indexOf(value) === index,
+    );
+    for (const versionId of versionIds) {
+      const version = database
+        .prepare('SELECT content_markdown FROM document_versions WHERE id = ?')
+        .get(versionId) as { content_markdown: string } | undefined;
+      if (!version?.content_markdown.trim()) continue;
+      const write: LibraryChunkWrite = {
+        sourceType: source.sourceType,
+        sourceId: source.sourceId,
+        documentId: document.id,
+        versionId,
+        status: document.published_version_id === versionId ? 'published' : 'draft',
+        kind: document.kind,
+        title: source.title,
+        content: version.content_markdown,
+        structurePath: source.structurePath,
+      };
+      count += writeProjectStructureNodes(database, document.project_id, write, now);
+      indexedDocumentSources.add(`${source.sourceType}\u001f${source.sourceId}\u001f${versionId}`);
+    }
+  }
+  const rows = database
+    .prepare(
+      `SELECT project_id, source_type, source_id, document_id, version_id, status, kind,
+              scope_type, scope_id, title, MIN(start_offset) AS start_offset,
+              MAX(end_offset) AS end_offset, GROUP_CONCAT(content_text, '\n\n') AS content
+       FROM project_library_chunks
+       WHERE document_id IS NULL
+       GROUP BY project_id, source_type, source_id, version_id`,
+    )
+    .all() as Array<{
+    project_id: string;
+    source_type: LibraryChunkSourceType;
+    source_id: string;
+    document_id: null;
+    version_id: string | null;
+    status: string;
+    kind: string | null;
+    scope_type: string | null;
+    scope_id: string | null;
+    title: string;
+    start_offset: number;
+    end_offset: number;
+    content: string;
+  }>;
+  for (const row of rows) {
+    const key = `${row.source_type}\u001f${row.source_id}\u001f${row.version_id ?? ''}`;
+    if (indexedDocumentSources.has(key)) continue;
+    count += writeProjectStructureNodes(
+      database,
+      row.project_id,
+      {
+        sourceType: row.source_type,
+        sourceId: row.source_id,
+        versionId: row.version_id ?? undefined,
+        status: row.status,
+        kind: row.kind ?? undefined,
+        scopeType: row.scope_type ?? undefined,
+        scopeId: row.scope_id ?? undefined,
+        title: row.title,
+        content: row.content,
+        structurePath: recordStructurePath(database, row),
+      },
+      now,
+    );
+  }
+  return count;
+}
+
+function recordStructurePath(
+  database: Database.Database,
+  row: { source_type: LibraryChunkSourceType; source_id: string; title: string },
+): string[] | undefined {
+  if (row.source_type === 'scene') return [row.title];
+  if (row.source_type !== 'shot') return undefined;
+  const scene = database
+    .prepare(
+      `SELECT scenes.title FROM shots
+       INNER JOIN scenes ON scenes.id = shots.scene_id
+       WHERE shots.id = ?`,
+    )
+    .get(row.source_id) as { title: string } | undefined;
+  return scene ? [scene.title, row.title] : [row.title];
+}
+
 function splitLibraryContent(content: string) {
   const chunks = splitNovelRagChunks(content);
   if (chunks.length > 0) return chunks;
@@ -565,19 +1081,31 @@ function resolveDocumentSource(
     id: string;
     kind: string;
     title: string;
+    scope_type: string | null;
+    scope_id: string | null;
     chapter_id: string | null;
     chapter_label: string | null;
   },
-): { sourceType: LibraryChunkSourceType; sourceId: string; title: string } {
+): {
+  sourceType: LibraryChunkSourceType;
+  sourceId: string;
+  title: string;
+  structurePath?: string[];
+} {
   if (document.chapter_id) {
     return {
       sourceType: 'novel-chapter',
       sourceId: document.chapter_id,
-      title: document.chapter_label?.trim() || document.title,
+      title: libraryChapterTitle(document.chapter_label, document.title),
     };
   }
   if (document.kind === 'storyboard') {
-    return { sourceType: 'storyboard', sourceId: document.id, title: document.title };
+    return {
+      sourceType: 'storyboard',
+      sourceId: document.id,
+      title: document.title,
+      structurePath: documentScopePath(database, document),
+    };
   }
   const binding = database
     .prepare(
@@ -586,9 +1114,42 @@ function resolveDocumentSource(
     )
     .get(document.id) as { present: number } | undefined;
   if (binding) {
-    return { sourceType: 'novel-reference', sourceId: document.id, title: document.title };
+    return {
+      sourceType: 'novel-reference',
+      sourceId: document.id,
+      title: document.title,
+      structurePath: documentScopePath(database, document),
+    };
   }
-  return { sourceType: 'document', sourceId: document.id, title: document.title };
+  return {
+    sourceType: 'document',
+    sourceId: document.id,
+    title: document.title,
+    structurePath: documentScopePath(database, document),
+  };
+}
+
+function documentScopePath(
+  database: Database.Database,
+  document: { scope_type: string | null; scope_id: string | null },
+): string[] | undefined {
+  if (!document.scope_id || document.scope_type === 'project') return undefined;
+  if (document.scope_type === 'scene') {
+    const scene = database
+      .prepare('SELECT title FROM scenes WHERE id = ?')
+      .get(document.scope_id) as { title: string } | undefined;
+    return scene ? [scene.title] : undefined;
+  }
+  if (document.scope_type === 'shot') {
+    const row = database
+      .prepare(
+        `SELECT scenes.title AS scene_title, shots.title AS shot_title
+         FROM shots INNER JOIN scenes ON scenes.id = shots.scene_id WHERE shots.id = ?`,
+      )
+      .get(document.scope_id) as { scene_title: string; shot_title: string } | undefined;
+    return row ? [row.scene_title, row.shot_title] : undefined;
+  }
+  return undefined;
 }
 
 interface LibraryChunkRow {
@@ -613,11 +1174,64 @@ interface LibraryChunkRow {
   updated_at: string;
 }
 
-function loadSearchCandidates(
+interface ProjectStructureNodeRow {
+  id: string;
+  project_id: string;
+  source_type: string;
+  source_id: string;
+  document_id: string | null;
+  version_id: string | null;
+  node_kind: string;
+  title: string;
+  path_json: string;
+  path_text: string;
+  level: number;
+  ordinal: number;
+  start_offset: number;
+  end_offset: number;
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function toProjectStructureNodeRecord(row: ProjectStructureNodeRow): ProjectStructureNodeRecord {
+  let path: string[];
+  try {
+    const parsed: unknown = JSON.parse(row.path_json);
+    path =
+      Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')
+        ? parsed
+        : [row.title];
+  } catch {
+    path = [row.title];
+  }
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceType: row.source_type as LibraryChunkSourceType,
+    sourceId: row.source_id,
+    documentId: row.document_id ?? undefined,
+    versionId: row.version_id ?? undefined,
+    kind: row.node_kind as ProjectStructureKind,
+    title: row.title,
+    path,
+    pathText: row.path_text,
+    level: row.level,
+    ordinal: row.ordinal,
+    startOffset: row.start_offset,
+    endOffset: row.end_offset,
+    contentHash: row.content_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function* loadSearchCandidates(
   database: Database.Database,
   params: LibrarySearchQuery,
   query: string,
-): LibraryChunkRow[] {
+  requestedChapters: ReadonlySet<number>,
+): Generator<LibraryChunkRow> {
   const filters = ['chunks.project_id = ?'];
   const values: unknown[] = [params.projectId];
   if (params.sourceTypes && params.sourceTypes.length > 0) {
@@ -651,60 +1265,185 @@ function loadSearchCandidates(
       WHERE archived.id = chunks.document_id AND archived.lifecycle_status = 'archived'
     )`);
   }
+  if (requestedChapters.size > 0) {
+    // Inspect only metadata across the whole library: a large recently updated
+    // chapter must not push an older requested chapter past a chunk-count cap.
+    // Each chapter/version starts at ordinal zero in the indexing pipeline.
+    const chapterRows = database
+      .prepare(
+        `SELECT chunks.id, chunks.title FROM project_library_chunks chunks
+         WHERE ${filters.join(' AND ')}
+           AND chunks.source_type = 'novel-chapter' AND chunks.ordinal = 0`,
+      )
+      .iterate(...values) as Iterable<{ id: string; title: string }>;
+    const loadChunk = database.prepare('SELECT * FROM project_library_chunks WHERE id = ?');
+    for (const row of chapterRows) {
+      const number = chapterNumbersFromText(row.title)[0];
+      if (number !== undefined && requestedChapters.has(number)) {
+        const chunk = loadChunk.get(row.id) as LibraryChunkRow | undefined;
+        if (chunk) yield chunk;
+      }
+    }
+    filters.push("chunks.source_type <> 'novel-chapter'");
+  }
   const where = filters.join(' AND ');
-  const byId = new Map<string, LibraryChunkRow>();
-  const add = (rows: LibraryChunkRow[]) => {
-    for (const row of rows) byId.set(row.id, row);
-  };
-
-  const ftsQuery = libraryFtsMatchQuery(query);
-  if (projectLibraryFtsEnabled(database) && ftsQuery) {
+  // FTS cannot equate “第一章” with “第 1 章”; explicit chapter matches
+  // were resolved above independently of the textual path.
+  if (projectLibraryFtsEnabled(database) && [...query].length >= 3) {
     try {
-      add(
-        database
-          .prepare(
-            `SELECT chunks.*
-             FROM project_library_fts
-             INNER JOIN project_library_chunks chunks ON chunks.rowid = project_library_fts.rowid
-             WHERE project_library_fts MATCH ? AND ${where}
-             ORDER BY chunks.updated_at DESC, chunks.id LIMIT 500`,
-          )
-          .all(ftsQuery, ...values) as LibraryChunkRow[],
-      );
-    } catch {
-      // Fall through to identity matching and explicit n-gram scoring; never tokenize on whitespace.
-    }
-  }
-
-  const identityTerms = analyzeLibraryQuery(query).identityTerms.slice(0, 8);
-  if (identityTerms.length > 0) {
-    const clauses = identityTerms.map(
-      () => "(chunks.title LIKE ? ESCAPE '\\' OR chunks.content_text LIKE ? ESCAPE '\\')",
-    );
-    const likeValues: unknown[] = [];
-    for (const term of identityTerms) {
-      const pattern = `%${escapeLibraryLike(term)}%`;
-      likeValues.push(pattern, pattern);
-    }
-    add(
-      database
+      const rows = database
         .prepare(
-          `SELECT chunks.* FROM project_library_chunks chunks
-           WHERE ${where} AND (${clauses.join(' OR ')})
-           ORDER BY chunks.updated_at DESC, chunks.id LIMIT 800`,
+          `SELECT chunks.*
+           FROM project_library_fts
+           INNER JOIN project_library_chunks chunks ON chunks.rowid = project_library_fts.rowid
+           WHERE project_library_fts MATCH ? AND ${where}`,
         )
-        .all(...values, ...likeValues) as LibraryChunkRow[],
-    );
+        .iterate(`"${query.replaceAll('"', '""')}"`, ...values) as Iterable<LibraryChunkRow>;
+      let found = false;
+      for (const row of rows) {
+        found = true;
+        yield row;
+      }
+      if (found) return;
+    } catch {
+      // Fall through to explicit n-gram scoring; never tokenize on whitespace.
+    }
+  }
+  yield* database
+    .prepare(`SELECT chunks.* FROM project_library_chunks chunks WHERE ${where}`)
+    .iterate(...values) as Iterable<LibraryChunkRow>;
+}
+
+function libraryChunkScore(
+  row: LibraryChunkRow,
+  query: string,
+  requestedChapters: ReadonlySet<number>,
+): number {
+  const haystack = `${row.title}\n${row.content_text}`.normalize('NFKC').toLocaleLowerCase('zh-CN');
+  const needle = query.normalize('NFKC').trim().toLocaleLowerCase('zh-CN');
+  const collapsedHaystack = collapseLibraryText(haystack);
+  const collapsedNeedle = collapseLibraryText(needle);
+  const collapsedTitle = collapseLibraryText(row.title.toLocaleLowerCase('zh-CN'));
+  const rowChapter =
+    row.source_type === 'novel-chapter' ? chapterNumbersFromText(row.title)[0] : undefined;
+  if (
+    requestedChapters.size > 0 &&
+    rowChapter !== undefined &&
+    !requestedChapters.has(rowChapter)
+  ) {
+    return 0;
+  }
+  let score = 0;
+  if (needle && haystack.includes(needle)) score += Math.min(needle.length, 12) * 4;
+  else if (collapsedNeedle && collapsedHaystack.includes(collapsedNeedle)) {
+    score += Math.min(collapsedNeedle.length, 12) * 3;
+  }
+  if (row.title.toLocaleLowerCase('zh-CN').includes(needle)) score += 8;
+  else if (collapsedNeedle && collapsedTitle.includes(collapsedNeedle)) score += 6;
+  for (const term of libraryQueryTerms(query)) {
+    if (haystack.includes(term)) score += Math.min(term.length, 6);
   }
 
-  if (byId.size > 0) return [...byId.values()];
+  if (rowChapter !== undefined && requestedChapters.has(rowChapter)) {
+    // A chapter number is an exact structural match even when the body does not
+    // repeat the label. Keep this above ordinary keyword matches.
+    score += 1_000;
+  }
 
-  return database
-    .prepare(
-      `SELECT chunks.* FROM project_library_chunks chunks WHERE ${where}
-       ORDER BY chunks.updated_at DESC, chunks.id LIMIT 5000`,
-    )
-    .all(...values) as LibraryChunkRow[];
+  // Weight only an actual textual/structural hit. A source-type prior by itself
+  // turns unrelated novels into false positives for every query.
+  if (score > 0 && (row.source_type === 'document' || row.source_type === 'novel-chapter')) {
+    score *= 1.5;
+    score += row.status === 'published' ? 10 : 5;
+  } else if (row.source_type === 'conversation') {
+    score = Math.floor(score * 0.3); // conversation chat messages are demoted to avoid search loops
+  }
+
+  return score;
+}
+
+function compareChapterOrder(
+  left: ProjectLibraryChunkRecord,
+  right: ProjectLibraryChunkRecord,
+): number {
+  const leftChapter =
+    left.sourceType === 'novel-chapter' ? chapterNumbersFromText(left.title)[0] : undefined;
+  const rightChapter =
+    right.sourceType === 'novel-chapter' ? chapterNumbersFromText(right.title)[0] : undefined;
+  // Give missing chapter numbers a consistent position as well, so mixed
+  // document/chapter ties form a total order independent of scan order.
+  if (leftChapter === undefined) return rightChapter === undefined ? 0 : 1;
+  if (rightChapter === undefined) return -1;
+  return leftChapter - rightChapter;
+}
+
+function chapterNumbersFromText(value: string): number[] {
+  const normalized = value.normalize('NFKC');
+  // A bare number must start at a token boundary; never recover a suffix from
+  // a malformed number such as -1章, 1.2章, or abc1章.
+  const references =
+    /(?:第\s*|(?<![\p{L}\p{N}_.,+-]))([零〇一二两三四五六七八九十百千万亿\d]+)\s*章/gu;
+  const numbers = new Set<number>();
+  for (const match of normalized.matchAll(references)) {
+    const token = match[1];
+    if (!token) continue;
+    const number = /^\d+$/u.test(token) ? Number(token) : parseChineseChapterNumber(token);
+    if (number !== undefined && Number.isSafeInteger(number) && number > 0) numbers.add(number);
+  }
+  return [...numbers];
+}
+
+function parseChineseChapterNumber(value: string): number | undefined {
+  const digits: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (/^[零〇一二两三四五六七八九]+$/u.test(value)) {
+    // Digit-by-digit labels such as 一〇一 mean 101, not the last digit.
+    return Number([...value].map((character) => digits[character]).join(''));
+  }
+  for (const [character, unit] of [
+    ['亿', 100_000_000],
+    ['万', 10_000],
+  ] as const) {
+    if (!value.includes(character)) continue;
+    const sections = value.split(character);
+    if (sections.length !== 2 || !sections[0]) return undefined;
+    const left = parseChineseChapterNumber(sections[0]);
+    const right = sections[1] ? parseChineseChapterNumber(sections[1]) : 0;
+    if (left === undefined || left <= 0 || right === undefined || right >= unit) return undefined;
+    const result = left * unit + right;
+    return Number.isSafeInteger(result) ? result : undefined;
+  }
+  const units: Record<string, number> = { 十: 10, 百: 100, 千: 1_000 };
+  let total = 0;
+  let number: number | undefined;
+  let previousUnit = 10_000;
+  for (const character of value) {
+    if (digits[character] !== undefined) {
+      if (number !== undefined && number !== 0) return undefined;
+      number = digits[character];
+      continue;
+    }
+    const unit = units[character];
+    if (unit === undefined || unit >= previousUnit || number === 0) return undefined;
+    if (number === undefined && (total !== 0 || unit !== 10)) return undefined;
+    total += (number ?? 1) * unit;
+    previousUnit = unit;
+    number = undefined;
+  }
+  const result = total + (number ?? 0);
+  return Number.isSafeInteger(result) ? result : undefined;
 }
 
 function toChunkRecord(row: LibraryChunkRow): ProjectLibraryChunkRecord {
@@ -771,7 +1510,7 @@ function catalogDocuments(database: Database.Database, projectId: string): Libra
       versionId: row.current_version_id,
       status: row.published_version_id === row.current_version_id ? 'published' : 'draft',
       kind: row.kind,
-      title: row.chapter_label?.trim() || row.title,
+      title: row.chapter_id ? libraryChapterTitle(row.chapter_label, row.title) : row.title,
       updatedAt: row.updated_at,
     });
   }

@@ -1,3 +1,20 @@
+import {
+  NetworkAdmission,
+  NetworkAdmissionError,
+  type NetworkOutcome,
+  retryAfterMs,
+  sharedNetworkAdmission,
+} from './network-admission.js';
+
+export {
+  NetworkAdmission,
+  NetworkAdmissionError,
+  sharedNetworkAdmission,
+  retryAfterMs,
+  type NetworkOutcome,
+  type NetworkPermit,
+} from './network-admission.js';
+
 export interface LlmProviderStatus {
   key: string;
   name: string;
@@ -46,13 +63,20 @@ export interface OpenAIProviderOptions {
   totalTimeoutMs?: number;
   firstByteTimeoutMs?: number;
   idleTimeoutMs?: number;
+  /** Override only when the caller owns a shared transport scope (e.g. isolated tests). */
+  networkAdmission?: NetworkAdmission;
 }
 
 export class LlmProviderError extends Error {
   constructor(
     message: string,
     readonly code:
-      'NOT_CONFIGURED' | 'AUTHENTICATION' | 'RATE_LIMITED' | 'TIMEOUT' | 'REQUEST_FAILED',
+      | 'NOT_CONFIGURED'
+      | 'AUTHENTICATION'
+      | 'RATE_LIMITED'
+      | 'TIMEOUT'
+      | 'REQUEST_FAILED'
+      | 'REQUEST_NOT_SENT',
     readonly retryable: boolean,
   ) {
     super(message);
@@ -67,6 +91,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
   private readonly totalTimeoutMs: number;
   private readonly firstByteTimeoutMs: number;
   private readonly idleTimeoutMs: number;
+  private readonly networkAdmission: NetworkAdmission;
 
   constructor(options: OpenAIProviderOptions = {}) {
     this.apiKey = options.apiKey;
@@ -76,6 +101,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
     this.totalTimeoutMs = positiveTimeout(options.totalTimeoutMs, 120_000);
     this.firstByteTimeoutMs = positiveTimeout(options.firstByteTimeoutMs, 30_000);
     this.idleTimeoutMs = positiveTimeout(options.idleTimeoutMs, 30_000);
+    this.networkAdmission = options.networkAdmission ?? sharedNetworkAdmission;
   }
 
   status(): LlmProviderStatus {
@@ -87,7 +113,45 @@ export class OpenAIResponsesProvider implements LlmProvider {
       throw new LlmProviderError('OPENAI_API_KEY is not configured.', 'NOT_CONFIGURED', false);
     if (request.signal?.aborted) throw abortError(request.signal);
 
-    const startedAt = Date.now();
+    // Serialization is local work: it must neither consume admission nor count
+    // malformed caller input as a remote service fault.
+    const body = JSON.stringify({
+      model: this.model,
+      instructions: request.systemInstruction,
+      input: `# 项目上下文\n\n${request.context}\n\n# 用户请求\n\n${request.prompt}`,
+      reasoning: { effort: 'none' },
+      store: false,
+      stream: true,
+      ...(request.tools?.length
+        ? {
+            tools: request.tools.map((tool) => ({
+              type: 'function',
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+            })),
+          }
+        : {}),
+    });
+    const permit = await this.networkAdmission
+      .acquire(this.baseUrl, request.signal)
+      .catch((error: unknown) => {
+        if (error instanceof NetworkAdmissionError) {
+          throw new LlmProviderError(error.message, error.code, error.retryable);
+        }
+        throw error;
+      });
+    let outcome: NetworkOutcome = { kind: 'neutral' };
+    const networkRead = async <T>(operation: () => Promise<T>): Promise<T> => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!request.signal?.aborted && outcome.kind !== 'cooldown') outcome = { kind: 'failure' };
+        throw error;
+      }
+    };
+
+    const startedAt = performance.now();
     const totalDeadline = startedAt + this.totalTimeoutMs;
     const firstByteDeadline = startedAt + this.firstByteTimeoutMs;
     const controller = new AbortController();
@@ -96,40 +160,29 @@ export class OpenAIResponsesProvider implements LlmProvider {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let response: Response;
     try {
+      if (request.signal?.aborted) throw abortError(request.signal);
       try {
-        response = await waitForDeadline(
-          this.fetcher(`${this.baseUrl}/responses`, {
-            method: 'POST',
-            headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json' },
-            body: JSON.stringify({
-              model: this.model,
-              instructions: request.systemInstruction,
-              input: `# 项目上下文\n\n${request.context}\n\n# 用户请求\n\n${request.prompt}`,
-              reasoning: { effort: 'none' },
-              store: false,
-              stream: true,
-              ...(request.tools?.length
-                ? {
-                    tools: request.tools.map((tool) => ({
-                      type: 'function',
-                      name: tool.name,
-                      description: tool.description,
-                      parameters: tool.parameters,
-                    })),
-                  }
-                : {}),
+        response = await networkRead(() =>
+          waitForDeadline(
+            this.fetcher(`${this.baseUrl}/responses`, {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${this.apiKey}`,
+                'content-type': 'application/json',
+              },
+              body,
+              signal: controller.signal,
             }),
-            signal: controller.signal,
-          }),
-          {
-            deadline: Math.min(totalDeadline, firstByteDeadline),
-            signal: request.signal,
-            timeoutMessage:
-              totalDeadline <= firstByteDeadline
-                ? 'OpenAI request exceeded the total timeout.'
-                : 'OpenAI response did not return headers before the first-byte timeout.',
-            onTimeout: (error) => controller.abort(error),
-          },
+            {
+              deadline: Math.min(totalDeadline, firstByteDeadline),
+              signal: request.signal,
+              timeoutMessage:
+                totalDeadline <= firstByteDeadline
+                  ? 'OpenAI request exceeded the total timeout.'
+                  : 'OpenAI response did not return headers before the first-byte timeout.',
+              onTimeout: (error) => controller.abort(error),
+            },
+          ),
         );
       } catch (error) {
         if (error instanceof LlmProviderError || request.signal?.aborted) throw error;
@@ -137,20 +190,36 @@ export class OpenAIResponsesProvider implements LlmProvider {
       }
 
       if (!response.ok) {
-        const message = await waitForDeadline(safeErrorMessage(response), {
-          deadline: totalDeadline,
-          signal: request.signal,
-          timeoutMessage: 'OpenAI error response exceeded the total timeout.',
-          onTimeout: (error) => controller.abort(error),
-        });
+        if (response.status === 429) {
+          outcome = {
+            kind: 'cooldown',
+            retryAfterMs: retryAfterMs(response.headers.get('retry-after')),
+          };
+        } else if (response.status === 408 || response.status >= 500) {
+          outcome = { kind: 'failure' };
+        }
+        const message = await networkRead(() =>
+          waitForDeadline(safeErrorMessage(response), {
+            deadline: totalDeadline,
+            signal: request.signal,
+            timeoutMessage: 'OpenAI error response exceeded the total timeout.',
+            onTimeout: (error) => controller.abort(error),
+          }),
+        );
         if (response.status === 401 || response.status === 403) {
           throw new LlmProviderError(message, 'AUTHENTICATION', false);
         }
         if (response.status === 429) throw new LlmProviderError(message, 'RATE_LIMITED', true);
-        throw new LlmProviderError(message, 'REQUEST_FAILED', response.status >= 500);
+        throw new LlmProviderError(
+          message,
+          'REQUEST_FAILED',
+          response.status === 408 || response.status >= 500,
+        );
       }
-      if (!response.body)
+      if (!response.body) {
+        outcome = { kind: 'failure' };
         throw new LlmProviderError('OpenAI returned an empty stream.', 'REQUEST_FAILED', true);
+      }
 
       reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -161,19 +230,24 @@ export class OpenAIResponsesProvider implements LlmProvider {
       let completed = false;
       let receivedBytes = false;
       while (true) {
-        const phaseDeadline = receivedBytes ? Date.now() + this.idleTimeoutMs : firstByteDeadline;
+        const phaseDeadline = receivedBytes
+          ? performance.now() + this.idleTimeoutMs
+          : firstByteDeadline;
         const deadline = Math.min(totalDeadline, phaseDeadline);
-        const { done, value } = await waitForDeadline(reader.read(), {
-          deadline,
-          signal: request.signal,
-          timeoutMessage:
-            totalDeadline <= phaseDeadline
-              ? 'OpenAI stream exceeded the total timeout.'
-              : receivedBytes
-                ? 'OpenAI stream exceeded the idle timeout.'
-                : 'OpenAI stream exceeded the first-byte timeout.',
-          onTimeout: (error) => controller.abort(error),
-        });
+        const streamReader = reader;
+        const { done, value } = await networkRead(() =>
+          waitForDeadline(streamReader.read(), {
+            deadline,
+            signal: request.signal,
+            timeoutMessage:
+              totalDeadline <= phaseDeadline
+                ? 'OpenAI stream exceeded the total timeout.'
+                : receivedBytes
+                  ? 'OpenAI stream exceeded the idle timeout.'
+                  : 'OpenAI stream exceeded the first-byte timeout.',
+            onTimeout: (error) => controller.abort(error),
+          }),
+        );
         if (value && value.byteLength > 0) receivedBytes = true;
         buffer += decoder.decode(value, { stream: !done });
         const events = buffer.split(/\r?\n\r?\n/);
@@ -189,7 +263,13 @@ export class OpenAIResponsesProvider implements LlmProvider {
             .map((line) => line.slice(5).trim())
             .join('');
           if (!data || data === '[DONE]') continue;
-          const parsed = JSON.parse(data) as OpenAIStreamEvent;
+          let parsed: OpenAIStreamEvent;
+          try {
+            parsed = JSON.parse(data) as OpenAIStreamEvent;
+          } catch (error) {
+            outcome = { kind: 'failure' };
+            throw error;
+          }
           if (parsed.type === 'response.created') providerResponseId = parsed.response?.id;
           if (parsed.type === 'response.output_text.delta' && parsed.delta) {
             content += parsed.delta;
@@ -220,6 +300,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
             if (call && parsed.arguments !== undefined) call.argumentsJson = parsed.arguments;
           }
           if (parsed.type === 'error') {
+            outcome = { kind: 'failure' };
             throw new LlmProviderError(
               parsed.message ?? parsed.error?.message ?? 'OpenAI stream failed.',
               'REQUEST_FAILED',
@@ -227,6 +308,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
             );
           }
           if (parsed.type === 'response.failed' || parsed.type === 'response.incomplete') {
+            outcome = { kind: 'failure' };
             throw new LlmProviderError(
               parsed.response?.error?.message ??
                 `OpenAI stream ended with ${parsed.type.replace('response.', '')} status.`,
@@ -236,9 +318,10 @@ export class OpenAIResponsesProvider implements LlmProvider {
           }
           if (parsed.type === 'response.completed') completed = true;
         }
-        if (done) break;
+        if (done || completed) break;
       }
       if (!completed) {
+        outcome = { kind: 'failure' };
         throw new LlmProviderError(
           'OpenAI stream ended before response.completed.',
           'REQUEST_FAILED',
@@ -250,11 +333,15 @@ export class OpenAIResponsesProvider implements LlmProvider {
         name: call.name,
         argumentsJson: call.argumentsJson,
       }));
+      outcome = { kind: 'success' };
       return { providerResponseId, model: this.model, content, toolCalls: completedToolCalls };
     } catch (error) {
-      if (reader) void reader.cancel().catch(() => undefined);
+      if (request.signal?.aborted && outcome.kind !== 'cooldown') outcome = { kind: 'neutral' };
       throw error;
     } finally {
+      controller.abort();
+      if (reader) void reader.cancel().catch(() => undefined);
+      permit.finish(outcome);
       request.signal?.removeEventListener('abort', forwardAbort);
     }
   }
@@ -304,7 +391,7 @@ function waitForDeadline<T>(promise: Promise<T>, options: DeadlineOptions): Prom
         finish(() => reject(error));
         options.onTimeout(error);
       },
-      Math.max(options.deadline - Date.now(), 0),
+      Math.max(options.deadline - performance.now(), 0),
     );
     options.signal?.addEventListener('abort', handleAbort, { once: true });
     if (options.signal?.aborted) {

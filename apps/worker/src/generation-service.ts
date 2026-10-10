@@ -152,9 +152,10 @@ export class GenerationService {
       params.budgetTokens,
       undefined,
       { idempotencyKey: params.idempotencyKey },
-      'agentMode' in params && params.agentMode === 'short-drama'
-        ? params.selectedChapterIds
-        : undefined,
+      // Chapter selections are hints for the System Agent, never an implicit
+      // full-text context. The resolver must locate and read the requested
+      // resources through library tools.
+      undefined,
       params.attachments,
     );
   }
@@ -982,8 +983,16 @@ export class GenerationService {
 
 const AGENT_RESEARCH_INSTRUCTION_MARKER = '# Agent external research policy';
 const AGENT_DOCUMENT_INSTRUCTION_MARKER = '# Agent document write policy';
-const AGENT_NOVEL_INSTRUCTION_MARKER = '# Agent novel chapter write policy';
 const AGENT_LIBRARY_INSTRUCTION_MARKER = '# Agent project library policy';
+const AGENT_SYSTEM_INSTRUCTION_MARKER = '# Agent system tool policy';
+const AGENT_DOCUMENT_WRITE_TOOLS = new Set([
+  'document.create_draft',
+  'document.update_draft',
+  'novel.chapter.submit_draft',
+  'novel.reference.submit_draft',
+  'novel.episode.submit_draft',
+  'novel.adaptation.submit_proposal',
+]);
 
 function withAgentToolInstructions(
   systemInstruction: string,
@@ -998,32 +1007,36 @@ function withAgentToolInstructions(
   }
   if (
     tools.some(
-      (tool) => tool.name === 'document.create_draft' || tool.name === 'document.update_draft',
+      (tool) =>
+        tool.name === 'project.get_context' ||
+        tool.name === 'project.structure.get' ||
+        tool.name === 'conversation.search',
     )
   ) {
+    next = withAgentSystemInstruction(next);
+  }
+  if (tools.some((tool) => AGENT_DOCUMENT_WRITE_TOOLS.has(tool.name))) {
     next = withAgentDocumentInstruction(next);
   }
-  if (tools.some((tool) => tool.name === 'novel.chapter.submit_draft')) {
-    if (!next.includes(AGENT_NOVEL_INSTRUCTION_MARKER)) {
-      next += `\n\n${AGENT_NOVEL_INSTRUCTION_MARKER}\nWorker 已确认本轮创建、续写或重写章节的意图，并锁定唯一章节目标。按用户要求完成小说正文，调用 novel.chapter.submit_draft 保存完整正文后再结束任务。title 只填写章名，contentMarkdown 填写完整章节正文，不重复添加章名 H1。用户只指定章序时，根据正文拟定正式章名，不要提交临时标题“未命名章节”，也不要要求用户另起章名。生成后续章节、续写或重写时先按需检索读取相关章节，承接已保存的故事。若用户是在找回上一条已经生成但没有看到草稿的章节，优先从当前会话上下文恢复那一条回复中的完整正文并提交保存；上下文没有完整正文时才重新生成，禁止编造“保存工具不可用”。检索、内容概要、创作建议和反问均不代表章节已生成或已保存。不要再次要求用户确认已经授权的创作动作；不要把正文只贴在会话中替代保存。只有保存工具成功后，才简短报告已保存的章名。`;
-    }
-  }
   return next;
+}
+
+function withAgentSystemInstruction(systemInstruction: string): string {
+  if (systemInstruction.includes(AGENT_SYSTEM_INSTRUCTION_MARKER)) return systemInstruction;
+  return `${systemInstruction}\n\n${AGENT_SYSTEM_INSTRUCTION_MARKER}\n你是整个项目的系统级助理，不按小说、短剧、剧本、生图等产品页面拆分自己的身份或记忆。先理解用户要操作的资源；需要定位时优先调用一次 project.structure.get，它返回项目工作区、资源 ID、文档 ID、文档结构节点、版本/行版本和项目修订。每个 Provider step 中最多调用一次 project.structure.get、一次 conversation.search 和一次 project.get_context；成功或失败后都不要用相同参数重复调用。结构结果只用于定位，不能代替正文证据；需要正文时用 library.search / library.read。后续写入必须把结构结果中的 resourceId、documentId、structureNodeId、versionId、revision/rowVersion 原样作为对应写工具的定位字段（expectedRevision/expectedRowVersion），工具执行器会再次校验项目、资源位置和版本，不要凭标题或页面猜 ID。若位置不唯一或版本已变化，停止写入并请求补充或重新定位。`;
 }
 
 function withAgentLibraryInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_LIBRARY_INSTRUCTION_MARKER)) return systemInstruction;
   return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nDo not repeat a successful library.search for the same query.
-项目资料按需检索与核源准则：
-1. 检索范围仅限当前打开的项目。不要编造读过的资料，也不要按操作系统或其他项目去找文件。
-2. 查询应优先使用对象身份：标题、书名号《》、「」引号、章号（第一章/第1章）、文件名。不要把整句用户请求（例如“根据第一章生成剧本”）当作唯一检索词。
-3. 结果里的 kind / sourceType 是英文枚举。对照：character=角色设定，scene=场景设定，outline=大纲，plan=计划，storyboard=分镜，note=笔记；novel-chapter=小说章节，document=项目文档，memory=项目记忆，constraint=生产约束，asset=素材。matchKind=title 表示标题/章号命中，body 只表示正文里出现过这些词。
-4. 读完必须核源：title、kindLabel、sourceTypeLabel 是否就是用户点名的那个对象。用户要“第一章”时，不能因为别的文档正文提到第一章就拿来用。
-5. 若 resultCount>1 且没有唯一身份匹配（标题/章号对得上），列出候选的标题、类型、草稿或已发布状态，请用户确认；此时禁止写入或生成派生文档。用户要的是连续章节范围（第3-5章）时，多章命中是预期，可以都读。
-6. 标题或章号对不上时，不要用正文命中凑合生成。可再检索一次更短的身份词（人名、第一章、《书名》）；仍不唯一就停止并询问。
-7. conversation 是历史聊天记录。除非用户明确要求回忆先前会话，否则不要检索 conversation。
-8. 不要连续反复变换近义词死循环检索。核心事实以 document 与 novel-chapter 为准。
-9. 资料目录已在系统提示中。不要用 project.get_context 找正文；正文只用 library.search / library.read。`;
+项目资料按需检索准则：
+1. 项目小说、章节和文档存储在当前项目 SQLite 资料库中，通过 library.search / library.read 获取；它们不是需要用户提供磁盘路径的文件目录。上下文中的资料目录仅为有界预览，可能不完整；未列出不代表不存在。
+2. 根据用户目标和已有证据，自主判断是否检索、查询词、来源类型及需要读取的范围，不按固定关键词机械选择工作流。查找小说章节时，推荐 sourceTypes=["novel-chapter"]，query 保留用户给出的章节号、书名或标题线索；其他资料按实际来源选择。小说页面的章节勾选只是可选快捷入口，不是 Agent 检索的前置条件，不得依赖界面勾选状态或预先注入的章节正文。
+结构定位：当用户按章节、场次、镜头或文档层级描述目标时，可先调用 library.search(searchMode="structure", query="*") 浏览结构；用 structurePath 精确收窄路径，或用标题/节点名查询。结构结果只有标题和路径，不是正文证据；随后必须用同一 sourceHandle 调用 library.read，需正文时使用 readMode="source"。
+3. 基于指定章节回答、改编或生成镜头提示词前，必须调用 library.read 取得覆盖目标章节范围的正文证据。不能仅凭目录、标题或搜索摘要推断情节。读取章节可使用 readMode="source"，maxChars 不超过 20000；若 truncated=true 且有 nextOffset，将 nextOffset 作为后续调用的 offset 继续读取同一 sourceHandle，直到所需范围覆盖或工具预算耗尽。
+4. 核心事实、设定、大纲与剧情以 document（项目文档）和 novel-chapter（小说正文/草稿）的实际正文为依据。保留 draft / published 来源标记，不能把草稿当作已发布权威。conversation 是历史聊天记录，仅在目标需要回忆会话时检索。
+5. 不重复相同的成功查询，不盲目变换近义词循环。空结果只表示本次查询未命中，可以根据证据调整查询或来源类型，不能据此断言资料不存在。遵守工具返回的剩余预算与硬限制；预算耗尽时停止检索，不改用自动注入正文作为降级。
+6. 若正文证据不足以完成用户指定的任务，说明已查到的范围和具体缺口，必要时澄清目标；不得凭常识编造项目剧情，也不得把未读取的范围声称为已完成。`;
 }
 
 function withAgentResearchInstruction(systemInstruction: string): string {
@@ -1033,7 +1046,7 @@ function withAgentResearchInstruction(systemInstruction: string): string {
 
 function withAgentDocumentInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_DOCUMENT_INSTRUCTION_MARKER)) return systemInstruction;
-  return `${systemInstruction}\n\n${AGENT_DOCUMENT_INSTRUCTION_MARKER}\nIf the user names a project document to create or save (大纲、角色设定、场景设定、章节、剧本、分镜、计划, or 保存), you must call document.create_draft or document.update_draft. A follow-up such as "保存" or "save it" refers to the document discussed in the conversation. The user's request already authorizes saving that draft; do not ask for another save confirmation. Put the full Markdown body in the tool arguments. Do not paste the document into the chat as a substitute for writing it into the project document library. Only report completion after a successful write tool result. Chat text should only briefly report the tool result, such as the created title and document kind. If the user only states an open-ended goal such as "我想写一部小说", you may ask a few clarifying questions or start a draft; asking questions is a valid completion and must not be treated as a failed save. Character prompts are one document per character or named group. Title that draft with the character name and set documentKind=character. If a chapter has several characters, call document.create_draft once per character in sequence until the cast is complete. Do not put multiple characters into one character document, and do not write a combined bible to split later.`;
+  return `${systemInstruction}\n\n${AGENT_DOCUMENT_INSTRUCTION_MARKER}\nIf the user asks to create, generate, save, place, or update a project document, you must call the authorized document-writing tool and wait for its successful result before claiming completion. Use document.create_draft for a new project document, document.update_draft for an authorized project document, novel.chapter.submit_draft for the authorized novel chapter, novel.reference.submit_draft for the authorized novel reference, novel.episode.submit_draft for the authorized episode overview, and novel.adaptation.submit_proposal for the authorized adaptation proposal. A follow-up such as "保存" or "save it" refers to the document discussed in the conversation. The user's request already authorizes saving a draft; do not ask for another save confirmation. Put the full Markdown body in the tool arguments. Do not paste the document into the chat as a substitute for writing it into the project document library. Only report completion after a successful write tool result. Chat text should only briefly report the tool result, such as the created title and document kind. Character prompts are one document per character or named group. Title that draft with the character name and set documentKind=character. If a chapter has several characters, call document.create_draft once per character in sequence until the cast is complete. Do not put multiple characters into one character document, and do not write a combined bible to split later.`;
 }
 
 function cloneToolContinuation(continuation: LlmToolContinuation): LlmToolContinuation {

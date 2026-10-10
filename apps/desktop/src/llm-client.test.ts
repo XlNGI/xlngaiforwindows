@@ -588,7 +588,7 @@ describe('streamPreparedLlmGeneration', () => {
       ...prepared,
       agentTaskId: 'agent-task',
       runtimeOwner: 'pi',
-      runtimeMode: 'novel-writing',
+      runtimeMode: 'document',
     };
     const confirmation = {
       version: 1 as const,
@@ -632,7 +632,7 @@ describe('streamPreparedLlmGeneration', () => {
 
     expect(callWorker).toHaveBeenCalledWith(
       'conversation.runtime.start',
-      expect.objectContaining({ taskId: 'agent-task', mode: 'novel-writing' }),
+      expect.objectContaining({ taskId: 'agent-task', mode: 'document' }),
     );
     expect(onConfirmation).toHaveBeenCalledWith(confirmation);
     expect(callWorker).toHaveBeenCalledWith('conversation.runtime.confirm', {
