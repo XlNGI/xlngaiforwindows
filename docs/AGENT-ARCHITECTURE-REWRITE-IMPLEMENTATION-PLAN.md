@@ -105,7 +105,7 @@
 
 - [ ] 将章节提交收敛为唯一 Worker Domain Command。
 - [ ] 将章节正文、章节标题、版本 CAS、任务目标校验放入同一事务。
-- [ ] 任务完成判定改为检查目标产物，而不是只检查 Provider 文本或任意文档写入。
+- [x] 章节写入成功后任务立即进入 `waiting_review`；Provider 文本不能单独把章节任务标为完成。
 - [ ] 错误文档 fallback 改为显式失败，不再静默保存为 outline/note/scene。
 
 完成标准：章节提交成功后才进入 `waiting_review`；章节工具未执行时任务必然失败或等待，不会成功结束。
@@ -161,6 +161,7 @@
 |---|---|---|---|
 | 2026-10-10 | 审计 | 两份项目 SQLite、会话消息、Agent Task、Tool Call、文档和章节表 | 已确认小说任务缺少章节工具、普通文档误写和 Worker 重启中断 |
 | 2026-10-10 | P2/P5 | Worker 构建；章节 Agent 定向测试；全仓 `pnpm test`、`pnpm build`、`pnpm lint`、`pnpm format:check`、`git diff --check` | Tool Manifest 冻结、章节主操作约束、检索去重和章节读取回归通过；P2/P5 仍有后续 Runtime/迁移工作 |
+| 2026-10-10 | P3 | 章节 Provider loop 定向测试：章节正文提交后任务状态为 `waiting_review`，缺少章节提交时拒绝终态完成 | 通过 |
 
 ## 7. 设计决策
 
