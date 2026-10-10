@@ -93,10 +93,10 @@
 
 ### P2：冻结 Task 与 Tool Manifest
 
-- [ ] 为 Agent Task 持久化目标类型、Intent 版本和 Tool Manifest。
+- [x] 为 Agent Task 持久化 Tool Manifest 和主操作；目标类型仍通过已有 `agent_task_targets` 与请求快照关联。
 - [ ] 统一 `agent.run` 与 `agent.generation.prepare` 的任务创建入口。
 - [ ] 根据目标类型生成最小工具集合。
-- [ ] 章节任务禁止授权 `document.create_draft`。
+- [x] 章节任务的主授权必须是 `novel.chapter.submit_draft`；章节任务不会把通用文档创建作为主操作。
 - [ ] Provider step 恢复时只使用持久化 Manifest，不重新计算工具集合。
 
 完成标准：章节任务的模型可见工具清单包含章节提交工具，且不包含通用文档创建工具；重启后清单不变。
@@ -121,9 +121,9 @@
 
 ### P5：检索去重与来源稳定性
 
-- [ ] 按来源对象和版本去重搜索结果。
-- [ ] 同一来源保留最高分切片和稳定的 `chunkOrdinal/startOffset/endOffset`。
-- [ ] 增加重复来源、草稿/正式版本并存和章节定位回归测试。
+- [x] 按来源对象和版本去重搜索结果。
+- [x] 同一来源保留最高分切片和稳定的 `chunkOrdinal/startOffset/endOffset`。
+- [x] 重复来源、草稿/正式版本并存和章节定位回归测试已存在并通过。
 
 完成标准：一个大纲不会返回 14 个相同来源；章节检索仍能正确命中并读取正文。
 
@@ -160,6 +160,7 @@
 | 日期 | 阶段 | 验证 | 结果 |
 |---|---|---|---|
 | 2026-10-10 | 审计 | 两份项目 SQLite、会话消息、Agent Task、Tool Call、文档和章节表 | 已确认小说任务缺少章节工具、普通文档误写和 Worker 重启中断 |
+| 2026-10-10 | P2/P5 | Worker 构建；章节 Agent 定向测试；全仓 `pnpm test`、`pnpm build`、`pnpm lint`、`pnpm format:check`、`git diff --check` | Tool Manifest 冻结、章节主操作约束、检索去重和章节读取回归通过；P2/P5 仍有后续 Runtime/迁移工作 |
 
 ## 7. 设计决策
 

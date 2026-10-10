@@ -1113,6 +1113,15 @@ describe('AgentProviderLoopService', () => {
         target.taskId,
       );
       generations.configureAgentTools(prepared.stream, agent.tools);
+      expect(taskSnapshot(project, target.taskId)).toMatchObject({
+        primaryOperation: 'novel.chapter.submit_draft',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        toolManifest: expect.arrayContaining([
+          expect.objectContaining({ operation: 'novel.chapter.submit_draft' }),
+          expect.objectContaining({ operation: 'library.search' }),
+          expect.objectContaining({ operation: 'library.read' }),
+        ]),
+      });
       const runtime = generations.runtime(prepared.stream);
       expect(runtime.systemInstruction).toContain('# Agent novel chapter write policy');
       expect(runtime.systemInstruction).toContain('novel.chapter.submit_draft 保存完整正文');
