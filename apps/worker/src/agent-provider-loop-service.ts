@@ -470,6 +470,15 @@ export class AgentProviderLoopService {
             ),
             JSON.stringify({
               promptHash: requestHash,
+              intent: {
+                version: 1,
+                operation: authorization.operation,
+                targetKind: targetKindForOperation(authorization.operation),
+                ...(authorization.targetDocumentId
+                  ? { targetDocumentId: authorization.targetDocumentId }
+                  : {}),
+                source: 'worker-resolver',
+              },
               agentMode: selectedChapterIds ? 'short-drama' : 'document',
               documentOperation: authorization.operation,
               novelReference:
@@ -4419,6 +4428,17 @@ function authorizationSpecsForTask(
     });
   }
   return uniqueAuthorizationSpecs(authorizations);
+}
+
+function targetKindForOperation(operation: AgentToolOperation): string {
+  if (operation === 'novel.chapter.submit_draft') return 'novel-chapter';
+  if (operation === 'novel.reference.submit_draft') return 'novel-reference';
+  if (operation.startsWith('novel.')) return 'novel';
+  if (operation.startsWith('document.')) return 'document';
+  if (operation.startsWith('media.')) return 'media-task';
+  if (operation.startsWith('asset')) return 'asset';
+  if (operation.startsWith('conversation.')) return 'conversation';
+  return 'project';
 }
 
 function freezeTaskToolManifest(
