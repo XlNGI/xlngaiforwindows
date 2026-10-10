@@ -219,7 +219,7 @@ pub(crate) enum LlmStreamEvent {
 #[derive(Default)]
 pub(crate) struct LlmStreamState {
     active: Mutex<HashMap<String, Arc<LlmCancellation>>>,
-    agent_generations: Mutex<HashMap<String, String>>,
+    agent_generations: Mutex<HashMap<String, serde_json::Value>>,
     agent_events: Mutex<HashMap<String, Vec<LlmStreamEvent>>>,
     agent_subscribers: Mutex<HashMap<String, Vec<Channel<LlmStreamEvent>>>>,
     confirmations: Mutex<HashMap<String, Arc<ConfirmationWaiter>>>,
@@ -280,7 +280,7 @@ impl LlmStreamState {
             .agent_generations
             .lock()
             .map_err(|_| "LLM Agent runtime registry lock is poisoned".to_string())?;
-        agent_generations.insert(request.attempt_id.clone(), request.generation_id.clone());
+        agent_generations.insert(request.attempt_id.clone(), runtime_identity(request));
         self.agent_events
             .lock()
             .map_err(|_| "LLM Agent runtime event registry lock is poisoned".to_string())?
@@ -334,8 +334,8 @@ impl LlmStreamState {
         true
     }
 
-    pub(crate) fn interrupt_agent_runtimes(&self) -> Vec<String> {
-        let generation_ids = self
+    pub(crate) fn interrupt_agent_runtimes(&self) -> Vec<serde_json::Value> {
+        let identities = self
             .agent_generations
             .lock()
             .map(|agent_generations| agent_generations.values().cloned().collect())
@@ -346,19 +346,31 @@ impl LlmStreamState {
             .map(|agent_generations| agent_generations.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
         {
-            self.cancel(&attempt_id);
+            self.interrupt(&attempt_id);
         }
-        generation_ids
+        identities
     }
 
     fn cancel(&self, attempt_id: &str) -> bool {
+        self.stop(attempt_id, false)
+    }
+
+    fn interrupt(&self, attempt_id: &str) -> bool {
+        self.stop(attempt_id, true)
+    }
+
+    fn stop(&self, attempt_id: &str, interrupted: bool) -> bool {
         let cancellation = self
             .active
             .lock()
             .ok()
             .and_then(|active| active.get(attempt_id).cloned());
         if let Some(cancellation) = cancellation {
-            cancellation.cancel();
+            if interrupted {
+                cancellation.interrupt();
+            } else {
+                cancellation.cancel();
+            }
             if let Some(waiter) = self
                 .confirmations
                 .lock()
@@ -479,6 +491,7 @@ impl ConfirmationWaiter {
 #[derive(Default)]
 pub(crate) struct LlmCancellation {
     cancelled: AtomicBool,
+    interrupted: AtomicBool,
     request_handle: AtomicUsize,
 }
 
@@ -505,8 +518,17 @@ impl LlmCancellation {
         self.close_request();
     }
 
+    fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::Release);
+        self.cancel();
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Acquire)
     }
 
     fn close_request(&self) {
@@ -930,6 +952,7 @@ fn run_agent_runtime(
     })();
     match result {
         Ok(()) => {}
+        Err(_) if cancellation.is_interrupted() => {}
         Err(failure) if failure.cancelled || cancellation.is_cancelled() => {
             let _ = worker_call(
                 worker,
@@ -2389,11 +2412,23 @@ mod tests {
             .register_agent(&agent_request, channel)
             .expect("Agent should register");
 
-        assert_eq!(streams.interrupt_agent_runtimes(), vec!["agent-generation"]);
+        let interrupted = streams.interrupt_agent_runtimes();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0]["generationId"], "agent-generation");
         assert!(!chat.is_cancelled());
         assert!(agent.is_cancelled());
+        assert!(agent.is_interrupted());
         streams.unregister("chat-attempt", &chat);
         streams.unregister("agent-attempt", &agent);
+    }
+
+    #[test]
+    fn ordinary_cancellation_is_not_marked_as_application_interruption() {
+        let cancellation = LlmCancellation::default();
+        cancellation.cancel();
+
+        assert!(cancellation.is_cancelled());
+        assert!(!cancellation.is_interrupted());
     }
 
     #[test]

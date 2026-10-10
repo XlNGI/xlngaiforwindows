@@ -10,6 +10,7 @@ import {
 } from './agent-system-tool-service.js';
 import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { ContentService } from './content-service.js';
+import { NovelService } from './novel-service.js';
 import { ProjectService } from './project-service.js';
 
 const directories: string[] = [];
@@ -27,6 +28,7 @@ async function setup() {
   projects.push(project);
   const opened = project.create(join(directory, 'project'), 'System Tool Project');
   const content = new ContentService(project);
+  const novels = new NovelService(project);
   const current = content.createConversation({ scopeType: 'project', title: 'Current' });
   content.createConversation({ scopeType: 'project', title: 'Research Notes' });
   const asset: AssetInfo = {
@@ -126,17 +128,100 @@ async function setup() {
     content,
     assets,
     settings,
-    service: new AgentSystemToolService(project, content, assets, settings, mediaTasks),
+    service: new AgentSystemToolService(
+      project,
+      content,
+      assets,
+      settings,
+      mediaTasks,
+      undefined,
+      undefined,
+      undefined,
+      novels,
+    ),
     identity: {
       projectId: opened.id,
       projectSessionId: project.currentSessionId()!,
       conversationId: current.id,
     },
     current,
+    novels,
   };
 }
 
 describe('AgentSystemToolService', () => {
+  it('lists novel chapters without bodies and applies chapter lifecycle changes with CAS', async () => {
+    const { service, identity, novels } = await setup();
+    novels.getProfile({ createIfMissing: true });
+    const chapter = novels.saveChapter({ title: '第一章 雾港' });
+
+    expect(service.execute('novel.chapter.list', {}, identity)).toMatchObject({
+      status: 'succeeded',
+      chapters: [
+        expect.objectContaining({
+          id: chapter.id,
+          title: '第一章 雾港',
+          lifecycleStatus: 'active',
+          rowVersion: chapter.rowVersion,
+        }),
+      ],
+    });
+
+    const pending = service.prepareConfirmation(
+      'novel.chapter.archive',
+      { chapterId: chapter.id, expectedRowVersion: chapter.rowVersion },
+      identity,
+    );
+    expect(pending).toMatchObject({
+      affectedEntities: [{ type: 'novel-chapter', id: chapter.id }],
+      executionArguments: {
+        chapterId: chapter.id,
+        expectedRowVersion: chapter.rowVersion,
+        reason: 'user_archive',
+      },
+    });
+    expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('active');
+
+    const archived = service.executeConfirmed(
+      'novel.chapter.archive',
+      pending.executionArguments,
+      identity,
+    );
+    expect(archived).toMatchObject({ status: 'archived', chapter: { id: chapter.id } });
+    const archivedChapter = novels.listChapters({ includeArchived: true })[0]!;
+    expect(archivedChapter.lifecycleStatus).toBe('archived');
+
+    const restored = service.executeConfirmed(
+      'novel.chapter.restore',
+      { chapterId: chapter.id, expectedRowVersion: archivedChapter.rowVersion },
+      identity,
+    );
+    expect(restored).toMatchObject({ status: 'restored', chapter: { id: chapter.id } });
+    expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('active');
+  });
+
+  it('rejects stale or foreign novel chapter lifecycle requests', async () => {
+    const first = await setup();
+    first.novels.getProfile({ createIfMissing: true });
+    const chapter = first.novels.saveChapter({ title: '当前项目章节' });
+    expect(() =>
+      first.service.prepareConfirmation(
+        'novel.chapter.archive',
+        { chapterId: chapter.id, expectedRowVersion: chapter.rowVersion + 1 },
+        first.identity,
+      ),
+    ).toThrow('AGENT_TOOL_ARGUMENTS_INVALID');
+
+    const second = await setup();
+    expect(() =>
+      second.service.prepareConfirmation(
+        'novel.chapter.archive',
+        { chapterId: chapter.id, expectedRowVersion: chapter.rowVersion },
+        second.identity,
+      ),
+    ).toThrow('AGENT_TOOL_PROJECT_SCOPE');
+  });
+
   it('returns bounded project, conversation, asset, and redacted settings summaries', async () => {
     const { service, identity } = await setup();
     const project = service.execute('project.get_context', {}, identity);

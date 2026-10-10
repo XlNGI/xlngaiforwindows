@@ -315,22 +315,58 @@ export function inferNovelWritingIntent(prompt: string): NovelWritingIntent | un
   if (/(不要|不需要|只讨论|只分析|给我建议|不要保存)/u.test(value)) return undefined;
   if (/(文档材料|项目资料|短剧|剧本|分镜|改编|总结|分析|说明|提纲|大纲)/u.test(value))
     return undefined;
-  const hasNovelScope = /(小说|章节|第一章|第二章|下一章|本章)/u.test(value);
+  const labelMatch = value.match(/第\s*[一二两三四五六七八九十百千万零〇0-9]+\s*章/u);
+  const hasNovelScope = /(小说|章节|下一章|本章)/u.test(value) || Boolean(labelMatch);
   if (!hasNovelScope) return undefined;
   if (/(续写|继续写|继续创作)/u.test(value)) return { action: 'continue_chapter' };
   if (/(重写|改写|润色本章|修改本章)/u.test(value)) return { action: 'rewrite_chapter' };
-  if (!/(生成|创作|写|创建|新建)/u.test(value)) return undefined;
-  const label = value.match(/第\s*[一二三四五六七八九十百千万零〇0-9]+\s*章/u)?.[0]?.replace(/\s+/gu, '');
-  const title = value
-    .replace(/^.*?第\s*[一二三四五六七八九十百千万零〇0-9]+\s*章/u, '')
-    .replace(/^(?:的|：|:|、|\s)+/u, '')
-    .split(/[。！？!?\n]/u, 1)[0]
-    ?.trim();
+  const missingDraftRecovery = isMissingDraftRecoveryRequest(value);
+  if (!/(生成|创作|写|创建|新建)/u.test(value) && !missingDraftRecovery) return undefined;
+  const hasChapterSignal =
+    Boolean(labelMatch) || /(章节|一章|本章|下一章|正文|章名|标题)/u.test(value);
+  if (!hasChapterSignal) return undefined;
+  const label = labelMatch?.[0].replace(/\s+/gu, '');
+  const namedTitle = value.match(
+    /(?:章名|标题)\s*(?:为|是|叫做|叫|[:：])?\s*[《「“"]?([^》」”"，,。！？!?\n]+)/u,
+  )?.[1];
+  const afterLabel = labelMatch
+    ? value.slice(labelMatch.index! + labelMatch[0].length).replace(/^[\s的：:、]+/u, '')
+    : value.match(/(?:章节|一章)\s*[《「“"]([^》」”"]+)[》」”"]/u)?.[1];
+  const candidateTitle = (namedTitle ?? afterLabel)
+    ?.split(/[，,。！？!?\n]/u, 1)[0]
+    ?.replace(/^[《「“"]|[》」”"]$/gu, '')
+    .trim();
+  const title =
+    candidateTitle &&
+    !/^(?:小说)?(?:正文|内容)$|^(?:描写|讲述|介绍|关于|要求|请|写|生成)/u.test(candidateTitle)
+      ? candidateTitle
+      : undefined;
+  if (missingDraftRecovery) {
+    return {
+      action: 'create_chapter',
+      ...(label ? { displayLabel: label } : {}),
+    };
+  }
   return {
     action: 'create_chapter',
     ...(title ? { chapterTitle: title } : {}),
     ...(label ? { displayLabel: label } : {}),
   };
+}
+
+/**
+ * A follow-up such as “第二章我没有看到草稿” is an explicit recovery
+ * request, rather than a read-only document lookup. Route it through the
+ * novel chapter writer so the Agent can recover the preceding response from
+ * the conversation and persist it as a chapter draft.
+ */
+function isMissingDraftRecoveryRequest(prompt: string): boolean {
+  return (
+    /(?:没有|没|未|找不到|看不到|没看到|不见|丢失|缺少).{0,20}(?:草稿|文档|章节|正文)/u.test(
+      prompt,
+    ) ||
+    /(?:草稿|文档|章节|正文).{0,20}(?:没有|没|未|找不到|看不到|没看到|不见|丢失|缺少)/u.test(prompt)
+  );
 }
 
 /**
@@ -808,6 +844,7 @@ const agentSystemToolService = new AgentSystemToolService(
   documentWorkflowService,
   maintenanceService,
   structureCompiler,
+  novelService,
 );
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
@@ -1986,7 +2023,11 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           const failParams = params as unknown as LlmGenerationFailParams;
           partialArtifactService.captureInterrupted(failParams, failParams.content);
           const failed = generationService.failNative(failParams);
-          agentProviderLoopService.terminateGeneration(failed.generationId, 'failed');
+          agentProviderLoopService.terminateGeneration(
+            failed.generationId,
+            failParams.failureKind ?? 'failed',
+            failParams.error,
+          );
           result = failed;
           break;
         }

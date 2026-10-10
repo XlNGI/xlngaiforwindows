@@ -9,6 +9,9 @@ export type SystemAgentToolOperation =
   | 'project.get_context'
   | 'project.structure.get'
   | 'novel.structure.get'
+  | 'novel.chapter.list'
+  | 'novel.chapter.archive'
+  | 'novel.chapter.restore'
   | 'project.integrity.check'
   | 'project.backup.prepare'
   | 'project.export.prepare'
@@ -357,6 +360,48 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         novelId: { type: 'string', minLength: 1, maxLength: 200 },
         includeArchived: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.list',
+    description:
+      'List bounded novel chapter metadata in the current project. Chapter bodies are not included. Use this to verify a chapter ID and row version before an archive or restore request.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        volumeId: { type: 'string', minLength: 1, maxLength: 200 },
+        includeArchived: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.archive',
+    description:
+      'Request archival of one novel chapter. The user must confirm before the chapter is archived. Use the current chapterId and rowVersion from novel.chapter.list or novel.structure.get.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chapterId', 'expectedRowVersion'],
+      properties: {
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+        reason: { type: 'string', enum: ['user_archive'] },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.restore',
+    description:
+      'Request restoration of one archived novel chapter. The user must confirm before the chapter is restored. Use the current chapterId and rowVersion from novel.chapter.list or novel.structure.get.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chapterId', 'expectedRowVersion'],
+      properties: {
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
       },
     },
   },
@@ -917,6 +962,9 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'project.get_context': readPolicy(),
   'project.structure.get': readPolicy(),
   'novel.structure.get': readPolicy(),
+  'novel.chapter.list': readPolicy(),
+  'novel.chapter.archive': confirmedPolicy(),
+  'novel.chapter.restore': confirmedPolicy(),
   'project.integrity.check': readPolicy(),
   'project.backup.prepare': protectedPolicy(),
   'project.export.prepare': protectedPolicy(),

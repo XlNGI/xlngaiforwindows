@@ -982,6 +982,7 @@ export class GenerationService {
 
 const AGENT_RESEARCH_INSTRUCTION_MARKER = '# Agent external research policy';
 const AGENT_DOCUMENT_INSTRUCTION_MARKER = '# Agent document write policy';
+const AGENT_NOVEL_INSTRUCTION_MARKER = '# Agent novel chapter write policy';
 const AGENT_LIBRARY_INSTRUCTION_MARKER = '# Agent project library policy';
 
 function withAgentToolInstructions(
@@ -1001,6 +1002,11 @@ function withAgentToolInstructions(
     )
   ) {
     next = withAgentDocumentInstruction(next);
+  }
+  if (tools.some((tool) => tool.name === 'novel.chapter.submit_draft')) {
+    if (!next.includes(AGENT_NOVEL_INSTRUCTION_MARKER)) {
+      next += `\n\n${AGENT_NOVEL_INSTRUCTION_MARKER}\nWorker 已确认本轮创建、续写或重写章节的意图，并锁定唯一章节目标。按用户要求完成小说正文，调用 novel.chapter.submit_draft 保存完整正文后再结束任务。title 只填写章名，contentMarkdown 填写完整章节正文，不重复添加章名 H1。用户只指定章序时，根据正文拟定正式章名，不要提交临时标题“未命名章节”，也不要要求用户另起章名。生成后续章节、续写或重写时先按需检索读取相关章节，承接已保存的故事。若用户是在找回上一条已经生成但没有看到草稿的章节，优先从当前会话上下文恢复那一条回复中的完整正文并提交保存；上下文没有完整正文时才重新生成，禁止编造“保存工具不可用”。检索、内容概要、创作建议和反问均不代表章节已生成或已保存。不要再次要求用户确认已经授权的创作动作；不要把正文只贴在会话中替代保存。只有保存工具成功后，才简短报告已保存的章名。`;
+    }
   }
   return next;
 }

@@ -19,8 +19,37 @@ import {
   parseRequest,
   resolveMediaProviderRegion,
 } from './handler.js';
+import { validateSessionRequestParams } from './request-validation.js';
 
 const temporaryDirectories: string[] = [];
+
+describe('LLM generation interruption validation', () => {
+  const identity = {
+    generationId: 'generation',
+    attemptId: 'attempt',
+    projectId: 'project',
+    projectSessionId: 'session',
+    conversationId: 'conversation',
+    content: '',
+    error: 'Application is closing.',
+    retryable: true,
+  };
+
+  it('accepts the explicit interrupted failure kind and rejects other failure kinds', () => {
+    expect(() =>
+      validateSessionRequestParams('llm.generation.fail', {
+        ...identity,
+        failureKind: 'interrupted',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateSessionRequestParams('llm.generation.fail', {
+        ...identity,
+        failureKind: 'cancelled',
+      }),
+    ).toThrow();
+  });
+});
 
 describe('inferUnifiedAgentCapability', () => {
   it('does not confuse media prompt writing with media generation', () => {
@@ -57,6 +86,75 @@ describe('resolveAgentRunWorkflow', () => {
       }),
     ).toBe('novel-writing');
   });
+
+  it('extracts chapter names without using the writing request as a title', () => {
+    expect(inferNovelWritingIntent('我现在要测试写一章小说正文')).toEqual({
+      action: 'create_chapter',
+    });
+    expect(inferNovelWritingIntent('帮我生成小说第一章正文')).toEqual({
+      action: 'create_chapter',
+      displayLabel: '第一章',
+    });
+    expect(inferNovelWritingIntent('写小说第一章《意外重逢》，描写咖啡馆相遇')).toEqual({
+      action: 'create_chapter',
+      displayLabel: '第一章',
+      chapterTitle: '意外重逢',
+    });
+    expect(inferNovelWritingIntent('写一章小说正文，章名为《雨夜来客》')).toEqual({
+      action: 'create_chapter',
+      chapterTitle: '雨夜来客',
+    });
+    expect(inferNovelWritingIntent('写小说第一章，描写雨夜')).toEqual({
+      action: 'create_chapter',
+      displayLabel: '第一章',
+    });
+  });
+
+  it.each([
+    '我要写一部小说',
+    '我现在要写小说',
+    '我现在要写写小说',
+    '我想写个故事',
+    '想创作一本小说',
+    '我要写一部悬疑小说',
+    '帮我写玄幻小说',
+    '我要创作一部长篇小说',
+  ])('keeps an open-ended novel goal in ordinary conversation: %s', (prompt) => {
+    expect(inferNovelWritingIntent(prompt)).toBeUndefined();
+    expect(resolveAgentRunWorkflow({ prompt })).toBe('document');
+  });
+
+  it.each([
+    ['创建小说章节', 'create_chapter'],
+    ['续写小说下一章', 'continue_chapter'],
+    ['重写第一章', 'rewrite_chapter'],
+  ])('preserves explicit chapter operations: %s', (prompt, action) => {
+    expect(inferNovelWritingIntent(prompt)).toEqual({ action });
+    expect(resolveAgentRunWorkflow({ prompt })).toBe('novel-writing');
+  });
+
+  it.each([
+    ['帮我生成第二章', '第二章'],
+    ['帮我生成第三章', '第三章'],
+    ['生成第12章', '第12章'],
+    ['写第 二 章正文', '第二章'],
+  ])(
+    'recognizes a numbered new-chapter request without a supplied title: %s',
+    (prompt, displayLabel) => {
+      expect(inferNovelWritingIntent(prompt)).toEqual({ action: 'create_chapter', displayLabel });
+      expect(resolveAgentRunWorkflow({ prompt })).toBe('novel-writing');
+    },
+  );
+
+  it.each(['第二章我没有看到草稿呢？', '我找不到刚才生成的第三章正文', '第一章草稿没有显示出来'])(
+    'routes a missing chapter draft follow-up to recovery: %s',
+    (prompt) => {
+      expect(inferNovelWritingIntent(prompt)).toMatchObject({
+        action: 'create_chapter',
+      });
+      expect(resolveAgentRunWorkflow({ prompt })).toBe('novel-writing');
+    },
+  );
 
   it('treats selected chapters as explicit short-drama context', () => {
     expect(

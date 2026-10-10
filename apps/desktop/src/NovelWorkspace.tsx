@@ -17,6 +17,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useState } from 'react';
 import type {
   DocumentDetail,
+  DocumentSummary,
   DocumentVersionState,
   NovelChapterInfo,
   NovelConsistencyReport,
@@ -37,6 +38,9 @@ interface NovelWorkspaceProps {
   writable: boolean;
   /** Select and re-read the chapter produced by an Agent task. */
   focusChapterId?: string;
+  focusReferenceId?: string;
+  referenceDocuments?: DocumentSummary[];
+  onReferencesChanged?: () => Promise<void>;
   /** Monotonic token used to force a fresh chapter/document read. */
   refreshToken?: number;
   onOpenDocument?: (documentId: string) => void;
@@ -106,6 +110,9 @@ export function NovelWorkspace({
   projectId,
   writable,
   focusChapterId,
+  focusReferenceId,
+  referenceDocuments = [],
+  onReferencesChanged,
   refreshToken,
   onOpenDocument,
   onGenerateEpisode,
@@ -114,6 +121,7 @@ export function NovelWorkspace({
   const [volumes, setVolumes] = useState<NovelVolumeInfo[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [selected, setSelected] = useState<NovelChapterInfo>();
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string>();
   const [document, setDocument] = useState<DocumentDetail>();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -181,6 +189,10 @@ export function NovelWorkspace({
     ]);
     setChapters(rows);
     setVolumes(volumeRows);
+    if (focusReferenceId && !preferredId) {
+      await openReference(focusReferenceId);
+      return;
+    }
     const next = rows.find((row) => row.id === preferredId) ?? rows[0];
     if (next && (forceOpen || next.id !== selected?.id)) await openChapter(next);
     else if (next) setSelected(next);
@@ -194,29 +206,50 @@ export function NovelWorkspace({
 
   useEffect(() => {
     void loadChapters(focusChapterId, Boolean(focusChapterId || refreshToken !== undefined));
-  }, [projectId, includeArchived, focusChapterId, refreshToken]);
+  }, [projectId, includeArchived, focusChapterId, focusReferenceId, refreshToken]);
+
+  const openReference = async (documentId: string) => {
+    setBusy(true);
+    try {
+      const detail = await callWorker('document.get', { documentId });
+      if (detail.domainScope !== 'novel') throw new Error('该文档不属于小说资料。');
+      setSelected(undefined);
+      setSelectedReferenceId(documentId);
+      setDocument(detail);
+      setTitle(detail.title);
+      setContent(detail.currentVersion?.contentMarkdown ?? '');
+      setConflictDocument(undefined);
+      setMessage('');
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '小说资料加载失败');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const openChapter = async (chapter: NovelChapterInfo) => {
     setBusy(true);
     try {
       const detail = await callWorker('document.get', { documentId: chapter.documentId });
       setSelected(chapter);
+      setSelectedReferenceId(undefined);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
       setMessage('');
+      setConflictDocument(undefined);
     } finally {
       setBusy(false);
     }
   };
 
   const saveDraft = async () => {
-    if (!selected || !document || !writable) return;
+    if ((!selected && !selectedReferenceId) || !document || !writable) return;
     setBusy(true);
     try {
       const next = await callWorker('document.draft.save', {
         documentId: document.id,
-        title: title.trim() || selected.title,
+        title: title.trim() || document.title,
         contentMarkdown: content,
         expectedDocumentRowVersion: document.rowVersion,
         authorType: 'user',
@@ -224,7 +257,7 @@ export function NovelWorkspace({
       setDocument(next);
       setChapters((rows) =>
         rows.map((row) =>
-          row.id === selected.id
+          row.id === selected?.id
             ? { ...row, title: next.title, documentRowVersion: next.rowVersion }
             : row,
         ),
@@ -232,7 +265,8 @@ export function NovelWorkspace({
       setSelected((row) =>
         row ? { ...row, title: next.title, documentRowVersion: next.rowVersion } : row,
       );
-      await loadChapters(selected.id);
+      if (selected) await loadChapters(selected.id);
+      if (onReferencesChanged) await onReferencesChanged();
       setMessage('草稿已保存，并已完成 RAG 切片。');
       setConflictDocument(undefined);
     } catch (error) {
@@ -538,6 +572,30 @@ export function NovelWorkspace({
                 />
               </label>
             </div>
+            {referenceDocuments.length > 0 && (
+              <div className="novel-volume-group" aria-label="小说资料">
+                <strong>小说资料</strong>
+                {referenceDocuments
+                  .filter(
+                    (item) =>
+                      !normalizedSearch ||
+                      item.title.toLocaleLowerCase('zh-CN').includes(normalizedSearch),
+                  )
+                  .map((item) => (
+                    <button
+                      className={`tree-item ${selectedReferenceId === item.id ? 'selected' : ''}`}
+                      type="button"
+                      key={item.id}
+                      disabled={busy}
+                      onClick={() => void openReference(item.id)}
+                    >
+                      <FileText size={13} />
+                      <span>{item.title}</span>
+                      <small>{item.kind === 'outline' ? '大纲' : '资料'}</small>
+                    </button>
+                  ))}
+              </div>
+            )}
             {volumes.map((volume) => (
               <div key={volume.id} className="novel-volume-group">
                 <strong>{volume.title}</strong>
@@ -556,11 +614,11 @@ export function NovelWorkspace({
             )}
           </aside>
           <section className="novel-editor">
-            {selected && document ? (
+            {(selected || selectedReferenceId) && document ? (
               <>
                 <div className="novel-editor-heading">
                   <input
-                    aria-label="章节标题"
+                    aria-label={selectedReferenceId ? '小说资料标题' : '章节标题'}
                     value={title}
                     disabled={!writable || busy}
                     onChange={(event) => setTitle(event.target.value)}
@@ -570,11 +628,13 @@ export function NovelWorkspace({
                       ? documentStateLabel(document.currentVersion.state)
                       : '未保存'}
                   </span>
-                  <span
-                    className={`document-state ${selected.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}`}
-                  >
-                    {selected.ragChunkCount > 0 ? `已切片 ${selected.ragChunkCount}` : '未切片'}
-                  </span>
+                  {selected && (
+                    <span
+                      className={`document-state ${selected.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}`}
+                    >
+                      {selected.ragChunkCount > 0 ? `已切片 ${selected.ragChunkCount}` : '未切片'}
+                    </span>
+                  )}
                   {onOpenDocument && (
                     <button
                       className="icon-button subtle"
@@ -602,7 +662,7 @@ export function NovelWorkspace({
                   </div>
                 )}
                 <textarea
-                  aria-label="章节内容"
+                  aria-label={selectedReferenceId ? '小说资料内容' : '章节内容'}
                   className="markdown-editor novel-markdown-editor"
                   value={content}
                   disabled={!writable || busy}
@@ -616,20 +676,22 @@ export function NovelWorkspace({
                   >
                     <Save size={13} /> 保存并切片
                   </button>
-                  <button
-                    className={selected.lifecycleStatus === 'archived' ? '' : 'danger'}
-                    type="button"
-                    disabled={!writable || busy}
-                    onClick={() => void toggleArchive()}
-                  >
-                    {selected.lifecycleStatus === 'archived' ? (
-                      '恢复草稿'
-                    ) : (
-                      <>
-                        <Trash2 size={13} /> 删除草稿
-                      </>
-                    )}
-                  </button>
+                  {selected && (
+                    <button
+                      className={selected.lifecycleStatus === 'archived' ? '' : 'danger'}
+                      type="button"
+                      disabled={!writable || busy}
+                      onClick={() => void toggleArchive()}
+                    >
+                      {selected.lifecycleStatus === 'archived' ? (
+                        '恢复草稿'
+                      ) : (
+                        <>
+                          <Trash2 size={13} /> 删除草稿
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </>
             ) : (

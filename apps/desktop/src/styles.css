@@ -5988,6 +5988,10 @@ button {
   background-clip: padding-box;
 }
 
+.workspace-docked-page[hidden] {
+  display: none;
+}
+
 .workspace-dock-separator {
   position: relative;
   width: 8px;

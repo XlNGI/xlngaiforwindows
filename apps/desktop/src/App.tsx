@@ -399,6 +399,9 @@ function readableFailure(reason: unknown, fallback: string): string {
 
 function readableGenerationError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  if (/application is closing|worker was restarting/i.test(error)) {
+    return '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或在任务日志恢复未完成产物。';
+  }
   if (error.includes('AGENT_DOCUMENT_NOT_WRITTEN')) {
     return '助手尚未将文档保存到项目，本次任务未完成。请重试保存。';
   }
@@ -474,7 +477,7 @@ const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = [
 
 /** Only workspace kinds are listed; everything else lives in its own workspace. */
 function isWorkspaceDocument(summary: DocumentSummary): boolean {
-  return WORKSPACE_DOCUMENT_KINDS.includes(summary.kind);
+  return summary.domainScope !== 'novel' && WORKSPACE_DOCUMENT_KINDS.includes(summary.kind);
 }
 
 function matchesDocumentFilter(summary: DocumentSummary, filter: 'all' | DocumentKind): boolean {
@@ -838,10 +841,10 @@ export function App() {
   };
 
   /** Routes a completed Agent chapter artifact to the novel editor. */
-  const focusNovelArtifact = async (
+  const focusNovelArtifact = (
     detail: import('@ai-video/contracts').AgentTaskDetail | undefined,
     expectedProjectId: string,
-  ): Promise<boolean> => {
+  ): boolean => {
     if (
       !detail ||
       detail.target?.targetKind !== 'novel-chapter' ||
@@ -858,6 +861,7 @@ export function App() {
     }
     if (activeProjectIdRef.current !== expectedProjectId) return false;
     setNovelFocusChapterId(detail.target.chapterId);
+    setNovelFocusReferenceId(undefined);
     setNovelRefreshRevision((revision) => revision + 1);
     openProjectView('novel');
     return true;
@@ -877,6 +881,7 @@ export function App() {
     documentContent,
     versions,
     contentBusy,
+    setContentBusy,
     contentMessage,
     documentCloseConfirmation,
     documentEditorWritable,
@@ -887,7 +892,7 @@ export function App() {
     setContentMessage,
     setDocumentCloseConfirmation,
     selectDocument,
-    openDocumentById,
+    openDocumentById: openNonChapterDocumentById,
     newDocument,
     importMarkdownDocument,
     saveDocument,
@@ -902,6 +907,55 @@ export function App() {
     reset: resetDocumentWorkspace,
   } = docs;
 
+  const openDocumentById = async (
+    documentId: string,
+    nonChapterDocuments: DocumentSummary[] = documents,
+  ) => {
+    const projectId = project?.id;
+    const reference = nonChapterDocuments.find((item) => item.id === documentId);
+    if (reference?.domainScope === 'novel') {
+      setNovelFocusReferenceId(documentId);
+      setNovelFocusChapterId(undefined);
+      setNovelRefreshRevision((revision) => revision + 1);
+      openProjectView('novel');
+      return;
+    }
+    if (!nonChapterDocuments.some((item) => item.id === documentId)) {
+      try {
+        const chapters = await callWorker('novel.chapter.list', { includeArchived: true });
+        if (activeProjectIdRef.current !== projectId) return;
+        const chapter = chapters.find((item) => item.documentId === documentId);
+        if (chapter) {
+          setNovelFocusReferenceId(undefined);
+          setNovelFocusChapterId(chapter.id);
+          setNovelRefreshRevision((revision) => revision + 1);
+          openProjectView('novel');
+          return;
+        }
+      } catch (reason) {
+        if (activeProjectIdRef.current === projectId) {
+          setContentMessage(reason instanceof Error ? reason.message : '文档所属页面读取失败');
+        }
+        return;
+      }
+    }
+    if (!reference) {
+      const detail = await callWorker('document.get', { documentId });
+      if (activeProjectIdRef.current !== projectId) return;
+      if (detail.domainScope === 'novel') {
+        setNovelFocusReferenceId(documentId);
+        setNovelFocusChapterId(undefined);
+        setDocuments((rows) =>
+          rows.some((row) => row.id === documentId) ? rows : [...rows, detail],
+        );
+        setNovelRefreshRevision((revision) => revision + 1);
+        openProjectView('novel');
+        return;
+      }
+    }
+    await openNonChapterDocumentById(documentId);
+  };
+
   const openWorkspaceForDocumentKind = (kind: DocumentKind) => {
     if (CHARACTER_DOCUMENT_KINDS.includes(kind)) openProjectView('characters');
     else if (kind === 'storyboard') openProjectView('shots');
@@ -913,11 +967,11 @@ export function App() {
       openProjectView('novel');
       return;
     }
-    if (
-      source.sourceType === 'document' ||
-      source.sourceType === 'storyboard' ||
-      source.sourceType === 'novel-reference'
-    ) {
+    if (source.sourceType === 'novel-reference') {
+      void openDocumentById(source.sourceId);
+      return;
+    }
+    if (source.sourceType === 'document' || source.sourceType === 'storyboard') {
       if (source.kind) openWorkspaceForDocumentKind(source.kind as DocumentKind);
       else if (source.sourceType === 'storyboard') openProjectView('shots');
       else openProjectView('documents');
@@ -939,7 +993,7 @@ export function App() {
   };
 
   const requestCloseEditor = () => {
-    if (view === 'documents' || view === 'characters') {
+    if ((view === 'documents' || view === 'characters') && !hasForeignDocument) {
       requestCloseDocument();
       return;
     }
@@ -976,6 +1030,7 @@ export function App() {
   const activeProjectIdRef = useRef(project?.id);
   const [taskCompletionRevision, setTaskCompletionRevision] = useState(0);
   const [novelFocusChapterId, setNovelFocusChapterId] = useState<string>();
+  const [novelFocusReferenceId, setNovelFocusReferenceId] = useState<string>();
   const [novelRefreshRevision, setNovelRefreshRevision] = useState(0);
   activeProjectIdRef.current = project?.id;
 
@@ -1246,11 +1301,13 @@ export function App() {
             setDocumentKindFilter('all');
           }
           const createdDocument = createdWorkspaceDocument ?? created[0];
-          if (createdDocument) void openDocumentById(createdDocument.id);
+          if (createdDocument) void openDocumentById(createdDocument.id, nextDocuments);
         });
-      const runtimeMode = (prepared as LlmGenerationPrepareResult & {
-        runtimeMode?: string;
-      }).runtimeMode;
+      const runtimeMode = (
+        prepared as LlmGenerationPrepareResult & {
+          runtimeMode?: string;
+        }
+      ).runtimeMode;
       if (runtimeMode !== 'novel-writing') {
         void refreshDocumentList().catch((reason) => {
           if (generationPollOwner.current.projectId === projectId) {
@@ -1259,13 +1316,13 @@ export function App() {
         });
         return;
       }
-      void callWorker('agent.task.get', { taskId: agentTaskId! })
+      void callWorker('agent.task.get', { taskId: agentTaskId })
         .catch(() => undefined)
         .then(async (detail) => {
           if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
           if (detail) {
             rememberAgentTask(detail);
-            if (await focusNovelArtifact(detail, projectId)) return;
+            if (focusNovelArtifact(detail, projectId)) return;
           }
           return refreshDocumentList();
         })
@@ -1724,6 +1781,8 @@ export function App() {
     projectContentRequest.current += 1;
     resetConversationWorkspace();
     resetDocumentWorkspace();
+    setNovelFocusChapterId(undefined);
+    setNovelFocusReferenceId(undefined);
     sceneRequest.current += 1;
     await cancelNativeLlmRun();
     setProjectBusy(true);
@@ -2404,17 +2463,6 @@ export function App() {
     }
   };
 
-  const openNovelDocument = async (documentId: string) => {
-    await openDocumentById(documentId);
-    const existingLabel = Object.values(detachedRegistryRef.current).find(
-      (registration) =>
-        registration.config.panelId === 'document' &&
-        registration.config.projectId === project?.id &&
-        registration.config.entityId === documentId,
-    )?.config.label;
-    if (existingLabel) await focusDetachedPanelWindow(existingLabel);
-  };
-
   const detachPanel = async (panelId: WorkspacePanelId) => {
     if (!project) {
       const message = '请先打开项目，再将面板分离为独立窗口。';
@@ -3086,14 +3134,20 @@ export function App() {
     />
   );
 
-  // The open document stays listed even when it does not match the active
-  // filter, so a task-log-opened note or storyboard draft is never edited from
-  // a hidden row.
+  const documentMatchesWorkspace =
+    document?.domainScope !== 'novel' &&
+    (view === 'characters'
+      ? CHARACTER_DOCUMENT_KINDS.includes(documentKind)
+      : !CHARACTER_DOCUMENT_KINDS.includes(documentKind));
+  const hasForeignDocument =
+    !documentMatchesWorkspace && Boolean(document || documentTitle || documentContent);
+  // Selected documents may bypass a kind filter, but never the page boundary.
   const workspaceKinds = view === 'characters' ? CHARACTER_DOCUMENT_KINDS : SCRIPT_DOCUMENT_KINDS;
   const visibleDocuments = documents.filter(
     (item) =>
-      (workspaceKinds.includes(item.kind) && matchesDocumentFilter(item, documentKindFilter)) ||
-      item.id === document?.id,
+      item.domainScope !== 'novel' &&
+      ((workspaceKinds.includes(item.kind) && matchesDocumentFilter(item, documentKindFilter)) ||
+        (documentMatchesWorkspace && item.id === document?.id)),
   );
 
   /**
@@ -3113,6 +3167,39 @@ export function App() {
     );
   };
 
+  const moveDocumentToNovel = async () => {
+    if (!document || !writable || contentBusy) return;
+    setContentBusy(true);
+    try {
+      if (
+        document.title !== documentTitle ||
+        document.kind !== documentKind ||
+        (document.currentVersion?.contentMarkdown ?? '') !== documentContent
+      ) {
+        const saved = await saveDocument();
+        if (!saved) return;
+        setContentBusy(true);
+      }
+      const bindings = await callWorker('novel.binding.list', { includeNeedsReview: true });
+      const binding = bindings.find((item) => item.documentId === document.id);
+      await callWorker('novel.binding.save', {
+        bindingId: binding?.id,
+        expectedRowVersion: binding?.rowVersion,
+        documentId: document.id,
+        role: 'work-outline',
+        domainScope: 'novel',
+        status: 'active',
+      });
+      const rows = await callWorker('document.list', {});
+      setDocuments(rows);
+      await openDocumentById(document.id, rows);
+    } catch (reason) {
+      setContentMessage(reason instanceof Error ? reason.message : '移动小说资料失败');
+    } finally {
+      setContentBusy(false);
+    }
+  };
+
   const renderDocumentToolbar = (
     eyebrow: string,
     fallbackTitle: string,
@@ -3122,10 +3209,27 @@ export function App() {
       <div>
         <span className="eyebrow">{eyebrow}</span>
         {options?.showHeading === false ? null : (
-          <h1>{options?.compact ? fallbackTitle : (document?.title ?? fallbackTitle)}</h1>
+          <h1>
+            {options?.compact || hasForeignDocument
+              ? fallbackTitle
+              : (document?.title ?? fallbackTitle)}
+          </h1>
         )}
       </div>
       <div className="toolbar-actions">
+        {view === 'documents' &&
+          document?.kind === 'outline' &&
+          document.scopeType === 'project' &&
+          !hasForeignDocument && (
+            <button
+              className="button secondary"
+              type="button"
+              disabled={!documentEditorWritable || contentBusy}
+              onClick={() => void moveDocumentToNovel()}
+            >
+              <BookOpen size={15} /> 移至小说资料
+            </button>
+          )}
         {options?.showImport === false ? null : (
           <button
             className="button secondary markdown-import-button"
@@ -3154,7 +3258,9 @@ export function App() {
           className="button primary"
           type="button"
           onClick={() => void saveAndPublishDocument()}
-          disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
+          disabled={
+            hasForeignDocument || !documentEditorWritable || contentBusy || !documentTitle.trim()
+          }
           title="保存当前内容并直接发布为权威版本"
         >
           <Save size={15} />
@@ -3164,11 +3270,13 @@ export function App() {
           className="button secondary"
           type="button"
           onClick={() => void saveDocument()}
-          disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
+          disabled={
+            hasForeignDocument || !documentEditorWritable || contentBusy || !documentTitle.trim()
+          }
         >
           保存草稿
         </button>
-        {document?.currentVersion?.state === 'in_review' && (
+        {!hasForeignDocument && document?.currentVersion?.state === 'in_review' && (
           <>
             <button
               className="button secondary"
@@ -3210,7 +3318,9 @@ export function App() {
   };
 
   const renderDocumentEditor = () =>
-    view === 'characters' ? (
+    hasForeignDocument ? (
+      <EmptyWorkspace title="请选择文档" />
+    ) : view === 'characters' ? (
       <CharacterSceneWorkspace
         title={documentTitle}
         kind={documentKind === 'scene' ? 'scene' : 'character'}
@@ -3494,7 +3604,12 @@ export function App() {
                 <FileText size={16} />
                 <span>剧本</span>
                 <span className="count">
-                  {documents.filter((item) => SCRIPT_DOCUMENT_KINDS.includes(item.kind)).length}
+                  {
+                    documents.filter(
+                      (item) =>
+                        item.domainScope !== 'novel' && SCRIPT_DOCUMENT_KINDS.includes(item.kind),
+                    ).length
+                  }
                 </span>
               </button>
               <button
@@ -3505,7 +3620,13 @@ export function App() {
                 <Users size={16} />
                 <span>角色与场景</span>
                 <span className="count">
-                  {documents.filter((item) => CHARACTER_DOCUMENT_KINDS.includes(item.kind)).length}
+                  {
+                    documents.filter(
+                      (item) =>
+                        item.domainScope !== 'novel' &&
+                        CHARACTER_DOCUMENT_KINDS.includes(item.kind),
+                    ).length
+                  }
                 </span>
               </button>
               <button
@@ -3746,12 +3867,16 @@ export function App() {
           <WorkspaceSurface
             layout={workspaceLayout}
             dispatch={workspaceDispatch}
-            documentTitle={document?.title ?? documentTitle}
+            documentTitle={
+              (view === 'documents' || view === 'characters') && !hasForeignDocument
+                ? (document?.title ?? documentTitle)
+                : ''
+            }
             editorTitle={WORKSPACE_VIEW_TITLES[view]}
             conversationContent={conversationPanel}
             productionContent={productionPanel}
             productionOpen={navigationMode === 'production'}
-            documentActive={view === 'documents' || view === 'characters'}
+            documentActive={(view === 'documents' || view === 'characters') && !hasForeignDocument}
             detachedPanels={detachedPanels}
             onOpenConversation={() => void focusDetachedPanelWindow(detachedPanels.conversation)}
             onOpenDocument={() => {
@@ -3768,8 +3893,16 @@ export function App() {
                 projectId={project?.id}
                 writable={writable}
                 focusChapterId={novelFocusChapterId}
+                focusReferenceId={novelFocusReferenceId}
+                referenceDocuments={documents.filter((item) => item.domainScope === 'novel')}
+                onReferencesChanged={async () => {
+                  setDocuments(await callWorker('document.list', {}));
+                  if (conversation)
+                    setContextPreview(
+                      await callWorker('context.preview', { conversationId: conversation.id }),
+                    );
+                }}
                 refreshToken={novelRefreshRevision || undefined}
-                onOpenDocument={(documentId) => void openNovelDocument(documentId)}
                 onGenerateEpisode={(chapters) => {
                   const prompt = composeEpisodeChapterPrompt(chapters);
                   setComposer((current) =>

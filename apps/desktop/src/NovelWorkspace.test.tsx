@@ -92,6 +92,60 @@ describe('NovelWorkspace', () => {
     );
   });
 
+  it('lists and edits novel reference documents separately from chapters', async () => {
+    const reference = {
+      id: 'reference-1',
+      projectId: 'project-1',
+      kind: 'outline' as const,
+      title: '都市小说大纲',
+      domainScope: 'novel' as const,
+      bindingRole: 'work-outline' as const,
+      scopeType: 'project' as const,
+      lifecycleStatus: 'active' as const,
+      rowVersion: 0,
+      createdAt: '2026-08-19T00:00:00.000Z',
+      updatedAt: '2026-08-19T00:00:00.000Z',
+    };
+    const referenceDetail = {
+      ...documentDetail('原小说大纲'),
+      id: reference.id,
+      kind: 'outline' as const,
+      title: reference.title,
+      domainScope: 'novel' as const,
+      bindingRole: 'work-outline' as const,
+      currentVersion: {
+        ...documentDetail('原小说大纲').currentVersion!,
+        documentId: reference.id,
+        contentMarkdown: '原小说大纲',
+      },
+    };
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return referenceDetail;
+      if (method === 'document.draft.save') return { ...referenceDetail, rowVersion: 1 };
+      return {};
+    });
+    render(
+      <NovelWorkspace
+        projectId="project-1"
+        writable
+        referenceDocuments={[reference]}
+        onReferencesChanged={async () => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /都市小说大纲/ }));
+    expect(await screen.findByDisplayValue('原小说大纲')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('小说资料内容'), { target: { value: '更新后的大纲' } });
+    fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'document.draft.save',
+        expect.objectContaining({ documentId: reference.id, contentMarkdown: '更新后的大纲' }),
+      ),
+    );
+  });
+
   it('focuses and reloads the chapter selected by an Agent result', async () => {
     let documentReads = 0;
     mockWorker((method) => {
@@ -107,12 +161,7 @@ describe('NovelWorkspace', () => {
     await screen.findByDisplayValue('Draft');
 
     rerender(
-      <NovelWorkspace
-        projectId="project-1"
-        writable
-        focusChapterId="chapter-1"
-        refreshToken={1}
-      />,
+      <NovelWorkspace projectId="project-1" writable focusChapterId="chapter-1" refreshToken={1} />,
     );
 
     expect(await screen.findByDisplayValue('Agent latest draft')).toBeInTheDocument();
@@ -131,7 +180,6 @@ describe('NovelWorkspace', () => {
   });
 
   it('selects chapters and emits chapter refs for the conversation prompt', async () => {
-
     const chapter2 = {
       ...chapter,
       id: 'chapter-2',

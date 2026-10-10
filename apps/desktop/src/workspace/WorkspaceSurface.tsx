@@ -113,6 +113,7 @@ export function WorkspaceSurface({
     : documentPanel.open;
   const conversationAutoHidden = isConversationAutoHidden(conversationWindowOptions);
   const showDocumentFloating =
+    !productionOpen &&
     documentActive &&
     documentPanel.open &&
     !detachedPanels.document &&
@@ -130,12 +131,12 @@ export function WorkspaceSurface({
     !detachedPanels.conversation &&
     !narrow &&
     !conversationAutoHidden;
-  const showEditorDock = narrow
-    ? !productionOpen
-    : documentDocked || (!showProductionDock && !showConversationDock);
+  const showEditorDock = !productionOpen && (narrow || documentDocked || !showConversationDock);
+  // Keep the project editor mounted while production owns the visible page.
+  const keepEditorMounted = productionOpen && documentDocked;
   const showProductionPage = showProductionDock || (!showEditorDock && productionOpen);
   const dockedPanelIds = [
-    ...(showEditorDock ? ['editor'] : []),
+    ...(showEditorDock || keepEditorMounted ? ['editor'] : []),
     ...(showProductionPage ? ['production'] : []),
     ...(showConversationDock ? ['conversation'] : []),
   ];
@@ -150,7 +151,7 @@ export function WorkspaceSurface({
     [paneOrder, showConversationDock, showEditorDock, showProductionPage],
   );
   const persistedDockLayout = useDefaultLayout({
-    id: `${WORKSPACE_DOCK_LAYOUT_ID}:${layout.projectId ?? 'no-project'}`,
+    id: `${WORKSPACE_DOCK_LAYOUT_ID}:${layout.projectId ?? 'no-project'}${productionOpen ? ':production' : ''}`,
     panelIds: dockedPanelIds,
     storage: safePanelLayoutStorage,
     onlySaveAfterUserInteractions: true,
@@ -438,11 +439,17 @@ export function WorkspaceSurface({
         <Panel
           id="editor"
           key="editor"
-          defaultSize={showProductionPage || showConversationDock ? '44%' : '100%'}
-          minSize="360px"
+          defaultSize={keepEditorMounted ? '0%' : showConversationDock ? '44%' : '100%'}
+          minSize={keepEditorMounted ? '0px' : '360px'}
+          maxSize={keepEditorMounted ? '0px' : '100%'}
+          disabled={keepEditorMounted}
+          aria-hidden={keepEditorMounted || undefined}
         >
-          <section className="workspace-docked-page workspace-editor-page">
-            {renderPaneHeader(paneId, index)}
+          <section
+            className="workspace-docked-page workspace-editor-page"
+            hidden={keepEditorMounted}
+          >
+            {!keepEditorMounted && renderPaneHeader(paneId, index)}
             {documentDocked && <div className="workspace-base-content">{children}</div>}
             {!documentDocked && (
               <div className="workspace-closed-panel">
@@ -464,7 +471,7 @@ export function WorkspaceSurface({
         <Panel
           id="production"
           key="production"
-          defaultSize={showProductionDock ? '30%' : '100%'}
+          defaultSize={showConversationDock ? '70%' : '100%'}
           minSize={showProductionDock ? '320px' : '0px'}
         >
           <section className="workspace-docked-page workspace-production-page">
@@ -535,7 +542,6 @@ export function WorkspaceSurface({
       onPointerCancel={cancelPaneDrag}
     >
       <Group
-        key={dockedPanelIds.join('|')}
         className="workspace-dock-group"
         orientation="horizontal"
         defaultLayout={dockDefaultLayout}
@@ -557,25 +563,31 @@ export function WorkspaceSurface({
         }}
         resizeTargetMinimumSize={{ fine: 6, coarse: 20 }}
       >
-        {visiblePaneOrder.flatMap((paneId, index) => [
-          ...(index > 0
-            ? [
-                <Separator
-                  key={`separator-${paneId}`}
-                  id={`workspace-${visiblePaneOrder[index - 1]}-${paneId}`}
-                  className="workspace-dock-separator"
-                  onPointerDown={
-                    paneId === 'conversation'
-                      ? () => {
-                          conversationUserResizeRef.current = true;
-                        }
-                      : undefined
-                  }
-                />,
-              ]
-            : []),
-          renderDockPane(paneId, index),
-        ])}
+        {paneOrder.flatMap((paneId) => {
+          const index = visiblePaneOrder.indexOf(paneId);
+          if (index < 0) {
+            return paneId === 'editor' && keepEditorMounted ? [renderDockPane(paneId, 0)] : [];
+          }
+          return [
+            ...(index > 0
+              ? [
+                  <Separator
+                    key={`separator-${paneId}`}
+                    id={`workspace-${visiblePaneOrder[index - 1]}-${paneId}`}
+                    className="workspace-dock-separator"
+                    onPointerDown={
+                      paneId === 'conversation'
+                        ? () => {
+                            conversationUserResizeRef.current = true;
+                          }
+                        : undefined
+                    }
+                  />,
+                ]
+              : []),
+            renderDockPane(paneId, index),
+          ];
+        })}
       </Group>
       {showDocumentFloating && (
         <FloatingWindow

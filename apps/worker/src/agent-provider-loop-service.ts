@@ -13,6 +13,8 @@ import type {
   AgentResearchMode,
   ConversationTargetPlatform,
   DocumentDetail,
+  DocumentBindingRole,
+  DocumentKind,
   AgentProviderStepCompleteParams,
   LlmGenerationIdentity,
   LlmToolCall,
@@ -28,7 +30,10 @@ import type {
   MediaSubmissionResult,
   MediaTaskCancelParams,
 } from '@ai-video/contracts';
-import { rebuildLibraryChunksForAdaptation } from '@ai-video/persistence';
+import {
+  rebuildLibraryChunksForAdaptation,
+  rebuildLibraryChunksForDocument,
+} from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -394,10 +399,11 @@ export class AgentProviderLoopService {
             .run(task.id, identity.generationId, now);
           const started = database
             .prepare(
-              `UPDATE agent_tasks SET status = 'running', phase = 'model_running', started_at = ?,
+              `UPDATE agent_tasks SET status = 'running', phase = 'model_running',
+               user_message_id = ?, context_snapshot_id = ?, started_at = ?,
                updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'queued'`,
             )
-            .run(now, now, task.id);
+            .run(generation.user_message_id, generation.context_snapshot_id, now, now, task.id);
           if (started.changes !== 1) throw new Error('Novel task could not be started.');
           this.appendEvent(
             database,
@@ -466,6 +472,10 @@ export class AgentProviderLoopService {
               promptHash: requestHash,
               agentMode: selectedChapterIds ? 'short-drama' : 'document',
               documentOperation: authorization.operation,
+              novelReference:
+                authorization.operation === 'document.create_draft'
+                  ? inferNovelReference(prompt)
+                  : undefined,
               researchMode,
               modelSelection: agentModelSelectionSnapshot(
                 generation,
@@ -2030,11 +2040,17 @@ export class AgentProviderLoopService {
         let result: string;
         let resultSummary: string;
         if (call.name === 'document.create_draft') {
+          const reference = (
+            JSON.parse(task.request_snapshot_json) as {
+              novelReference?: { role: DocumentBindingRole; kind: DocumentKind };
+            }
+          ).novelReference;
           document = this.documents.writeTrustedAgentDraftInTransaction(database, project, {
             taskId: task.id,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
             kind:
+              reference?.kind ??
               (args.documentKind as DocumentDetail['kind'] | undefined) ??
               inferDocumentKindFromDraft(
                 String(args.title ?? ''),
@@ -2045,6 +2061,16 @@ export class AgentProviderLoopService {
             sourceMessageId: task.user_message_id ?? undefined,
             contextSnapshotId: task.context_snapshot_id ?? undefined,
           });
+          if (reference) {
+            database
+              .prepare(
+                `INSERT INTO document_bindings
+               (id, project_id, document_id, role, domain_scope, status, row_version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'novel', 'active', 0, ?, ?)`,
+              )
+              .run(randomUUID(), project.id, document.id, reference.role, now, now);
+            rebuildLibraryChunksForDocument(database, project.id, document.id, now);
+          }
           linkResearchCitations(
             database,
             project.id,
@@ -2057,6 +2083,7 @@ export class AgentProviderLoopService {
             status: 'draft_created',
             documentId: document.id,
             documentVersionId: document.currentVersion?.id,
+            ...(reference ? { domainScope: 'novel', bindingRole: reference.role } : {}),
             reviewRequired: true,
           });
           resultSummary = result;
@@ -2149,7 +2176,7 @@ export class AgentProviderLoopService {
         ) {
           if (
             !authorization.targetDocumentId ||
-            !authorization.baseVersionId ||
+            (!authorization.baseVersionId && call.name !== 'novel.chapter.submit_draft') ||
             authorization.expectedDocumentRowVersion === undefined
           ) {
             throw new Error('Update authorization is missing its trusted target or CAS.');
@@ -2164,7 +2191,7 @@ export class AgentProviderLoopService {
             taskId: task.id,
             documentId: authorization.targetDocumentId,
             expectedDocumentRowVersion: authorization.expectedDocumentRowVersion,
-            baseVersionId: authorization.baseVersionId,
+            baseVersionId: authorization.baseVersionId ?? null,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
             scopeType: task.scope_type,
@@ -3136,7 +3163,37 @@ export class AgentProviderLoopService {
       database.transaction(() => {
         const task = this.requireTask(database, project.id, params.generationId);
         const step = this.requireOpenStep(database, params.attemptId);
-        const request = JSON.parse(task.request_snapshot_json) as { documentOperation?: string };
+        const request = JSON.parse(task.request_snapshot_json) as {
+          agentMode?: string;
+          documentOperation?: string;
+        };
+        if (
+          request.agentMode === 'novel-writing' ||
+          request.documentOperation === 'novel.chapter.submit_draft'
+        ) {
+          const written = database
+            .prepare(
+              `SELECT 1 FROM agent_tool_calls calls
+               INNER JOIN document_versions versions ON versions.id = calls.result_document_version_id
+               INNER JOIN novel_chapters chapters ON chapters.document_id = versions.document_id
+               INNER JOIN agent_tool_authorizations authorization ON authorization.id = calls.authorization_id
+               LEFT JOIN agent_task_targets targets ON targets.task_id = calls.task_id
+               WHERE calls.task_id = ? AND calls.tool_name = 'novel.chapter.submit_draft'
+                 AND calls.status = 'succeeded' AND chapters.project_id = ?
+                 AND versions.source_task_id = calls.task_id
+                 AND versions.document_id = calls.result_document_id
+                 AND versions.document_id = authorization.target_document_id
+                 AND (targets.task_id IS NULL OR
+                   (targets.target_kind = 'novel-chapter' AND targets.chapter_id = chapters.id
+                    AND targets.document_id = versions.document_id)) LIMIT 1`,
+            )
+            .get(task.id, project.id);
+          if (!written) {
+            throw new Error(
+              'AGENT_CHAPTER_NOT_WRITTEN: 小说正文尚未保存，请调用 novel.chapter.submit_draft 写入完整正文后再结束任务。',
+            );
+          }
+        }
         const operation = request.documentOperation;
         const userMessage = database
           .prepare('SELECT content FROM chat_messages WHERE id = ?')
@@ -3195,7 +3252,7 @@ export class AgentProviderLoopService {
 
   terminateGeneration(
     generationId: string,
-    reason: 'cancelled' | 'failed',
+    reason: 'cancelled' | 'failed' | 'interrupted',
     errorMessage?: string,
   ): number {
     this.cancelGeneration(generationId);
@@ -3218,13 +3275,22 @@ export class AgentProviderLoopService {
           .all(generationId, project.id) as Array<{ id: string }>;
         const detail = errorMessage?.trim() || `Provider generation ${reason}.`;
         for (const task of tasks) {
+          const taskStatus = reason === 'cancelled' ? 'cancelled' : 'failed';
           database
             .prepare(
               `UPDATE agent_tasks SET status = ?, phase = 'recovering', error_code = ?,
-               error_message = ?, completed_at = ?, updated_at = ?, row_version = row_version + 1
+              error_message = ?, retryable = COALESCE(?, retryable), completed_at = ?, updated_at = ?, row_version = row_version + 1
                WHERE id = ? AND status = 'running'`,
             )
-            .run(reason, reason, detail.slice(0, 1000), now, now, task.id);
+            .run(
+              taskStatus,
+              reason,
+              detail.slice(0, 1000),
+              reason === 'interrupted' ? 1 : null,
+              now,
+              now,
+              task.id,
+            );
           database
             .prepare(
               `UPDATE agent_tool_authorizations SET status = 'revoked', revoked_at = ?,
@@ -3255,7 +3321,36 @@ export class AgentProviderLoopService {
                WHERE task_id = ? AND status = 'pending'`,
             )
             .run(now, task.id);
-          this.appendEvent(database, project.id, task.id, 'agent.task.interrupted', detail, now);
+          const eventType =
+            reason === 'interrupted'
+              ? 'agent.task.interrupted'
+              : reason === 'cancelled'
+                ? 'agent.task.cancelled'
+                : 'agent.task.failed';
+          this.appendEvent(database, project.id, task.id, eventType, detail, now);
+          const placeholder = database
+            .prepare(
+              `SELECT targets.chapter_id, targets.document_id FROM agent_task_targets targets
+               INNER JOIN novel_chapters chapters ON chapters.id = targets.chapter_id
+               WHERE targets.task_id = ? AND targets.project_id = ? AND targets.created_placeholder = 1
+                 AND chapters.lifecycle_status = 'reserved'
+                 AND NOT EXISTS (SELECT 1 FROM document_versions WHERE document_id = targets.document_id)`,
+            )
+            .get(task.id, project.id) as { chapter_id: string; document_id: string } | undefined;
+          if (placeholder) {
+            database
+              .prepare(
+                `UPDATE novel_chapters SET lifecycle_status = 'archived', archive_reason = 'generation_placeholder',
+                 updated_at = ?, row_version = row_version + 1 WHERE id = ? AND project_id = ?`,
+              )
+              .run(now, placeholder.chapter_id, project.id);
+            database
+              .prepare(
+                `UPDATE documents SET lifecycle_status = 'archived', updated_at = ?, row_version = row_version + 1
+                 WHERE id = ? AND project_id = ?`,
+              )
+              .run(now, placeholder.document_id, project.id);
+          }
         }
         for (const openStep of openSteps) this.openStepHandles.delete(openStep.id);
         return tasks.length;
@@ -3279,7 +3374,13 @@ export class AgentProviderLoopService {
           .all(project.id) as Array<{ generation_id: string }>,
     );
     return generationIds.reduce(
-      (count, generation) => count + this.terminateGeneration(generation.generation_id, 'failed'),
+      (count, generation) =>
+        count +
+        this.terminateGeneration(
+          generation.generation_id,
+          'interrupted',
+          'Agent runtime was interrupted while the Worker was restarting.',
+        ),
       0,
     );
   }
@@ -4580,6 +4681,9 @@ const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'project.get_context',
   'project.structure.get',
   'novel.structure.get',
+  'novel.chapter.list',
+  'novel.chapter.archive',
+  'novel.chapter.restore',
   'project.integrity.check',
   'project.backup.prepare',
   'project.export.prepare',
@@ -4620,6 +4724,7 @@ const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
 const SYSTEM_CONTEXTUAL_READ_OPERATIONS = [
   'project.structure.get',
   'novel.structure.get',
+  'novel.chapter.list',
   'asset.get',
   'asset.search',
   'tag.list',
@@ -4638,6 +4743,8 @@ function hasSystemReadIntent(
     'project.structure.get': /(?:项目|工程).{0,20}(?:结构|架构|目录|树)|project.{0,20}structure/iu,
     'novel.structure.get':
       /(?:小说|章节|卷章|大纲).{0,20}(?:结构|架构|目录|树)|novel.{0,20}structure/iu,
+    'novel.chapter.list':
+      /(?:列出|查看|查询|显示|有哪些).{0,20}(?:小说章节|章节|卷章)|(?:novel|chapter).{0,20}(?:list|show|query)/iu,
     'asset.get': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
     'asset.search': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
     'tag.list': /(?:标签|\btags?\b)/iu,
@@ -4658,6 +4765,8 @@ const SYSTEM_MUTATING_OPERATIONS = [
   'conversation.rename',
   'conversation.archive',
   'conversation.restore',
+  'novel.chapter.archive',
+  'novel.chapter.restore',
   'document.publish',
   'asset.update_alias',
   'asset.update_tags',
@@ -4693,6 +4802,10 @@ function hasSystemOperationIntent(
     'conversation.archive': /(?:归档).{0,12}(?:会话|对话)|archive.{0,12}(?:conversation|chat)/iu,
     'conversation.restore':
       /(?:恢复|取消归档).{0,12}(?:会话|对话)|(?:restore|unarchive).{0,12}(?:conversation|chat)/iu,
+    'novel.chapter.archive':
+      /(?:(?:归档|删除|移除|隐藏).{0,24}(?:小说章节|章节|卷章|第.{0,8}章)|(?:小说章节|章节|卷章|第.{0,8}章).{0,16}(?:归档|删除|移除|隐藏))|archive.{0,20}(?:novel\s+)?chapter/iu,
+    'novel.chapter.restore':
+      /(?:(?:恢复|取消归档|还原).{0,24}(?:小说章节|章节|卷章|第.{0,8}章)|(?:小说章节|章节|卷章|第.{0,8}章).{0,16}(?:恢复|取消归档|还原))|(?:restore|unarchive).{0,20}(?:novel\s+)?chapter/iu,
     'document.publish': /(?:发布).{0,12}(?:文档|草稿)|publish.{0,12}(?:document|draft)/iu,
     'asset.update_alias':
       /(?:素材|资源).{0,32}(?:别名|改名|重命名)|(?:alias|rename).{0,32}(?:asset|media)/iu,
@@ -4723,7 +4836,14 @@ function hasSystemOperationIntent(
     'maintenance.diagnostics.prepare':
       /(?:导出|生成).{0,12}(?:诊断包|诊断信息)|(?:export|create).{0,12}diagnostic/iu,
   };
-  return patterns[operation].test(prompt);
+  const normalized = prompt.normalize('NFKC');
+  const match = patterns[operation].exec(normalized);
+  if (!match) return false;
+  if (operation !== 'novel.chapter.archive' && operation !== 'novel.chapter.restore') return true;
+  const context = normalized.slice(Math.max(0, match.index - 20), match.index + match[0].length);
+  return !/(?:不要|别|不需要|不用|无需|暂不|先不|不必|取消).{0,32}(?:归档|删除|移除|隐藏|恢复|还原)/iu.test(
+    context,
+  );
 }
 
 function parseConfirmationContinuationDescriptor(
@@ -4800,6 +4920,21 @@ function hasSaveIntent(prompt: string): boolean {
       value,
     );
   return mentionsSave && !saveIsNotRequested;
+}
+
+export function inferNovelReference(
+  prompt: string,
+): { role: DocumentBindingRole; kind: DocumentKind } | undefined {
+  const value = prompt.normalize('NFKC');
+  if (!/(小说|故事|novel)/iu.test(value) || /(短剧|剧本|分镜|改编|screenplay)/iu.test(value))
+    return undefined;
+  if (/(大纲|提纲|outline)/iu.test(value)) return { role: 'work-outline', kind: 'outline' };
+  if (/(人物设定|角色设定|人物小传|character.*bible)/iu.test(value))
+    return { role: 'character-bible', kind: 'character' };
+  if (/(世界观|世界设定|world.*bible)/iu.test(value)) return { role: 'world-bible', kind: 'note' };
+  if (/(时间线|timeline)/iu.test(value)) return { role: 'timeline', kind: 'note' };
+  if (/(风格指南|style.*guide)/iu.test(value)) return { role: 'style-guide', kind: 'note' };
+  return undefined;
 }
 
 function isOpenEndedStoryGoal(prompt: string): boolean {

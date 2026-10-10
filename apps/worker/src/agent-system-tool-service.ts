@@ -9,6 +9,10 @@ import type {
   ConversationInfo,
   ContextSnapshotCleanupResult,
   MediaTaskSummary,
+  NovelChapterArchiveParams,
+  NovelChapterInfo,
+  NovelChapterListParams,
+  NovelChapterRestoreParams,
   ProviderModelInfo,
   ProviderProfileInfo,
   ResearchCacheCleanupResult,
@@ -48,6 +52,12 @@ export interface AgentMediaTaskService {
   getTask(taskId: string): MediaTaskSummary;
 }
 
+export interface AgentNovelToolService {
+  listChapters(params?: NovelChapterListParams): NovelChapterInfo[];
+  archiveChapter(params: NovelChapterArchiveParams): NovelChapterInfo;
+  restoreChapter(params: NovelChapterRestoreParams): NovelChapterInfo;
+}
+
 export interface AgentMaintenanceToolService {
   getMetrics(): WorkerMetricsSnapshot;
   inspectCache(): CacheInspectionResult;
@@ -80,6 +90,7 @@ export class AgentSystemToolService {
     private readonly documents?: Pick<DocumentWorkflowService, 'getDocument' | 'selfPublish'>,
     private readonly maintenance?: AgentMaintenanceToolService,
     private readonly structureCompiler?: ProjectStructureCompiler,
+    private readonly novels?: AgentNovelToolService,
   ) {}
 
   execute(
@@ -97,6 +108,8 @@ export class AgentSystemToolService {
         return this.projectStructure(args);
       case 'novel.structure.get':
         return this.novelStructure(args);
+      case 'novel.chapter.list':
+        return this.listNovelChapters(args);
       case 'project.integrity.check':
         rejectUnknown(args, []);
         return this.projectIntegrity();
@@ -139,6 +152,8 @@ export class AgentSystemToolService {
       case 'project.restore.prepare':
       case 'conversation.archive':
       case 'conversation.restore':
+      case 'novel.chapter.archive':
+      case 'novel.chapter.restore':
       case 'document.publish':
       case 'asset.move_to_trash':
       case 'asset.restore':
@@ -182,6 +197,9 @@ export class AgentSystemToolService {
       case 'conversation.archive':
       case 'conversation.restore':
         return this.previewConversationLifecycle(operation, args);
+      case 'novel.chapter.archive':
+      case 'novel.chapter.restore':
+        return this.previewNovelChapterLifecycle(operation, args);
       case 'document.publish':
         return this.previewDocumentPublication(args);
       case 'asset.move_to_trash':
@@ -228,6 +246,32 @@ export class AgentSystemToolService {
           version: 1,
           status: operation === 'conversation.archive' ? 'archived' : 'restored',
           conversation: toConversationSummary(conversation),
+        };
+      }
+      case 'novel.chapter.archive':
+      case 'novel.chapter.restore': {
+        const preview = this.previewNovelChapterLifecycle(operation, args);
+        if (!this.novels) throw unavailable('Novel chapter lifecycle');
+        const chapterId = requiredString(args.chapterId, 'chapterId', 200);
+        const expectedRowVersion = requiredInteger(
+          args.expectedRowVersion,
+          'expectedRowVersion',
+          0,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const chapter =
+          operation === 'novel.chapter.archive'
+            ? this.novels.archiveChapter({
+                chapterId,
+                expectedRowVersion,
+                reason: 'user_archive',
+              })
+            : this.novels.restoreChapter({ chapterId, expectedRowVersion });
+        return {
+          version: 1,
+          status: operation === 'novel.chapter.archive' ? 'archived' : 'restored',
+          chapter: toNovelChapterSummary(chapter),
+          summary: preview.summary,
         };
       }
       case 'document.publish': {
@@ -408,6 +452,24 @@ export class AgentSystemToolService {
         includeArchived,
       }),
     }));
+  }
+
+  private listNovelChapters(args: Record<string, unknown>): Record<string, unknown> {
+    rejectUnknown(args, ['volumeId', 'includeArchived']);
+    if (!this.novels) throw unavailable('Novel chapter listing');
+    const volumeId = optionalString(args.volumeId, 'volumeId', 200);
+    const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    const chapters = this.novels.listChapters({
+      ...(volumeId ? { volumeId } : {}),
+      includeArchived,
+    });
+    const bounded = chapters.slice(0, 200).map(toNovelChapterSummary);
+    return {
+      version: 1,
+      status: 'succeeded',
+      chapters: bounded,
+      truncated: chapters.length > bounded.length,
+    };
   }
 
   private projectIntegrity(): Record<string, unknown> {
@@ -748,6 +810,59 @@ export class AgentSystemToolService {
     };
   }
 
+  private previewNovelChapterLifecycle(
+    operation: 'novel.chapter.archive' | 'novel.chapter.restore',
+    args: Record<string, unknown>,
+  ): AgentSystemToolConfirmationPreview {
+    rejectUnknown(args, ['chapterId', 'expectedRowVersion', 'reason']);
+    if (!this.novels) throw unavailable('Novel chapter lifecycle');
+    const chapterId = requiredString(args.chapterId, 'chapterId', 200);
+    const expectedRowVersion = requiredInteger(
+      args.expectedRowVersion,
+      'expectedRowVersion',
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (
+      operation === 'novel.chapter.archive' &&
+      args.reason !== undefined &&
+      args.reason !== 'user_archive'
+    ) {
+      throw new Error('reason must be user_archive.');
+    }
+    const chapter = this.novels
+      .listChapters({ includeArchived: true })
+      .find((candidate) => candidate.id === chapterId);
+    if (!chapter) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_PROJECT_SCOPE',
+        'The requested novel chapter is not available in the current project.',
+      );
+    }
+    if (chapter.rowVersion !== expectedRowVersion) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_ARGUMENTS_INVALID',
+        'The novel chapter changed. Re-read its current rowVersion before retrying.',
+        true,
+      );
+    }
+    if (operation === 'novel.chapter.archive' && chapter.lifecycleStatus === 'archived') {
+      throw new Error('Novel chapter is already archived.');
+    }
+    if (operation === 'novel.chapter.restore' && chapter.lifecycleStatus !== 'archived') {
+      throw new Error('Novel chapter is not archived.');
+    }
+    return {
+      summary: `${operation === 'novel.chapter.archive' ? '归档' : '恢复'}小说章节“${chapter.displayLabel} ${chapter.title}”`,
+      affectedEntities: [{ type: 'novel-chapter', id: chapter.id, label: chapter.title }],
+      executionArguments: {
+        chapterId: chapter.id,
+        expectedRowVersion: chapter.rowVersion,
+        ...(operation === 'novel.chapter.archive' ? { reason: 'user_archive' } : {}),
+      },
+    };
+  }
+
   private previewDocumentPublication(
     args: Record<string, unknown>,
   ): AgentSystemToolConfirmationPreview {
@@ -979,6 +1094,25 @@ function toAssetSummary(asset: AssetInfo): Record<string, unknown> {
     tags: (asset.tags ?? []).slice(0, 100).map((tag) => ({ id: tag.id, name: tag.name })),
     createdAt: asset.createdAt,
     updatedAt: asset.updatedAt,
+  };
+}
+
+function toNovelChapterSummary(chapter: NovelChapterInfo): Record<string, unknown> {
+  return {
+    id: chapter.id,
+    volumeId: chapter.volumeId,
+    documentId: chapter.documentId,
+    title: chapter.title,
+    displayLabel: chapter.displayLabel,
+    position: chapter.position,
+    lifecycleStatus: chapter.lifecycleStatus,
+    archiveReason: chapter.archiveReason,
+    rowVersion: chapter.rowVersion,
+    documentRowVersion: chapter.documentRowVersion,
+    ragChunkCount: chapter.ragChunkCount,
+    ragIndexedAt: chapter.ragIndexedAt,
+    createdAt: chapter.createdAt,
+    updatedAt: chapter.updatedAt,
   };
 }
 

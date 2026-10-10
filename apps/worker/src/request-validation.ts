@@ -1120,10 +1120,11 @@ export function validateSessionRequestParams(
       validateUsage(params.usage);
       break;
     case 'llm.generation.fail':
-      validateIdentity(params, ['content', 'error', 'retryable', 'usage']);
+      validateIdentity(params, ['content', 'error', 'retryable', 'failureKind', 'usage']);
       requireString(params, 'content', MAX_MESSAGE_LENGTH, true);
       requireString(params, 'error', MAX_ERROR_LENGTH);
       requireBoolean(params, 'retryable');
+      optionalEnum(params, 'failureKind', new Set(['failed', 'interrupted']));
       validateUsage(params.usage);
       break;
     case 'llm.generation.get':

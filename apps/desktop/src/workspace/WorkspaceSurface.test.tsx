@@ -32,6 +32,9 @@ function WorkspaceFixture({
       <button type="button" onClick={() => dispatch({ type: 'open', panelId: 'conversation' })}>
         测试打开会话
       </button>
+      <button type="button" onClick={() => dispatch({ type: 'float', panelId: 'document' })}>
+        测试浮动文档
+      </button>
       <WorkspaceSurface
         layout={layout}
         dispatch={dispatch}
@@ -175,16 +178,64 @@ describe('WorkspaceSurface', () => {
     expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(1);
   });
 
-  it('adds and removes the production split without leaving an empty panel', () => {
+  it('switches between project and production pages without mixing their content', () => {
     const { container, rerender } = render(<WorkspaceFixture productionOpen />);
 
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
-    expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(2);
+    expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
+    expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(1);
 
     rerender(<WorkspaceFixture productionOpen={false} />);
 
     expect(container.querySelector('.workspace-production-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.workspace-editor-page')).toBeVisible();
     expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(1);
+  });
+
+  it.each([1440, 1100, 800])(
+    'hides the novel page during production and preserves edits at %i px',
+    (width) => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      const children = <input aria-label="章节内容" defaultValue="已保存的小说正文" />;
+      const { rerender } = render(
+        <WorkspaceFixture documentActive={false} editorTitle="小说">
+          {children}
+        </WorkspaceFixture>,
+      );
+      fireEvent.change(screen.getByLabelText('章节内容'), {
+        target: { value: '未保存的小说修改' },
+      });
+
+      rerender(
+        <WorkspaceFixture productionOpen documentActive={false} editorTitle="小说">
+          {children}
+        </WorkspaceFixture>,
+      );
+      expect(screen.getByLabelText('章节内容')).not.toBeVisible();
+      expect(screen.queryByRole('button', { name: '关闭小说' })).not.toBeInTheDocument();
+      expect(screen.getByText('生产内容')).toBeVisible();
+
+      rerender(
+        <WorkspaceFixture documentActive={false} editorTitle="小说">
+          {children}
+        </WorkspaceFixture>,
+      );
+      expect(screen.getByLabelText('章节内容')).toBeVisible();
+      expect(screen.getByLabelText('章节内容')).toHaveValue('未保存的小说修改');
+    },
+  );
+
+  it('hides a floating project editor while production is active', () => {
+    const { container, rerender } = render(<WorkspaceFixture />);
+    fireEvent.click(screen.getByRole('button', { name: '测试浮动文档' }));
+    expect(container.querySelector('.floating-window-document')).toBeInTheDocument();
+
+    rerender(<WorkspaceFixture productionOpen />);
+    expect(container.querySelector('.floating-window-document')).not.toBeInTheDocument();
+    expect(screen.queryByText('文档内容')).not.toBeInTheDocument();
+
+    rerender(<WorkspaceFixture />);
+    expect(container.querySelector('.floating-window-document')).toBeInTheDocument();
   });
 
   it('lets docked neighbors fill the split when the document is detached', () => {
@@ -201,7 +252,7 @@ describe('WorkspaceSurface', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
     const { container } = render(<WorkspaceFixture productionOpen />);
 
-    expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();

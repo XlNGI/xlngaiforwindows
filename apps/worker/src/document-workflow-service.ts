@@ -20,6 +20,8 @@ import type {
   DocumentDetail,
   DocumentDraftSaveParams,
   DocumentKind,
+  DocumentBindingDomain,
+  DocumentBindingRole,
   DocumentPublicationInfo,
   DocumentPublishParams,
   DocumentRestoreParams,
@@ -98,6 +100,8 @@ interface DocumentRow {
   id: string;
   project_id: string;
   kind: string;
+  domain_scope?: DocumentBindingDomain;
+  binding_role?: DocumentBindingRole;
   title: string;
   scope_type: string;
   scope_id: string | null;
@@ -247,7 +251,7 @@ export interface TrustedAgentDraftParams {
 export interface TrustedAgentUpdateParams extends TrustedAgentDraftParams {
   documentId: string;
   expectedDocumentRowVersion: number;
-  baseVersionId: string;
+  baseVersionId: string | null;
 }
 
 export interface TrustedAgentLifecycleParams {
@@ -298,6 +302,8 @@ function toDocumentSummary(row: DocumentRow): DocumentSummary {
     id: row.id,
     projectId: row.project_id,
     kind: documentKind(row.kind),
+    domainScope: row.domain_scope,
+    bindingRole: row.binding_role,
     title: row.title,
     scopeType: scopeType(row.scope_type),
     scopeId: row.scope_id ?? undefined,
@@ -434,9 +440,11 @@ export class DocumentWorkflowService {
       (
         database
           .prepare(
-            `SELECT * FROM documents
-             WHERE project_id = ? AND lifecycle_status = 'active'
-             ORDER BY updated_at DESC, id DESC`,
+            `SELECT documents.*, bindings.domain_scope, bindings.role AS binding_role
+             FROM documents LEFT JOIN document_bindings bindings
+               ON bindings.document_id = documents.id AND bindings.status = 'active'
+             WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+             ORDER BY documents.updated_at DESC, documents.id DESC`,
           )
           .all(project.id) as DocumentRow[]
       ).map(toDocumentSummary),
@@ -1154,7 +1162,7 @@ export class DocumentWorkflowService {
       scopeType: scopeType(existing.scope_type),
       scopeId: existing.scope_id ?? undefined,
       expectedDocumentRowVersion: params.expectedDocumentRowVersion,
-      baseVersionId: params.baseVersionId,
+      baseVersionId: params.baseVersionId ?? undefined,
       sourceTaskId: params.taskId,
       sourceMessageId: params.sourceMessageId,
       contextSnapshotId: params.contextSnapshotId,
@@ -1286,8 +1294,11 @@ export class DocumentWorkflowService {
     return (
       database
         .prepare(
-          `SELECT * FROM documents WHERE project_id = ? AND lifecycle_status = 'active'
-           ORDER BY updated_at DESC, id DESC LIMIT 100`,
+          `SELECT documents.*, bindings.domain_scope, bindings.role AS binding_role
+           FROM documents LEFT JOIN document_bindings bindings
+             ON bindings.document_id = documents.id AND bindings.status = 'active'
+           WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+           ORDER BY documents.updated_at DESC, documents.id DESC LIMIT 100`,
         )
         .all(project.id) as DocumentRow[]
     ).map(toDocumentSummary);
@@ -2223,8 +2234,14 @@ export class DocumentWorkflowService {
     project: OpenProject,
     id: string,
   ): DocumentRow {
-    const document = database.prepare('SELECT * FROM documents WHERE id = ?').get(id) as
-      DocumentRow | undefined;
+    const document = database
+      .prepare(
+        `SELECT documents.*, bindings.domain_scope, bindings.role AS binding_role
+       FROM documents LEFT JOIN document_bindings bindings
+         ON bindings.document_id = documents.id AND bindings.status = 'active'
+       WHERE documents.id = ?`,
+      )
+      .get(id) as DocumentRow | undefined;
     if (!document || document.project_id !== project.id) throw new Error('Document was not found.');
     return document;
   }

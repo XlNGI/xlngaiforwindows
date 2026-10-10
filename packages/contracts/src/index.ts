@@ -723,6 +723,8 @@ export interface DocumentSummary {
   id: string;
   projectId: string;
   kind: DocumentKind;
+  domainScope?: DocumentBindingDomain;
+  bindingRole?: DocumentBindingRole;
   title: string;
   scopeType: ConversationScopeType;
   scopeId?: string;
@@ -2832,6 +2834,7 @@ export interface LlmGenerationCompleteParams extends LlmGenerationObserveParams 
 export interface LlmGenerationFailParams extends LlmGenerationObserveParams {
   error: string;
   retryable: boolean;
+  failureKind?: 'failed' | 'interrupted';
   usage?: NormalizedLlmUsage;
 }
 

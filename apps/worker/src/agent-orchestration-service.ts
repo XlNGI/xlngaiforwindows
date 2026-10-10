@@ -80,7 +80,7 @@ function inferAction(prompt: string): NovelWritingAction | undefined {
 }
 
 function containsNegatedAction(prompt: string): boolean {
-  return /(不要|不需要|取消|别)(?:再)?(?:创建|新建|续写|继续写|重写|改写|创作)/u.test(prompt);
+  return /(不要|不需要|取消|别)(?:再)?(?:创建|新建|生成|续写|继续写|重写|改写|创作)/u.test(prompt);
 }
 
 export class AgentOrchestrationService {
@@ -99,11 +99,15 @@ export class AgentOrchestrationService {
         const prompt = requiredText(input.prompt, 'Prompt', 100_000);
         const conversation = database
           .prepare('SELECT id, archived_at FROM conversations WHERE id = ? AND project_id = ?')
-          .get(input.conversationId, project.id) as { id: string; archived_at: string | null } | undefined;
+          .get(input.conversationId, project.id) as
+          { id: string; archived_at: string | null } | undefined;
         if (!conversation)
           throw new AgentOrchestrationError('NOT_FOUND', 'Conversation was not found.');
         if (conversation.archived_at)
-          throw new AgentOrchestrationError('CONFLICT', 'Archived conversations cannot be updated.');
+          throw new AgentOrchestrationError(
+            'CONFLICT',
+            'Archived conversations cannot be updated.',
+          );
 
         const requestHash = sha256(
           JSON.stringify({
@@ -332,7 +336,13 @@ export class AgentOrchestrationService {
   ): AgentPendingIntentInfo['reasonCode'] | undefined {
     if (containsNegatedAction(prompt)) return 'NEGATED_ACTION';
     if (!action) return 'AMBIGUOUS_ACTION';
-    if (action === 'create_chapter' && !intent?.chapterTitle?.trim()) return 'TARGET_REQUIRED';
+    // A chapter label identifies a new target before the model names its draft.
+    if (
+      action === 'create_chapter' &&
+      !intent?.chapterTitle?.trim() &&
+      !intent?.displayLabel?.trim()
+    )
+      return 'TARGET_REQUIRED';
     if (action !== 'create_chapter' && !intent?.chapterId) return 'TARGET_REQUIRED';
     return undefined;
   }
@@ -387,7 +397,8 @@ export class AgentOrchestrationService {
     intent: NovelWritingIntent,
     now: string,
   ): { chapterId: string; documentId: string; title: string; createdPlaceholder: true } {
-    const title = requiredText(intent.chapterTitle, 'Chapter title', 200);
+    // The first saved version replaces this provisional title with the chapter name.
+    const title = requiredText(intent.chapterTitle?.trim() || '未命名章节', 'Chapter title', 200);
     if (intent.volumeId) {
       const volume = database
         .prepare('SELECT id FROM novel_volumes WHERE id = ? AND project_id = ? AND status = ?')
