@@ -2477,6 +2477,9 @@ export class AgentProviderLoopService {
                       kind: toolArguments.kind,
                       scopeType: toolArguments.scopeType,
                       scopeId: toolArguments.scopeId,
+                      searchMode: toolArguments.searchMode,
+                      structurePath: toolArguments.structurePath,
+                      offset: toolArguments.offset,
                       includeArchived: toolArguments.includeArchived,
                       limit: toolArguments.limit,
                     })
@@ -2485,6 +2488,8 @@ export class AgentProviderLoopService {
                       attemptId: params.attemptId,
                       sourceHandle: toolArguments.sourceHandle,
                       maxChars: toolArguments.maxChars,
+                      readMode: toolArguments.readMode,
+                      offset: toolArguments.offset,
                     });
               resultSummary = summarizeLibraryResult(result);
               output = {
@@ -5243,10 +5248,19 @@ type LibraryToolArguments =
       kind?: string;
       scopeType?: string;
       scopeId?: string;
+      searchMode?: 'content' | 'structure';
+      structurePath?: string[];
+      offset?: number;
       includeArchived?: boolean;
       limit?: number;
     }
-  | { operation: 'library.read'; sourceHandle: string; maxChars?: number };
+  | {
+      operation: 'library.read';
+      sourceHandle: string;
+      maxChars?: number;
+      readMode?: 'chunk' | 'source';
+      offset?: number;
+    };
 
 function parseLibraryToolArguments(
   operation: LibraryOperation,
@@ -5270,6 +5284,9 @@ function parseLibraryToolArguments(
       'kind',
       'scopeType',
       'scopeId',
+      'searchMode',
+      'structurePath',
+      'offset',
       'includeArchived',
       'limit',
     ]);
@@ -5293,12 +5310,24 @@ function parseLibraryToolArguments(
       kind: typeof record.kind === 'string' ? record.kind : undefined,
       scopeType: typeof record.scopeType === 'string' ? record.scopeType : undefined,
       scopeId: typeof record.scopeId === 'string' ? record.scopeId : undefined,
+      searchMode:
+        record.searchMode === 'content' || record.searchMode === 'structure'
+          ? record.searchMode
+          : undefined,
+      structurePath: Array.isArray(record.structurePath)
+        ? record.structurePath.filter((item): item is string => typeof item === 'string')
+        : undefined,
+      offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
       includeArchived:
         typeof record.includeArchived === 'boolean' ? record.includeArchived : undefined,
       limit: optionalBoundedInteger(record.limit, 1, 20),
     };
   }
-  if (Object.keys(record).some((key) => !['sourceHandle', 'maxChars'].includes(key))) {
+  if (
+    Object.keys(record).some(
+      (key) => !['sourceHandle', 'maxChars', 'readMode', 'offset'].includes(key),
+    )
+  ) {
     throw new Error('Library read arguments contain unsupported fields.');
   }
   if (typeof record.sourceHandle !== 'string' || !record.sourceHandle.trim()) {
@@ -5310,6 +5339,9 @@ function parseLibraryToolArguments(
     operation,
     sourceHandle,
     maxChars: optionalBoundedInteger(record.maxChars, 1, 20_000),
+    readMode:
+      record.readMode === 'chunk' || record.readMode === 'source' ? record.readMode : undefined,
+    offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 

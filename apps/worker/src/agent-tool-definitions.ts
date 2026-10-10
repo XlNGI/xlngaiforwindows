@@ -386,6 +386,46 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
   {
+    name: 'novel.structure.get',
+    description: 'Get the bounded novel structure and chapter locators for the current project.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'novel.chapter.list',
+    description: 'List novel chapters in the current project without returning chapter bodies.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { includeArchived: { type: 'boolean' } },
+    },
+  },
+  {
+    name: 'novel.chapter.archive',
+    description: 'Archive a novel chapter after explicit user confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chapterId', 'expectedRowVersion'],
+      properties: {
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.restore',
+    description: 'Restore a novel chapter after explicit user confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chapterId', 'expectedRowVersion'],
+      properties: {
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+      },
+    },
+  },
+  {
     name: 'project.integrity.check',
     description: 'Check the open project database integrity. This is read-only.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
@@ -950,6 +990,10 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'task.package.complete': writePolicy(),
   'project.get_context': readPolicy(),
   'project.structure.get': readPolicy(),
+  'novel.structure.get': readPolicy(),
+  'novel.chapter.list': readPolicy(),
+  'novel.chapter.archive': confirmedPolicy(),
+  'novel.chapter.restore': confirmedPolicy(),
   'project.integrity.check': readPolicy(),
   'project.backup.prepare': protectedPolicy(),
   'project.export.prepare': protectedPolicy(),

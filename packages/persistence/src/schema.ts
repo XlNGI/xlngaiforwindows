@@ -1,5 +1,14 @@
 export const CURRENT_SCHEMA_VERSION = 41;
 
+export const MIGRATION_V40 = `
+CREATE TABLE IF NOT EXISTS asset_group_assets (
+  group_id TEXT NOT NULL REFERENCES asset_groups(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  PRIMARY KEY(group_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_group_assets_asset ON asset_group_assets(asset_id, group_id);
+`;
+
 export const MIGRATION_V1 = `
 CREATE TABLE schema_migrations (
   version INTEGER PRIMARY KEY,

@@ -1032,16 +1032,30 @@ describe('ChatPanel attempt metadata', () => {
     expect(onConfirm).toHaveBeenCalledWith(true);
   });
 
-  it('shows a restart recovery notice for retryable Agent tasks', () => {
+  it('labels novel chapter confirmation entities for users', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
       scopeType: 'project',
-      title: '测试会话',
-      createdAt: '2026-08-03T00:00:00.000Z',
-      updatedAt: '2026-08-03T00:00:00.000Z',
+      title: '小说会话',
+      createdAt: '2026-10-10T00:00:00.000Z',
+      updatedAt: '2026-10-10T00:00:00.000Z',
     };
-    const onOpenTaskLog = vi.fn();
+    const confirmation: AgentToolConfirmationRequest = {
+      version: 1,
+      confirmationId: 'chapter-confirmation',
+      confirmationToken: 'token',
+      taskId: 'task',
+      toolCallId: 'tool-call',
+      operation: 'novel.chapter.archive',
+      action: 'novel.chapter.archive',
+      argumentsHash: 'arguments-hash',
+      projectSessionId: 'project-session',
+      riskLevel: 'R2',
+      summary: '归档小说章节“第一章”',
+      affectedEntities: [{ type: 'novel-chapter', id: 'chapter', label: '第一章' }],
+      expiresAt: '2026-10-10T01:00:00.000Z',
+    };
     render(
       <ChatPanel
         scopeType="project"
@@ -1057,15 +1071,83 @@ describe('ChatPanel attempt metadata', () => {
         llmModels={[]}
         selectedLlmProfileId=""
         selectedLlmModelId=""
+        confirmation={confirmation}
+        onConfirmAgentAction={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('第一章 (小说章节)');
+  });
+
+  it('shows a restart recovery notice for retryable Agent tasks', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '测试会话',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    };
+    const onOpenTaskLog = vi.fn();
+    const messages: ChatMessageInfo[] = [
+      {
+        id: 'user-message',
+        conversationId: conversation.id,
+        role: 'user',
+        content: '创建小说章节',
+        status: 'complete',
+        createdAt: '2026-08-03T00:00:00.000Z',
+      },
+      {
+        id: 'assistant-message',
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: '任务已中断',
+        status: 'failed',
+        createdAt: '2026-08-03T00:00:01.000Z',
+      },
+    ];
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={messages}
+        composer=""
+        statusMessage=""
+        llmStatus={{
+          provider: 'Legacy',
+          model: 'legacy',
+          configured: true,
+          configurationSource: 'environment',
+        }}
+        legacyLlmConfigured
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
         agentTask={{
           task: {
             id: 'task',
             projectId: 'project',
             conversationId: conversation.id,
+            userMessageId: 'user-message',
             taskType: 'document-create',
             scopeType: 'project',
             title: '中断任务',
             status: 'failed',
+            errorCode: 'interrupted',
             phase: 'recovering',
             retryable: true,
             createdAt: '2026-08-03T00:00:00.000Z',
@@ -1089,7 +1171,8 @@ describe('ChatPanel attempt metadata', () => {
         onSendMessage={vi.fn()}
       />,
     );
-    expect(screen.getByText(/上次 Agent 任务未完成/)).toBeInTheDocument();
+    expect(screen.getByText(/应用退出时任务中断；已保存的草稿会保留/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '查看任务日志' }));
     expect(onOpenTaskLog).toHaveBeenCalledOnce();
   });
@@ -1752,51 +1835,6 @@ describe('ChatPanel attempt metadata', () => {
     expect(onRestoreConversation).toHaveBeenCalledWith('conversation');
   });
 
-  it('surfaces the sticky chapter context and clears it on request', () => {
-    const conversation: ConversationInfo = {
-      id: 'conversation',
-      projectId: 'project',
-      scopeType: 'project',
-      title: '短剧会话',
-      createdAt: '2026-09-15T00:00:00.000Z',
-      updatedAt: '2026-09-15T00:00:00.000Z',
-    };
-    const onClearSelectedChapters = vi.fn();
-    render(
-      <ChatPanel
-        scopeType="project"
-        scopeAvailable
-        writable
-        conversations={[conversation]}
-        conversation={conversation}
-        messages={[]}
-        composer=""
-        statusMessage=""
-        legacyLlmConfigured={false}
-        llmProfiles={[]}
-        llmModels={[]}
-        selectedLlmProfileId=""
-        selectedLlmModelId=""
-        selectedChapterCount={2}
-        onClearSelectedChapters={onClearSelectedChapters}
-        onSelectConversation={vi.fn()}
-        onCreateConversation={vi.fn()}
-        onRetryGeneration={vi.fn()}
-        onLlmProfileChange={vi.fn()}
-        onLlmModelChange={vi.fn()}
-        onOpenProviderSettings={vi.fn()}
-        onComposerChange={vi.fn()}
-        onCancelGeneration={vi.fn()}
-        onSendMessage={vi.fn()}
-      />,
-    );
-
-    // Selected chapters are request scope metadata, so the state stays visible
-    // after the chapter workspace is left.
-    expect(screen.getByRole('status')).toHaveTextContent('下次发送将带上 2 个章节作为本集范围');
-    fireEvent.click(screen.getByRole('button', { name: '清除' }));
-    expect(onClearSelectedChapters).toHaveBeenCalledOnce();
-  });
   it('disables message composer and buttons when conversation is archived', () => {
     const archivedConversation: ConversationInfo = {
       id: 'archived-conv',

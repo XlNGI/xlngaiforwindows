@@ -244,7 +244,7 @@ export class AgentOrchestrationService {
               version: 1,
               // Chapter targeting is a resolver hint, not a separate Agent
               // persona. Every project task runs through the System Agent.
-              agentMode: 'document',
+              agentMode: 'novel-writing',
               action,
               promptHash: sha256(prompt),
               chapterId: target.chapterId,
@@ -400,7 +400,12 @@ export class AgentOrchestrationService {
   ): AgentPendingIntentInfo['reasonCode'] | undefined {
     if (containsNegatedAction(prompt)) return 'NEGATED_ACTION';
     if (!action) return 'AMBIGUOUS_ACTION';
-    if (action === 'create_chapter' && !intent?.chapterTitle?.trim()) return 'TARGET_REQUIRED';
+    if (
+      action === 'create_chapter' &&
+      !intent?.chapterTitle?.trim() &&
+      !intent?.displayLabel?.trim()
+    )
+      return 'TARGET_REQUIRED';
     if (ambiguousTarget) return 'TARGET_NOT_UNIQUE';
     if (action !== 'create_chapter' && !intent?.chapterId) return 'TARGET_REQUIRED';
     return undefined;
@@ -508,7 +513,11 @@ export class AgentOrchestrationService {
     intent: NovelWritingIntent,
     now: string,
   ): { chapterId: string; documentId: string; title: string; createdPlaceholder: true } {
-    const title = requiredText(intent.chapterTitle, 'Chapter title', 200);
+    const title = requiredText(
+      intent.chapterTitle?.trim() || intent.displayLabel?.trim() || '未命名章节',
+      'Chapter title',
+      200,
+    );
     if (intent.volumeId) {
       const volume = database
         .prepare('SELECT id FROM novel_volumes WHERE id = ? AND project_id = ? AND status = ?')

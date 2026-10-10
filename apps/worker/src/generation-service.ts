@@ -983,6 +983,7 @@ export class GenerationService {
 
 const AGENT_RESEARCH_INSTRUCTION_MARKER = '# Agent external research policy';
 const AGENT_DOCUMENT_INSTRUCTION_MARKER = '# Agent document write policy';
+const AGENT_NOVEL_INSTRUCTION_MARKER = '# Agent novel chapter write policy';
 const AGENT_LIBRARY_INSTRUCTION_MARKER = '# Agent project library policy';
 const AGENT_SYSTEM_INSTRUCTION_MARKER = '# Agent system tool policy';
 const AGENT_DOCUMENT_WRITE_TOOLS = new Set([
@@ -1015,8 +1016,14 @@ function withAgentToolInstructions(
   ) {
     next = withAgentSystemInstruction(next);
   }
-  if (tools.some((tool) => AGENT_DOCUMENT_WRITE_TOOLS.has(tool.name))) {
+  const hasNovelWriteTool = tools.some((tool) => tool.name === 'novel.chapter.submit_draft');
+  if (!hasNovelWriteTool && tools.some((tool) => AGENT_DOCUMENT_WRITE_TOOLS.has(tool.name))) {
     next = withAgentDocumentInstruction(next);
+  }
+  if (hasNovelWriteTool) {
+    if (!next.includes(AGENT_NOVEL_INSTRUCTION_MARKER)) {
+      next += `\n\n${AGENT_NOVEL_INSTRUCTION_MARKER}\nWorker 已确认本轮创建、续写或重写章节的意图，并锁定唯一章节目标。按用户要求完成小说正文，调用 novel.chapter.submit_draft 保存完整正文后再结束任务。title 只填写章名，contentMarkdown 填写完整章节正文，不重复添加章名 H1。用户只指定章序时，根据正文拟定正式章名，不要提交临时标题“未命名章节”，也不要要求用户另起章名。生成后续章节、续写或重写时先按需检索读取相关章节，承接已保存的故事。检索、内容概要、创作建议和反问均不代表章节已生成或已保存。只有保存工具成功后，才简短报告已保存的章名。`;
+    }
   }
   return next;
 }

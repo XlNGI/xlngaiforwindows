@@ -63,7 +63,6 @@ import type {
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
   AgentProtectedUiHandoff,
-  NovelWritingIntent,
   VideoGenerationJobInfo,
   ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
@@ -87,7 +86,7 @@ import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { TaskLogView } from './TaskLogView';
-import { NovelWorkspace } from './NovelWorkspace';
+import { NovelWorkspace, composeEpisodeChapterPrompt } from './NovelWorkspace';
 import { ChangeSetReviewPanel } from './ChangeSetReviewPanel';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
@@ -400,6 +399,9 @@ function readableFailure(reason: unknown, fallback: string): string {
 
 function readableGenerationError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  if (/application is closing|worker was restarting/i.test(error)) {
+    return '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或在任务日志恢复未完成产物。';
+  }
   if (error.includes('AGENT_DOCUMENT_NOT_WRITTEN')) {
     return '助手尚未将文档保存到项目，本次任务未完成。请重试保存。';
   }
@@ -475,7 +477,7 @@ const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = [
 
 /** Only workspace kinds are listed; everything else lives in its own workspace. */
 function isWorkspaceDocument(summary: DocumentSummary): boolean {
-  return WORKSPACE_DOCUMENT_KINDS.includes(summary.kind);
+  return summary.domainScope !== 'novel' && WORKSPACE_DOCUMENT_KINDS.includes(summary.kind);
 }
 
 function matchesDocumentFilter(summary: DocumentSummary, filter: 'all' | DocumentKind): boolean {
@@ -496,31 +498,6 @@ export function mergeGenerationMessage(
 
 export function inferAgentCapability(prompt: string): UnifiedAgentCapability {
   return inferUnifiedAgentCapabilityHint(prompt);
-}
-
-/**
- * A selected novel chapter is only a target when the user explicitly asks to
- * write or save chapter prose. Reading or discussing a chapter stays in the
- * ordinary document workflow.
- */
-export function inferNovelWritingIntent(
-  prompt: string,
-  chapterId?: string,
-): NovelWritingIntent | undefined {
-  if (!chapterId) return undefined;
-  const value = prompt.normalize('NFC').trim();
-  if (!value || !/(小说|章节|正文|本章|此章|稿件)/u.test(value)) return undefined;
-  if (
-    !/(?:生成|创作|撰写|写作|续写|继续写|继续创作|重写|改写|修改|更新|保存|存入|写入|替换|覆盖|generate|write|continue|rewrite|save|update)/iu.test(
-      value,
-    )
-  ) {
-    return undefined;
-  }
-  const action = /(?:续写|继续写|继续创作|continue)/iu.test(value)
-    ? 'continue_chapter'
-    : 'rewrite_chapter';
-  return { action, chapterId };
 }
 
 /**
@@ -668,7 +645,6 @@ export function App() {
   );
 
   const [view, setView] = useState<WorkspaceView>('documents');
-  const [libraryFocusChapterId, setLibraryFocusChapterId] = useState<string>();
   const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
   const [detachedPanels, setDetachedPanels] = useState<Partial<Record<WorkspacePanelId, string>>>(
     {},
@@ -689,12 +665,6 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
-  const [activeNovelChapter, setActiveNovelChapter] = useState<{
-    id: string;
-    title: string;
-  }>();
-  const [pendingNovelIntent, setPendingNovelIntent] = useState<NovelWritingIntent>();
-  const [novelRefreshToken, setNovelRefreshToken] = useState(0);
   const [chatMessage, setChatMessage] = useState('');
   const [agentModelSelection, setAgentModelSelection] =
     useState<UnifiedAgentModelSelectionRequest>();
@@ -727,7 +697,6 @@ export function App() {
     initialLlmSelectionValue.modelId ?? '',
   );
   const [researchMode, setResearchMode] = useState<AgentResearchMode>(initialResearchMode);
-  const [episodeChapterIds, setEpisodeChapterIds] = useState<string[]>([]);
   const [generation, setGeneration] = useState<LlmGenerationInfo>();
   const [agentTask, setAgentTask] = useState<import('@ai-video/contracts').AgentTaskDetail>();
   const [conversationAgentTasks, setConversationAgentTasks] = useState<
@@ -871,6 +840,33 @@ export function App() {
     workspaceDispatch({ type: 'open', panelId: 'document' });
   };
 
+  /** Routes a completed Agent chapter artifact to the novel editor. */
+  const focusNovelArtifact = (
+    detail: import('@ai-video/contracts').AgentTaskDetail | undefined,
+    expectedProjectId: string,
+  ): boolean => {
+    if (
+      !detail ||
+      detail.target?.targetKind !== 'novel-chapter' ||
+      !detail.target.chapterId ||
+      !detail.target.documentVersionId ||
+      !detail.documents.some(
+        (artifact) =>
+          artifact.documentId === detail.target?.documentId &&
+          artifact.documentVersionId === detail.target.documentVersionId,
+      ) ||
+      activeProjectIdRef.current !== expectedProjectId
+    ) {
+      return false;
+    }
+    if (activeProjectIdRef.current !== expectedProjectId) return false;
+    setNovelFocusChapterId(detail.target.chapterId);
+    setNovelFocusReferenceId(undefined);
+    setNovelRefreshRevision((revision) => revision + 1);
+    openProjectView('novel');
+    return true;
+  };
+
   const docs = useDocumentWorkspace({
     writable,
     syncDetachedPanel: (entityId) => syncDetachedPanelForEntity('document', entityId),
@@ -885,6 +881,7 @@ export function App() {
     documentContent,
     versions,
     contentBusy,
+    setContentBusy,
     contentMessage,
     documentCloseConfirmation,
     documentEditorWritable,
@@ -895,7 +892,7 @@ export function App() {
     setContentMessage,
     setDocumentCloseConfirmation,
     selectDocument,
-    openDocumentById,
+    openDocumentById: openNonChapterDocumentById,
     newDocument,
     importMarkdownDocument,
     saveDocument,
@@ -910,6 +907,55 @@ export function App() {
     reset: resetDocumentWorkspace,
   } = docs;
 
+  const openDocumentById = async (
+    documentId: string,
+    nonChapterDocuments: DocumentSummary[] = documents,
+  ) => {
+    const projectId = project?.id;
+    const reference = nonChapterDocuments.find((item) => item.id === documentId);
+    if (reference?.domainScope === 'novel') {
+      setNovelFocusReferenceId(documentId);
+      setNovelFocusChapterId(undefined);
+      setNovelRefreshRevision((revision) => revision + 1);
+      openProjectView('novel');
+      return;
+    }
+    if (!nonChapterDocuments.some((item) => item.id === documentId)) {
+      try {
+        const chapters = await callWorker('novel.chapter.list', { includeArchived: true });
+        if (activeProjectIdRef.current !== projectId) return;
+        const chapter = chapters.find((item) => item.documentId === documentId);
+        if (chapter) {
+          setNovelFocusReferenceId(undefined);
+          setNovelFocusChapterId(chapter.id);
+          setNovelRefreshRevision((revision) => revision + 1);
+          openProjectView('novel');
+          return;
+        }
+      } catch (reason) {
+        if (activeProjectIdRef.current === projectId) {
+          setContentMessage(reason instanceof Error ? reason.message : '文档所属页面读取失败');
+        }
+        return;
+      }
+    }
+    if (!reference) {
+      const detail = await callWorker('document.get', { documentId });
+      if (activeProjectIdRef.current !== projectId) return;
+      if (detail.domainScope === 'novel') {
+        setNovelFocusReferenceId(documentId);
+        setNovelFocusChapterId(undefined);
+        setDocuments((rows) =>
+          rows.some((row) => row.id === documentId) ? rows : [...rows, detail],
+        );
+        setNovelRefreshRevision((revision) => revision + 1);
+        openProjectView('novel');
+        return;
+      }
+    }
+    await openNonChapterDocumentById(documentId);
+  };
+
   const openWorkspaceForDocumentKind = (kind: DocumentKind) => {
     if (CHARACTER_DOCUMENT_KINDS.includes(kind)) openProjectView('characters');
     else if (kind === 'storyboard') openProjectView('shots');
@@ -918,15 +964,17 @@ export function App() {
 
   const openLibrarySource = (source: AgentLibrarySourceInfo) => {
     if (source.sourceType === 'novel-chapter') {
-      setLibraryFocusChapterId(source.sourceId);
+      setNovelFocusChapterId(source.sourceId);
+      setNovelFocusReferenceId(undefined);
+      setNovelRefreshRevision((revision) => revision + 1);
       openProjectView('novel');
       return;
     }
-    if (
-      source.sourceType === 'document' ||
-      source.sourceType === 'storyboard' ||
-      source.sourceType === 'novel-reference'
-    ) {
+    if (source.sourceType === 'novel-reference') {
+      void openDocumentById(source.sourceId);
+      return;
+    }
+    if (source.sourceType === 'document' || source.sourceType === 'storyboard') {
       if (source.kind) openWorkspaceForDocumentKind(source.kind as DocumentKind);
       else if (source.sourceType === 'storyboard') openProjectView('shots');
       else openProjectView('documents');
@@ -940,15 +988,7 @@ export function App() {
       openProjectView('assets');
       return;
     }
-    if (source.sourceType === 'scene') {
-      const target = scenes.find((item) => item.id === source.sourceId);
-      if (target) void selectScene(target);
-      else openProjectView('shots');
-      return;
-    }
-    if (source.sourceType === 'shot') {
-      const loaded = shots.find((item) => item.id === source.sourceId);
-      if (loaded) setShot(loaded);
+    if (source.sourceType === 'scene' || source.sourceType === 'shot') {
       openProjectView('shots');
       return;
     }
@@ -956,7 +996,7 @@ export function App() {
   };
 
   const requestCloseEditor = () => {
-    if (view === 'documents' || view === 'characters') {
+    if ((view === 'documents' || view === 'characters') && !hasForeignDocument) {
       requestCloseDocument();
       return;
     }
@@ -992,6 +1032,9 @@ export function App() {
   >(undefined);
   const activeProjectIdRef = useRef(project?.id);
   const [taskCompletionRevision, setTaskCompletionRevision] = useState(0);
+  const [novelFocusChapterId, setNovelFocusChapterId] = useState<string>();
+  const [novelFocusReferenceId, setNovelFocusReferenceId] = useState<string>();
+  const [novelRefreshRevision, setNovelRefreshRevision] = useState(0);
   activeProjectIdRef.current = project?.id;
 
   useEffect(() => {
@@ -1221,10 +1264,7 @@ export function App() {
     poll.timer = window.setInterval(readEvents, 400);
   };
 
-  const launchPreparedGeneration = (
-    prepared: LlmGenerationPrepareResult,
-    options: { refreshNovelChapter?: boolean } = {},
-  ) => {
+  const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
     confirmationResolverRef.current?.(false);
     paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
@@ -1249,23 +1289,45 @@ export function App() {
       if (!isAgentGeneration || agentDocumentRefreshStarted) return;
       agentDocumentRefreshStarted = true;
       const projectId = prepared.stream.projectId;
-      void callWorker('document.list', {})
-        .then((nextDocuments) => {
-          if (generationPollOwner.current.projectId === projectId) {
-            setDocuments(nextDocuments);
-            const created = nextDocuments.filter((item) => !previousDocumentIds.has(item.id));
-            const createdWorkspace = created.filter(isWorkspaceDocument);
-            const createdWorkspaceDocument = createdWorkspace[0];
-            if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
-              openWorkspaceForDocumentKind(createdWorkspaceDocument.kind);
-              setDocumentKindFilter(createdWorkspaceDocument.kind);
-            } else if (createdWorkspace.length > 1) {
-              openProjectView('documents');
-              setDocumentKindFilter('all');
-            }
-            const createdDocument = createdWorkspaceDocument ?? created[0];
-            if (createdDocument) void openDocumentById(createdDocument.id);
+      const refreshDocumentList = () =>
+        callWorker('document.list', {}).then((nextDocuments) => {
+          if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
+          setDocuments(nextDocuments);
+          const created = nextDocuments.filter((item) => !previousDocumentIds.has(item.id));
+          const createdWorkspace = created.filter(isWorkspaceDocument);
+          const createdWorkspaceDocument = createdWorkspace[0];
+          if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
+            openWorkspaceForDocumentKind(createdWorkspaceDocument.kind);
+            setDocumentKindFilter(createdWorkspaceDocument.kind);
+          } else if (createdWorkspace.length > 1) {
+            openProjectView('documents');
+            setDocumentKindFilter('all');
           }
+          const createdDocument = createdWorkspaceDocument ?? created[0];
+          if (createdDocument) void openDocumentById(createdDocument.id, nextDocuments);
+        });
+      const runtimeMode = (
+        prepared as LlmGenerationPrepareResult & {
+          runtimeMode?: string;
+        }
+      ).runtimeMode;
+      if (runtimeMode !== 'novel-writing') {
+        void refreshDocumentList().catch((reason) => {
+          if (generationPollOwner.current.projectId === projectId) {
+            setContentMessage(reason instanceof Error ? reason.message : '文档列表刷新失败');
+          }
+        });
+        return;
+      }
+      void callWorker('agent.task.get', { taskId: agentTaskId })
+        .catch(() => undefined)
+        .then(async (detail) => {
+          if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
+          if (detail) {
+            rememberAgentTask(detail);
+            if (focusNovelArtifact(detail, projectId)) return;
+          }
+          return refreshDocumentList();
         })
         .catch((reason) => {
           if (generationPollOwner.current.projectId === projectId) {
@@ -1288,7 +1350,6 @@ export function App() {
     });
     if (!isGenerationActive(prepared.generation)) {
       setChatMessage(prepared.generation.error ?? '生成已完成');
-      if (options.refreshNovelChapter) setNovelRefreshToken((value) => value + 1);
       refreshAgentDocuments();
       return;
     }
@@ -1328,7 +1389,6 @@ export function App() {
           activeMediaInputsRef.current = [];
           if (next.error) lastGenerationErrorRef.current = next.error;
           setChatMessage(readableGenerationError(next.error) ?? '生成完成');
-          if (options.refreshNovelChapter) setNovelRefreshToken((value) => value + 1);
           refreshAgentDocuments();
         }
       },
@@ -1373,7 +1433,9 @@ export function App() {
           const detail = await callWorker('agent.task.get', { taskId: agentTaskId }).catch(
             () => undefined,
           );
-          if (detail && nativeRunIsCurrent(run)) rememberAgentTask(detail);
+          if (detail && nativeRunIsCurrent(run)) {
+            rememberAgentTask(detail);
+          }
         }
         stopAgentTaskEventPolling();
         if (nativeRunIsCurrent(run)) setLiveAgentActions([]);
@@ -1722,6 +1784,8 @@ export function App() {
     projectContentRequest.current += 1;
     resetConversationWorkspace();
     resetDocumentWorkspace();
+    setNovelFocusChapterId(undefined);
+    setNovelFocusReferenceId(undefined);
     sceneRequest.current += 1;
     await cancelNativeLlmRun();
     setProjectBusy(true);
@@ -2052,9 +2116,6 @@ export function App() {
           agentPrompt = composeImageGenerationPrompt(promptForAgent, promptDocument);
         }
         const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
-        const novelIntent =
-          pendingNovelIntent ??
-          (view === 'novel' ? inferNovelWritingIntent(prompt, activeNovelChapter?.id) : undefined);
         const runModel = resolveAgentRunModelSelection(
           capability,
           modelSelection
@@ -2087,17 +2148,9 @@ export function App() {
             : {}),
           ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
           researchMode,
-          ...(novelIntent ? { novelIntent } : {}),
-          ...(episodeChapterIds.length > 0
-            ? { selectedChapterIds: episodeChapterIds, targetPlatform: 'seedance' as const }
-            : {}),
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         });
-        if (unified.status !== 'needs_model_selection' && episodeChapterIds.length > 0) {
-          setEpisodeChapterIds([]);
-        }
-        if (unified.status !== 'needs_model_selection') setPendingNovelIntent(undefined);
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
@@ -2204,7 +2257,7 @@ export function App() {
           setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
           return;
         }
-        launchPreparedGeneration(unified, { refreshNovelChapter: Boolean(novelIntent) });
+        launchPreparedGeneration(unified);
       } catch (reason) {
         setComposer(prompt);
         setChatMessage(readableFailure(reason, '生成启动失败'));
@@ -2411,26 +2464,6 @@ export function App() {
     } finally {
       retryRequestsRef.current.delete(assistantMessageId);
     }
-  };
-
-  const openNovelDocument = async (documentId: string) => {
-    const chapters = await callWorker('novel.chapter.list', { includeArchived: true }).catch(
-      () => [],
-    );
-    const chapter = chapters.find((item) => item.documentId === documentId);
-    if (chapter) {
-      setLibraryFocusChapterId(chapter.id);
-      openProjectView('novel');
-      return;
-    }
-    await openDocumentById(documentId);
-    const existingLabel = Object.values(detachedRegistryRef.current).find(
-      (registration) =>
-        registration.config.panelId === 'document' &&
-        registration.config.projectId === project?.id &&
-        registration.config.entityId === documentId,
-    )?.config.label;
-    if (existingLabel) await focusDetachedPanelWindow(existingLabel);
   };
 
   const detachPanel = async (panelId: WorkspacePanelId) => {
@@ -2967,11 +3000,6 @@ export function App() {
       onOpenProtectedUi={openAgentProtectedUi}
       onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
       onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
-      selectedChapterCount={episodeChapterIds.length}
-      onClearSelectedChapters={() => {
-        setEpisodeChapterIds([]);
-        setChatMessage('已清除本集章节范围。');
-      }}
       onOpenLibrarySource={openLibrarySource}
       onConfirmSchemaProposal={(adapterKey, version) => {
         void confirmSchemaProposal(adapterKey, version);
@@ -2984,7 +3012,7 @@ export function App() {
         setView('tasks');
       }}
       onContinueAgentTask={() => {
-        const prompt = '请继续完成尚未成功的项目交付物，并调用已授权工具。';
+        const prompt = '请继续完成尚未成功的短剧交付物，并调用已授权工具。';
         setComposer(prompt);
         if (conversation) void sendMessage(prompt);
       }}
@@ -3109,14 +3137,20 @@ export function App() {
     />
   );
 
-  // The open document stays listed even when it does not match the active
-  // filter, so a task-log-opened note or storyboard draft is never edited from
-  // a hidden row.
+  const documentMatchesWorkspace =
+    document?.domainScope !== 'novel' &&
+    (view === 'characters'
+      ? CHARACTER_DOCUMENT_KINDS.includes(documentKind)
+      : !CHARACTER_DOCUMENT_KINDS.includes(documentKind));
+  const hasForeignDocument =
+    !documentMatchesWorkspace && Boolean(document || documentTitle || documentContent);
+  // Selected documents may bypass a kind filter, but never the page boundary.
   const workspaceKinds = view === 'characters' ? CHARACTER_DOCUMENT_KINDS : SCRIPT_DOCUMENT_KINDS;
   const visibleDocuments = documents.filter(
     (item) =>
-      (workspaceKinds.includes(item.kind) && matchesDocumentFilter(item, documentKindFilter)) ||
-      item.id === document?.id,
+      item.domainScope !== 'novel' &&
+      ((workspaceKinds.includes(item.kind) && matchesDocumentFilter(item, documentKindFilter)) ||
+        (documentMatchesWorkspace && item.id === document?.id)),
   );
 
   /**
@@ -3136,6 +3170,39 @@ export function App() {
     );
   };
 
+  const moveDocumentToNovel = async () => {
+    if (!document || !writable || contentBusy) return;
+    setContentBusy(true);
+    try {
+      if (
+        document.title !== documentTitle ||
+        document.kind !== documentKind ||
+        (document.currentVersion?.contentMarkdown ?? '') !== documentContent
+      ) {
+        const saved = await saveDocument();
+        if (!saved) return;
+        setContentBusy(true);
+      }
+      const bindings = await callWorker('novel.binding.list', { includeNeedsReview: true });
+      const binding = bindings.find((item) => item.documentId === document.id);
+      await callWorker('novel.binding.save', {
+        bindingId: binding?.id,
+        expectedRowVersion: binding?.rowVersion,
+        documentId: document.id,
+        role: 'work-outline',
+        domainScope: 'novel',
+        status: 'active',
+      });
+      const rows = await callWorker('document.list', {});
+      setDocuments(rows);
+      await openDocumentById(document.id, rows);
+    } catch (reason) {
+      setContentMessage(reason instanceof Error ? reason.message : '移动小说资料失败');
+    } finally {
+      setContentBusy(false);
+    }
+  };
+
   const renderDocumentToolbar = (
     eyebrow: string,
     fallbackTitle: string,
@@ -3145,10 +3212,27 @@ export function App() {
       <div>
         <span className="eyebrow">{eyebrow}</span>
         {options?.showHeading === false ? null : (
-          <h1>{options?.compact ? fallbackTitle : (document?.title ?? fallbackTitle)}</h1>
+          <h1>
+            {options?.compact || hasForeignDocument
+              ? fallbackTitle
+              : (document?.title ?? fallbackTitle)}
+          </h1>
         )}
       </div>
       <div className="toolbar-actions">
+        {view === 'documents' &&
+          document?.kind === 'outline' &&
+          document.scopeType === 'project' &&
+          !hasForeignDocument && (
+            <button
+              className="button secondary"
+              type="button"
+              disabled={!documentEditorWritable || contentBusy}
+              onClick={() => void moveDocumentToNovel()}
+            >
+              <BookOpen size={15} /> 移至小说资料
+            </button>
+          )}
         {options?.showImport === false ? null : (
           <button
             className="button secondary markdown-import-button"
@@ -3177,7 +3261,9 @@ export function App() {
           className="button primary"
           type="button"
           onClick={() => void saveAndPublishDocument()}
-          disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
+          disabled={
+            hasForeignDocument || !documentEditorWritable || contentBusy || !documentTitle.trim()
+          }
           title="保存当前内容并直接发布为权威版本"
         >
           <Save size={15} />
@@ -3187,11 +3273,13 @@ export function App() {
           className="button secondary"
           type="button"
           onClick={() => void saveDocument()}
-          disabled={!documentEditorWritable || contentBusy || !documentTitle.trim()}
+          disabled={
+            hasForeignDocument || !documentEditorWritable || contentBusy || !documentTitle.trim()
+          }
         >
           保存草稿
         </button>
-        {document?.currentVersion?.state === 'in_review' && (
+        {!hasForeignDocument && document?.currentVersion?.state === 'in_review' && (
           <>
             <button
               className="button secondary"
@@ -3233,7 +3321,9 @@ export function App() {
   };
 
   const renderDocumentEditor = () =>
-    view === 'characters' ? (
+    hasForeignDocument ? (
+      <EmptyWorkspace title="请选择文档" />
+    ) : view === 'characters' ? (
       <CharacterSceneWorkspace
         title={documentTitle}
         kind={documentKind === 'scene' ? 'scene' : 'character'}
@@ -3269,7 +3359,6 @@ export function App() {
         versions={versions}
         currentVersionId={document?.currentVersionId}
         message={contentMessage}
-        episodeChapterCount={episodeChapterIds.length}
         onTitleChange={setDocumentTitle}
         onKindChange={setDocumentKind}
         onContentChange={setDocumentContent}
@@ -3505,10 +3594,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'novel' ? 'active' : ''}`}
                 type="button"
-                onClick={() => {
-                  if (view !== 'novel') setLibraryFocusChapterId(undefined);
-                  openProjectView('novel');
-                }}
+                onClick={() => openProjectView('novel')}
               >
                 <BookOpen size={16} />
                 <span>小说</span>
@@ -3521,7 +3607,12 @@ export function App() {
                 <FileText size={16} />
                 <span>剧本</span>
                 <span className="count">
-                  {documents.filter((item) => SCRIPT_DOCUMENT_KINDS.includes(item.kind)).length}
+                  {
+                    documents.filter(
+                      (item) =>
+                        item.domainScope !== 'novel' && SCRIPT_DOCUMENT_KINDS.includes(item.kind),
+                    ).length
+                  }
                 </span>
               </button>
               <button
@@ -3532,7 +3623,13 @@ export function App() {
                 <Users size={16} />
                 <span>角色与场景</span>
                 <span className="count">
-                  {documents.filter((item) => CHARACTER_DOCUMENT_KINDS.includes(item.kind)).length}
+                  {
+                    documents.filter(
+                      (item) =>
+                        item.domainScope !== 'novel' &&
+                        CHARACTER_DOCUMENT_KINDS.includes(item.kind),
+                    ).length
+                  }
                 </span>
               </button>
               <button
@@ -3773,12 +3870,16 @@ export function App() {
           <WorkspaceSurface
             layout={workspaceLayout}
             dispatch={workspaceDispatch}
-            documentTitle={document?.title ?? documentTitle}
+            documentTitle={
+              (view === 'documents' || view === 'characters') && !hasForeignDocument
+                ? (document?.title ?? documentTitle)
+                : ''
+            }
             editorTitle={WORKSPACE_VIEW_TITLES[view]}
             conversationContent={conversationPanel}
             productionContent={productionPanel}
             productionOpen={navigationMode === 'production'}
-            documentActive={view === 'documents' || view === 'characters'}
+            documentActive={(view === 'documents' || view === 'characters') && !hasForeignDocument}
             detachedPanels={detachedPanels}
             onOpenConversation={() => void focusDetachedPanelWindow(detachedPanels.conversation)}
             onOpenDocument={() => {
@@ -3794,23 +3895,25 @@ export function App() {
               <NovelWorkspace
                 projectId={project?.id}
                 writable={writable}
-                focusChapterId={libraryFocusChapterId}
-                refreshToken={novelRefreshToken}
-                onChapterSelected={(chapter) =>
-                  setActiveNovelChapter({ id: chapter.id, title: chapter.title })
-                }
-                onOpenDocument={(documentId) => void openNovelDocument(documentId)}
-                onGenerateChapter={(chapter) => {
-                  setPendingNovelIntent({ action: 'rewrite_chapter', chapterId: chapter.id });
-                  setComposer(`请生成并保存“${chapter.title}”的小说正文。`);
-                  workspaceDispatch({ type: 'open', panelId: 'conversation' });
-                  setChatMessage(`已指定章节“${chapter.title}”，下次发送会将正文写回对应文档。`);
+                focusChapterId={novelFocusChapterId}
+                focusReferenceId={novelFocusReferenceId}
+                referenceDocuments={documents.filter((item) => item.domainScope === 'novel')}
+                onReferencesChanged={async () => {
+                  setDocuments(await callWorker('document.list', {}));
+                  if (conversation)
+                    setContextPreview(
+                      await callWorker('context.preview', { conversationId: conversation.id }),
+                    );
                 }}
-                onGenerateEpisode={(chapterIds) => {
-                  setEpisodeChapterIds(chapterIds);
+                refreshToken={novelRefreshRevision || undefined}
+                onGenerateEpisode={(chapters) => {
+                  const prompt = composeEpisodeChapterPrompt(chapters);
+                  setComposer((current) =>
+                    current.trim() ? `${current.trim()}\n\n${prompt}` : prompt,
+                  );
                   workspaceDispatch({ type: 'open', panelId: 'conversation' });
                   setChatMessage(
-                    `已指定 ${chapterIds.length} 个章节作为本集范围。直接描述要生成的短剧内容，下次发送会冻结这些章节。`,
+                    `已写入 ${chapters.length} 个章节引用。确认后发送即可，助手会按需检索这些章节。`,
                   );
                 }}
               />

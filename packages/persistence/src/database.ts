@@ -39,6 +39,7 @@ import {
   MIGRATION_V36,
   MIGRATION_V38,
   MIGRATION_V39,
+  MIGRATION_V40,
   MIGRATION_V41,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
@@ -453,6 +454,7 @@ function applyMigrationV39(database: Database.Database, now: string): void {
 }
 
 function applyMigrationV40(database: Database.Database, now: string): void {
+  database.exec(MIGRATION_V40);
   const rows = database.prepare('SELECT id, project_id FROM documents').all() as Array<{
     id: string;
     project_id: string;

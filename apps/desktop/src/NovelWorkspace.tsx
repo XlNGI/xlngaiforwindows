@@ -17,6 +17,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useState } from 'react';
 import type {
   DocumentDetail,
+  DocumentSummary,
   DocumentVersionState,
   NovelChapterInfo,
   NovelConsistencyReport,
@@ -26,17 +27,36 @@ import { callWorker } from './worker-client';
 import { readNovelDocument } from './novel-import-client';
 import { parseNovelSource, type NovelImportChapterDraft } from './novel-import';
 
+export interface NovelEpisodeChapterRef {
+  id: string;
+  displayLabel: string;
+  title: string;
+}
+
 interface NovelWorkspaceProps {
   projectId?: string;
   writable: boolean;
+  /** Select and re-read the chapter produced by an Agent task. */
   focusChapterId?: string;
-  /** Increment after an Agent chapter write so the editor reloads its bound document. */
+  focusReferenceId?: string;
+  referenceDocuments?: DocumentSummary[];
+  onReferencesChanged?: () => Promise<void>;
+  /** Monotonic token used to force a fresh chapter/document read. */
   refreshToken?: number;
-  onChapterSelected?: (chapter: NovelChapterInfo) => void;
   onOpenDocument?: (documentId: string) => void;
-  onGenerateChapter?: (chapter: NovelChapterInfo) => void;
-  /** Called with the user-selected chapter IDs when starting episode generation. */
-  onGenerateEpisode?: (chapterIds: string[]) => void;
+  /** Puts selected chapter titles into the current conversation prompt. */
+  onGenerateEpisode?: (chapters: NovelEpisodeChapterRef[]) => void;
+}
+
+export function composeEpisodeChapterPrompt(chapters: readonly NovelEpisodeChapterRef[]): string {
+  const names = chapters
+    .map((chapter) => `${chapter.displayLabel}《${chapter.title.trim() || '未命名'}》`)
+    .join('、');
+  return (
+    `请基于这些小说章节生成本集短剧内容：${names}。` +
+    '先用 library.search 检索 sourceType 为 novel-chapter 的对应章节，核对标题后再写草稿；' +
+    '不要用其它文档或未点名的章节代替。'
+  );
 }
 
 function documentStateLabel(state: DocumentVersionState): string {
@@ -90,16 +110,18 @@ export function NovelWorkspace({
   projectId,
   writable,
   focusChapterId,
-  refreshToken = 0,
-  onChapterSelected,
+  focusReferenceId,
+  referenceDocuments = [],
+  onReferencesChanged,
+  refreshToken,
   onOpenDocument,
-  onGenerateChapter,
   onGenerateEpisode,
 }: NovelWorkspaceProps) {
   const [chapters, setChapters] = useState<NovelChapterInfo[]>([]);
   const [volumes, setVolumes] = useState<NovelVolumeInfo[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [selected, setSelected] = useState<NovelChapterInfo>();
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string>();
   const [document, setDocument] = useState<DocumentDetail>();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -167,6 +189,10 @@ export function NovelWorkspace({
     ]);
     setChapters(rows);
     setVolumes(volumeRows);
+    if (focusReferenceId && !preferredId) {
+      await openReference(focusReferenceId);
+      return;
+    }
     const next = rows.find((row) => row.id === preferredId) ?? rows[0];
     if (next && (forceOpen || next.id !== selected?.id)) await openChapter(next);
     else if (next) setSelected(next);
@@ -179,31 +205,51 @@ export function NovelWorkspace({
   };
 
   useEffect(() => {
-    void loadChapters(focusChapterId, true);
-  }, [projectId, includeArchived, focusChapterId, refreshToken]);
+    void loadChapters(focusChapterId, Boolean(focusChapterId || refreshToken !== undefined));
+  }, [projectId, includeArchived, focusChapterId, focusReferenceId, refreshToken]);
+
+  const openReference = async (documentId: string) => {
+    setBusy(true);
+    try {
+      const detail = await callWorker('document.get', { documentId });
+      if (detail.domainScope !== 'novel') throw new Error('该文档不属于小说资料。');
+      setSelected(undefined);
+      setSelectedReferenceId(documentId);
+      setDocument(detail);
+      setTitle(detail.title);
+      setContent(detail.currentVersion?.contentMarkdown ?? '');
+      setConflictDocument(undefined);
+      setMessage('');
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '小说资料加载失败');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const openChapter = async (chapter: NovelChapterInfo) => {
     setBusy(true);
     try {
       const detail = await callWorker('document.get', { documentId: chapter.documentId });
       setSelected(chapter);
-      onChapterSelected?.(chapter);
+      setSelectedReferenceId(undefined);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
       setMessage('');
+      setConflictDocument(undefined);
     } finally {
       setBusy(false);
     }
   };
 
   const saveDraft = async () => {
-    if (!selected || !document || !writable) return;
+    if ((!selected && !selectedReferenceId) || !document || !writable) return;
     setBusy(true);
     try {
       const next = await callWorker('document.draft.save', {
         documentId: document.id,
-        title: title.trim() || selected.title,
+        title: title.trim() || document.title,
         contentMarkdown: content,
         expectedDocumentRowVersion: document.rowVersion,
         authorType: 'user',
@@ -211,7 +257,7 @@ export function NovelWorkspace({
       setDocument(next);
       setChapters((rows) =>
         rows.map((row) =>
-          row.id === selected.id
+          row.id === selected?.id
             ? { ...row, title: next.title, documentRowVersion: next.rowVersion }
             : row,
         ),
@@ -219,7 +265,8 @@ export function NovelWorkspace({
       setSelected((row) =>
         row ? { ...row, title: next.title, documentRowVersion: next.rowVersion } : row,
       );
-      await loadChapters(selected.id);
+      if (selected) await loadChapters(selected.id);
+      if (onReferencesChanged) await onReferencesChanged();
       setMessage('草稿已保存，并已完成 RAG 切片。');
       setConflictDocument(undefined);
     } catch (error) {
@@ -400,7 +447,7 @@ export function NovelWorkspace({
           type="button"
           title="刷新章节"
           disabled={busy}
-          onClick={() => void loadChapters(selected?.id)}
+          onClick={() => void loadChapters(selected?.id, true)}
         >
           <RefreshCw size={14} />
         </button>
@@ -444,10 +491,14 @@ export function NovelWorkspace({
           title="用所选章节生成短剧内容（本集整体把控、场次与镜头、角色与场景）"
           disabled={!onGenerateEpisode || selectedChapterIds.size === 0}
           onClick={() => {
-            const ids = chapters
+            const selected = chapters
               .filter((chapter) => selectedChapterIds.has(chapter.id))
-              .map((chapter) => chapter.id);
-            if (ids.length > 0) onGenerateEpisode?.(ids);
+              .map((chapter) => ({
+                id: chapter.id,
+                displayLabel: chapter.displayLabel,
+                title: chapter.title,
+              }));
+            if (selected.length > 0) onGenerateEpisode?.(selected);
           }}
         >
           <Clapperboard size={13} /> 生成短剧内容（{selectedChapterIds.size}）
@@ -521,6 +572,30 @@ export function NovelWorkspace({
                 />
               </label>
             </div>
+            {referenceDocuments.length > 0 && (
+              <div className="novel-volume-group" aria-label="小说资料">
+                <strong>小说资料</strong>
+                {referenceDocuments
+                  .filter(
+                    (item) =>
+                      !normalizedSearch ||
+                      item.title.toLocaleLowerCase('zh-CN').includes(normalizedSearch),
+                  )
+                  .map((item) => (
+                    <button
+                      className={`tree-item ${selectedReferenceId === item.id ? 'selected' : ''}`}
+                      type="button"
+                      key={item.id}
+                      disabled={busy}
+                      onClick={() => void openReference(item.id)}
+                    >
+                      <FileText size={13} />
+                      <span>{item.title}</span>
+                      <small>{item.kind === 'outline' ? '大纲' : '资料'}</small>
+                    </button>
+                  ))}
+              </div>
+            )}
             {volumes.map((volume) => (
               <div key={volume.id} className="novel-volume-group">
                 <strong>{volume.title}</strong>
@@ -539,11 +614,11 @@ export function NovelWorkspace({
             )}
           </aside>
           <section className="novel-editor">
-            {selected && document ? (
+            {(selected || selectedReferenceId) && document ? (
               <>
                 <div className="novel-editor-heading">
                   <input
-                    aria-label="章节标题"
+                    aria-label={selectedReferenceId ? '小说资料标题' : '章节标题'}
                     value={title}
                     disabled={!writable || busy}
                     onChange={(event) => setTitle(event.target.value)}
@@ -553,17 +628,19 @@ export function NovelWorkspace({
                       ? documentStateLabel(document.currentVersion.state)
                       : '未保存'}
                   </span>
-                  <span
-                    className={`document-state ${selected.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}`}
-                  >
-                    {selected.ragChunkCount > 0 ? `已切片 ${selected.ragChunkCount}` : '未切片'}
-                  </span>
+                  {selected && (
+                    <span
+                      className={`document-state ${selected.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}`}
+                    >
+                      {selected.ragChunkCount > 0 ? `已切片 ${selected.ragChunkCount}` : '未切片'}
+                    </span>
+                  )}
                   {onOpenDocument && (
                     <button
                       className="icon-button subtle"
                       type="button"
-                      title="定位到小说章节"
-                      aria-label="定位到小说章节"
+                      title="在文档工作区打开"
+                      aria-label="在文档工作区打开"
                       onClick={() => onOpenDocument(document.id)}
                     >
                       <ExternalLink size={14} />
@@ -585,7 +662,7 @@ export function NovelWorkspace({
                   </div>
                 )}
                 <textarea
-                  aria-label="章节内容"
+                  aria-label={selectedReferenceId ? '小说资料内容' : '章节内容'}
                   className="markdown-editor novel-markdown-editor"
                   value={content}
                   disabled={!writable || busy}
@@ -599,30 +676,22 @@ export function NovelWorkspace({
                   >
                     <Save size={13} /> 保存并切片
                   </button>
-                  {onGenerateChapter && (
+                  {selected && (
                     <button
-                      className="button primary"
+                      className={selected.lifecycleStatus === 'archived' ? '' : 'danger'}
                       type="button"
                       disabled={!writable || busy}
-                      onClick={() => onGenerateChapter(selected)}
+                      onClick={() => void toggleArchive()}
                     >
-                      <BookOpen size={13} /> 生成正文到本章
+                      {selected.lifecycleStatus === 'archived' ? (
+                        '恢复草稿'
+                      ) : (
+                        <>
+                          <Trash2 size={13} /> 删除草稿
+                        </>
+                      )}
                     </button>
                   )}
-                  <button
-                    className={selected.lifecycleStatus === 'archived' ? '' : 'danger'}
-                    type="button"
-                    disabled={!writable || busy}
-                    onClick={() => void toggleArchive()}
-                  >
-                    {selected.lifecycleStatus === 'archived' ? (
-                      '恢复草稿'
-                    ) : (
-                      <>
-                        <Trash2 size={13} /> 删除草稿
-                      </>
-                    )}
-                  </button>
                 </div>
               </>
             ) : (

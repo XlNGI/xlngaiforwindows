@@ -271,8 +271,7 @@ export class PiConversationRuntime implements ConversationRuntime {
           providerGateway &&
           toolResults.length > 0 &&
           plan?.status !== 'succeeded' &&
-          (!genericPlanWorkflow ||
-            definitions.some((definition) => providerGateway.hasDefinition(definition.name)))
+          (!genericPlanWorkflow || (readyOperations?.length ?? 0) > 0)
         ) {
           providerGateway.startProviderStep();
         }

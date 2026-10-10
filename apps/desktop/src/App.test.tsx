@@ -1,13 +1,17 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AdapterDescriptor, ConversationInfo, LlmGenerationInfo } from '@ai-video/contracts';
+import type {
+  AdapterDescriptor,
+  AgentTaskDetail,
+  ConversationInfo,
+  LlmGenerationInfo,
+} from '@ai-video/contracts';
 import {
   App,
   buildAgentAttachments,
   collectReferenceImageInputs,
   composeImageGenerationPrompt,
   inferAgentCapability,
-  inferNovelWritingIntent,
   mergeGenerationMessage,
   normalizeImageDataUrl,
   resolveAgentRunModelSelection,
@@ -36,24 +40,6 @@ describe('inferAgentCapability', () => {
     expect(inferAgentCapability('生成一张角色图')).toBe('image');
     expect(inferAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferAgentCapability('生成角色三视图提示词')).toBe('document');
-  });
-});
-
-describe('inferNovelWritingIntent', () => {
-  it('targets the selected chapter only for an explicit prose write request', () => {
-    expect(inferNovelWritingIntent('请生成并保存本章小说正文', 'chapter-1')).toEqual({
-      action: 'rewrite_chapter',
-      chapterId: 'chapter-1',
-    });
-    expect(inferNovelWritingIntent('请续写本章小说正文', 'chapter-1')).toEqual({
-      action: 'continue_chapter',
-      chapterId: 'chapter-1',
-    });
-  });
-
-  it('does not route chapter discussion or unscoped prompts to novel writing', () => {
-    expect(inferNovelWritingIntent('请总结本章剧情', 'chapter-1')).toBeUndefined();
-    expect(inferNovelWritingIntent('请生成并保存本章小说正文')).toBeUndefined();
   });
 });
 
@@ -550,6 +536,147 @@ describe('App', () => {
       'project',
     );
     expect(container.querySelector('.production-panel')).not.toBeInTheDocument();
+  });
+
+  it.each(['小说', '剧本', '角色与场景', '场次与镜头', '素材库', '任务日志'])(
+    'keeps the %s page out of image and video production',
+    (page) => {
+      window.localStorage.removeItem('ai-video.production-capability');
+      const { container } = render(<App />);
+      const projectNav = screen.getByRole('navigation', { name: '项目导航' });
+      fireEvent.click(within(projectNav).getByRole('button', { name: new RegExp(`^${page}`) }));
+      expect(container.querySelector('.workspace-editor-page')).toBeVisible();
+
+      fireEvent.click(screen.getByRole('button', { name: '文生图' }));
+      expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
+      expect(container.querySelector('[data-pane-id="editor"]')).not.toBeInTheDocument();
+      expect(container.querySelector('.workspace-production-page')).toBeVisible();
+
+      fireEvent.click(screen.getByRole('button', { name: '视频制作' }));
+      fireEvent.click(screen.getByRole('button', { name: '文生视频' }));
+      expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
+
+      fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
+      expect(container.querySelector('.workspace-editor-page')).toBeVisible();
+      expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent(page);
+    },
+  );
+
+  it('opens a chapter artifact from the task log in the novel page', async () => {
+    const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
+    const chapter = {
+      id: 'chapter-1',
+      projectId: 'project',
+      documentId: 'chapter-document',
+      title: '小说专属章节',
+      position: 0,
+      displayLabel: '第一章',
+      lifecycleStatus: 'active' as const,
+      documentRowVersion: 0,
+      ragChunkCount: 1,
+      rowVersion: 0,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const task = {
+      id: 'chapter-task',
+      projectId: 'project',
+      conversationId: 'conversation',
+      userMessageId: 'message',
+      taskType: 'document-create' as const,
+      scopeType: 'project' as const,
+      title: '生成小说章节',
+      status: 'completed' as const,
+      phase: 'waiting_review' as const,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Page Boundary Project',
+          rootPath: 'D:\\PageBoundary',
+          mode: 'read-write',
+          schemaVersion: 38,
+          createdAt: 'now',
+          updatedAt: 'now',
+        });
+      if (method === 'conversation.list' || method === 'task.log.list')
+        return Promise.resolve({
+          items:
+            method === 'task.log.list'
+              ? [{ ...task, kind: 'agent-document', sourceId: task.id }]
+              : [],
+        });
+      if (method === 'agent.task.get')
+        return Promise.resolve({
+          task,
+          documents: [
+            {
+              documentId: chapter.documentId,
+              documentVersionId: 'chapter-version',
+              operation: 'create',
+              createdAt: 'now',
+            },
+          ],
+          events: [],
+          providerSteps: [],
+          researchSources: [],
+        } satisfies AgentTaskDetail);
+      if (method === 'novel.chapter.list') return Promise.resolve([chapter]);
+      if (method === 'document.get')
+        return Promise.resolve({
+          id: chapter.documentId,
+          projectId: 'project',
+          kind: 'note',
+          title: chapter.title,
+          scopeType: 'project',
+          lifecycleStatus: 'active',
+          rowVersion: 0,
+          currentVersionId: 'chapter-version',
+          createdAt: 'now',
+          updatedAt: 'now',
+          currentVersion: {
+            id: 'chapter-version',
+            documentId: chapter.documentId,
+            version: 1,
+            contentMarkdown: '仅属于小说页面的正文',
+            state: 'draft',
+            authorType: 'agent',
+            createdAt: 'now',
+          },
+        });
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ providers: [], capabilities: [], adapters: [] });
+      if (
+        [
+          'document.list',
+          'scene.list',
+          'asset.list',
+          'constraint.list',
+          'provider.profile.list',
+          'novel.volume.list',
+          'agent.partial.list',
+        ].includes(method)
+      )
+        return Promise.resolve([]);
+      return baselineWorker(method, params);
+    });
+
+    render(<App />);
+    await screen.findAllByText('Page Boundary Project');
+    const projectNav = screen.getByRole('navigation', { name: '项目导航' });
+    fireEvent.click(within(projectNav).getByRole('button', { name: '任务日志' }));
+    fireEvent.click(await screen.findByRole('button', { name: /生成小说章节/ }));
+    fireEvent.click(await screen.findByRole('button', { name: '打开文档' }));
+    expect(await screen.findByLabelText('章节内容')).toHaveValue('仅属于小说页面的正文');
+    expect(screen.queryByLabelText('文档内容')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '在文档工作区打开' })).not.toBeInTheDocument();
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
+    expect(screen.queryByDisplayValue('仅属于小说页面的正文')).not.toBeInTheDocument();
+    expect(screen.queryByText(chapter.title)).not.toBeInTheDocument();
   });
 
   it('offers a sample project on first use and sends the selected absolute path', async () => {
@@ -1144,7 +1271,8 @@ describe('App', () => {
           conversationId: conversation.id,
           prompt: 'Draft a project brief',
           capability: 'text',
-          idempotencyKey: expect.stringMatching(/^desktop-run:/) as unknown,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          idempotencyKey: expect.stringMatching(/^desktop-run:/),
           providerProfileId: profile.id,
           modelId: model.id,
           researchMode: 'auto',
@@ -1165,7 +1293,7 @@ describe('App', () => {
   });
 
   it('splits script documents from character and scene prompts', async () => {
-    vi.mocked(callWorker).mockImplementation((method: string) => {
+    vi.mocked(callWorker).mockImplementation((method: string, params: unknown) => {
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -1262,6 +1390,32 @@ describe('App', () => {
             updatedAt: 'now',
           },
         ]);
+      if (method === 'document.get') {
+        const isCharacter = (params as { documentId: string }).documentId === 'd-character';
+        const id = isCharacter ? 'd-character' : 'd-outline';
+        return Promise.resolve({
+          id,
+          projectId: 'project',
+          kind: isCharacter ? 'character' : 'outline',
+          title: isCharacter ? '角色设定' : '项目大纲',
+          scopeType: 'project',
+          lifecycleStatus: 'active',
+          rowVersion: 0,
+          currentVersionId: `${id}-v1`,
+          createdAt: 'now',
+          updatedAt: 'now',
+          currentVersion: {
+            id: `${id}-v1`,
+            documentId: id,
+            version: 1,
+            contentMarkdown: isCharacter ? '角色专属正文' : '剧本专属正文',
+            state: 'draft',
+            authorType: 'user',
+            createdAt: 'now',
+          },
+        });
+      }
+      if (method === 'document.versions') return Promise.resolve([]);
       if (method === 'scene.list') return Promise.resolve([]);
       if (method === 'asset.list') return Promise.resolve([]);
       if (method === 'constraint.list')
@@ -1333,6 +1487,28 @@ describe('App', () => {
     fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
     expect(screen.getByText('角色设定')).toBeInTheDocument();
     expect(screen.getByText('场景设定')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /角色设定/ }));
+    expect(await screen.findByDisplayValue('角色专属正文')).toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue('角色专属正文'), {
+      target: { value: '未保存的角色修改' },
+    });
+    const projectNav = screen.getByRole('navigation', { name: '项目导航' });
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
+    expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('未保存的角色修改')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '文档在独立窗口打开' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
+    expect(screen.getByDisplayValue('未保存的角色修改')).toBeInTheDocument();
+
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
+    fireEvent.click(screen.getByRole('button', { name: /项目大纲/ }));
+    expect(await screen.findByDisplayValue('剧本专属正文')).toBeInTheDocument();
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
+    expect(screen.queryByDisplayValue('剧本专属正文')).not.toBeInTheDocument();
+    expect(screen.queryByText('项目大纲')).not.toBeInTheDocument();
   });
 
   it('publishes an edited document in one action without a separate review step', async () => {

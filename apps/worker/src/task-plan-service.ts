@@ -1424,9 +1424,15 @@ export function shouldRequireStructuredPlan(
   _userPrompt: string,
   _authorizedOperations: readonly string[],
 ): boolean {
-  // Ordinary project sessions let the model pick tools. Only the explicit
-  // short-drama UI path freezes a structured plan before write tools.
-  return mode === 'short-drama';
+  if (mode === 'short-drama') return true;
+  const needsProjectEvidence = /(?:小说|章节|项目资料|根据.*第一章|chapter|novel)/iu.test(
+    _userPrompt,
+  );
+  return (
+    needsProjectEvidence &&
+    _authorizedOperations.includes('library.search') &&
+    inferRequiredPlanOperations(_userPrompt, _authorizedOperations).length >= 2
+  );
 }
 
 export function inferRequiredPlanOperations(
