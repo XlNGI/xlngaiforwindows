@@ -166,6 +166,8 @@ interface ChatPanelProps {
     proposedParameters?: AdapterParameters;
   };
   onSubmitAgentParameters?: (adapterKey: string, parameters: AdapterParameters) => void;
+  selectedChapterCount?: number;
+  onClearSelectedChapters?: () => void;
 }
 
 export function ChatPanel({
