@@ -141,6 +141,7 @@ import { NovelService, NovelServiceError } from './novel-service.js';
 import {
   AgentOrchestrationError,
   AgentOrchestrationService,
+  inferNovelWritingIntentFromPrompt,
 } from './agent-orchestration-service.js';
 import { PartialArtifactService } from './partial-artifact-service.js';
 import { MarkdownExportService } from './markdown-export-service.js';
@@ -1468,12 +1469,14 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           // Every project request uses the same System Agent. A trusted
           // chapter shortcut may pre-resolve a target, but it does not
           // change the runtime into a novel or short-drama persona.
-          const orchestration = agentParams.novelIntent
+          const novelIntent =
+            agentParams.novelIntent ?? inferNovelWritingIntentFromPrompt(agentParams.prompt);
+          const orchestration = novelIntent
             ? agentOrchestrationService.prepareNovelTask({
                 conversationId: agentParams.conversationId,
                 projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
                 prompt: agentParams.prompt,
-                intent: agentParams.novelIntent,
+                intent: novelIntent,
                 idempotencyKey: agentParams.idempotencyKey,
               })
             : undefined;
@@ -1502,7 +1505,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             documentIntent,
             selectedChapterIds: agentParams.selectedChapterIds,
             targetPlatform: agentParams.targetPlatform,
-            ...(agentParams.novelIntent ? { novelIntent: agentParams.novelIntent } : {}),
+            ...(novelIntent ? { novelIntent } : {}),
           });
           const agent = agentProviderLoopService.prepare(
             prepared.stream,
@@ -1539,13 +1542,15 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           // `agentMode` is retained at the IPC boundary for compatibility with
           // older Desktop callers. It never selects an Agent persona: all
           // requests use the same project System Agent and resolver.
-          const orchestration = agentParams.novelIntent
+          const novelIntent =
+            agentParams.novelIntent ?? inferNovelWritingIntentFromPrompt(agentParams.prompt);
+          const orchestration = novelIntent
             ? agentOrchestrationService.prepareNovelTask({
                 conversationId: agentParams.conversationId,
                 projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
                 prompt: agentParams.prompt,
                 title: agentParams.title,
-                intent: agentParams.novelIntent,
+                intent: novelIntent,
                 idempotencyKey: agentParams.idempotencyKey,
               })
             : undefined;
@@ -1568,7 +1573,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             ...(orchestration && 'documentIntent' in orchestration
               ? {
                   novelIntent: {
-                    ...agentParams.novelIntent,
+                    ...novelIntent,
                     chapterId: orchestration.chapterId,
                   },
                 }

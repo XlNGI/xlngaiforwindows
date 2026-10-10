@@ -2,7 +2,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AgentOrchestrationService } from './agent-orchestration-service.js';
+import {
+  AgentOrchestrationService,
+  inferNovelWritingIntentFromPrompt,
+} from './agent-orchestration-service.js';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
 
@@ -30,6 +33,14 @@ async function setup() {
 }
 
 describe('AgentOrchestrationService', () => {
+  it('infers a chapter writer request when the Desktop omits novelIntent', () => {
+    expect(inferNovelWritingIntentFromPrompt('请生成第一章小说正文')).toMatchObject({
+      action: 'create_chapter',
+      displayLabel: '第一章',
+    });
+    expect(inferNovelWritingIntentFromPrompt('请写一份小说大纲')).toBeUndefined();
+  });
+
   it('creates a reserved chapter, task target, and chapter lock atomically before generation', async () => {
     const { project, conversation, orchestration } = await setup();
     const prepared = orchestration.prepareNovelTask({

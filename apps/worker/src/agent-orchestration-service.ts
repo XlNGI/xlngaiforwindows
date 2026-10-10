@@ -21,6 +21,35 @@ export interface NovelTaskPreparation {
   };
 }
 
+/** Resolve direct chapter requests from older Desktop clients without hints. */
+export function inferNovelWritingIntentFromPrompt(prompt: string): NovelWritingIntent | undefined {
+  const value = prompt.normalize('NFC').trim();
+  if (
+    !value ||
+    !/(小说正文|小说章节|章节|本章|续写|重写|第一章|第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章)/u.test(
+      value,
+    )
+  )
+    return undefined;
+  if (
+    !/(生成|创作|撰写|写作|续写|继续写|继续创作|重写|改写|修改|更新|保存|写入|generate|write|continue|rewrite|save|update)/iu.test(
+      value,
+    )
+  )
+    return undefined;
+  const label = value.match(/第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章/u)?.[0];
+  return {
+    action: /续写|继续写|继续创作|continue/iu.test(value)
+      ? 'continue_chapter'
+      : label
+        ? 'create_chapter'
+        : 'rewrite_chapter',
+    ...(label
+      ? { displayLabel: label.replace(/\s+/gu, ''), chapterTitle: label.replace(/\s+/gu, '') }
+      : {}),
+  };
+}
+
 export class AgentOrchestrationError extends Error {
   constructor(
     readonly code: 'CONFLICT' | 'INVALID_PARAMETERS' | 'INVALID_STATE' | 'NOT_FOUND',
