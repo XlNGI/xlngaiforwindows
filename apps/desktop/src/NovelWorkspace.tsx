@@ -44,6 +44,8 @@ interface NovelWorkspaceProps {
   /** Monotonic token used to force a fresh chapter/document read. */
   refreshToken?: number;
   onOpenDocument?: (documentId: string) => void;
+  onChapterSelected?: (chapter: NovelChapterInfo) => void;
+  onGenerateChapter?: (chapter: NovelChapterInfo) => void;
   /** Puts selected chapter titles into the current conversation prompt. */
   onGenerateEpisode?: (chapters: NovelEpisodeChapterRef[]) => void;
 }
@@ -115,6 +117,8 @@ export function NovelWorkspace({
   onReferencesChanged,
   refreshToken,
   onOpenDocument,
+  onChapterSelected,
+  onGenerateChapter,
   onGenerateEpisode,
 }: NovelWorkspaceProps) {
   const [chapters, setChapters] = useState<NovelChapterInfo[]>([]);
@@ -232,6 +236,7 @@ export function NovelWorkspace({
     try {
       const detail = await callWorker('document.get', { documentId: chapter.documentId });
       setSelected(chapter);
+      onChapterSelected?.(chapter);
       setSelectedReferenceId(undefined);
       setDocument(detail);
       setTitle(detail.title);
@@ -442,6 +447,14 @@ export function NovelWorkspace({
           />{' '}
           显示已删除
         </label>
+        <button
+          className="button secondary"
+          type="button"
+          disabled={!onGenerateChapter || !selected || busy}
+          onClick={() => selected && onGenerateChapter?.(selected)}
+        >
+          <BookOpen size={13} /> 生成本章正文
+        </button>
         <button
           className="icon-button subtle"
           type="button"

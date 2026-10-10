@@ -63,8 +63,10 @@ import type {
   MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
   AgentProtectedUiHandoff,
+  NovelWritingIntent,
   VideoGenerationJobInfo,
   ConversationRuntimeLiveAction,
+  NovelChapterInfo,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -500,6 +502,35 @@ export function inferAgentCapability(prompt: string): UnifiedAgentCapability {
   return inferUnifiedAgentCapabilityHint(prompt);
 }
 
+export function inferNovelWritingIntent(
+  prompt: string,
+  chapterId?: string,
+): NovelWritingIntent | undefined {
+  const value = prompt.normalize('NFC').trim();
+  if (!value || !/(小说|章节|正文|本章|稿件)/u.test(value)) return undefined;
+  if (
+    !/(生成|创作|撰写|写作|续写|继续写|继续创作|重写|改写|修改|更新|保存|写入|generate|write|continue|rewrite|save|update)/iu.test(
+      value,
+    )
+  ) {
+    return undefined;
+  }
+  if (chapterId) {
+    return {
+      action: /续写|继续写|继续创作|continue/iu.test(value)
+        ? 'continue_chapter'
+        : 'rewrite_chapter',
+      chapterId,
+    };
+  }
+  const label = value.match(/第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章/u)?.[0];
+  return {
+    action: 'create_chapter',
+    ...(label ? { displayLabel: label.replace(/\s+/gu, '') } : {}),
+    ...(label ? { chapterTitle: label.replace(/\s+/gu, '') } : {}),
+  };
+}
+
 /**
  * Combines the user's direct image request with the most relevant generated
  * prompt document. Image adapters only receive their `prompt` parameter, so
@@ -665,6 +696,8 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const [activeNovelChapter, setActiveNovelChapter] = useState<NovelChapterInfo>();
+  const [pendingNovelIntent, setPendingNovelIntent] = useState<NovelWritingIntent>();
   const [chatMessage, setChatMessage] = useState('');
   const [agentModelSelection, setAgentModelSelection] =
     useState<UnifiedAgentModelSelectionRequest>();
@@ -2116,6 +2149,11 @@ export function App() {
           agentPrompt = composeImageGenerationPrompt(promptForAgent, promptDocument);
         }
         const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
+        const novelIntent =
+          pendingNovelIntent ??
+          (view === 'novel'
+            ? inferNovelWritingIntent(prompt, activeNovelChapter?.id)
+            : inferNovelWritingIntent(prompt));
         const runModel = resolveAgentRunModelSelection(
           capability,
           modelSelection
@@ -2148,9 +2186,11 @@ export function App() {
             : {}),
           ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
           researchMode,
+          ...(novelIntent ? { novelIntent } : {}),
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         });
+        if (unified.status !== 'needs_model_selection') setPendingNovelIntent(undefined);
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
@@ -3897,6 +3937,14 @@ export function App() {
                 writable={writable}
                 focusChapterId={novelFocusChapterId}
                 focusReferenceId={novelFocusReferenceId}
+                refreshToken={novelRefreshRevision || undefined}
+                onChapterSelected={setActiveNovelChapter}
+                onGenerateChapter={(chapter) => {
+                  setPendingNovelIntent({ action: 'rewrite_chapter', chapterId: chapter.id });
+                  setComposer(`请生成并保存“${chapter.title}”的小说正文。`);
+                  workspaceDispatch({ type: 'open', panelId: 'conversation' });
+                  setChatMessage(`已指定章节“${chapter.title}”，发送后会将正文写回对应章节。`);
+                }}
                 referenceDocuments={documents.filter((item) => item.domainScope === 'novel')}
                 onReferencesChanged={async () => {
                   setDocuments(await callWorker('document.list', {}));
@@ -3905,7 +3953,6 @@ export function App() {
                       await callWorker('context.preview', { conversationId: conversation.id }),
                     );
                 }}
-                refreshToken={novelRefreshRevision || undefined}
                 onGenerateEpisode={(chapters) => {
                   const prompt = composeEpisodeChapterPrompt(chapters);
                   setComposer((current) =>
