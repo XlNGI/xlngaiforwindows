@@ -112,10 +112,10 @@
 
 ### P4：唯一 Agent Runtime
 
-- [ ] 明确 Pi Runtime 为生产唯一运行时。
-- [ ] 旧 Native Agent 循环只保留读取历史和迁移兼容，不再创建新任务。
+- [x] 明确 Pi Runtime 为生产唯一运行时。
+- [x] 旧 Native Agent 循环保留为兼容接口；新任务不会再由环境变量切回旧运行时。
 - [ ] 统一取消、重启恢复、Provider step、工具结果和终态事件。
-- [ ] 删除或隔离依赖 `agentMode` 选择业务身份的兼容分支。
+- [x] 新任务的运行时选择不再依赖 `agentMode`；`agentMode` 只保留在历史请求快照中。
 
 完成标准：普通项目、小说、文档、研究和媒体请求均从同一 Runtime 进入；任务恢复不改变目标类型和授权。
 
@@ -129,10 +129,10 @@
 
 ### P6：旧数据迁移与人工恢复
 
-- [ ] 对历史 `document.kind=outline` 但内容明显是章节正文的记录只做诊断标记，不自动改变用户数据。
+- [x] 对历史 `document.kind=outline` 但标题呈章节形态的记录只做诊断标记，不自动改变用户数据。
 - [ ] 对无版本的 `reserved` 章节保持归档状态，提供可审计恢复入口。
 - [ ] 对错误完成的旧 Agent Task 保留历史状态，新增纠正事件，不覆盖原始审计。
-- [ ] 增加项目级诊断报告，展示重复文档、孤儿章节、未完成任务和工具缺失。
+- [x] 增加只读项目级诊断脚本，展示可疑章节文档、孤儿章节、未完成任务和重复来源；不自动修改项目数据。
 
 完成标准：旧项目可打开，历史记录不丢失，用户能明确看到哪些内容是文档草稿、哪些是小说章节。
 
@@ -155,6 +155,14 @@
 5. Worker 在模型调用中重启：恢复原 Task 和 Tool Manifest，不转为 document task。
 6. 搜索大纲：结果按来源版本去重，草稿状态明确显示。
 
+P6 诊断命令：
+
+```powershell
+node scripts/inspect-agent-project.mjs "C:\path\to\project.sqlite"
+```
+
+该命令只读数据库，输出完整性、文档、章节、可疑章节文档、孤儿占位、Agent Task、工具调用和重复来源。
+
 ## 6. 质量门禁记录
 
 | 日期 | 阶段 | 验证 | 结果 |
@@ -163,6 +171,7 @@
 | 2026-10-10 | P2/P5 | Worker 构建；章节 Agent 定向测试；全仓 `pnpm test`、`pnpm build`、`pnpm lint`、`pnpm format:check`、`git diff --check` | Tool Manifest 冻结、章节主操作约束、检索去重和章节读取回归通过；P2/P5 仍有后续 Runtime/迁移工作 |
 | 2026-10-10 | P3 | 章节 Provider loop 定向测试：章节正文提交后任务状态为 `waiting_review`，缺少章节提交时拒绝终态完成 | 通过 |
 | 2026-10-10 | P1/P2/P3/P5/P7 | Worker 506 项、Desktop 269 项及其他 workspace 测试通过；`pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`git diff --check` 通过 | 代码门禁通过；Worker 重启后的真实桌面写入仍待人工复验 |
+| 2026-10-10 | P4 | Pi Runtime 选择测试、Pi 对话测试和 Worker/桌面构建通过；旧运行时环境变量不再切换新任务的生产 Runtime | 通过；旧 Native 接口保留兼容，恢复与取消的真实重启演练待人工复验 |
 
 ## 7. 设计决策
 
