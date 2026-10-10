@@ -3399,6 +3399,8 @@ export class AgentProviderLoopService {
     now: string,
     authorizations: AuthorizationSpec | AuthorizationSpec[],
   ): { stepId: string; authorizationHandles: Map<AgentToolOperation, string> } {
+    const authorizationList = Array.isArray(authorizations) ? authorizations : [authorizations];
+    freezeTaskToolManifest(database, taskId, authorizationList);
     const stepId = randomUUID();
     database
       .prepare(
@@ -3430,7 +3432,7 @@ export class AgentProviderLoopService {
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, 0, ?, 0, ?
        FROM agent_tasks WHERE id = ?`,
     );
-    for (const authorization of Array.isArray(authorizations) ? authorizations : [authorizations]) {
+    for (const authorization of authorizationList) {
       unifiedAgentToolRegistry.require(authorization.operation);
       const handle = randomBytes(32).toString('base64url');
       insert.run(
@@ -4400,6 +4402,76 @@ function authorizationSpecsForTask(
     });
   }
   return uniqueAuthorizationSpecs(authorizations);
+}
+
+function freezeTaskToolManifest(
+  database: Database.Database,
+  taskId: string,
+  authorizations: readonly AuthorizationSpec[],
+): void {
+  const row = database
+    .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
+    .get(taskId) as { request_snapshot_json: string } | undefined;
+  if (!row) throw new Error('Agent task was not found while freezing its tool manifest.');
+  const snapshot = JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
+  const current = authorizations
+    .map((authorization) => ({
+      operation: authorization.operation,
+      ...(authorization.targetDocumentId
+        ? { targetDocumentId: authorization.targetDocumentId }
+        : {}),
+      ...(authorization.scopeType ? { scopeType: authorization.scopeType } : {}),
+      ...(authorization.scopeId ? { scopeId: authorization.scopeId } : {}),
+      ...(authorization.baseVersionId ? { baseVersionId: authorization.baseVersionId } : {}),
+      ...(authorization.expectedDocumentRowVersion === undefined
+        ? {}
+        : { expectedDocumentRowVersion: authorization.expectedDocumentRowVersion }),
+    }))
+    .sort((left, right) => left.operation.localeCompare(right.operation));
+  const existing = Array.isArray(snapshot.toolManifest)
+    ? (snapshot.toolManifest as Array<Record<string, unknown>>)
+    : [];
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const item of [...existing, ...current]) {
+    if (typeof item.operation === 'string') merged.set(item.operation, item);
+  }
+  const manifest = [...merged.values()].sort((left, right) =>
+    String(left.operation).localeCompare(String(right.operation)),
+  );
+  const primaryOperations = manifest
+    .map((item) => String(item.operation))
+    .filter(
+      (operation) =>
+        !isResearchOperation(operation) &&
+        !isLibraryOperation(operation) &&
+        !isSystemOperation(operation) &&
+        !isMediaPrepareOperation(operation),
+    );
+  const primary = primaryOperations[0];
+  const previousPrimary =
+    typeof snapshot.primaryOperation === 'string' ? snapshot.primaryOperation : undefined;
+  if (previousPrimary && primary && previousPrimary !== primary) {
+    throw new Error('Agent task primary operation changed after its tool manifest was frozen.');
+  }
+  const next = {
+    ...snapshot,
+    toolManifest: manifest,
+    ...(primary ? { primaryOperation: primary } : {}),
+  };
+  if (JSON.stringify(next) !== JSON.stringify(snapshot)) {
+    database
+      .prepare(
+        `UPDATE agent_tasks SET request_snapshot_json = ?, row_version = row_version + 1
+         WHERE id = ?`,
+      )
+      .run(JSON.stringify(next), taskId);
+  }
+  if (primary === 'novel.chapter.submit_draft') return;
+  if (snapshot.agentMode === 'novel-writing' || snapshot.novelIntent !== undefined) {
+    throw new Error(
+      'Novel chapter tasks must authorize novel.chapter.submit_draft as their primary operation.',
+    );
+  }
 }
 
 function uniqueAuthorizationSpecs(authorizations: AuthorizationSpec[]): AuthorizationSpec[] {
