@@ -2348,6 +2348,23 @@ export class AgentProviderLoopService {
             )
             .run(now, project.id, document.id);
           if (activated.changes > 1) throw new Error('Novel chapter activation was not unique.');
+          const waitingReview = database
+            .prepare(
+              `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
+               updated_at = ?, row_version = row_version + 1
+               WHERE id = ? AND status = 'running'`,
+            )
+            .run(now, task.id);
+          if (waitingReview.changes === 1) {
+            this.appendEvent(
+              database,
+              project.id,
+              task.id,
+              'agent.task.waiting_review',
+              'Novel chapter draft was saved and is waiting for review.',
+              now,
+            );
+          }
         }
         database
           .prepare(
