@@ -8,6 +8,7 @@ import {
 } from './agent-orchestration-service.js';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
+import { DocumentWorkflowService } from './document-workflow-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -33,6 +34,71 @@ async function setup() {
 }
 
 describe('AgentOrchestrationService', () => {
+  it.each(['生成第四章和第五章', '生成小说的第四章和第五章'])(
+    'does not silently freeze the first target of an unsplit multi-chapter request: %s',
+    async (prompt) => {
+      const { project, conversation, orchestration } = await setup();
+      const result = orchestration.prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt,
+        intent: { action: 'create_chapter', displayLabel: '第四章' },
+      });
+      expect(result).toMatchObject({ pendingIntent: { reasonCode: 'TARGET_NOT_UNIQUE' } });
+      expect(
+        project.access(false, (database) =>
+          database.prepare('SELECT count(*) count FROM novel_chapters').get(),
+        ),
+      ).toEqual({ count: 0 });
+    },
+  );
+  it.each([false, true])(
+    'recovers an orphan chapter preparation while preserving drafts (draft=%s)',
+    async (withDraft) => {
+      const { project, conversation, orchestration } = await setup();
+      const rootPath = project.current()!.rootPath;
+      const target = orchestration.prepareNovelTask({
+        conversationId: conversation.id,
+        projectSessionId: project.currentSessionId()!,
+        prompt: '现在生成小说第一章',
+        intent: { action: 'create_chapter', displayLabel: '第一章' },
+      });
+      if ('pendingIntent' in target) throw new Error('Expected a chapter target.');
+      const workflow = new DocumentWorkflowService(project);
+      if (withDraft)
+        workflow.saveDraft({
+          documentId: target.documentId,
+          title: '用户草稿',
+          contentMarkdown: '用户保存的正文',
+          expectedDocumentRowVersion: 0,
+        });
+      expect(orchestration.recoverInterruptedPreparations()).toBe(0);
+      project.close();
+      project.open(rootPath);
+      expect(orchestration.recoverInterruptedPreparations()).toBe(1);
+      expect(orchestration.recoverInterruptedPreparations()).toBe(0);
+      expect(
+        project.access(false, (database) => ({
+          task: database
+            .prepare('SELECT status, error_code FROM agent_tasks WHERE id = ?')
+            .get(target.taskId),
+          chapter: database
+            .prepare('SELECT lifecycle_status FROM novel_chapters WHERE id = ?')
+            .get(target.chapterId),
+          locks: database.prepare('SELECT COUNT(*) AS count FROM novel_chapter_task_locks').get(),
+        })),
+      ).toEqual({
+        task: { status: 'failed', error_code: 'GENERATION_PREPARE_FAILED' },
+        chapter: { lifecycle_status: withDraft ? 'reserved' : 'archived' },
+        locks: { count: 0 },
+      });
+      if (withDraft)
+        expect(workflow.getDocument(target.documentId).currentVersion?.contentMarkdown).toBe(
+          '用户保存的正文',
+        );
+    },
+  );
+
   it('infers a chapter writer request when the Desktop omits novelIntent', () => {
     expect(inferNovelWritingIntentFromPrompt('请生成第一章小说正文')).toMatchObject({
       action: 'create_chapter',
@@ -40,6 +106,13 @@ describe('AgentOrchestrationService', () => {
     });
     expect(inferNovelWritingIntentFromPrompt('请写一份小说大纲')).toBeUndefined();
   });
+
+  it.each(['帮我生成一个小说', '请创作一部悬疑小说', '请生成小说大纲'])(
+    'leaves the broad goal %s to the conversation assistant',
+    (prompt) => {
+      expect(inferNovelWritingIntentFromPrompt(prompt)).toBeUndefined();
+    },
+  );
 
   it('creates a reserved chapter, task target, and chapter lock atomically before generation', async () => {
     const { project, conversation, orchestration } = await setup();
@@ -99,6 +172,40 @@ describe('AgentOrchestrationService', () => {
         documentId: prepared.documentId,
       },
     });
+  });
+
+  it('allows a new numbered chapter while an earlier chapter remains in review', async () => {
+    const { project, conversation, orchestration } = await setup();
+    const first = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '现在生成第一章',
+      intent: { action: 'create_chapter', displayLabel: '第一章' },
+    });
+    if ('pendingIntent' in first) throw new Error('Expected the first chapter target.');
+    orchestration.markTaskGenerationStarted(first.taskId);
+    project.access(true, (database) => {
+      const now = new Date().toISOString();
+      database
+        .prepare(
+          "UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review', updated_at = ? WHERE id = ?",
+        )
+        .run(now, first.taskId);
+    });
+    const second = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: project.currentSessionId()!,
+      prompt: '现在生成第二章',
+      intent: { action: 'create_chapter', displayLabel: '第二章', chapterTitle: '第二章' },
+    });
+    expect(second).toMatchObject({ documentIntent: { operation: 'novel.chapter.submit_draft' } });
+    if ('pendingIntent' in second) return;
+    expect(second.chapterId).not.toBe(first.chapterId);
+    expect(
+      project.access(false, (database) =>
+        database.prepare('SELECT COUNT(*) AS count FROM novel_chapter_task_locks').get(),
+      ),
+    ).toEqual({ count: 2 });
   });
 
   it('keeps ambiguous or negated writing requests out of business tables', async () => {

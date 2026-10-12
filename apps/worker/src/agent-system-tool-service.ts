@@ -24,6 +24,8 @@ import { ContentService } from './content-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 import { ProjectStructureCompiler } from './structure-compiler.js';
+import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
+import { AgentDraftSubmissionService } from './agent-draft-submission-service.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -77,6 +79,9 @@ export interface AgentSystemToolIdentity {
   projectId: string;
   projectSessionId: string;
   conversationId: string;
+  /** Worker-injected execution identity; never accepted in model arguments. */
+  taskId?: string;
+  toolCallId?: string;
 }
 
 /** Executes bounded system tools through the same services used by the Desktop UI. */
@@ -87,11 +92,35 @@ export class AgentSystemToolService {
     private readonly assets: AgentAssetToolService,
     private readonly settings: AgentSettingsToolService,
     private readonly mediaTasks?: AgentMediaTaskService,
-    private readonly documents?: Pick<DocumentWorkflowService, 'getDocument' | 'selfPublish'>,
+    private readonly documents?: DocumentWorkflowService,
     private readonly maintenance?: AgentMaintenanceToolService,
     private readonly structureCompiler?: ProjectStructureCompiler,
     private readonly novels?: AgentNovelToolService,
   ) {}
+
+  availableOperations(): SystemAgentToolOperation[] {
+    return SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation).filter(
+      (name) => {
+        if (name === 'project.structure.get' || name === 'novel.structure.get')
+          return !!this.structureCompiler;
+        if (
+          name === 'novel.chapter.list' ||
+          name === 'novel.chapter.archive' ||
+          name === 'novel.chapter.restore'
+        )
+          return !!this.novels;
+        if (
+          name === 'document.submit_draft' ||
+          name === 'novel.chapter.write_draft' ||
+          name === 'document.publish'
+        )
+          return !!this.documents;
+        if (name.startsWith('maintenance.')) return !!this.maintenance;
+        if (name === 'media.task.get') return !!this.mediaTasks;
+        return true;
+      },
+    );
+  }
 
   execute(
     operation: SystemAgentToolOperation,
@@ -101,6 +130,14 @@ export class AgentSystemToolService {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
     switch (operation) {
+      case 'document.submit_draft':
+      case 'novel.chapter.write_draft':
+        if (!this.documents) throw unavailable('Draft submission');
+        return new AgentDraftSubmissionService(this.projects, this.documents).submit(
+          operation,
+          args,
+          identity,
+        );
       case 'project.get_context':
         rejectUnknown(args, []);
         return this.projectContext();
@@ -463,7 +500,16 @@ export class AgentSystemToolService {
       ...(volumeId ? { volumeId } : {}),
       includeArchived,
     });
-    const bounded = chapters.slice(0, 200).map(toNovelChapterSummary);
+    const bounded = this.projects.access(false, (database) =>
+      chapters.slice(0, 200).map((chapter) => ({
+        ...toNovelChapterSummary(chapter),
+        baseVersionId: (
+          database
+            .prepare('SELECT current_version_id FROM documents WHERE id = ?')
+            .get(chapter.documentId) as { current_version_id: string | null }
+        ).current_version_id,
+      })),
+    );
     return {
       version: 1,
       status: 'succeeded',

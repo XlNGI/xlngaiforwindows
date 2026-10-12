@@ -58,6 +58,7 @@ import type {
   UnifiedAgentModelSelectionRequest,
   AdapterDescriptor,
   UnifiedAgentCapability,
+  UnifiedAgentRunParams,
   LlmInputAttachment,
   MediaModelSelectionDecision,
   MediaModelSelectionRequest,
@@ -66,7 +67,6 @@ import type {
   NovelWritingIntent,
   VideoGenerationJobInfo,
   ConversationRuntimeLiveAction,
-  NovelChapterInfo,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -507,7 +507,13 @@ export function inferNovelWritingIntent(
   chapterId?: string,
 ): NovelWritingIntent | undefined {
   const value = prompt.normalize('NFC').trim();
-  if (!value || !/(小说|章节|正文|本章|稿件)/u.test(value)) return undefined;
+  // A chapter hint freezes a writing target before the model can respond.
+  // Broad novel goals must reach the assistant even from the novel workspace.
+  const chapterRequest =
+    /(小说正文|小说章节|章节|本章|第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章)/u.test(value) ||
+    (value.includes('小说') && /续写|重写/u.test(value));
+  const selectedBodyRequest = Boolean(chapterId) && /(正文|稿件)/u.test(value);
+  if (!value || (!chapterRequest && !selectedBodyRequest)) return undefined;
   if (
     !/(生成|创作|撰写|写作|续写|继续写|继续创作|重写|改写|修改|更新|保存|写入|generate|write|continue|rewrite|save|update)/iu.test(
       value,
@@ -515,7 +521,15 @@ export function inferNovelWritingIntent(
   ) {
     return undefined;
   }
-  if (chapterId) {
+  const label = value.match(/第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章/u)?.[0];
+  // A numbered creation request names its own target; the open editor is
+  // only a target hint for edits and continuation of the current chapter.
+  const createsNumberedChapter =
+    Boolean(label) &&
+    !/续写|继续写|继续创作|重写|重新|改写|修改|更新|保存|写入|continue|rewrite|save|update/iu.test(
+      value,
+    );
+  if (chapterId && !createsNumberedChapter) {
     return {
       action: /续写|继续写|继续创作|continue/iu.test(value)
         ? 'continue_chapter'
@@ -523,7 +537,6 @@ export function inferNovelWritingIntent(
       chapterId,
     };
   }
-  const label = value.match(/第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*章/u)?.[0];
   return {
     action: 'create_chapter',
     ...(label ? { displayLabel: label.replace(/\s+/gu, '') } : {}),
@@ -696,11 +709,18 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
-  const [activeNovelChapter, setActiveNovelChapter] = useState<NovelChapterInfo>();
-  const [pendingNovelIntent, setPendingNovelIntent] = useState<NovelWritingIntent>();
+  const [pendingNovelIntent, setPendingNovelIntent] = useState<{
+    intent: NovelWritingIntent;
+    prompt: string;
+    projectId?: string;
+    conversationId?: string;
+  }>();
   const [chatMessage, setChatMessage] = useState('');
-  const [agentModelSelection, setAgentModelSelection] =
-    useState<UnifiedAgentModelSelectionRequest>();
+  const [agentModelSelection, setAgentModelSelection] = useState<
+    UnifiedAgentModelSelectionRequest & {
+      composerPrompt?: string;
+    }
+  >();
   const [agentMediaSelection, setAgentMediaSelection] = useState<MediaModelSelectionRequest>();
   const [agentModelPreferences, setAgentModelPreferences] = useState<
     Record<
@@ -924,7 +944,6 @@ export function App() {
     setDocumentContent,
     setContentMessage,
     setDocumentCloseConfirmation,
-    selectDocument,
     openDocumentById: openNonChapterDocumentById,
     newDocument,
     importMarkdownDocument,
@@ -946,14 +965,7 @@ export function App() {
   ) => {
     const projectId = project?.id;
     const reference = nonChapterDocuments.find((item) => item.id === documentId);
-    if (reference?.domainScope === 'novel') {
-      setNovelFocusReferenceId(documentId);
-      setNovelFocusChapterId(undefined);
-      setNovelRefreshRevision((revision) => revision + 1);
-      openProjectView('novel');
-      return;
-    }
-    if (!nonChapterDocuments.some((item) => item.id === documentId)) {
+    {
       try {
         const chapters = await callWorker('novel.chapter.list', { includeArchived: true });
         if (activeProjectIdRef.current !== projectId) return;
@@ -971,6 +983,13 @@ export function App() {
         }
         return;
       }
+    }
+    if (reference?.domainScope === 'novel') {
+      setNovelFocusReferenceId(documentId);
+      setNovelFocusChapterId(undefined);
+      setNovelRefreshRevision((revision) => revision + 1);
+      openProjectView('novel');
+      return;
     }
     if (!reference) {
       const detail = await callWorker('document.get', { documentId });
@@ -1008,12 +1027,7 @@ export function App() {
       return;
     }
     if (source.sourceType === 'document' || source.sourceType === 'storyboard') {
-      if (source.kind) openWorkspaceForDocumentKind(source.kind as DocumentKind);
-      else if (source.sourceType === 'storyboard') openProjectView('shots');
-      else openProjectView('documents');
-      const item = documents.find((document) => document.id === source.sourceId);
-      if (item) void selectDocument(item);
-      else void openDocumentById(source.sourceId);
+      void openDocumentById(source.sourceId);
       return;
     }
     if (source.sourceType === 'asset') {
@@ -1297,7 +1311,7 @@ export function App() {
     poll.timer = window.setInterval(readEvents, 400);
   };
 
-  const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult) => {
+  const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult): Promise<void> => {
     confirmationResolverRef.current?.(false);
     paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
@@ -1339,19 +1353,6 @@ export function App() {
           const createdDocument = createdWorkspaceDocument ?? created[0];
           if (createdDocument) void openDocumentById(createdDocument.id, nextDocuments);
         });
-      const runtimeMode = (
-        prepared as LlmGenerationPrepareResult & {
-          runtimeMode?: string;
-        }
-      ).runtimeMode;
-      if (runtimeMode !== 'novel-writing') {
-        void refreshDocumentList().catch((reason) => {
-          if (generationPollOwner.current.projectId === projectId) {
-            setContentMessage(reason instanceof Error ? reason.message : '文档列表刷新失败');
-          }
-        });
-        return;
-      }
       void callWorker('agent.task.get', { taskId: agentTaskId })
         .catch(() => undefined)
         .then(async (detail) => {
@@ -1384,7 +1385,7 @@ export function App() {
     if (!isGenerationActive(prepared.generation)) {
       setChatMessage(prepared.generation.error ?? '生成已完成');
       refreshAgentDocuments();
-      return;
+      return Promise.resolve();
     }
     const run = streamPreparedLlmGeneration(prepared, {
       onLiveActions(actions) {
@@ -1452,7 +1453,7 @@ export function App() {
       },
     });
     nativeLlmRun.current = run;
-    void run.completion
+    return run.completion
       .catch((reason: unknown) => {
         if (nativeRunIsCurrent(run)) {
           setChatMessage(reason instanceof Error ? reason.message : '原生 LLM 流处理失败');
@@ -2119,40 +2120,16 @@ export function App() {
       try {
         setAgentModelSelection(undefined);
         setAgentParameterRequest(undefined);
-        const capability = inferAgentCapability(prompt);
-        let agentPrompt = promptForAgent;
-        if (capability === 'image') {
-          const isImagePromptDocument = (item: { kind: string; title: string }) =>
-            (item.kind === 'character' || item.kind === 'scene') &&
-            /(提示词|三视图|立绘|角色)/u.test(item.title);
-          let promptDocument =
-            document?.currentVersion?.contentMarkdown &&
-            document.title &&
-            isImagePromptDocument(document)
-              ? { title: document.title, content: document.currentVersion.contentMarkdown }
-              : undefined;
-          if (!promptDocument) {
-            const candidate = [...documents]
-              .filter(isImagePromptDocument)
-              .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-            if (candidate) {
-              const detail = await callWorker('document.get', { documentId: candidate.id });
-              if (detail.currentVersion?.contentMarkdown) {
-                promptDocument = {
-                  title: detail.title,
-                  content: detail.currentVersion.contentMarkdown,
-                };
-              }
-            }
-          }
-          agentPrompt = composeImageGenerationPrompt(promptForAgent, promptDocument);
-        }
+        const capability = 'text' as const;
+        const agentPrompt = promptForAgent;
         const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
-        const novelIntent =
-          pendingNovelIntent ??
-          (view === 'novel'
-            ? inferNovelWritingIntent(prompt, activeNovelChapter?.id)
-            : inferNovelWritingIntent(prompt));
+        const shortcutIntent =
+          pendingNovelIntent?.prompt === prompt &&
+          pendingNovelIntent.projectId === project?.id &&
+          pendingNovelIntent.conversationId === conversation.id
+            ? pendingNovelIntent.intent
+            : undefined;
+        const novelIntent = shortcutIntent;
         const runModel = resolveAgentRunModelSelection(
           capability,
           modelSelection
@@ -2175,7 +2152,7 @@ export function App() {
           ? undefined
           : buildAgentAttachments(chatAttachments);
         const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
-        const unified = await callWorker('agent.run', {
+        const runParams: UnifiedAgentRunParams = {
           conversationId: conversation.id,
           prompt: agentPrompt || '请分析我提供的附件。',
           capability,
@@ -2188,14 +2165,15 @@ export function App() {
           ...(novelIntent ? { novelIntent } : {}),
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
-        });
+        };
+        const unified = await callWorker('agent.run', runParams);
         if (unified.status !== 'needs_model_selection') setPendingNovelIntent(undefined);
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
           modelId &&
           conversation &&
-          capability !== 'auto'
+          capability === 'text'
         ) {
           void callWorker('conversation.modelPreference.set', {
             conversationId: conversation.id,
@@ -2209,6 +2187,7 @@ export function App() {
           setChatMessage('');
           setAgentModelSelection({
             prompt: agentPrompt || '请分析我提供的附件。',
+            composerPrompt: prompt,
             capability: unified.capability,
             models: unified.models,
             reason: unified.reason,
@@ -2296,7 +2275,7 @@ export function App() {
           setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
           return;
         }
-        launchPreparedGeneration(unified);
+        void launchPreparedGeneration(unified);
       } catch (reason) {
         setComposer(prompt);
         setChatMessage(readableFailure(reason, '生成启动失败'));
@@ -2314,7 +2293,7 @@ export function App() {
           modelId: selectedLlmModel.id,
           idempotencyKey,
         });
-        launchPreparedGeneration(prepared);
+        void launchPreparedGeneration(prepared);
       } catch (reason) {
         setComposer(prompt);
         setChatMessage(readableFailure(reason, '生成启动失败'));
@@ -2407,7 +2386,9 @@ export function App() {
 
   const cancelGeneration = async () => {
     const current = generation;
-    if (!current || !isGenerationActive(current)) return;
+    if (!current || !isGenerationActive(current)) {
+      return;
+    }
     const agentTaskId = agentTask?.task.id;
     confirmationResolverRef.current?.(false);
     paidSubmissionResolverRef.current?.(false);
@@ -2489,7 +2470,7 @@ export function App() {
           modelId: selectedLlmModel.id,
           idempotencyKey,
         });
-        launchPreparedGeneration(prepared);
+        void launchPreparedGeneration(prepared);
         return;
       }
       const retried = await callWorker('llm.generation.retry', {
@@ -2905,6 +2886,8 @@ export function App() {
       openSettings('providers');
       void getCurrentWindow().setFocus();
     } else if (action.type === 'conversation-composer') {
+      setPendingNovelIntent(undefined);
+      setAgentModelSelection(undefined);
       setComposer(action.value);
     } else if (action.type === 'conversation-cancel') {
       void cancelGeneration();
@@ -3032,7 +3015,10 @@ export function App() {
               text: { providerProfileId, modelId },
             },
           }));
-          void sendMessage(pending.prompt, { providerProfileId, modelId });
+          void sendMessage(pending.composerPrompt ?? pending.prompt, {
+            providerProfileId,
+            modelId,
+          });
         }
       }}
       onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
@@ -3082,7 +3068,11 @@ export function App() {
         setSettingsInitialPage('providers');
         setSettingsOpen(true);
       }}
-      onComposerChange={setComposer}
+      onComposerChange={(value) => {
+        setPendingNovelIntent(undefined);
+        setAgentModelSelection(undefined);
+        setComposer(value);
+      }}
       attachments={chatAttachments}
       onAddAttachments={(files) => void addChatAttachments(files)}
       onRemoveAttachment={removeChatAttachment}
@@ -3935,10 +3925,16 @@ export function App() {
                 focusChapterId={novelFocusChapterId}
                 focusReferenceId={novelFocusReferenceId}
                 refreshToken={novelRefreshRevision || undefined}
-                onChapterSelected={setActiveNovelChapter}
                 onGenerateChapter={(chapter) => {
-                  setPendingNovelIntent({ action: 'rewrite_chapter', chapterId: chapter.id });
-                  setComposer(`请生成并保存“${chapter.title}”的小说正文。`);
+                  const prompt = `请生成并保存“${chapter.title}”的小说正文。`;
+                  setAgentModelSelection(undefined);
+                  setPendingNovelIntent({
+                    intent: { action: 'rewrite_chapter', chapterId: chapter.id },
+                    prompt,
+                    projectId: project?.id,
+                    conversationId: conversation?.id,
+                  });
+                  setComposer(prompt);
                   workspaceDispatch({ type: 'open', panelId: 'conversation' });
                   setChatMessage(`已指定章节“${chapter.title}”，发送后会将正文写回对应章节。`);
                 }}
@@ -3952,6 +3948,8 @@ export function App() {
                 }}
                 onGenerateEpisode={(chapters) => {
                   const prompt = composeEpisodeChapterPrompt(chapters);
+                  setPendingNovelIntent(undefined);
+                  setAgentModelSelection(undefined);
                   setComposer((current) =>
                     current.trim() ? `${current.trim()}\n\n${prompt}` : prompt,
                   );
@@ -4020,7 +4018,7 @@ export function App() {
                           className={`tree-item with-kind ${document?.id === item.id ? 'selected' : ''}`}
                           type="button"
                           key={item.id}
-                          onClick={() => void selectDocument(item)}
+                          onClick={() => void openDocumentById(item.id)}
                         >
                           <FileText size={13} />
                           <span>{item.title}</span>

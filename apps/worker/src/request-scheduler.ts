@@ -40,6 +40,8 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'agent.task.get',
   'agent.task.events',
   'agent.task.list',
+  'task.log.list',
+  'generation.job.events.list',
   'conversation.runtime.get',
   'llm.status',
   'llm.generation.runtime',
@@ -71,6 +73,10 @@ const backgroundMethods = new Set<WorkerMethod>([
   'usage.rebuild',
   'maintenance.diagnostics.export',
   'image.generate.complete',
+  // Confirmation is consumed synchronously before waiting for Native. Local
+  // mutations (including cancellation) must remain available during inference.
+  'media.generation.confirmSubmission',
+  'agent.generation.confirmMediaSubmission',
 ]);
 
 export function isSerializedWorkerMethod(method: WorkerMethod): boolean {

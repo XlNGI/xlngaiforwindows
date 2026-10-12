@@ -141,6 +141,7 @@ interface ChatPanelProps {
   onOpenProviderSettings: () => void;
   onComposerChange: (value: string) => void;
   onCancelGeneration: () => void;
+  batchRunning?: boolean;
   onSendMessage: () => void;
   attachments?: ChatAttachment[];
   onAddAttachments?: (files: FileList | File[]) => void;
@@ -217,6 +218,7 @@ export function ChatPanel({
   onOpenProviderSettings,
   onComposerChange,
   onCancelGeneration,
+  batchRunning = false,
   onSendMessage,
   attachments = [],
   onAddAttachments,
@@ -277,7 +279,8 @@ export function ChatPanel({
         ? '禁止联网'
         : undefined;
   const isArchived = Boolean(conversation?.archivedAt);
-  const generationLocked = generation?.status === 'prepared' || generation?.status === 'streaming';
+  const generationLocked =
+    batchRunning || generation?.status === 'prepared' || generation?.status === 'streaming';
   const messageListRef = useRef<HTMLDivElement>(null);
   /**
    * Paid media submissions never render here. `media-confirmation.tsx` owns that
@@ -956,8 +959,7 @@ export function ChatPanel({
             event.preventDefault();
             if (
               !isArchived &&
-              generation?.status !== 'prepared' &&
-              generation?.status !== 'streaming' &&
+              !generationLocked &&
               (composer.trim() || attachments.length > 0) &&
               conversation &&
               writable
@@ -967,7 +969,7 @@ export function ChatPanel({
           }}
           disabled={!conversation || !writable || isArchived}
         />
-        {generation?.status === 'prepared' || generation?.status === 'streaming' ? (
+        {generationLocked ? (
           <button
             className="icon-button send-button"
             type="button"

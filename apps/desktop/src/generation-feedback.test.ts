@@ -36,6 +36,7 @@ describe('generation feedback', () => {
   });
 
   it('uses one Chinese status and lifecycle vocabulary', () => {
+    expect(generationStatusLabel('submission_unknown')).toBe('提交结果未知');
     expect(generationStatusLabel('polling')).toBe('生成中');
     expect(generationStatusLabel('downloading')).toBe('正在保存结果');
     expect(generationPhaseLabel('download')).toBe('保存结果');
@@ -50,6 +51,18 @@ describe('generation feedback', () => {
   });
 
   it('turns technical failures into guidance while retaining technical detail', () => {
+    const received = generationErrorFeedback(
+      'Provider image response received; local output processing failed: DNS boundary',
+    );
+    expect(received.userMessage).toContain('已收到生成结果');
+    expect(received.userMessage).toContain('避免重复生成');
+    expect(received.technicalDetail).toContain('DNS boundary');
+    const unknown = generationErrorFeedback(
+      'Submission status is unknown: Provider response could not be received（超时）',
+    );
+    expect(unknown.userMessage).toContain('不会自动重试');
+    expect(unknown.userMessage).toContain('Provider 后台核对');
+    expect(unknown.technicalDetail).toContain('could not be received');
     expect(
       generationErrorFeedback('Provider authentication failed with HTTP 401.', 'provider'),
     ).toEqual({

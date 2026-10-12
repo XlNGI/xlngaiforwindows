@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { RequestScheduler } from './request-scheduler.js';
 
 describe('RequestScheduler', () => {
+  it('keeps local writes, cancellation, and task inspection available during media submission', async () => {
+    const scheduler = new RequestScheduler();
+    let release!: () => void;
+    const submission = scheduler.run(
+      'media.generation.confirmSubmission',
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    await expect(scheduler.run('chat.message.save', () => Promise.resolve('saved'))).resolves.toBe(
+      'saved',
+    );
+    await expect(
+      scheduler.run('media.task.cancel', () => Promise.resolve('cancelled')),
+    ).resolves.toBe('cancelled');
+    await expect(scheduler.run('task.log.list', () => Promise.resolve('tasks'))).resolves.toBe(
+      'tasks',
+    );
+    await expect(
+      scheduler.run('generation.job.events.list', () => Promise.resolve('events')),
+    ).resolves.toBe('events');
+    release();
+    await submission;
+  });
+
   it('allows reads to complete while a long background request is active', async () => {
     const scheduler = new RequestScheduler();
     let releaseBackup: (() => void) | undefined;

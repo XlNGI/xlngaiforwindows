@@ -141,7 +141,6 @@ import { NovelService, NovelServiceError } from './novel-service.js';
 import {
   AgentOrchestrationError,
   AgentOrchestrationService,
-  inferNovelWritingIntentFromPrompt,
 } from './agent-orchestration-service.js';
 import { PartialArtifactService } from './partial-artifact-service.js';
 import { MarkdownExportService } from './markdown-export-service.js';
@@ -152,9 +151,11 @@ import { DomainToolGateway } from './domain-tool-gateway.js';
 import { TaskPlanService } from './task-plan-service.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { MediaOrchestrationService } from './media-orchestration-service.js';
+import { ProjectStructureCompiler } from './structure-compiler.js';
 import { ProjectTaskRuntime } from './project-task-runtime.js';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
+import { prepareAgentGeneration } from './agent-generation-preparation.js';
 import {
   adapterBindsCatalogModel,
   getAdapter,
@@ -800,6 +801,8 @@ const agentSystemToolService = new AgentSystemToolService(
   mediaPreparationService,
   documentWorkflowService,
   maintenanceService,
+  new ProjectStructureCompiler(),
+  novelService,
 );
 const agentProviderLoopService = new AgentProviderLoopService(
   projectService,
@@ -1098,6 +1101,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       maintenanceService,
       generationService,
       agentProviderLoopService,
+      agentOrchestrationService,
       partialArtifactService,
       markdownExportService,
       mediaOrchestrationService,
@@ -1359,10 +1363,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         }
         case 'agent.run': {
           const agentParams = params as unknown as UnifiedAgentRunParams;
-          const capabilityHint =
-            agentParams.capability && agentParams.capability !== 'auto'
-              ? agentParams.capability
-              : inferUnifiedAgentCapability(agentParams.prompt);
+          const capabilityHint = 'text' as const;
           const hasImageAttachment =
             agentParams.attachments?.some((attachment) =>
               attachment.mimeType.toLowerCase().startsWith('image/'),
@@ -1484,64 +1485,39 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             capability: 'text' as const,
             confirmedAt: storedPreference?.confirmedAt ?? new Date().toISOString(),
           };
-          // Every project request uses the same System Agent. A trusted
-          // chapter shortcut may pre-resolve a target, but it does not
-          // change the runtime into a novel or short-drama persona.
-          const novelIntent =
-            agentParams.novelIntent ?? inferNovelWritingIntentFromPrompt(agentParams.prompt);
-          const orchestration = novelIntent
-            ? agentOrchestrationService.prepareNovelTask({
-                conversationId: agentParams.conversationId,
-                projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
-                prompt: agentParams.prompt,
-                intent: novelIntent,
-                idempotencyKey: agentParams.idempotencyKey,
-              })
-            : undefined;
-          if (orchestration && 'pendingIntent' in orchestration) {
-            result = {
-              status: 'pending_intent',
-              capability: 'document',
-              pendingIntent: orchestration.pendingIntent,
-            };
-            break;
-          }
-          const documentIntent =
-            orchestration && 'documentIntent' in orchestration
-              ? orchestration.documentIntent
-              : inferAgentDocumentIntent(agentParams.prompt);
-          const prepared = generationService.prepare({
-            conversationId: agentParams.conversationId,
-            prompt: agentParams.prompt,
-            providerProfileId: selected.providerProfileId,
-            modelId: selected.modelId,
-            attachments: agentParams.attachments,
-            budgetTokens: agentParams.budgetTokens,
-            idempotencyKey: agentParams.idempotencyKey,
-            agentMode: 'document',
-            researchMode: agentParams.researchMode,
-            documentIntent,
-            selectedChapterIds: agentParams.selectedChapterIds,
-            targetPlatform: agentParams.targetPlatform,
-            ...(novelIntent ? { novelIntent } : {}),
-          });
-          const agent = agentProviderLoopService.prepare(
-            prepared.stream,
-            agentParams.prompt,
+          // Every project request uses the same System Agent. Chapter
+          // shortcuts supply optional context for the model.
+          // Semantic interpretation belongs to the LLM. UI intent is only a hint.
+          const novelIntent = agentParams.novelIntent;
+          const documentIntent = { operation: 'document.list' as const };
+          const prepared = prepareAgentGeneration(
+            {
+              generations: generationService,
+              loop: agentProviderLoopService,
+              orchestration: agentOrchestrationService,
+            },
+            {
+              conversationId: agentParams.conversationId,
+              prompt: agentParams.prompt,
+              providerProfileId: selected.providerProfileId,
+              modelId: selected.modelId,
+              attachments: agentParams.attachments,
+              budgetTokens: agentParams.budgetTokens,
+              idempotencyKey: agentParams.idempotencyKey,
+              agentMode: 'document',
+              researchMode: agentParams.researchMode,
+              documentIntent,
+              selectedChapterIds: agentParams.selectedChapterIds,
+              targetPlatform: agentParams.targetPlatform,
+              ...(novelIntent ? { novelIntent } : {}),
+            },
             undefined,
-            documentIntent,
-            agentParams.researchMode,
-            orchestration && 'taskId' in orchestration ? orchestration.taskId : undefined,
-            agentParams.selectedChapterIds,
-            agentParams.targetPlatform,
             provenance,
           );
-          generationService.configureAgentTools(prepared.stream, agent.tools);
           result = {
             status: 'started',
             capability: capabilityHint,
             ...prepared,
-            agentTaskId: agent.taskId,
             runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
             runtimeMode: 'document',
           };
@@ -1560,62 +1536,36 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           // `agentMode` is retained at the IPC boundary for compatibility with
           // older Desktop callers. It never selects an Agent persona: all
           // requests use the same project System Agent and resolver.
-          const novelIntent =
-            agentParams.novelIntent ?? inferNovelWritingIntentFromPrompt(agentParams.prompt);
-          const orchestration = novelIntent
-            ? agentOrchestrationService.prepareNovelTask({
-                conversationId: agentParams.conversationId,
-                projectSessionId: projectService.currentSessionId() ?? 'unknown-session',
-                prompt: agentParams.prompt,
-                title: agentParams.title,
-                intent: novelIntent,
-                idempotencyKey: agentParams.idempotencyKey,
-              })
-            : undefined;
-          if (orchestration && 'pendingIntent' in orchestration) {
-            result = { pendingIntent: orchestration.pendingIntent };
-            break;
-          }
-          const documentIntent =
-            orchestration && 'documentIntent' in orchestration
-              ? orchestration.documentIntent
-              : (agentParams.documentIntent ?? inferAgentDocumentIntent(agentParams.prompt));
+          // Semantic interpretation belongs to the LLM. UI intent is only a hint.
+          const novelIntent = agentParams.novelIntent;
+          const documentIntent = agentParams.documentIntent ?? {
+            operation: 'document.list' as const,
+          };
           const selectedChapterIds = agentParams.selectedChapterIds;
           const targetPlatform = agentParams.targetPlatform;
-          const prepared = generationService.prepare({
-            ...agentParams,
-            agentMode: 'document',
-            documentIntent,
-            selectedChapterIds,
-            targetPlatform,
-            ...(orchestration && 'documentIntent' in orchestration
-              ? {
-                  novelIntent: {
-                    ...novelIntent,
-                    chapterId: orchestration.chapterId,
-                  },
-                }
-              : {}),
-          });
-          const agent = agentProviderLoopService.prepare(
-            prepared.stream,
-            agentParams.prompt,
-            agentParams.title,
-            documentIntent,
-            agentParams.researchMode,
-            orchestration && 'taskId' in orchestration ? orchestration.taskId : undefined,
-            selectedChapterIds,
-            targetPlatform,
+          const prepared = prepareAgentGeneration(
+            {
+              generations: generationService,
+              loop: agentProviderLoopService,
+              orchestration: agentOrchestrationService,
+            },
+            {
+              ...agentParams,
+              agentMode: 'document',
+              documentIntent,
+              selectedChapterIds,
+              targetPlatform,
+              ...(novelIntent ? { novelIntent } : {}),
+            },
+            undefined,
             {
               source: 'request',
               capability: 'text',
               confirmedAt: new Date().toISOString(),
             },
           );
-          generationService.configureAgentTools(prepared.stream, agent.tools);
           result = {
             ...prepared,
-            agentTaskId: agent.taskId,
             runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
             runtimeMode: 'document',
           };

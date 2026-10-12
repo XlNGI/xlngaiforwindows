@@ -444,6 +444,8 @@ export class DocumentWorkflowService {
              FROM documents LEFT JOIN document_bindings bindings
                ON bindings.document_id = documents.id AND bindings.status = 'active'
              WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+               AND NOT EXISTS (SELECT 1 FROM novel_chapters chapters
+                 WHERE chapters.document_id = documents.id AND chapters.project_id = documents.project_id)
              ORDER BY documents.updated_at DESC, documents.id DESC`,
           )
           .all(project.id) as DocumentRow[]
@@ -1348,9 +1350,13 @@ export class DocumentWorkflowService {
                     WHERE artifacts.task_id = targets.task_id
                     ORDER BY artifacts.updated_at DESC, artifacts.id DESC LIMIT 1) AS document_version_id
              FROM agent_task_targets targets
-            WHERE targets.task_id = ? AND targets.project_id = ?`,
+            WHERE targets.project_id = ? AND (targets.task_id = ? OR targets.task_id IN (
+              SELECT children.id FROM agent_tasks children
+              WHERE children.project_id = ? AND json_extract(children.request_snapshot_json, '$.parentTaskId') = ?
+            ))
+            ORDER BY (targets.task_id = ?) DESC, targets.created_at DESC, targets.task_id DESC LIMIT 1`,
         )
-        .get(task.id, project.id) as
+        .get(project.id, task.id, project.id, task.id, task.id) as
         | {
             target_kind: AgentTaskTargetInfo['targetKind'];
             action: AgentTaskTargetInfo['action'];
@@ -1435,10 +1441,13 @@ export class DocumentWorkflowService {
                       ORDER BY history.created_at DESC, history.operation DESC LIMIT 1
                     ), 'create') AS operation,
                     artifacts.updated_at AS created_at
-             FROM agent_task_document_artifacts artifacts WHERE task_id = ?
+             FROM agent_task_document_artifacts artifacts WHERE task_id = ? OR task_id IN (
+               SELECT children.id FROM agent_tasks children WHERE children.project_id = ?
+                 AND json_extract(children.request_snapshot_json, '$.parentTaskId') = ?
+             )
              ORDER BY created_at, id`,
           )
-          .all(task.id) as TaskDocumentRow[]
+          .all(task.id, project.id, task.id) as TaskDocumentRow[]
       ).map((item) => ({
         documentId: item.document_id,
         documentVersionId: item.document_version_id,
@@ -1677,11 +1686,14 @@ export class DocumentWorkflowService {
             estimated_cost: string | null;
           }>)
         : [];
+      const mediaStatus = `CASE
+        WHEN media_state IN ('draft', 'awaiting_confirmation', 'submitting', 'submission_unknown')
+        THEN media_state ELSE status END`;
       const jobs = includeJobs
         ? (database
             .prepare(
-              `SELECT id, adapter_key, shot_id, status, created_at, updated_at
-               FROM generation_jobs WHERE project_id = ?${params.status ? ' AND status = ?' : ''}
+              `SELECT id, adapter_key, shot_id, ${mediaStatus} AS status, created_at, updated_at
+               FROM generation_jobs WHERE project_id = ?${params.status ? ` AND ${mediaStatus} = ?` : ''}
                ORDER BY updated_at DESC, id DESC LIMIT ?`,
             )
             .all(
@@ -1716,7 +1728,7 @@ export class DocumentWorkflowService {
         ...jobs
           .map((job): TaskLogItem => ({
             id: `job:${job.id}`,
-            kind: /video|vidu/i.test(job.adapter_key) ? 'video' : 'image',
+            kind: job.adapter_key.split(':')[0]?.endsWith('TO_VIDEO') ? 'video' : 'image',
             title: job.adapter_key,
             status: job.status,
             createdAt: job.created_at,

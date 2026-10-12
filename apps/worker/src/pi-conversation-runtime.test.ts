@@ -366,7 +366,7 @@ describe('PiConversationRuntime', () => {
     );
   });
 
-  it('lets the model retrieve before planning and after a plan omits retrieval without unlocking writes', async () => {
+  it('lets the model retrieve and execute sequential operations without a semantic planning gate', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     const plannedCall = (name: string, id: string, args = {}) =>
       fauxAssistantMessage([fauxToolCall(name, args, { id })], {
@@ -375,15 +375,11 @@ describe('PiConversationRuntime', () => {
       });
     faux.setResponses([
       plannedCall('library.search', 'search', { query: '第一章', sourceTypes: ['novel-chapter'] }),
-      plannedCall('media.image.prepare', 'premature-image'),
-      plannedCall('task.plan.submit', 'plan', { version: 2, steps: [], constraints: [] }),
       plannedCall('library.read', 'read', { sourceHandle: 'chapter-source' }),
-      plannedCall('document.create_draft', 'unplanned-write'),
-      plannedCall('media.video.prepare', 'premature-video'),
       plannedCall('media.image.prepare', 'image'),
       plannedCall('library.read', 'read-more', { sourceHandle: 'chapter-source' }),
       plannedCall('media.video.prepare', 'video'),
-      plannedCall('task.package.complete', 'complete'),
+      fauxAssistantMessage('图片和视频草稿已准备。'),
     ]);
     const plans = new FakePlanService();
     const beginStep = vi.spyOn(plans, 'beginStep');
@@ -454,8 +450,8 @@ describe('PiConversationRuntime', () => {
 
     expect(generation.failNative).not.toHaveBeenCalled();
     expect(systemPrompts[0]).toContain(libraryPolicy);
-    expect(systemPrompts[0]).toContain('plan only');
-    expect(plans.completed).toBe(true);
+    expect(systemPrompts[0]).not.toContain('plan only');
+    expect(plans.completed).toBe(false);
     expect(providerTools.executeTools.mock.calls.map(([params]) => params.calls[0]?.id)).toEqual([
       'search',
       'read',
@@ -463,32 +459,13 @@ describe('PiConversationRuntime', () => {
       'read-more',
       'video',
     ]);
-    expect(beginStep.mock.calls.map(([input]) => input.operation)).toEqual([
-      'library.search',
-      'library.read',
-      'media.image.prepare',
-      'library.read',
-      'media.video.prepare',
-    ]);
-    expect(recordStepSuccess).toHaveBeenCalledTimes(2);
+    expect(beginStep).not.toHaveBeenCalled();
+    expect(recordStepSuccess).not.toHaveBeenCalled();
     const configured = (
       generation.configureAgentTools.mock.calls as unknown as Array<[unknown, LlmToolDefinition[]]>
     ).map(([, tools]) => tools.map((tool) => tool.name));
-    expect(configured[0]).toEqual(['task.plan.submit', 'library.search', 'library.read']);
-    expect(configured[1]).toEqual(configured[0]);
-    expect(configured).toContainEqual([
-      'library.search',
-      'library.read',
-      'media.image.prepare',
-      'task.package.complete',
-    ]);
-    expect(configured).toContainEqual([
-      'library.search',
-      'library.read',
-      'media.video.prepare',
-      'task.package.complete',
-    ]);
-    expect(configured.at(-1)).toEqual([]);
+    expect(configured[0]).toEqual(definitions.map((tool) => tool.name));
+    expect(generation.complete).toHaveBeenCalled();
   });
 
   it('executes a document tool and refreshes Worker authorizations for the next Pi turn', async () => {

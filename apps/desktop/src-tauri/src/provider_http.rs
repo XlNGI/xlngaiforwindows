@@ -17,6 +17,8 @@ use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
 };
 
+pub(crate) const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JsonHttpErrorKind {
     Admission,
@@ -151,6 +153,55 @@ pub(crate) fn assert_public_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Provider output domains can resolve through a local TUN proxy's fake-IP DNS.
+/// Research requests keep the strict public-address policy above.
+pub(crate) fn assert_provider_output_host(host: &str) -> Result<(), String> {
+    let addresses = (host, 443)
+        .to_socket_addrs()
+        .map_err(|_| format!("Provider output hostname {host} could not be resolved"))?
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    validate_provider_output_addresses(host, &addresses)
+}
+
+fn validate_provider_output_addresses(host: &str, addresses: &[IpAddr]) -> Result<(), String> {
+    // An exception for named Provider output domains only. Direct requests to
+    // benchmark IPs, localhost, LAN addresses, or mixed unsafe answers stay blocked.
+    let named_domain = host.parse::<IpAddr>().is_err()
+        && host.contains('.')
+        && !host.split('.').any(str::is_empty)
+        && ![".local", ".localhost", ".lan", ".internal", ".home.arpa"]
+            .iter()
+            .any(|suffix| host.to_ascii_lowercase().ends_with(suffix));
+    if !addresses.is_empty()
+        && addresses.iter().all(|address| {
+            is_public_address(address) || (named_domain && is_proxy_fake_ip(address))
+        })
+    {
+        return Ok(());
+    }
+    let resolved = addresses
+        .iter()
+        .take(8)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "Provider output host {host} is outside the supported network boundary ({resolved})"
+    ))
+}
+
+fn is_proxy_fake_ip(address: &IpAddr) -> bool {
+    let ipv4 = match address {
+        IpAddr::V4(value) => Some(*value),
+        IpAddr::V6(value) => value.to_ipv4_mapped(),
+    };
+    ipv4.is_some_and(|value| {
+        let [first, second, ..] = value.octets();
+        first == 198 && matches!(second, 18 | 19)
+    })
+}
+
 fn is_public_address(address: &IpAddr) -> bool {
     match address {
         IpAddr::V4(value) => is_public_ipv4(value),
@@ -225,16 +276,39 @@ pub(crate) fn request_bytes_with_admission<F>(
 where
     F: FnOnce(&str) -> Result<request_guard::Permit, request_guard::AdmissionError>,
 {
+    request_bytes_with_receive_timeout(request, DEFAULT_RECEIVE_TIMEOUT, acquire)
+}
+
+fn request_bytes_with_receive_timeout<F>(
+    request: JsonHttpRequest<'_>,
+    receive_timeout: Duration,
+    acquire: F,
+) -> Result<RawHttpResponse, JsonHttpError>
+where
+    F: FnOnce(&str) -> Result<request_guard::Permit, request_guard::AdmissionError>,
+{
     validate_request(&request)?;
+    let receive_timeout_ms = i32::try_from(receive_timeout.as_millis())
+        .ok()
+        .filter(|value| (1..=600_000).contains(value))
+        .ok_or_else(|| {
+            JsonHttpError::new(
+                JsonHttpErrorKind::InvalidRequest,
+                "Provider receive timeout must be between 1 ms and 10 minutes",
+            )
+        })?;
     let origin = request_guard::origin_key(request.secure, request.host, request.port);
     let permit = acquire(&origin)
         .map_err(|error| JsonHttpError::new(JsonHttpErrorKind::Admission, error.to_string()))?;
-    let result = request_bytes_admitted(request);
+    let result = request_bytes_admitted(request, receive_timeout_ms);
     permit.finish(request_outcome(&result));
     result
 }
 
-fn request_bytes_admitted(request: JsonHttpRequest<'_>) -> Result<RawHttpResponse, JsonHttpError> {
+fn request_bytes_admitted(
+    request: JsonHttpRequest<'_>,
+    receive_timeout_ms: i32,
+) -> Result<RawHttpResponse, JsonHttpError> {
     let agent = wide("unicomp/0.1");
     let host = wide(request.host);
     let verb = wide(request.method);
@@ -251,7 +325,7 @@ fn request_bytes_admitted(request: JsonHttpRequest<'_>) -> Result<RawHttpRespons
         },
         "Unable to initialize provider transport",
     )?;
-    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) } == 0 {
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, receive_timeout_ms) } == 0 {
         return Err(
             winhttp_error("Unable to configure provider timeouts").with_outcome(Outcome::Neutral)
         );
@@ -423,6 +497,7 @@ fn validate_public_request(request: &PublicHttpRequest<'_>) -> Result<(), JsonHt
             "text/html,application/xhtml+xml,application/json;q=0.8"
                 | "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.5"
                 | "video/mp4"
+                | "image/png,image/jpeg,image/webp"
         )
         || request.response_body_limit == 0
     {
@@ -467,7 +542,12 @@ fn request_public_bytes_admitted(
         },
         "Unable to initialize public transport",
     )?;
-    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, 15_000) } == 0 {
+    let receive_timeout = if request.accept == "image/png,image/jpeg,image/webp" {
+        60_000
+    } else {
+        15_000
+    };
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, receive_timeout) } == 0 {
         return Err(winhttp_error("Unable to configure public request timeouts")
             .with_outcome(Outcome::Neutral));
     }
@@ -645,6 +725,17 @@ pub(crate) fn request_json(
     request: JsonHttpRequest<'_>,
 ) -> Result<JsonHttpResponse, JsonHttpError> {
     parse_json_response(request_bytes(request)?)
+}
+
+pub(crate) fn request_json_with_receive_timeout(
+    request: JsonHttpRequest<'_>,
+    receive_timeout: Duration,
+) -> Result<JsonHttpResponse, JsonHttpError> {
+    parse_json_response(request_bytes_with_receive_timeout(
+        request,
+        receive_timeout,
+        |origin| request_guard::acquire(origin, || false),
+    )?)
 }
 
 fn parse_json_response(response: RawHttpResponse) -> Result<JsonHttpResponse, JsonHttpError> {
@@ -938,6 +1029,56 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_image_submission_can_wait_beyond_the_default_receive_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock image provider should bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(
+                String::from_utf8_lossy(&bytes).starts_with("POST /v1/images/generations HTTP/1.1")
+            );
+            thread::sleep(super::DEFAULT_RECEIVE_TIMEOUT + Duration::from_secs(2));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        let response = super::request_json_with_receive_timeout(
+            JsonHttpRequest {
+                host: "127.0.0.1",
+                port,
+                secure: false,
+                method: "POST",
+                path: "/v1/images/generations",
+                authorization_scheme: "Bearer",
+                accept: "application/json",
+                secret: "local-image-key",
+                body: Some(b"{}"),
+                request_body_limit: 1024,
+                response_body_limit: 1024,
+            },
+            crate::unicompapi_receive_timeout("POST", "/v1/images/generations"),
+        );
+        server.join().unwrap();
+        assert_eq!(
+            response
+                .expect("slow image response must not time out at 30 seconds")
+                .status,
+            200
+        );
+    }
+
+    #[test]
     fn streams_authorized_binary_responses_without_json_parsing() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider should bind");
         let port = listener.local_addr().expect("mock address").port();
@@ -1072,6 +1213,54 @@ mod tests {
             parse_retry_after_ms("Wed, 21 Oct 2015 07:28:00 GMT"),
             Some(0)
         );
+    }
+
+    #[test]
+    fn provider_output_domains_support_proxy_fake_ip_without_relaxing_research() {
+        let fake = "198.18.0.174".parse::<IpAddr>().unwrap();
+        assert!(!is_public_address(&fake));
+        for address in ["198.18.0.174", "198.19.255.254", "::ffff:198.18.0.174"] {
+            assert!(super::validate_provider_output_addresses(
+                "cdn.example.com",
+                &[address.parse().unwrap()]
+            )
+            .is_ok());
+        }
+        for host in [
+            "198.18.0.174",
+            "localhost",
+            "host.local",
+            "host.localhost",
+            "host.lan",
+            "host.internal",
+            "host.home.arpa",
+        ] {
+            assert!(super::validate_provider_output_addresses(host, &[fake]).is_err());
+        }
+        for address in [
+            "127.0.0.1",
+            "192.168.1.1",
+            "10.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "::1",
+            "fc00::1",
+        ] {
+            let blocked = address.parse::<IpAddr>().unwrap();
+            assert!(
+                super::validate_provider_output_addresses("cdn.example.com", &[blocked]).is_err()
+            );
+            assert!(
+                super::validate_provider_output_addresses("cdn.example.com", &[fake, blocked])
+                    .is_err()
+            );
+        }
+        assert!(super::validate_provider_output_addresses("cdn.example.com", &[]).is_err());
+        assert!(super::validate_provider_output_addresses(
+            "cdn.example.com",
+            &["8.8.8.8".parse().unwrap()]
+        )
+        .is_ok());
     }
 
     #[test]

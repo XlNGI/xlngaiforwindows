@@ -6,6 +6,8 @@ import type {
 } from '@ai-video/contracts';
 
 export type SystemAgentToolOperation =
+  | 'document.submit_draft'
+  | 'novel.chapter.write_draft'
   | 'project.get_context'
   | 'project.structure.get'
   | 'project.integrity.check'
@@ -363,6 +365,52 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'document.submit_draft',
+    description:
+      'Save one complete project document draft in an independent review task. Choose documentKind explicitly. For an existing document, first retrieve its actual documentId, expectedDocumentRowVersion and baseVersionId; include all three. Novel chapters must use novel.chapter.write_draft. Call sequentially for multiple documents. Successful saving requires no extra user confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['title', 'contentMarkdown', 'documentKind'],
+      properties: {
+        title: { type: 'string', minLength: 1, maxLength: 200 },
+        contentMarkdown: { type: 'string', minLength: 1, maxLength: 1000000 },
+        documentKind: {
+          type: 'string',
+          enum: ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'],
+        },
+        documentId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedDocumentRowVersion: { type: 'integer', minimum: 0 },
+        baseVersionId: { type: ['string', 'null'], maxLength: 200 },
+        bindingRole: {
+          type: 'string',
+          enum: ['work-outline', 'character-bible', 'world-bible', 'timeline', 'style-guide'],
+        },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.write_draft',
+    description:
+      'Save one complete novel chapter draft in its own review task and chapter lock. Interpret the user intent yourself. For create_chapter provide title and optional displayLabel/volumeId, without existing IDs or CAS. For continue_chapter/rewrite_chapter first query novel.chapter.list and read the body, then supply chapterId, expectedChapterRowVersion, expectedDocumentRowVersion, baseVersionId and the full revised body. Multiple chapters use consecutive calls; saving one does not end the conversation or require a second authorization.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['action', 'title', 'contentMarkdown'],
+      properties: {
+        action: { type: 'string', enum: ['create_chapter', 'continue_chapter', 'rewrite_chapter'] },
+        title: { type: 'string', minLength: 1, maxLength: 200 },
+        contentMarkdown: { type: 'string', minLength: 1, maxLength: 1000000 },
+        chapterId: { type: 'string', minLength: 1, maxLength: 200 },
+        volumeId: { type: 'string', minLength: 1, maxLength: 200 },
+        displayLabel: { type: 'string', minLength: 1, maxLength: 80 },
+        expectedChapterRowVersion: { type: 'integer', minimum: 0 },
+        expectedDocumentRowVersion: { type: 'integer', minimum: 0 },
+        baseVersionId: { type: ['string', 'null'], maxLength: 200 },
+      },
+    },
+  },
+  {
     name: 'project.get_context',
     description: 'Get a bounded summary of the currently open project. This is read-only.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
@@ -375,20 +423,21 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       type: 'object',
       additionalProperties: false,
       properties: {
-        query: { type: 'string', maxLength: 200 },
-        workspace: {
-          type: 'string',
-          enum: ['novel', 'documents', 'characters', 'shots', 'assets', 'tasks', 'settings'],
-        },
-        resourceId: { type: 'string', maxLength: 200 },
-        maxDepth: { type: 'integer', minimum: 0, maximum: 8 },
+        includeArchived: { type: 'boolean' },
       },
     },
   },
   {
     name: 'novel.structure.get',
     description: 'Get the bounded novel structure and chapter locators for the current project.',
-    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        novelId: { type: 'string', maxLength: 200 },
+        includeArchived: { type: 'boolean' },
+      },
+    },
   },
   {
     name: 'novel.chapter.list',
@@ -396,7 +445,10 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     parameters: {
       type: 'object',
       additionalProperties: false,
-      properties: { includeArchived: { type: 'boolean' } },
+      properties: {
+        volumeId: { type: 'string', maxLength: 200 },
+        includeArchived: { type: 'boolean' },
+      },
     },
   },
   {
@@ -972,6 +1024,8 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'adapter.schema.propose': writePolicy(),
   'adapter.schema.audit.list': readPolicy(),
   'document.create_draft': writePolicy(),
+  'document.submit_draft': writePolicy(),
+  'novel.chapter.write_draft': writePolicy(),
   'document.list': readPolicy(),
   'document.read': readPolicy(),
   'document.update_draft': writePolicy(),

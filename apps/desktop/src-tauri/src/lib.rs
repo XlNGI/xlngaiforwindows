@@ -43,8 +43,8 @@ use llm_stream::{
 use novel_import::novel_import;
 use provider_connector::provider_test_connection;
 use provider_http::{
-    assert_public_host, parse_public_https_url, request_bytes, request_json, request_public_bytes,
-    JsonHttpRequest, PublicHttpRequest,
+    assert_provider_output_host, parse_public_https_url, request_bytes, request_json,
+    request_public_bytes, JsonHttpRequest, PublicHttpRequest,
 };
 use research_bridge::NativeResearchBridge;
 
@@ -1156,6 +1156,17 @@ fn store_embedded_image(
     index: usize,
 ) -> Result<(PathBuf, &'static str), String> {
     let (bytes, content_type, extension) = decode_embedded_image(value, location)?;
+    store_native_image_bytes(&bytes, content_type, extension, directory, nonce, index)
+}
+
+fn store_native_image_bytes(
+    bytes: &[u8],
+    content_type: &'static str,
+    extension: &'static str,
+    directory: &Path,
+    nonce: u128,
+    index: usize,
+) -> Result<(PathBuf, &'static str), String> {
     let temporary_path = directory.join(format!(
         "image-{}-{nonce}-{index}.{extension}",
         std::process::id()
@@ -1165,20 +1176,126 @@ fn store_embedded_image(
     Ok((temporary_path, content_type))
 }
 
-fn externalize_image_object(
+fn download_remote_image_with<F>(
+    source: &str,
+    mut fetch: F,
+) -> Result<provider_http::RawHttpResponse, String>
+where
+    F: FnMut(&provider_http::PublicHttpsUrl) -> Result<provider_http::RawHttpResponse, String>,
+{
+    let mut url = tauri::Url::parse(source).map_err(|_| "Provider image URL is invalid")?;
+    for redirect in 0..=5 {
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("Provider image URL must not contain credentials".to_string());
+        }
+        url.set_fragment(None);
+        let target = parse_public_https_url(url.as_str())?;
+        let response = fetch(&target)?;
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            if redirect == 5 {
+                return Err("Provider image download exceeded the redirect limit".to_string());
+            }
+            url = url
+                .join(
+                    response
+                        .location
+                        .as_deref()
+                        .ok_or("Provider image redirect is missing its location")?,
+                )
+                .map_err(|_| "Provider image redirect URL is invalid")?;
+            continue;
+        }
+        return Ok(response);
+    }
+    unreachable!("bounded redirect loop always returns")
+}
+
+fn download_remote_image(source: &str) -> Result<provider_http::RawHttpResponse, String> {
+    download_remote_image_with(source, |target| {
+        assert_provider_output_host(&target.host)?;
+        request_public_bytes(PublicHttpRequest {
+            host: &target.host,
+            path: &target.path,
+            accept: "image/png,image/jpeg,image/webp",
+            response_body_limit: NATIVE_IMAGE_OUTPUT_LIMIT,
+            cancellation: None,
+        })
+        .map_err(|error| error.to_string())
+    })
+}
+
+fn store_provider_image<F>(
+    source: &str,
+    location: &str,
+    directory: &Path,
+    nonce: u128,
+    index: usize,
+    download: &mut F,
+) -> Result<(PathBuf, &'static str), String>
+where
+    F: FnMut(&str) -> Result<provider_http::RawHttpResponse, String>,
+{
+    let source = source.trim();
+    if !source.starts_with("https://") && !source.starts_with("http://") {
+        return store_embedded_image(source, location, directory, nonce, index);
+    }
+    // Temporary signed output URLs are consumed in Native, never sent over IPC.
+    let response = download(source)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "Provider image download failed at {location} with HTTP {}",
+            response.status
+        ));
+    }
+    if response.body.is_empty() || response.body.len() > NATIVE_IMAGE_OUTPUT_LIMIT {
+        return Err(format!(
+            "Provider image output at {location} exceeds the 25 MiB limit"
+        ));
+    }
+    let declared = response
+        .content_type
+        .as_deref()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let subtype = declared.strip_prefix("image/");
+    if subtype.is_none() && !matches!(declared.as_str(), "" | "application/octet-stream") {
+        return Err(format!(
+            "Provider image download at {location} is not an image"
+        ));
+    }
+    let (content_type, extension) = decoded_image_type(&response.body, subtype)?;
+    store_native_image_bytes(
+        &response.body,
+        content_type,
+        extension,
+        directory,
+        nonce,
+        index,
+    )
+}
+
+fn externalize_image_object<F>(
     values: &mut serde_json::Map<String, serde_json::Value>,
     location: &str,
     directory: &Path,
     nonce: u128,
     paths: &mut Vec<PathBuf>,
-) -> Result<bool, String> {
+    download: &mut F,
+) -> Result<bool, String>
+where
+    F: FnMut(&str) -> Result<provider_http::RawHttpResponse, String>,
+{
     let base64_key = ["b64_json", "b64", "base64"].into_iter().find(|key| {
         values
             .get(*key)
             .and_then(serde_json::Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
     });
-    let data_url_key = [
+    let image_url_key = [
         "url",
         "uri",
         "image_url",
@@ -1192,18 +1309,19 @@ fn externalize_image_object(
             .get(*key)
             .and_then(serde_json::Value::as_str)
             .is_some_and(|value| {
-                value
-                    .trim()
-                    .get(..11)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"))
+                is_image_source(value.trim())
+                    || value
+                        .trim()
+                        .get(..11)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"))
             })
     });
-    if base64_key.is_some() && data_url_key.is_some() {
+    if base64_key.is_some() && image_url_key.is_some() {
         return Err(format!(
-            "Provider returned multiple inline image payloads at {location}"
+            "Provider returned multiple image payloads at {location}"
         ));
     }
-    let Some(key) = base64_key.or(data_url_key) else {
+    let Some(key) = base64_key.or(image_url_key) else {
         return Ok(false);
     };
     if paths.len() >= NATIVE_IMAGE_RESULT_LIMIT {
@@ -1216,8 +1334,14 @@ fn externalize_image_object(
         unreachable!("selected image field must be a string")
     };
     let field_location = format!("{location}.{key}");
-    let (path, content_type) =
-        store_embedded_image(&value, &field_location, directory, nonce, paths.len())?;
+    let (path, content_type) = store_provider_image(
+        &value,
+        &field_location,
+        directory,
+        nonce,
+        paths.len(),
+        download,
+    )?;
     paths.push(path.clone());
     values.insert(
         "nativeImageFilePath".to_string(),
@@ -1230,13 +1354,17 @@ fn externalize_image_object(
     Ok(true)
 }
 
-fn externalize_image_value(
+fn externalize_image_value<F>(
     value: &mut serde_json::Value,
     location: &str,
     directory: &Path,
     nonce: u128,
     paths: &mut Vec<PathBuf>,
-) -> Result<(), String> {
+    download: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) -> Result<provider_http::RawHttpResponse, String>,
+{
     match value {
         serde_json::Value::Array(values) => {
             for (index, item) in values.iter_mut().enumerate() {
@@ -1246,11 +1374,12 @@ fn externalize_image_value(
                     directory,
                     nonce,
                     paths,
+                    download,
                 )?;
             }
         }
         serde_json::Value::Object(values) => {
-            if externalize_image_object(values, location, directory, nonce, paths)? {
+            if externalize_image_object(values, location, directory, nonce, paths, download)? {
                 return Ok(());
             }
             for key in [
@@ -1268,6 +1397,7 @@ fn externalize_image_value(
                         directory,
                         nonce,
                         paths,
+                        download,
                     )?;
                 }
             }
@@ -1280,7 +1410,7 @@ fn externalize_image_value(
                 .trim()
                 .get(..11)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"));
-            if !is_data_url {
+            if !is_data_url && !is_image_source(source.trim()) {
                 *value = serde_json::Value::String(source);
                 return Ok(());
             }
@@ -1288,7 +1418,7 @@ fn externalize_image_value(
                 return Err("Provider returned more than 4 image results".to_string());
             }
             let (path, content_type) =
-                store_embedded_image(&source, location, directory, nonce, paths.len())?;
+                store_provider_image(&source, location, directory, nonce, paths.len(), download)?;
             paths.push(path.clone());
             *value = serde_json::json!({
                 "nativeImageFilePath": path.to_string_lossy(),
@@ -1300,7 +1430,24 @@ fn externalize_image_value(
     Ok(())
 }
 
-fn externalize_embedded_images(response: &mut ProviderHttpResponse) -> Result<(), String> {
+fn externalize_provider_images(response: &mut ProviderHttpResponse) -> Result<(), String> {
+    if let Err(error) = externalize_provider_images_with(response, download_remote_image) {
+        // HTTP succeeded. This is a local output-processing failure, not an
+        // ambiguous paid submission; return it without exposing the signed URL.
+        response.body = serde_json::json!({
+            "nativeImageOutputError": format!("Provider image response received; local output processing failed: {error}"),
+        });
+    }
+    Ok(())
+}
+
+fn externalize_provider_images_with<F>(
+    response: &mut ProviderHttpResponse,
+    mut download: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) -> Result<provider_http::RawHttpResponse, String>,
+{
     if !(200..300).contains(&response.status) {
         return Ok(());
     }
@@ -1313,8 +1460,28 @@ fn externalize_embedded_images(response: &mut ProviderHttpResponse) -> Result<()
         .map_err(|error| format!("Unable to create provider image directory: {error}"))?;
     cleanup_stale_native_images(&directory);
     let mut paths = Vec::new();
-    match externalize_image_value(&mut response.body, "$", &directory, nonce, &mut paths) {
-        Ok(()) => Ok(()),
+    match externalize_image_value(
+        &mut response.body,
+        "$",
+        &directory,
+        nonce,
+        &mut paths,
+        &mut download,
+    ) {
+        Ok(()) => {
+            // Return only local results. Provider metadata can echo a signed URL
+            // in multiple fields and must not invalidate an otherwise valid image.
+            response.body = serde_json::json!({ "data": paths.iter().map(|path| {
+                let content_type = match path.extension().and_then(|value| value.to_str()) {
+                    Some("png") => "image/png",
+                    Some("jpg") => "image/jpeg",
+                    Some("webp") => "image/webp",
+                    _ => unreachable!("stored images have a validated extension"),
+                };
+                serde_json::json!({ "nativeImageFilePath": path.to_string_lossy(), "contentType": content_type })
+            }).collect::<Vec<_>>() });
+            Ok(())
+        }
         Err(error) => {
             for path in paths {
                 let _ = remove_file(path);
@@ -1559,7 +1726,7 @@ fn provider_download_remote_video_blocking(
     source: &str,
 ) -> Result<ProviderBinaryDownloadResponse, String> {
     let target = parse_public_https_url(source)?;
-    assert_public_host(&target.host)?;
+    provider_http::assert_public_host(&target.host)?;
     let response = request_public_bytes(PublicHttpRequest {
         host: &target.host,
         path: &target.path,
@@ -1706,7 +1873,7 @@ fn provider_submit_blocking(
                 "/v1/images/generations",
                 Some(&body),
             )?;
-            externalize_embedded_images(&mut response)?;
+            externalize_provider_images(&mut response)?;
             return Ok(response);
         }
         let (capability, _) = unicompapi_submit_template(adapter_key)?;
@@ -1722,7 +1889,7 @@ fn provider_submit_blocking(
             }
             _ => Err("UniCompAPI adapter must use the matching media bridge".to_string()),
         }?;
-        externalize_embedded_images(&mut response)?;
+        externalize_provider_images(&mut response)?;
         return Ok(response);
     }
     let target = provider_target(adapter_key, provider_region)?;
@@ -1733,7 +1900,7 @@ fn provider_submit_blocking(
         return Ok(response);
     }
     if contains_image_source(&response.body) {
-        externalize_embedded_images(&mut response)?;
+        externalize_provider_images(&mut response)?;
         return Ok(response);
     }
 
@@ -1755,7 +1922,7 @@ fn provider_submit_blocking(
             return Ok(poll);
         }
         if contains_image_source(&poll.body) {
-            externalize_embedded_images(&mut poll)?;
+            externalize_provider_images(&mut poll)?;
             return Ok(poll);
         }
         match poll.body.get("state").and_then(serde_json::Value::as_str) {
@@ -1825,19 +1992,22 @@ fn request_unicompapi_json(
     {
         return Err("UniCompAPI request path is not allowed".to_string());
     }
-    let response = request_json(JsonHttpRequest {
-        host: UNICOMPAPI_HOST,
-        port: 443,
-        secure: true,
-        method,
-        path,
-        authorization_scheme: UNICOMPAPI_AUTHORIZATION_SCHEME,
-        accept: "application/json",
-        secret: secret.as_str()?,
-        body,
-        request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
-        response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
-    })
+    let response = provider_http::request_json_with_receive_timeout(
+        JsonHttpRequest {
+            host: UNICOMPAPI_HOST,
+            port: 443,
+            secure: true,
+            method,
+            path,
+            authorization_scheme: UNICOMPAPI_AUTHORIZATION_SCHEME,
+            accept: "application/json",
+            secret: secret.as_str()?,
+            body,
+            request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+            response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
+        },
+        unicompapi_receive_timeout(method, path),
+    )
     .map_err(|error| error.to_string())?;
     Ok(ProviderHttpResponse {
         status: response.status,
@@ -1871,6 +2041,15 @@ fn request_unicompapi_bytes(
         response_body_limit: 512 * 1024 * 1024,
     })
     .map_err(|error| error.to_string())
+}
+
+fn unicompapi_receive_timeout(method: &str, path: &str) -> Duration {
+    if method == "POST" && path == "/v1/images/generations" {
+        // Synchronous image generation returns only after inference finishes.
+        Duration::from_secs(5 * 60)
+    } else {
+        provider_http::DEFAULT_RECEIVE_TIMEOUT
+    }
 }
 
 struct WorkerProcess {
@@ -2414,7 +2593,7 @@ fn provider_media_submit_blocking(
     let kind = params["kind"].as_str().unwrap_or_default();
     let remote_model_id = params["remoteModelId"].as_str().unwrap_or_default();
     if kind == "image" {
-        let mut response = provider_submit_blocking(
+        let response = provider_submit_blocking(
             adapter_key,
             provider_region,
             provider_profile_id,
@@ -2422,8 +2601,6 @@ fn provider_media_submit_blocking(
             remote_model_id,
         )
         .map_err(|error| provider_transport_host_error(&error, false))?;
-        externalize_embedded_images(&mut response)
-            .map_err(|error| host_error("PROVIDER_FAILED", error, false))?;
         return serde_json::to_value(response)
             .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true));
     }
@@ -3497,7 +3674,7 @@ pub fn run() {
 mod tests {
     use super::{
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
-        ensure_video_adapter, externalize_embedded_images, is_profile_id,
+        ensure_video_adapter, externalize_provider_images, is_profile_id,
         normalize_provider_media_poll, provider_cancel_path, provider_payload, provider_state,
         provider_submit_error, provider_target, provider_task_error, provider_task_id,
         provider_task_path, provider_video_extension, resolve_controlled_media_inputs_at_root,
@@ -3643,6 +3820,24 @@ mod tests {
         }
         let ambiguous = super::provider_transport_host_error("Connection reset after send", false);
         assert_eq!(ambiguous["code"], "PROVIDER_FAILED");
+    }
+
+    #[test]
+    fn only_synchronous_image_submissions_use_the_long_receive_timeout() {
+        assert_eq!(
+            super::unicompapi_receive_timeout("POST", "/v1/images/generations"),
+            Duration::from_secs(300)
+        );
+        for (method, path) in [
+            ("GET", "/v1/models"),
+            ("POST", "/v1/videos"),
+            ("GET", "/v1/videos/task"),
+        ] {
+            assert_eq!(
+                super::unicompapi_receive_timeout(method, path),
+                Duration::from_secs(30)
+            );
+        }
     }
 
     #[test]
@@ -4415,6 +4610,223 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Opt-in download of a public static image; never submits a paid generation"]
+    fn provider_image_download_real_network_smoke() {
+        let source =
+            std::env::var("AI_VIDEO_IMAGE_SMOKE_URL").expect("set a public static image URL");
+        let mut response = ProviderHttpResponse {
+            status: 200,
+            retry_after_ms: None,
+            body: json!({ "data": [{ "url": source }] }),
+        };
+        externalize_provider_images(&mut response).unwrap();
+        assert!(
+            response.body.get("nativeImageOutputError").is_none(),
+            "{}",
+            response.body
+        );
+        assert!(!super::contains_sensitive_host_data(&response.body));
+        let path = Path::new(
+            response.body["data"][0]["nativeImageFilePath"]
+                .as_str()
+                .unwrap(),
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let (content_type, _) = super::decoded_image_type(&bytes, None).unwrap();
+        if let Ok(result_path) = std::env::var("AI_VIDEO_IMAGE_SMOKE_RESULT_PATH") {
+            let envelope = json!({ "kind": "host.response", "requestId": "network-smoke", "ok": true, "result": response });
+            std::fs::write(result_path, envelope.to_string()).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+        println!(
+            "Native downloaded and validated {} bytes ({content_type})",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn provider_image_output_processing_error_preserves_successful_submission() {
+        let mut response = ProviderHttpResponse {
+            status: 200,
+            retry_after_ms: None,
+            body: json!({ "data": [{ "url": "https://localhost/output.png?signature=temporary" }] }),
+        };
+        externalize_provider_images(&mut response).unwrap();
+        assert_eq!(response.status, 200);
+        assert!(response.body["nativeImageOutputError"]
+            .as_str()
+            .unwrap()
+            .starts_with("Provider image response received; local output processing failed:"));
+        assert!(!super::contains_sensitive_host_data(&response.body));
+        assert!(!response.body.to_string().contains("temporary"));
+    }
+
+    #[test]
+    fn provider_bridge_receives_signed_image_urls_and_returns_only_local_results() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let signed_url = "https://cdn.example.invalid/output.png?X-Amz-Signature=temporary";
+        let body = json!({
+            "data": [{ "url": signed_url, "cover_url": signed_url }],
+            "metadata": { "signedUrl": signed_url },
+        })
+        .to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut received = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                received.extend_from_slice(&chunk[..count]);
+                if let Some(end) = received.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map(|value| value.trim().parse::<usize>().unwrap())
+                        .unwrap_or(0);
+                    if received.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let received = super::request_json(super::JsonHttpRequest {
+            host: "127.0.0.1",
+            port,
+            secure: false,
+            method: "POST",
+            path: "/v1/images/generations",
+            authorization_scheme: "Bearer",
+            accept: "application/json",
+            secret: "local-fixture",
+            body: Some(b"{}"),
+            request_body_limit: 1024,
+            response_body_limit: 4096,
+        })
+        .unwrap();
+        server.join().unwrap();
+        let mut response = ProviderHttpResponse {
+            status: received.status,
+            body: received.body,
+            retry_after_ms: None,
+        };
+        let png = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        super::externalize_provider_images_with(&mut response, |source| {
+            assert_eq!(source, signed_url);
+            Ok(super::provider_http::RawHttpResponse {
+                status: 200,
+                body: png.clone(),
+                content_type: Some("image/png".to_string()),
+                location: None,
+                retry_after: None,
+            })
+        })
+        .expect("signed output must be downloaded before IPC");
+        let envelope = json!({ "kind": "host.response", "requestId": "image-result",
+            "ok": true, "result": response });
+        assert!(!super::contains_sensitive_host_data(&envelope));
+        assert!(!envelope.to_string().contains("temporary"));
+        let path = Path::new(
+            envelope["result"]["body"]["data"][0]["nativeImageFilePath"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(std::fs::read(path).unwrap(), png);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn provider_image_download_preserves_signatures_and_validates_each_redirect() {
+        let mut requests = Vec::new();
+        super::download_remote_image_with(
+            "https://cdn.example.invalid/output.png?token=one#preview",
+            |target| {
+                requests.push((target.host.clone(), target.path.clone()));
+                Ok(super::provider_http::RawHttpResponse {
+                    status: if requests.len() == 1 { 302 } else { 200 },
+                    body: Vec::new(),
+                    content_type: None,
+                    retry_after: None,
+                    location: Some("/final.png?signature=two".to_string()),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                (
+                    "cdn.example.invalid".to_string(),
+                    "/output.png?token=one".to_string()
+                ),
+                (
+                    "cdn.example.invalid".to_string(),
+                    "/final.png?signature=two".to_string()
+                ),
+            ]
+        );
+        for unsafe_location in [
+            "http://cdn.example.invalid/image.png",
+            "https://localhost/image.png",
+            "https://user:secret@cdn.example.invalid/image.png",
+        ] {
+            let mut calls = 0;
+            let result =
+                super::download_remote_image_with("https://cdn.example.invalid/start", |_| {
+                    calls += 1;
+                    Ok(super::provider_http::RawHttpResponse {
+                        status: 302,
+                        body: Vec::new(),
+                        content_type: None,
+                        retry_after: None,
+                        location: Some(unsafe_location.to_string()),
+                    })
+                });
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn provider_bridge_removes_partial_images_when_a_remote_download_is_invalid() {
+        let mut response = ProviderHttpResponse {
+            status: 200,
+            retry_after_ms: None,
+            body: json!({ "data": ["data:image/png;base64,iVBORw0KGgo=", "https://cdn.example.invalid/output.png?signature=temporary"] }),
+        };
+        let error = super::externalize_provider_images_with(&mut response, |_| {
+            Ok(super::provider_http::RawHttpResponse {
+                status: 200,
+                body: b"<html>error</html>".to_vec(),
+                content_type: Some("text/html".to_string()),
+                location: None,
+                retry_after: None,
+            })
+        })
+        .unwrap_err();
+        assert!(error.contains("is not an image"));
+        assert!(!error.contains("temporary"));
+        let path = Path::new(
+            response.body["data"][0]["nativeImageFilePath"]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn provider_bridge_externalizes_base64_image_outputs_before_ipc() {
         let png = [137, 80, 78, 71, 13, 10, 26, 10];
         let mut response = ProviderHttpResponse {
@@ -4423,7 +4835,7 @@ mod tests {
             retry_after_ms: None,
         };
 
-        externalize_embedded_images(&mut response).expect("externalize provider image");
+        externalize_provider_images(&mut response).expect("externalize provider image");
 
         let path = response.body["data"][0]["nativeImageFilePath"]
             .as_str()
@@ -4449,7 +4861,7 @@ mod tests {
             retry_after_ms: None,
         };
 
-        externalize_embedded_images(&mut response).expect("externalize provider images");
+        externalize_provider_images(&mut response).expect("externalize provider images");
 
         for item in response.body["data"].as_array().expect("image results") {
             let path = item["nativeImageFilePath"]
@@ -4476,7 +4888,10 @@ mod tests {
             retry_after_ms: None,
         };
 
-        let error = externalize_embedded_images(&mut response).expect_err("invalid second image");
+        let error = super::externalize_provider_images_with(&mut response, |_| {
+            unreachable!("Base64 does not require download")
+        })
+        .expect_err("invalid second image");
 
         assert!(error.contains("$.data[1].b64_json"));
         let first_path = response.body["data"][0]["nativeImageFilePath"]

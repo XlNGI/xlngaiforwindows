@@ -24,10 +24,9 @@ import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works
 import { createPiStreamFunction, NativeProviderBridge } from './native-provider-bridge.js';
 import { DomainToolGateway, type PiToolIdentity } from './domain-tool-gateway.js';
 import type { GenerationService } from './generation-service.js';
-import { shouldRequireStructuredPlan, TaskPlanService } from './task-plan-service.js';
+import { TaskPlanService } from './task-plan-service.js';
 import {
   AgentProviderToolGateway,
-  isLibraryRetrievalOperation,
   type AgentProviderPlanHooks,
   type AgentProviderToolExecutor,
 } from './agent-provider-tool-gateway.js';
@@ -128,32 +127,17 @@ export class PiConversationRuntime implements ConversationRuntime {
     // Short-drama still freezes a plan first. Ordinary document sessions
     // authorize tools and let the model choose; prompt regex is not a router.
     const shortDramaWorkflow = request.mode === 'short-drama';
-    const genericPlanWorkflow =
-      !shortDramaWorkflow &&
-      shouldRequireStructuredPlan(
-        request.mode,
-        prompt,
-        (runtime.tools ?? []).map((tool) => tool.name),
-      );
-    const plannedWorkflow = shortDramaWorkflow || genericPlanWorkflow;
+    const plannedWorkflow = shortDramaWorkflow;
     const gateway = plannedWorkflow ? this.options.createGateway(gatewayIdentity) : undefined;
     const planning = plannedWorkflow
       ? this.options.plans.planOnlyRound(request.taskId, prompt, request.mode)
       : undefined;
     const planningGrants = planning?.tools ?? [];
     const providerGateway = !shortDramaWorkflow
-      ? this.createProviderGateway(
-          identity,
-          runtime.tools ?? [],
-          genericPlanWorkflow,
-          request.taskId,
-        )
+      ? this.createProviderGateway(identity, runtime.tools ?? [], false, request.taskId)
       : undefined;
     const initialDefinitions = plannedWorkflow
-      ? [
-          ...planningGrants.map((grant) => grant.tool),
-          ...(genericPlanWorkflow ? providerGateway!.currentDefinitions([]) : []),
-        ]
+      ? [...planningGrants.map((grant) => grant.tool)]
       : providerGateway!.currentDefinitions();
     this.options.generation.configureAgentTools(identity, initialDefinitions);
 
@@ -176,28 +160,17 @@ export class PiConversationRuntime implements ConversationRuntime {
       streamFn,
       initialState: {
         systemPrompt: withFrozenContext(
-          genericPlanWorkflow
-            ? `${unifiedAgentInstruction(runtime.systemInstruction)}\n\n${planning!.systemInstruction}`
-            : (planning?.systemInstruction ?? unifiedAgentInstruction(runtime.systemInstruction)),
+          planning?.systemInstruction ?? unifiedAgentInstruction(runtime.systemInstruction),
           runtime.context,
         ),
         model,
         thinkingLevel: 'off',
-        tools: plannedWorkflow
-          ? [
-              ...gateway!.tools(planningGrants),
-              ...(genericPlanWorkflow ? providerGateway!.tools([]) : []),
-            ]
-          : providerGateway!.tools(),
+        tools: plannedWorkflow ? [...gateway!.tools(planningGrants)] : providerGateway!.tools(),
       },
       toolExecution: plannedWorkflow ? 'parallel' : 'sequential',
       // eslint-disable-next-line @typescript-eslint/require-await
       beforeToolCall: async ({ assistantMessage, toolCall }) => {
-        if (
-          planningRound &&
-          toolCall.name !== 'task.plan.submit' &&
-          !(genericPlanWorkflow && isLibraryRetrievalOperation(toolCall.name))
-        ) {
+        if (planningRound && toolCall.name !== 'task.plan.submit') {
           return {
             block: true,
             reason:
@@ -240,26 +213,14 @@ export class PiConversationRuntime implements ConversationRuntime {
             ? planningGrants
             : this.options.plans.availableToolGrants(request.taskId)
           : [];
-        const readyOperations =
-          genericPlanWorkflow && !planningRound
-            ? this.options.plans.availableOperations(request.taskId)
-            : undefined;
         const definitions =
           plan?.status === 'succeeded'
             ? []
             : plannedWorkflow && planningRound
-              ? [
-                  ...planningGrants.map((grant) => grant.tool),
-                  ...(genericPlanWorkflow ? providerGateway!.currentDefinitions([]) : []),
-                ]
+              ? [...planningGrants.map((grant) => grant.tool)]
               : shortDramaWorkflow
                 ? grants.map((grant) => grant.tool)
-                : genericPlanWorkflow
-                  ? [
-                      ...providerGateway!.currentDefinitions(readyOperations),
-                      ...grants.map((grant) => grant.tool),
-                    ]
-                  : providerGateway!.currentDefinitions();
+                : providerGateway!.currentDefinitions();
         const continuation = buildContinuation(
           runtimeProtocol(this.options.generation.runtime(identity)),
           message,
@@ -267,12 +228,7 @@ export class PiConversationRuntime implements ConversationRuntime {
           context.messages,
         );
         this.options.generation.configureAgentTools(identity, definitions, continuation);
-        if (
-          providerGateway &&
-          toolResults.length > 0 &&
-          plan?.status !== 'succeeded' &&
-          (!genericPlanWorkflow || (readyOperations?.length ?? 0) > 0)
-        ) {
+        if (providerGateway && toolResults.length > 0 && plan?.status !== 'succeeded') {
           providerGateway.startProviderStep();
         }
         return {
@@ -290,15 +246,10 @@ export class PiConversationRuntime implements ConversationRuntime {
               plan?.status === 'succeeded'
                 ? []
                 : plannedWorkflow && planningRound
-                  ? [
-                      ...gateway!.tools(planningGrants),
-                      ...(genericPlanWorkflow ? providerGateway!.tools([]) : []),
-                    ]
+                  ? [...gateway!.tools(planningGrants)]
                   : shortDramaWorkflow
                     ? gateway!.tools(grants)
-                    : genericPlanWorkflow
-                      ? [...providerGateway!.tools(readyOperations), ...gateway!.tools(grants)]
-                      : providerGateway!.tools(),
+                    : providerGateway!.tools(),
           },
         };
       },
@@ -317,11 +268,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       },
     });
 
-    if (
-      providerGateway &&
-      (!plannedWorkflow ||
-        (genericPlanWorkflow && providerGateway.currentDefinitions([]).length > 0))
-    ) {
+    if (providerGateway && !plannedWorkflow) {
       providerGateway.startProviderStep();
     }
 

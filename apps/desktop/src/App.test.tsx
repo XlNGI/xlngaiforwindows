@@ -493,6 +493,7 @@ describe('App', () => {
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
       if (method === 'document.draft.save') return Promise.resolve(saved);
       if (method === 'document.versions') return Promise.resolve([saved.currentVersion]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -643,6 +644,21 @@ describe('App', () => {
           researchSources: [],
         } satisfies AgentTaskDetail);
       if (method === 'novel.chapter.list') return Promise.resolve([chapter]);
+      // Old lists/caches can still contain a chapter as an ordinary note.
+      if (method === 'document.list')
+        return Promise.resolve([
+          {
+            id: chapter.documentId,
+            projectId: 'project',
+            kind: 'note',
+            title: chapter.title,
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
       if (method === 'document.get')
         return Promise.resolve({
           id: chapter.documentId,
@@ -881,6 +897,7 @@ describe('App', () => {
           sources: [],
         });
       }
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
     render(<App />);
@@ -1030,6 +1047,7 @@ describe('App', () => {
       if (method === 'llm.generate') return Promise.resolve(streaming);
       if (method === 'llm.generation.get') return stalePoll;
       if (method === 'llm.generation.cancel') return Promise.resolve(cancelled);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1062,7 +1080,20 @@ describe('App', () => {
     ).toHaveLength(1);
   });
 
-  it('keeps an incomplete novel request for clarification, then refreshes an Agent document', async () => {
+  it.each([
+    ['帮我生成一个小说', 'selected'],
+    ['续写小说下一章', 'selected'],
+    ['现在生成小说第一章', 'selected'],
+    ['现在生成小说第一章', 'conversation-preference'],
+    ['现在生成小说第一章', 'missing_model'],
+    ['现在生成小说第一章', 'model_unavailable'],
+    ['现在生成小说第一章', 'shortcut-model-selection'],
+    ['现在生成小说第一章', 'novel-possessive'],
+  ])('sends %s (%s)', async (firstPrompt, batchModelState) => {
+    window.localStorage.clear();
+    const batchPrompt =
+      batchModelState === 'novel-possessive' ? '生成小说的第四章和第五章' : '生成第四章和第五章';
+    const isChapter = firstPrompt === '现在生成小说第一章';
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -1107,6 +1138,7 @@ describe('App', () => {
     };
     const prepared = {
       agentTaskId: 'agent-task',
+      runtimeMode: 'document',
       stream: {
         generationId: 'generation',
         attemptId: 'attempt',
@@ -1169,6 +1201,20 @@ describe('App', () => {
       },
     };
     let documentListCalls = 0;
+    const chapter = {
+      id: 'generated-chapter',
+      projectId: 'project',
+      documentId: createdDocument.id,
+      title: createdDocument.title,
+      position: 0,
+      displayLabel: '第一章',
+      lifecycleStatus: 'active' as const,
+      documentRowVersion: 1,
+      ragChunkCount: 1,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
 
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'health')
@@ -1204,6 +1250,44 @@ describe('App', () => {
       if (method === 'document.get') return Promise.resolve(createdDocumentDetail);
       if (method === 'document.versions')
         return Promise.resolve([createdDocumentDetail.currentVersion]);
+      if (method === 'agent.task.get' && !isChapter) return Promise.resolve(null);
+      if (method === 'agent.task.get' && isChapter)
+        return Promise.resolve({
+          task: {
+            id: prepared.agentTaskId,
+            projectId: 'project',
+            conversationId: conversation.id,
+            taskType: 'document-update',
+            scopeType: 'project',
+            title: firstPrompt,
+            status: 'waiting_review',
+            phase: 'waiting_review',
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          target: {
+            targetKind: 'novel-chapter',
+            action: 'create_chapter',
+            chapterId: chapter.id,
+            documentId: chapter.documentId,
+            documentVersionId: createdDocument.currentVersionId,
+          },
+          documents: [
+            {
+              documentId: chapter.documentId,
+              documentVersionId: createdDocument.currentVersionId,
+              operation: 'create',
+              createdAt: 'now',
+            },
+          ],
+          events: [],
+          providerSteps: [],
+          researchSources: [],
+        } satisfies AgentTaskDetail);
+      if (method === 'novel.chapter.list') return Promise.resolve(isChapter ? [chapter] : []);
+      if (method === 'novel.volume.list' || method === 'agent.partial.list')
+        return Promise.resolve([]);
       if (method === 'project.recent' || method === 'scene.list') return Promise.resolve([]);
       if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'adapter.catalog')
@@ -1219,6 +1303,16 @@ describe('App', () => {
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'conversation.list') return Promise.resolve({ items: [conversation] });
       if (method === 'chat.message.list') return Promise.resolve({ items: [] });
+      if (method === 'chat.message.save')
+        return Promise.resolve({
+          id: 'batch-original',
+          conversationId: conversation.id,
+          role: 'user' as const,
+          content: (params as { content: string }).content,
+          status: 'complete' as const,
+          createdAt: 'now',
+        });
+      if (method === 'llm.generation.get') return Promise.resolve(prepared.generation);
       if (method === 'context.preview')
         return Promise.resolve({
           version: 1,
@@ -1254,12 +1348,32 @@ describe('App', () => {
           },
         });
       }
-      if (method === 'agent.run')
+      if (method === 'agent.run') {
+        const run = params as { providerProfileId?: string; modelId?: string };
+        if (!run.modelId && ['missing_model', 'model_unavailable'].includes(batchModelState))
+          return Promise.resolve({
+            status: 'needs_model_selection' as const,
+            capability: 'text' as const,
+            reason: batchModelState as 'missing_model' | 'model_unavailable',
+            models: [
+              {
+                providerProfileId: profile.id,
+                providerName: profile.name,
+                modelId: model.id,
+                remoteModelId: model.remoteModelId,
+                modelName: model.displayName,
+                capabilities: model.capabilities,
+                source: model.source,
+                schemaReady: true,
+              },
+            ],
+          });
         return Promise.resolve({
           status: 'started' as const,
           capability: 'text' as const,
           ...prepared,
         });
+      }
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1267,26 +1381,29 @@ describe('App', () => {
     await screen.findByDisplayValue('Project conversation');
     selectLlm(profile.id, model.id);
     fireEvent.change(screen.getByLabelText('会话消息'), {
-      target: { value: '续写小说下一章' },
+      target: { value: firstPrompt },
     });
     fireEvent.click(screen.getByTitle('发送消息'));
 
-    expect(
-      await screen.findByText('请补充要操作的小说章节或新章节标题，助手会继续当前任务。'),
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText('会话消息')).toHaveValue('续写小说下一章');
+    const needsClarification = firstPrompt === '续写小说下一章';
+    if (needsClarification) {
+      expect(
+        await screen.findByText('请补充要操作的小说章节或新章节标题，助手会继续当前任务。'),
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText('会话消息')).toHaveValue(firstPrompt);
 
-    fireEvent.change(screen.getByLabelText('会话消息'), {
-      target: { value: 'Draft a project brief' },
-    });
-    fireEvent.click(screen.getByTitle('发送消息'));
+      fireEvent.change(screen.getByLabelText('会话消息'), {
+        target: { value: 'Draft a project brief' },
+      });
+      fireEvent.click(screen.getByTitle('发送消息'));
+    }
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'agent.run',
         expect.objectContaining({
           conversationId: conversation.id,
-          prompt: 'Draft a project brief',
+          prompt: needsClarification ? 'Draft a project brief' : firstPrompt,
           capability: 'text',
           // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           idempotencyKey: expect.stringMatching(/^desktop-run:/),
@@ -1296,6 +1413,88 @@ describe('App', () => {
         }),
       ),
     );
+    if (!needsClarification) {
+      const run = vi.mocked(callWorker).mock.calls.find(([method]) => method === 'agent.run');
+      expect(run?.[1]).not.toHaveProperty('novelIntent');
+      await waitFor(() => expect(screen.getByLabelText('会话消息')).toHaveValue(''));
+      expect(
+        screen.queryByText('请补充要操作的小说章节或新章节标题，助手会继续当前任务。'),
+      ).not.toBeInTheDocument();
+    }
+    if (isChapter) {
+      expect(await screen.findByLabelText('章节内容')).toHaveValue('Agent 桌面人工测试成功');
+      expect(screen.queryByLabelText('文档内容')).not.toBeInTheDocument();
+      expect(callWorker).toHaveBeenCalledWith('agent.task.get', { taskId: prepared.agentTaskId });
+      if (batchModelState === 'shortcut-model-selection') {
+        fireEvent.click(screen.getByRole('button', { name: '生成本章正文' }));
+        const shortcutPrompt = `请生成并保存“${chapter.title}”的小说正文。`;
+        expect(screen.getByLabelText('会话消息')).toHaveValue(shortcutPrompt);
+        const original = vi.mocked(callWorker).getMockImplementation()!;
+        let tried = false;
+        vi.mocked(callWorker).mockImplementation((method, params) => {
+          if (method === 'agent.run' && !tried) {
+            tried = true;
+            return Promise.resolve({
+              status: 'needs_model_selection',
+              capability: 'text',
+              reason: 'model_unavailable',
+              models: [
+                {
+                  providerProfileId: profile.id,
+                  providerName: profile.name,
+                  modelId: model.id,
+                  remoteModelId: model.remoteModelId,
+                  modelName: model.displayName,
+                  capabilities: model.capabilities,
+                  source: model.source,
+                  schemaReady: true,
+                },
+              ],
+            });
+          }
+          return original(method, params);
+        });
+        fireEvent.click(screen.getByTitle('发送消息'));
+        const selection = await screen.findByRole('dialog', { name: '选择Agent模型' });
+        fireEvent.click(within(selection).getByRole('button', { name: 'GPT Test OpenAI' }));
+        await waitFor(() =>
+          expect(
+            vi
+              .mocked(callWorker)
+              .mock.calls.filter(
+                ([method, params]) =>
+                  method === 'agent.run' &&
+                  (params as { prompt: string }).prompt === shortcutPrompt,
+              ),
+          ).toHaveLength(2),
+        );
+        for (const [, params] of vi
+          .mocked(callWorker)
+          .mock.calls.filter(
+            ([method, params]) =>
+              method === 'agent.run' && (params as { prompt: string }).prompt === shortcutPrompt,
+          ))
+          expect(params).toMatchObject({
+            novelIntent: { action: 'rewrite_chapter', chapterId: chapter.id },
+          });
+        return;
+      }
+      fireEvent.change(screen.getByLabelText('会话消息'), { target: { value: batchPrompt } });
+      const batchCallStart = vi.mocked(callWorker).mock.calls.length;
+      fireEvent.click(screen.getByTitle('发送消息'));
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith(
+          'agent.run',
+          expect.objectContaining({ prompt: batchPrompt, capability: 'text' }),
+        ),
+      );
+      const batchCalls = vi.mocked(callWorker).mock.calls.slice(batchCallStart);
+      expect(batchCalls.filter(([method]) => method === 'agent.run')).toHaveLength(1);
+      expect(batchCalls.filter(([method]) => method === 'chat.message.save')).toHaveLength(0);
+      const run = batchCalls.find(([method]) => method === 'agent.run');
+      expect(run?.[1]).not.toHaveProperty('novelIntent');
+      return;
+    }
     expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);
     expect(await screen.findByDisplayValue(createdDocument.title)).toBeInTheDocument();
     expect(await screen.findByDisplayValue('Agent 桌面人工测试成功')).toBeInTheDocument();
@@ -1459,6 +1658,7 @@ describe('App', () => {
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
@@ -1664,6 +1864,7 @@ describe('App', () => {
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method + ' ' + JSON.stringify(params));
     });
     render(<App />);
@@ -1777,6 +1978,7 @@ describe('App', () => {
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
@@ -1937,6 +2139,7 @@ describe('App', () => {
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     const { container } = render(<App />);
@@ -2080,6 +2283,7 @@ describe('App', () => {
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
@@ -2255,6 +2459,7 @@ describe('App', () => {
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'video.generate.list' || method === 'agent.changeSet.list')
         return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     const { container } = render(<App />);
@@ -2488,6 +2693,7 @@ describe('App', () => {
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'video.generate.list' || method === 'agent.changeSet.list')
         return Promise.resolve([]);
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     const { container } = render(<App />);
@@ -2657,6 +2863,7 @@ describe('App', () => {
           confirmedAt: 'now',
           updatedAt: 'now',
         });
+      if (method === 'novel.chapter.list') return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);

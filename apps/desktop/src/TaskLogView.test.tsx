@@ -287,6 +287,31 @@ describe('TaskLogView', () => {
     expect(callWorker).not.toHaveBeenCalledWith('agent.task.get', expect.anything());
   });
 
+  it('shows an uncertain image submission instead of running and advises checking the Provider', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'task.log.list')
+        return Promise.resolve({ items: [{ ...imageItem, status: 'submission_unknown' }] });
+      if (method === 'image.generate.get')
+        return Promise.resolve({
+          ...imageJob,
+          status: 'running',
+          mediaState: 'submission_unknown',
+          results: [],
+          error: 'Submission status is unknown: Provider response could not be received（超时）',
+        });
+      if (method === 'generation.job.events.list')
+        return Promise.resolve({ events: [], nextSequence: -1, hasMore: false });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    render(<TaskLogView projectId="project-1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /文本生成图片/ }));
+    await screen.findByRole('heading', { name: '请求参数摘要' });
+    expect(screen.getAllByText('提交结果未知 (submission_unknown)')).toHaveLength(2);
+    expect(screen.queryByText('执行中 (running)')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('不会自动重试');
+    expect(screen.getByRole('alert')).toHaveTextContent('Provider 后台核对');
+  });
+
   it('loads full video job details', async () => {
     const videoItem: TaskLogItem = {
       ...imageItem,

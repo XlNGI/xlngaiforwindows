@@ -7,6 +7,7 @@ import { ContentService } from './content-service.js';
 import { DocumentWorkflowError, DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 import { createRepositories } from '@ai-video/persistence';
+import { AgentOrchestrationService } from './agent-orchestration-service.js';
 
 const directories: string[] = [];
 const services: ProjectService[] = [];
@@ -41,6 +42,75 @@ async function setup() {
 }
 
 describe('DocumentWorkflowService', () => {
+  it('keeps saved chapter documents out of the general document list', async () => {
+    const { projects, workflow, conversation } = await setup();
+    const orchestration = new AgentOrchestrationService(projects);
+    const target = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: projects.currentSessionId()!,
+      prompt: '生成第三章',
+      intent: { action: 'create_chapter', displayLabel: '第三章' },
+    });
+    if ('pendingIntent' in target) throw new Error('Expected target');
+    workflow.saveDraft({
+      documentId: target.documentId,
+      title: '第三章 记忆当',
+      contentMarkdown: '小说章节正文',
+      expectedDocumentRowVersion: 0,
+    });
+    const reference = workflow.saveDraft({ title: '独立笔记', contentMarkdown: '普通文档' });
+    expect(workflow.listDocuments().map((document) => document.id)).toContain(reference.id);
+    expect(workflow.listDocuments().map((document) => document.id)).not.toContain(
+      target.documentId,
+    );
+    expect(workflow.getDocument(target.documentId).currentVersion?.contentMarkdown).toBe(
+      '小说章节正文',
+    );
+  });
+  it('reports and filters media submission states and classifies Vidu images by capability', async () => {
+    const { projects, workflow } = await setup();
+    projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      for (const [id, adapterKey, mediaState] of [
+        [
+          'uncertain-image',
+          'TEXT_TO_IMAGE:unicompapi:cn.qwen.qwen-image-3-0:contract-1',
+          'submission_unknown',
+        ],
+        ['vidu-image', 'TEXT_TO_IMAGE:vidu:viduq2:v2', 'submitting'],
+        ['vidu-video', 'REFERENCE_TO_VIDEO:vidu:viduq3:v2', 'polling'],
+      ] as const) {
+        repositories.jobs.save({
+          id,
+          projectId: project.id,
+          adapterKey,
+          mediaState,
+          status: mediaState === 'polling' ? 'polling' : 'running',
+          requestJson: '{}',
+          createdAt: '2026-10-12T01:53:13.000Z',
+          updatedAt: '2026-10-12T01:53:44.000Z',
+        });
+      }
+    });
+    expect(workflow.listTaskLog({ kind: 'image' }).items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: 'uncertain-image',
+          status: 'submission_unknown',
+          kind: 'image',
+        }),
+        expect.objectContaining({ sourceId: 'vidu-image', status: 'submitting', kind: 'image' }),
+      ]),
+    );
+    expect(
+      workflow.listTaskLog({ status: 'submission_unknown' }).items.map((item) => item.sourceId),
+    ).toEqual(['uncertain-image']);
+    expect(workflow.listTaskLog({ status: 'running' }).items).toEqual([]);
+    expect(workflow.listTaskLog({ kind: 'video' }).items).toEqual([
+      expect.objectContaining({ sourceId: 'vidu-video', status: 'polling' }),
+    ]);
+  });
+
   it('lists an agent draft in catalog and marks it published without injecting the body', async () => {
     const { projects, content, workflow, contexts, conversation, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({

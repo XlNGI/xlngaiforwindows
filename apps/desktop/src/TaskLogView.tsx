@@ -27,6 +27,7 @@ import {
   generationEventSummary,
   generationPhaseLabel,
   generationStatusLabel,
+  generationTaskStatus,
 } from './generation-feedback';
 
 interface TaskLogViewProps {
@@ -44,6 +45,10 @@ const kindLabel: Record<TaskLogItem['kind'], string> = {
 };
 
 const statusLabel: Record<string, string> = {
+  draft: '待提交',
+  awaiting_confirmation: '等待确认',
+  submitting: '正在提交',
+  submission_unknown: '提交结果未知',
   queued: '排队中',
   running: '执行中',
   waiting_review: '等待审核',
@@ -607,7 +612,7 @@ function MediaTaskDetailPanel({
     : undefined;
   return (
     <div className="task-log-detail-body">
-      <TaskLogStatus status={detail.status} />
+      <TaskLogStatus status={generationTaskStatus(detail)} />
       <dl className="task-log-detail-meta">
         <div>
           <dt>任务 ID</dt>

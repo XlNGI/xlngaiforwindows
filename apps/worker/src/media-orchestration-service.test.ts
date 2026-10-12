@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,13 +7,14 @@ import type {
   MediaModelSelectionSnapshot,
   ProviderModelInfo,
   ProviderProfileInfo,
+  SidecarEnvelope,
 } from '@ai-video/contracts';
 import { getAdapter } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 import type { AppSettingsService } from './app-settings-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { MediaOrchestrationService } from './media-orchestration-service.js';
-import { NativeProviderRequestError, type NativeProviderBridge } from './native-provider-bridge.js';
+import { NativeProviderRequestError, NativeProviderBridge } from './native-provider-bridge.js';
 import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 
@@ -79,6 +80,7 @@ async function setup() {
     profile,
     models,
     adapterLookup,
+    settings,
   };
 }
 
@@ -158,6 +160,129 @@ function prepareVideo(videos: VideoGenerationService) {
 }
 
 describe('MediaOrchestrationService', () => {
+  it('records local output failures after HTTP success as failed without resubmitting', async () => {
+    const { images, service, request } = await setup();
+    const job = prepareImage(images);
+    const pending = service.requestSubmission({ jobId: job.id });
+    const message =
+      'Provider image response received; local output processing failed: download blocked';
+    request.mockResolvedValueOnce({ status: 200, body: { nativeImageOutputError: message } });
+    const result = await service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(result.job).toMatchObject({ status: 'failed', mediaState: 'failed', error: message });
+    expect(result.job.error).not.toContain('Submission status is unknown');
+    expect(service.requestSubmission({ jobId: job.id }).confirmation).toBeUndefined();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('receives a Native image result through the real bridge and saves its preview and asset', async () => {
+    const { images, videos, settings, projectsService } = await setup();
+    const sent: Array<Extract<SidecarEnvelope, { kind: 'host.request' }>> = [];
+    const bridge = new NativeProviderBridge({
+      send: (envelope) => {
+        sent.push(envelope);
+        return Promise.resolve();
+      },
+    });
+    const service = new MediaOrchestrationService(
+      projectsService,
+      settings,
+      images,
+      videos,
+      bridge,
+    );
+    const nativeRoot = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    await mkdir(nativeRoot, { recursive: true });
+    const nativeDirectory = await mkdtemp(join(nativeRoot, 'image-receive-'));
+    roots.push(nativeDirectory);
+    const nativeImageFilePath = join(nativeDirectory, 'image-output.png');
+    await writeFile(nativeImageFilePath, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    const job = prepareImage(images);
+    const pending = service.requestSubmission({ jobId: job.id });
+    const submission = service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    bridge.handleEnvelope({
+      kind: 'host.response',
+      requestId: sent[0]!.requestId,
+      ok: true,
+      result: { status: 200, body: { data: [{ nativeImageFilePath, contentType: 'image/png' }] } },
+    });
+    const result = await submission;
+    expect(result.job).toMatchObject({ status: 'succeeded', mediaState: 'succeeded' });
+    expect(result.job.results[0]?.asset).toBeDefined();
+    expect(images.get(job.id).results[0]?.asset).toBeDefined();
+    expect(result.job).toHaveProperty('preview.contentType', 'image/png');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('waits for synchronous images beyond the default Native bridge timeout', async () => {
+    const { images, videos, settings, projectsService } = await setup();
+    const sent: Array<Extract<SidecarEnvelope, { kind: 'host.request' }>> = [];
+    const bridge = new NativeProviderBridge({
+      send: (envelope) => {
+        sent.push(envelope);
+        return Promise.resolve();
+      },
+    });
+    const service = new MediaOrchestrationService(
+      projectsService,
+      settings,
+      images,
+      videos,
+      bridge,
+    );
+    const job = prepareImage(images);
+    const pending = service.requestSubmission({ jobId: job.id });
+    vi.useFakeTimers();
+    try {
+      const submission = service.confirmSubmission({
+        jobId: job.id,
+        confirmationToken: pending.confirmation!.confirmationToken,
+        approved: true,
+      });
+      // Inference can outlast the Native bridge's default two-minute request deadline.
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(images.get(job.id).mediaState).toBe('submitting');
+      bridge.handleEnvelope({
+        kind: 'host.response',
+        requestId: sent[0]!.requestId,
+        ok: true,
+        result: { status: 400, body: { error: { message: 'mock provider rejection' } } },
+      });
+      const result = await submission;
+      expect(result.job).toMatchObject({ status: 'failed', mediaState: 'failed' });
+      expect(result.job.error).toContain('HTTP 400');
+      expect(service.requestSubmission({ jobId: job.id }).confirmation).toBeUndefined();
+      expect(sent).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves cancellation when an in-flight image submission later fails', async () => {
+    const { images, service, request } = await setup();
+    const job = prepareImage(images);
+    const pending = service.requestSubmission({ jobId: job.id });
+    let rejectSubmission!: (error: Error) => void;
+    request.mockImplementationOnce(() => new Promise((_, reject) => (rejectSubmission = reject)));
+    const submission = service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(images.get(job.id).mediaState).toBe('submitting');
+    await service.cancel({ jobId: job.id });
+    rejectSubmission(new Error('response timed out'));
+    expect((await submission).job).toMatchObject({ status: 'cancelled', mediaState: 'cancelled' });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('submits a HappyHorse draft through the existing media boundary and freezes the official contract', async () => {
     const { profile, models, videos, service, request, projectsService } = await setup();
     Object.assign(profile, {

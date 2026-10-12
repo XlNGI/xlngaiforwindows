@@ -1,3 +1,4 @@
+import { linkResearchCitations } from './agent-research-citations.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
@@ -351,7 +352,7 @@ export class AgentProviderLoopService {
               existing.task_id,
               previousAuthorization,
               mode,
-              this.systemTools !== undefined,
+              this.systemTools?.availableOperations() ?? false,
               this.media !== undefined,
             ),
           );
@@ -388,9 +389,9 @@ export class AgentProviderLoopService {
             conversation,
             intent,
           );
-          const authorization = this.systemTools
-            ? this.enforceExplicitUserIntent(resolvedAuthorization, prompt)
-            : resolvedAuthorization;
+          // The model owns semantic interpretation. Worker authorization is
+          // structural and service based; it never classifies the prompt.
+          const authorization = resolvedAuthorization;
           database
             .prepare(
               `INSERT INTO agent_task_generations (task_id, generation_id, ordinal, purpose, created_at)
@@ -425,7 +426,7 @@ export class AgentProviderLoopService {
               task.id,
               authorization,
               researchMode,
-              this.systemTools !== undefined,
+              this.systemTools?.availableOperations() ?? false,
               this.media !== undefined,
             ),
           );
@@ -441,9 +442,9 @@ export class AgentProviderLoopService {
           conversation,
           intent,
         );
-        const authorization = this.systemTools
-          ? this.enforceExplicitUserIntent(resolvedAuthorization, prompt)
-          : resolvedAuthorization;
+        // Do not infer an operation from prompt wording. Keep a stable,
+        // least-privilege primary handle and let the model choose tools.
+        const authorization = resolvedAuthorization;
         database
           .prepare(
             `INSERT INTO agent_tasks
@@ -477,14 +478,10 @@ export class AgentProviderLoopService {
                 ...(authorization.targetDocumentId
                   ? { targetDocumentId: authorization.targetDocumentId }
                   : {}),
-                source: 'worker-resolver',
+                source: 'structured-request',
               },
               agentMode: selectedChapterIds ? 'short-drama' : 'document',
               documentOperation: authorization.operation,
-              novelReference:
-                authorization.operation === 'document.create_draft'
-                  ? inferNovelReference(prompt)
-                  : undefined,
               researchMode,
               modelSelection: agentModelSelectionSnapshot(
                 generation,
@@ -529,7 +526,7 @@ export class AgentProviderLoopService {
             taskId,
             authorization,
             researchMode,
-            this.systemTools !== undefined,
+            this.systemTools?.availableOperations() ?? false,
             this.media !== undefined,
           ),
         );
@@ -766,7 +763,7 @@ export class AgentProviderLoopService {
               task.id,
               primaryAuthorization,
               researchModeFromSnapshot(task.request_snapshot_json),
-              this.systemTools !== undefined,
+              this.systemTools?.availableOperations() ?? false,
               true,
             ),
           );
@@ -1078,7 +1075,7 @@ export class AgentProviderLoopService {
             staged.task.id,
             firstPrimaryAuthorization(database, staged.task.id),
             researchModeFromSnapshot(staged.task.request_snapshot_json),
-            this.systemTools !== undefined,
+            this.systemTools?.availableOperations() ?? false,
             this.media !== undefined,
           ),
         );
@@ -1138,7 +1135,7 @@ export class AgentProviderLoopService {
             task.id,
             firstPrimaryAuthorization(database, task.id),
             researchModeFromSnapshot(task.request_snapshot_json),
-            this.systemTools !== undefined,
+            this.systemTools?.availableOperations() ?? false,
             this.media !== undefined,
           ),
         );
@@ -1364,7 +1361,7 @@ export class AgentProviderLoopService {
             task.id,
             primaryAuthorization,
             researchModeFromSnapshot(task.request_snapshot_json),
-            this.systemTools !== undefined,
+            this.systemTools?.availableOperations() ?? false,
             true,
           ),
         );
@@ -1620,9 +1617,12 @@ export class AgentProviderLoopService {
               now,
             );
           let output: string;
+          const operation = call.name;
           try {
             output = unifiedAgentToolRegistry.serializeResult(
-              systemTools.execute(call.name, args, params),
+              database.transaction(() =>
+                systemTools.execute(operation, args, { ...params, taskId: task.id, toolCallId }),
+              )(),
             );
           } catch (error) {
             const policyError =
@@ -1646,16 +1646,35 @@ export class AgentProviderLoopService {
                 now,
                 toolCallId,
               );
-            if (error instanceof AgentToolPolicyError) throw error;
             outputs.push({ callId: call.id, output: failedOutput });
+            if (
+              error instanceof AgentToolPolicyError &&
+              operation !== 'document.submit_draft' &&
+              operation !== 'novel.chapter.write_draft'
+            )
+              throw error;
             continue;
           }
+          const artifact = JSON.parse(output) as {
+            documentId?: string;
+            documentVersionId?: string;
+            chapterId?: string;
+          };
           database
             .prepare(
               `UPDATE agent_tool_calls SET status = 'succeeded', result_summary_json = ?,
-               completed_at = ?, version = version + 1 WHERE id = ?`,
+            result_document_id = ?, result_document_version_id = ?, target_chapter_id = ?, target_document_id = ?,
+            completed_at = ?, version = version + 1 WHERE id = ?`,
             )
-            .run(output, now, toolCallId);
+            .run(
+              output,
+              artifact.documentVersionId ? (artifact.documentId ?? null) : null,
+              artifact.documentVersionId ?? null,
+              artifact.chapterId ?? null,
+              artifact.documentVersionId ? (artifact.documentId ?? null) : null,
+              now,
+              toolCallId,
+            );
           outputs.push({ callId: call.id, output });
         }
         this.appendEvent(
@@ -1697,7 +1716,7 @@ export class AgentProviderLoopService {
               task.id,
               primaryAuthorization,
               researchModeFromSnapshot(task.request_snapshot_json),
-              true,
+              systemTools.availableOperations(),
               this.media !== undefined,
             ),
           );
@@ -1722,7 +1741,7 @@ export class AgentProviderLoopService {
             database,
             task,
             step.id,
-            true,
+            systemTools.availableOperations(),
             this.media !== undefined,
           ),
         };
@@ -2296,22 +2315,45 @@ export class AgentProviderLoopService {
             status: 'listed',
             documents: items
               .slice(0, 100)
-              .map(({ id, title, scopeType, scopeId, lifecycleStatus, updatedAt }) => ({
-                id,
-                title,
-                scopeType,
-                scopeId,
-                lifecycleStatus,
-                updatedAt,
-              })),
+              .map(
+                ({
+                  id,
+                  kind,
+                  title,
+                  scopeType,
+                  scopeId,
+                  lifecycleStatus,
+                  updatedAt,
+                  rowVersion,
+                  currentVersionId,
+                }) => ({
+                  id,
+                  documentId: id,
+                  documentKind: kind,
+                  expectedDocumentRowVersion: rowVersion,
+                  baseVersionId: currentVersionId ?? null,
+                  title,
+                  scopeType,
+                  scopeId,
+                  lifecycleStatus,
+                  updatedAt,
+                }),
+              ),
             truncated: items.length > 100,
           });
           resultSummary = result;
-          database
-            .prepare(
-              "UPDATE agent_tasks SET status = 'completed', outcome = 'read-only', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-            )
-            .run(now, now, task.id);
+          if (this.systemTools)
+            database
+              .prepare(
+                "UPDATE agent_tasks SET phase = 'model_running' WHERE id = ? AND status = 'running'",
+              )
+              .run(task.id);
+          else
+            database
+              .prepare(
+                "UPDATE agent_tasks SET status = 'completed', outcome = 'read-only', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+              )
+              .run(now, now, task.id);
         } else if (call.name === 'document.read') {
           if (!authorization.targetDocumentId)
             throw new Error('Read authorization is missing its trusted target.');
@@ -2339,11 +2381,18 @@ export class AgentProviderLoopService {
               'utf8',
             ),
           });
-          database
-            .prepare(
-              "UPDATE agent_tasks SET status = 'completed', outcome = 'read-only', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-            )
-            .run(now, now, task.id);
+          if (this.systemTools)
+            database
+              .prepare(
+                "UPDATE agent_tasks SET phase = 'model_running' WHERE id = ? AND status = 'running'",
+              )
+              .run(task.id);
+          else
+            database
+              .prepare(
+                "UPDATE agent_tasks SET status = 'completed', outcome = 'read-only', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+              )
+              .run(now, now, task.id);
         } else {
           throw new Error('Provider tool is not supported.');
         }
@@ -2402,14 +2451,23 @@ export class AgentProviderLoopService {
             callIds: params.calls.map((item) => item.id),
           }),
         );
-        this.createStep(
+        const nextStep = this.createStep(
           database,
           project.id,
           params,
           task.id,
           step.ordinal + 1,
           now,
-          authorization,
+          this.systemTools && (call.name === 'document.list' || call.name === 'document.read')
+            ? authorizationSpecsForTask(
+                database,
+                task.id,
+                authorization,
+                researchModeFromSnapshot(task.request_snapshot_json),
+                this.systemTools.availableOperations(),
+                this.media !== undefined,
+              )
+            : authorization,
         );
         this.appendEvent(
           database,
@@ -2420,6 +2478,9 @@ export class AgentProviderLoopService {
           now,
         );
         return {
+          ...(this.systemTools && (call.name === 'document.list' || call.name === 'document.read')
+            ? { tools: this.toolsForStep(nextStep.authorizationHandles) }
+            : {}),
           continuation: createToolContinuation(
             activeGeneration.protocol,
             params.providerResponseId,
@@ -2605,7 +2666,7 @@ export class AgentProviderLoopService {
             database,
             task,
             step.id,
-            this.systemTools !== undefined,
+            this.systemTools?.availableOperations() ?? false,
             this.media !== undefined,
           ),
         };
@@ -2846,7 +2907,7 @@ export class AgentProviderLoopService {
           database,
           task,
           step.id,
-          this.systemTools !== undefined,
+          this.systemTools?.availableOperations() ?? false,
           this.media !== undefined,
         );
         this.appendEvent(
@@ -3144,7 +3205,7 @@ export class AgentProviderLoopService {
               expectedDocumentRowVersion: confirmation.expectedDocumentRowVersion,
             },
             researchModeFromSnapshot(task.request_snapshot_json),
-            this.systemTools !== undefined,
+            this.systemTools?.availableOperations() ?? false,
             this.media !== undefined,
           ),
         );
@@ -3225,31 +3286,8 @@ export class AgentProviderLoopService {
             );
           }
         }
-        const operation = request.documentOperation;
-        const userMessage = database
-          .prepare('SELECT content FROM chat_messages WHERE id = ?')
-          .get(task.user_message_id) as { content: string } | undefined;
-        if (
-          (operation === 'document.create_draft' || operation === 'document.update_draft') &&
-          userMessage &&
-          requiresPersistedDocumentWrite(userMessage.content, operation) &&
-          !isMediaOnlyRequest(userMessage.content)
-        ) {
-          const written = database
-            .prepare(
-              `SELECT 1 FROM agent_tool_calls calls
-               INNER JOIN document_versions versions ON versions.id = calls.result_document_version_id
-               INNER JOIN documents documents ON documents.id = versions.document_id
-               WHERE calls.task_id = ? AND calls.tool_name = ? AND calls.status = 'succeeded'
-                 AND documents.id = calls.result_document_id AND documents.project_id = ? LIMIT 1`,
-            )
-            .get(task.id, operation, project.id);
-          if (!written) {
-            throw new Error(
-              `AGENT_DOCUMENT_NOT_WRITTEN: 文档尚未保存到项目，请调用 ${operation} 写入完整正文后再结束任务。`,
-            );
-          }
-        }
+        // A normal assistant response may be an answer, a query, or a model
+        // selected write. Do not make completion depend on Worker regexes.
         const now = new Date().toISOString();
         this.completeStep(
           database,
@@ -3262,11 +3300,14 @@ export class AgentProviderLoopService {
         );
         const completed = database
           .prepare(
-            `UPDATE agent_tasks SET status = 'completed', outcome = 'read-only',
+            `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
+               SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft')
+             ) THEN NULL ELSE 'read-only' END,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
              WHERE id = ? AND status = 'running' AND phase = 'model_running'`,
           )
-          .run(now, now, task.id);
+          .run(task.id, now, now, task.id);
         if (completed.changes === 1) {
           this.appendEvent(
             database,
@@ -3497,7 +3538,7 @@ export class AgentProviderLoopService {
     database: Database.Database,
     task: AgentTaskRow,
     stepId: string,
-    includeSystemTools: boolean,
+    includeSystemTools: false | readonly SystemAgentToolOperation[],
     includeMedia: boolean,
   ): LlmToolDefinition[] {
     const handles = this.openStepHandles.get(stepId);
@@ -3738,20 +3779,6 @@ export class AgentProviderLoopService {
       scopeId: document.scope_id ?? undefined,
       baseVersionId: document.current_version_id ?? undefined,
       expectedDocumentRowVersion: document.row_version,
-    };
-  }
-
-  private enforceExplicitUserIntent(
-    authorization: AuthorizationSpec,
-    prompt: string,
-  ): AuthorizationSpec {
-    const policy = unifiedAgentToolRegistry.require(authorization.operation);
-    if (policy.confirmationPolicy !== 'explicit-user-intent') return authorization;
-    if (hasExplicitOperationIntent(prompt, authorization.operation)) return authorization;
-    return {
-      operation: 'document.list',
-      scopeType: authorization.scopeType,
-      scopeId: authorization.scopeId,
     };
   }
 
@@ -4289,93 +4316,25 @@ function addCitationLabels(
   return { ...result, citationLabel: labels.get(result.canonicalUrl) };
 }
 
-function linkResearchCitations(
-  database: Database.Database,
-  projectId: string,
-  taskId: string,
-  documentVersionId: string | undefined,
-  contentMarkdown: string,
-  now: string,
-): void {
-  if (!documentVersionId) throw new Error('Agent draft did not produce a document version.');
-  const labels = [...contentMarkdown.matchAll(/\[R([1-9][0-9]*)\]/g)].map(
-    (match) => `R${match[1]}`,
-  );
-  const distinctLabels = [...new Set(labels)];
-  const sources = database
-    .prepare(
-      `SELECT id, citation_label AS citationLabel
-       FROM agent_research_sources
-       WHERE project_id = ? AND task_id = ? AND status = 'fetched'`,
-    )
-    .all(projectId, taskId) as Array<{ id: string; citationLabel: string | null }>;
-  const byLabel = new Map(
-    sources
-      .filter((source): source is { id: string; citationLabel: string } => !!source.citationLabel)
-      .map((source) => [source.citationLabel, source.id]),
-  );
-  for (const label of distinctLabels) {
-    if (!byLabel.has(label)) {
-      throw new Error(`RESEARCH_CITATION_INVALID: unknown citation label ${label}.`);
-    }
-  }
-  const version = database
-    .prepare(
-      `SELECT versions.document_id AS documentId
-       FROM document_versions versions
-       INNER JOIN documents documents ON documents.id = versions.document_id
-       WHERE versions.id = ? AND documents.project_id = ?`,
-    )
-    .get(documentVersionId, projectId) as { documentId: string } | undefined;
-  if (!version) throw new Error('RESEARCH_CITATION_INVALID: document version is out of scope.');
-  const insert = database.prepare(
-    `INSERT INTO document_version_research_sources
-     (id, project_id, document_id, document_version_id, source_id, citation_label,
-      citation_reason, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(document_version_id, source_id) DO NOTHING`,
-  );
-  for (const label of distinctLabels) {
-    const sourceId = byLabel.get(label)!;
-    insert.run(
-      randomUUID(),
-      projectId,
-      version.documentId,
-      documentVersionId,
-      sourceId,
-      label,
-      'explicit Markdown citation in Agent draft',
-      now,
-    );
-    database
-      .prepare(
-        `UPDATE agent_research_sources
-         SET adoption_status = 'adopted', adoption_reason = ?
-         WHERE id = ? AND project_id = ? AND task_id = ?`,
-      )
-      .run(`Cited by document version ${documentVersionId}.`, sourceId, projectId, taskId);
-  }
-  database
-    .prepare(
-      `UPDATE agent_research_sources
-       SET adoption_status = 'excluded', adoption_reason = ?
-       WHERE project_id = ? AND task_id = ? AND status = 'fetched'
-         AND adoption_status = 'unreviewed'`,
-    )
-    .run(`Not cited by Agent draft version ${documentVersionId}.`, projectId, taskId);
-}
-
 function authorizationSpecsForTask(
   database: Database.Database,
   taskId: string,
   primary: AuthorizationSpec,
   researchMode: AgentResearchMode,
-  includeSystemTools = false,
+  includeSystemTools: false | readonly SystemAgentToolOperation[] = false,
   includeMediaTools = false,
 ): AuthorizationSpec[] {
   const authorizations = [
     primary,
-    ...(includeSystemTools ? systemAuthorizationSpecsForTask(database, taskId) : []),
+    ...(includeSystemTools
+      ? includeSystemTools
+          .filter(
+            (operation) =>
+              primary.operation !== 'novel.chapter.submit_draft' ||
+              (operation !== 'document.submit_draft' && operation !== 'novel.chapter.write_draft'),
+          )
+          .map((operation) => ({ operation }))
+      : []),
     ...(includeMediaTools
       ? [
           { operation: 'media.image.prepare' as const },
@@ -4482,7 +4441,8 @@ function freezeTaskToolManifest(
         !isResearchOperation(operation) &&
         !isLibraryOperation(operation) &&
         !isSystemOperation(operation) &&
-        !isMediaPrepareOperation(operation),
+        !isMediaPrepareOperation(operation) &&
+        !isMediaSubmissionOperation(operation),
     );
   const primary = primaryOperations[0];
   const previousPrimary =
@@ -4578,37 +4538,11 @@ function firstPrimaryAuthorization(database: Database.Database, taskId: string):
       !isResearchOperation(candidate.operation) &&
       !isLibraryOperation(candidate.operation) &&
       !isSystemOperation(candidate.operation) &&
-      !isMediaPrepareOperation(candidate.operation),
+      !isMediaPrepareOperation(candidate.operation) &&
+      !isMediaSubmissionOperation(candidate.operation),
   );
   if (!row) throw new Error('Agent task primary authorization was not found.');
   return row;
-}
-
-function systemAuthorizationSpecsForTask(
-  database: Database.Database,
-  taskId: string,
-): AuthorizationSpec[] {
-  const row = database
-    .prepare(
-      `SELECT messages.content
-       FROM agent_tasks tasks
-       LEFT JOIN chat_messages messages ON messages.id = tasks.user_message_id
-       WHERE tasks.id = ?`,
-    )
-    .get(taskId) as { content: string | null } | undefined;
-  const prompt = row?.content?.normalize('NFKC') ?? '';
-  const operations: SystemAgentToolOperation[] = [
-    'project.get_context',
-    'project.integrity.check',
-    'conversation.search',
-  ];
-  for (const operation of SYSTEM_CONTEXTUAL_READ_OPERATIONS) {
-    if (hasSystemReadIntent(prompt, operation)) operations.push(operation);
-  }
-  for (const operation of SYSTEM_MUTATING_OPERATIONS) {
-    if (hasSystemOperationIntent(prompt, operation)) operations.push(operation);
-  }
-  return operations.map((operation) => ({ operation }));
 }
 
 function researchModeFromTask(database: Database.Database, taskId: string): AgentResearchMode {
@@ -4792,6 +4726,8 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 }
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
+  'document.submit_draft',
+  'novel.chapter.write_draft',
   'project.get_context',
   'project.structure.get',
   'novel.structure.get',
@@ -4834,131 +4770,6 @@ const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'maintenance.diagnostics.prepare',
   'media.task.get',
 ]);
-
-const SYSTEM_CONTEXTUAL_READ_OPERATIONS = [
-  'project.structure.get',
-  'novel.structure.get',
-  'novel.chapter.list',
-  'asset.get',
-  'asset.search',
-  'tag.list',
-  'assetGroup.list',
-  'assetGroup.resolve',
-  'settings.get',
-  'maintenance.status',
-  'media.task.get',
-] as const satisfies readonly SystemAgentToolOperation[];
-
-function hasSystemReadIntent(
-  prompt: string,
-  operation: (typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number],
-): boolean {
-  const patterns: Record<(typeof SYSTEM_CONTEXTUAL_READ_OPERATIONS)[number], RegExp> = {
-    'project.structure.get': /(?:项目|工程).{0,20}(?:结构|架构|目录|树)|project.{0,20}structure/iu,
-    'novel.structure.get':
-      /(?:小说|章节|卷章|大纲).{0,20}(?:结构|架构|目录|树)|novel.{0,20}structure/iu,
-    'novel.chapter.list':
-      /(?:列出|查看|查询|显示|有哪些).{0,20}(?:小说章节|章节|卷章)|(?:novel|chapter).{0,20}(?:list|show|query)/iu,
-    'asset.get': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
-    'asset.search': /(?:素材|素材库|资源库|资源文件|\basset\b|\bmedia library\b)/iu,
-    'tag.list': /(?:标签|\btags?\b)/iu,
-    'assetGroup.list': /(?:素材组|资源组|asset group|media group)/iu,
-    'assetGroup.resolve': /(?:素材组|资源组|asset group|media group)/iu,
-    'settings.get': /(?:应用设置|Provider|提供商|连接凭据|\bsettings?\b)/iu,
-    'maintenance.status': /(?:维护|诊断包|清理缓存|\bmaintenance\b)/iu,
-    'media.task.get': /(?:生成任务|媒体任务|media task)/iu,
-  };
-  return patterns[operation].test(prompt);
-}
-
-const SYSTEM_MUTATING_OPERATIONS = [
-  'project.backup.prepare',
-  'project.export.prepare',
-  'project.restore.prepare',
-  'conversation.create',
-  'conversation.rename',
-  'conversation.archive',
-  'conversation.restore',
-  'novel.chapter.archive',
-  'novel.chapter.restore',
-  'document.publish',
-  'asset.update_alias',
-  'asset.update_tags',
-  'asset.move_to_trash',
-  'asset.restore',
-  'asset.purge',
-  'tag.create',
-  'tag.update',
-  'tag.delete',
-  'assetGroup.create',
-  'assetGroup.update',
-  'assetGroup.delete',
-  'settings.propose_update',
-  'settings.apply_update',
-  'maintenance.clear_cache',
-  'maintenance.cleanup_research_cache',
-  'maintenance.cleanup_context_snapshots',
-  'maintenance.diagnostics.prepare',
-] as const satisfies readonly SystemAgentToolOperation[];
-
-function hasSystemOperationIntent(
-  prompt: string,
-  operation: (typeof SYSTEM_MUTATING_OPERATIONS)[number],
-): boolean {
-  const patterns: Record<(typeof SYSTEM_MUTATING_OPERATIONS)[number], RegExp> = {
-    'project.backup.prepare': /(?:备份项目|项目备份|backup\s+(?:the\s+)?project)/iu,
-    'project.export.prepare': /(?:导出项目|项目导出|export\s+(?:the\s+)?project)/iu,
-    'project.restore.prepare': /(?:恢复项目|还原项目|restore\s+(?:the\s+)?project)/iu,
-    'conversation.create':
-      /(?:新建|创建|新增).{0,12}(?:会话|对话)|create.{0,12}(?:conversation|chat)/iu,
-    'conversation.rename':
-      /(?:会话|对话).{0,12}(?:重命名|改名|修改标题)|rename.{0,12}(?:conversation|chat)/iu,
-    'conversation.archive': /(?:归档).{0,12}(?:会话|对话)|archive.{0,12}(?:conversation|chat)/iu,
-    'conversation.restore':
-      /(?:恢复|取消归档).{0,12}(?:会话|对话)|(?:restore|unarchive).{0,12}(?:conversation|chat)/iu,
-    'novel.chapter.archive':
-      /(?:(?:归档|删除|移除|隐藏).{0,24}(?:小说章节|章节|卷章|第.{0,8}章)|(?:小说章节|章节|卷章|第.{0,8}章).{0,16}(?:归档|删除|移除|隐藏))|archive.{0,20}(?:novel\s+)?chapter/iu,
-    'novel.chapter.restore':
-      /(?:(?:恢复|取消归档|还原).{0,24}(?:小说章节|章节|卷章|第.{0,8}章)|(?:小说章节|章节|卷章|第.{0,8}章).{0,16}(?:恢复|取消归档|还原))|(?:restore|unarchive).{0,20}(?:novel\s+)?chapter/iu,
-    'document.publish': /(?:发布).{0,12}(?:文档|草稿)|publish.{0,12}(?:document|draft)/iu,
-    'asset.update_alias':
-      /(?:素材|资源).{0,32}(?:别名|改名|重命名)|(?:alias|rename).{0,32}(?:asset|media)/iu,
-    'asset.update_tags':
-      /(?:素材|资源).{0,32}(?:添加|移除|更新|修改).{0,12}标签|(?:add|remove|update).{0,32}(?:asset|media).{0,12}tag/iu,
-    'asset.move_to_trash':
-      /(?:删除|移入回收站).{0,20}(?:素材|资源)|(?:trash|delete).{0,20}(?:asset|media)/iu,
-    'asset.restore': /(?:恢复|还原).{0,20}(?:素材|资源)|restore.{0,20}(?:asset|media)/iu,
-    'asset.purge':
-      /(?:彻底|永久).{0,12}删除.{0,20}(?:素材|资源)|permanent(?:ly)?.{0,20}delete.{0,20}(?:asset|media)/iu,
-    'tag.create': /(?:新建|创建|新增).{0,12}标签|create.{0,12}tag/iu,
-    'tag.update': /(?:修改|更新|重命名).{0,12}标签|(?:update|rename).{0,12}tag/iu,
-    'tag.delete': /删除.{0,12}标签|delete.{0,12}tag/iu,
-    'assetGroup.create':
-      /(?:新建|创建|新增).{0,12}(?:素材组|资源组)|create.{0,12}(?:asset|media).{0,8}group/iu,
-    'assetGroup.update':
-      /(?:修改|更新|重命名).{0,12}(?:素材组|资源组)|(?:update|rename).{0,12}(?:asset|media).{0,8}group/iu,
-    'assetGroup.delete': /删除.{0,12}(?:素材组|资源组)|delete.{0,12}(?:asset|media).{0,8}group/iu,
-    'settings.propose_update':
-      /(?:修改|更新|配置).{0,24}(?:Provider|提供商|模型服务|连接|凭据|设置)|(?:update|configure).{0,24}(?:provider|connection|credential|setting)/iu,
-    'settings.apply_update':
-      /(?:继续|应用|确认).{0,16}(?:Provider|提供商|模型服务|连接|凭据|设置).{0,12}(?:修改|更新|配置)?|apply.{0,16}(?:provider|setting).{0,12}(?:change|update)/iu,
-    'maintenance.clear_cache': /(?:清理|清空).{0,12}缓存|clear.{0,12}cache/iu,
-    'maintenance.cleanup_research_cache':
-      /(?:清理|清空).{0,12}(?:研究|检索).{0,8}缓存|clear.{0,12}research.{0,8}cache/iu,
-    'maintenance.cleanup_context_snapshots':
-      /(?:清理|删除).{0,12}上下文快照|clean.{0,12}context.{0,8}snapshot/iu,
-    'maintenance.diagnostics.prepare':
-      /(?:导出|生成).{0,12}(?:诊断包|诊断信息)|(?:export|create).{0,12}diagnostic/iu,
-  };
-  const normalized = prompt.normalize('NFKC');
-  const match = patterns[operation].exec(normalized);
-  if (!match) return false;
-  if (operation !== 'novel.chapter.archive' && operation !== 'novel.chapter.restore') return true;
-  const context = normalized.slice(Math.max(0, match.index - 20), match.index + match[0].length);
-  return !/(?:不要|别|不需要|不用|无需|暂不|先不|不必|取消).{0,32}(?:归档|删除|移除|隐藏|恢复|还原)/iu.test(
-    context,
-  );
-}
 
 function parseConfirmationContinuationDescriptor(
   value: string,
@@ -5018,24 +4829,6 @@ function parseConfirmationContinuationDescriptor(
   return descriptor as unknown as SystemConfirmationContinuationDescriptor;
 }
 
-function requiresPersistedDocumentWrite(prompt: string, operation: AgentToolOperation): boolean {
-  if (operation !== 'document.create_draft' && operation !== 'document.update_draft') return false;
-  if (!hasExplicitOperationIntent(prompt, operation)) return false;
-  const value = prompt.normalize('NFKC');
-  if (isOpenEndedStoryGoal(value)) return false;
-  return isNamedDocumentWrite(value) || hasSaveIntent(value);
-}
-
-function hasSaveIntent(prompt: string): boolean {
-  const value = prompt.normalize('NFKC');
-  const mentionsSave = /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value);
-  const saveIsNotRequested =
-    /(?:不要|不用|无需|别|不需要|暂不|先不|如何|怎么|怎样|是否).{0,12}(?:保存|存为|存成|存到|存入)|(?:do not|don't|how (?:do|to)).{0,20}\bsave\b/iu.test(
-      value,
-    );
-  return mentionsSave && !saveIsNotRequested;
-}
-
 export function inferNovelReference(
   prompt: string,
 ): { role: DocumentBindingRole; kind: DocumentKind } | undefined {
@@ -5049,63 +4842,6 @@ export function inferNovelReference(
   if (/(时间线|timeline)/iu.test(value)) return { role: 'timeline', kind: 'note' };
   if (/(风格指南|style.*guide)/iu.test(value)) return { role: 'style-guide', kind: 'note' };
   return undefined;
-}
-
-function isOpenEndedStoryGoal(prompt: string): boolean {
-  return (
-    /(?:想|要|帮我|请)?(?:写|创作|编)(?:一)?(?:部|本|个)?(?:小说|故事)/u.test(prompt) &&
-    !isNamedDocumentWrite(prompt)
-  );
-}
-
-function isNamedDocumentWrite(prompt: string): boolean {
-  return /(?:文档|草稿|大纲|计划|分镜|剧本|提示词|角色设定|人物设定|场景设定|章节|下一章|第[0-9零〇一二两三四五六七八九十百]+章|document|draft|outline|plan|storyboard|script|prompt)/iu.test(
-    prompt,
-  );
-}
-
-function hasExplicitOperationIntent(prompt: string, operation: AgentToolOperation): boolean {
-  const value = prompt.normalize('NFKC');
-  const saveIntent = hasSaveIntent(value);
-  if (
-    /(?:保存|存为|存成|存到|存入|\bsave\b)/iu.test(value) &&
-    !saveIntent &&
-    (operation === 'document.create_draft' || operation === 'document.update_draft')
-  )
-    return false;
-  if (operation === 'adapter.schema.propose') {
-    return /(?:schema|参数|字段|配置项).{0,24}(?:添加|新增|修改|更新|补充|调整|add|update|modify|change)/iu.test(
-      value,
-    );
-  }
-  if (operation === 'document.update_draft') {
-    return saveIntent || /(?:修改|更新|修订|重写|改写|edit|update|revise|rewrite)/iu.test(value);
-  }
-  if (
-    operation === 'document.create_draft' ||
-    operation === 'novel.chapter.submit_draft' ||
-    operation === 'novel.reference.submit_draft' ||
-    operation === 'novel.episode.submit_draft' ||
-    operation === 'novel.episode.submit_structure' ||
-    operation === 'novel.adaptation.submit_proposal'
-  ) {
-    return (
-      saveIntent ||
-      /(?:创建|生成|写|起草|撰写|整理成|做成|续写|改写|create|generate|write|draft|compose|continue|rewrite)/iu.test(
-        value,
-      )
-    );
-  }
-  return true;
-}
-
-function isMediaOnlyRequest(prompt: string): boolean {
-  return (
-    /(?:图片|图像|视频|生图|image|video|picture)/iu.test(prompt) &&
-    !/(?:文档|草稿|剧本|分镜|大纲|提示词|document|draft|script|storyboard|outline|prompt)/iu.test(
-      prompt,
-    )
-  );
 }
 
 type SchemaToolArguments =

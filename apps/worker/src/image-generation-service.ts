@@ -155,6 +155,13 @@ export class ImageGenerationService {
       return found;
     });
     if (job.status !== 'running') return this.get(job.id);
+    const outputError =
+      params.providerBody && typeof params.providerBody === 'object'
+        ? (params.providerBody as Record<string, unknown>).nativeImageOutputError
+        : undefined;
+    if (typeof outputError === 'string' && outputError.trim()) {
+      return this.fail(job.id, outputError, projectSessionId);
+    }
     if (params.providerStatus < 200 || params.providerStatus >= 300) {
       const providerMessage = providerErrorMessage(params.providerBody);
       const message =

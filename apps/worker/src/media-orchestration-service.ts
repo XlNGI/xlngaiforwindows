@@ -30,6 +30,9 @@ import type { VideoGenerationService } from './video-generation-service.js';
 import { resolveMediaProviderRoute } from './media-preparation-service.js';
 
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
+// Includes Native admission, connection, synchronous inference, and result transfer.
+// The Native image receive timeout is 5 minutes; Desktop waits for Worker for 12 minutes.
+const IMAGE_SUBMISSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface ResolvedMediaSubmission {
   draftVersion: number;
@@ -256,7 +259,10 @@ export class MediaOrchestrationService {
     };
     let response: unknown;
     try {
-      response = await this.native.request('provider.media.submit', request);
+      response =
+        kind === 'image'
+          ? await this.native.request('provider.media.submit', request, IMAGE_SUBMISSION_TIMEOUT_MS)
+          : await this.native.request('provider.media.submit', request);
     } catch (error) {
       if (this.projects.currentSessionId() !== prepared.projectSessionId) {
         cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
@@ -448,6 +454,8 @@ export class MediaOrchestrationService {
       const job = repositories.jobs.get(jobId);
       if (!job || job.projectId !== project.id)
         throw new Error('Media generation job was not found.');
+      // Cancellation can complete while Native is still awaiting its response.
+      if (job.mediaState !== 'submitting') return this.info(kind, jobId);
       const now = new Date().toISOString();
       database.transaction(() => {
         repositories.jobs.save({

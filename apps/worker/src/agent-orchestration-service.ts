@@ -8,6 +8,7 @@ import type {
   NovelWritingIntent,
 } from '@ai-video/contracts';
 import { ProjectService } from './project-service.js';
+import { hasMultipleNovelChapterTargets } from '@ai-video/contracts';
 
 const PENDING_INTENT_TTL_MS = 24 * 60 * 60_000;
 
@@ -153,7 +154,9 @@ function chapterDisplayLabel(value: string): string | undefined {
 }
 
 function containsNegatedAction(prompt: string): boolean {
-  return /(不要|不需要|取消|别)(?:再)?(?:创建|新建|续写|继续写|重写|改写|创作)/u.test(prompt);
+  return /(不要|不需要|取消|别)(?:再)?(?:生成|撰写|创建|新建|续写|继续写|重写|改写|创作)/u.test(
+    prompt,
+  );
 }
 
 export class AgentOrchestrationService {
@@ -166,6 +169,8 @@ export class AgentOrchestrationService {
     title?: string;
     intent?: NovelWritingIntent;
     idempotencyKey?: string;
+    /** Trusted model-tool entry: validate typed targets without reading prompt semantics. */
+    structured?: boolean;
   }): NovelTaskPreparation | { pendingIntent: AgentPendingIntentInfo } {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -215,13 +220,19 @@ export class AgentOrchestrationService {
           }
         }
 
-        let action = input.intent?.action ?? inferAction(prompt);
+        let action = input.intent?.action ?? (input.structured ? undefined : inferAction(prompt));
         const resolution =
-          action && action !== 'create_chapter'
+          !input.structured && action && action !== 'create_chapter'
             ? this.resolveExistingChapterIntent(database, project.id, prompt, input.intent)
             : { intent: input.intent, ambiguous: false, empty: false };
         let intent = resolution.intent;
-        if (action && action !== 'create_chapter' && resolution.empty && !resolution.ambiguous) {
+        if (
+          !input.structured &&
+          action &&
+          action !== 'create_chapter' &&
+          resolution.empty &&
+          !resolution.ambiguous
+        ) {
           const displayLabel = chapterDisplayLabel(prompt);
           if (displayLabel) {
             action = 'create_chapter';
@@ -233,7 +244,21 @@ export class AgentOrchestrationService {
             };
           }
         }
-        const pending = this.pendingReason(prompt, action, intent, resolution.ambiguous);
+        if (
+          input.structured &&
+          (!action ||
+            !['create_chapter', 'continue_chapter', 'rewrite_chapter'].includes(action) ||
+            (action !== 'create_chapter' && !intent?.chapterId))
+        ) {
+          throw new AgentOrchestrationError(
+            'INVALID_PARAMETERS',
+            'A typed action and existing chapter ID are required.',
+          );
+        }
+        const pending = input.structured
+          ? undefined
+          : (this.pendingReason(prompt, action, intent, resolution.ambiguous) ??
+            (hasMultipleNovelChapterTargets(prompt) ? 'TARGET_NOT_UNIQUE' : undefined));
         if (pending) {
           return {
             pendingIntent: this.createPending(
@@ -281,7 +306,7 @@ export class AgentOrchestrationService {
                 action,
                 chapterId: target.chapterId,
                 documentId: target.documentId,
-                source: 'worker-resolver',
+                source: input.structured ? 'model-tool' : 'worker-resolver',
               },
               action,
               promptHash: sha256(prompt),
@@ -371,6 +396,14 @@ export class AgentOrchestrationService {
           )
           .run(message.slice(0, 500), now, now, taskId, project.id);
         if (failed.changes !== 1) return;
+        this.appendEvent(
+          database,
+          project.id,
+          taskId,
+          'agent.novel.task.failed',
+          message.slice(0, 500),
+          now,
+        );
         const placeholder = database
           .prepare(
             `SELECT targets.chapter_id, targets.document_id FROM agent_task_targets targets
@@ -395,6 +428,31 @@ export class AgentOrchestrationService {
           .run(now, placeholder.document_id, project.id);
       })();
     });
+  }
+
+  recoverInterruptedPreparations(): number {
+    const project = this.projects.current();
+    const sessionId = this.projects.currentSessionId();
+    if (!project || project.mode !== 'read-write' || !sessionId) return 0;
+    const tasks = this.projects.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            `SELECT tasks.id FROM agent_tasks tasks
+           INNER JOIN agent_task_targets targets ON targets.task_id = tasks.id
+           WHERE tasks.project_id = ? AND tasks.status = 'queued'
+             AND tasks.project_session_id <> ? AND targets.target_kind = 'novel-chapter'
+             AND NOT EXISTS (
+               SELECT 1 FROM agent_task_generations links WHERE links.task_id = tasks.id
+             )`,
+          )
+          .all(project.id, sessionId) as Array<{ id: string }>,
+    );
+    for (const task of tasks) {
+      this.failTaskBeforeGeneration(task.id, '章节任务在生成准备期间中断，请重新发送请求。');
+    }
+    return tasks.length;
   }
 
   listPending(params: NovelPendingIntentListParams = {}): AgentPendingIntentInfo[] {

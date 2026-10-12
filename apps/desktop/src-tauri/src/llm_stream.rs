@@ -12,11 +12,12 @@ use tauri::{ipc::Channel, Manager};
 use windows_sys::Win32::{
     Foundation::GetLastError,
     Networking::WinHttp::{
-        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-        WinHttpSetTimeouts, ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
-        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+        WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+        WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, ERROR_WINHTTP_TIMEOUT,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE,
+        WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RETRY_AFTER,
+        WINHTTP_QUERY_STATUS_CODE,
     },
 };
 
@@ -1267,15 +1268,37 @@ where
         emit(LlmStreamEvent::Started)?;
         let started_at = Instant::now();
         let mut parser = SseParser::new(&runtime.protocol);
+        let mut received_bytes = 0_u64;
         loop {
             if cancellation.is_cancelled() {
                 return Err(StreamFailure::cancelled());
             }
             if started_at.elapsed() > total_timeout(&runtime) {
                 return Err(
-                    StreamFailure::new("LLM stream exceeded the total timeout.", true)
+                    StreamFailure::new(
+                        format!(
+                            "LLM stream exceeded the total timeout. Received {} bytes in {} seconds; {} tool calls, {} tool argument bytes; no protocol success event.",
+                            received_bytes,
+                            started_at.elapsed().as_secs(),
+                            parser.tool_calls.len(),
+                            parser.tool_calls.values().map(|item| item.call.arguments_json.len()).sum::<usize>(),
+                        ),
+                        true,
+                    )
                         .with_outcome(Outcome::Failure),
                 );
+            }
+            // Read only bytes already available. A fixed 8 KiB read can block
+            // waiting to fill its buffer even after a small final SSE event.
+            let mut available = 0_u32;
+            if unsafe { WinHttpQueryDataAvailable(cancellation.request()?, &mut available) } == 0 {
+                return Err(transport_failure(
+                    &cancellation,
+                    "LLM response stream could not be read",
+                ));
+            }
+            if available == 0 {
+                break;
             }
             let mut chunk = [0_u8; 8192];
             let mut read = 0_u32;
@@ -1283,7 +1306,7 @@ where
                 WinHttpReadData(
                     cancellation.request()?,
                     chunk.as_mut_ptr().cast(),
-                    chunk.len() as u32,
+                    available.min(chunk.len() as u32),
                     &mut read,
                 )
             } == 0
@@ -1296,7 +1319,13 @@ where
             if read == 0 {
                 break;
             }
+            received_bytes += u64::from(read);
             parser.feed(&chunk[..read as usize], |event| emit(event))?;
+            // SSE success ends the response independently of HTTP connection
+            // closure. Some gateways keep the chunked connection open afterward.
+            if parser.completed {
+                break;
+            }
         }
         let completed = parser.finish(|event| emit(event))?;
         if completed.tool_calls.is_empty() {
@@ -1871,6 +1900,10 @@ impl SseParser {
             let event = self.buffer[..position].to_vec();
             self.buffer.drain(..position + delimiter_length);
             self.parse_event(&event, &mut emit)?;
+            if self.completed {
+                self.buffer.clear();
+                break;
+            }
         }
         Ok(())
     }
@@ -3530,5 +3563,102 @@ mod tests {
         )
         .expect("mock stream should complete");
         server.join().expect("mock provider should finish");
+    }
+
+    #[test]
+    fn protocol_success_finishes_tool_stream_without_waiting_for_connection_close() {
+        for (protocol, payload) in [
+            ("openai-chat-completions", "data: {\"id\":\"chat_complete\",\"choices\":[{\"delta\":{\"content\":\"chapter\"}}]}\n\ndata: [DONE]\n\n"),
+            ("openai-responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"chapter\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"),
+        ] {
+            let mut parser = SseParser::new(protocol);
+            let mut events = Vec::new();
+            parser.feed(payload.as_bytes(), |event| { events.push(event); Ok(()) }).unwrap();
+            assert!(parser.completed, "{protocol} did not recognize protocol success");
+            parser.finish(|_| Ok(())).unwrap();
+            assert!(!events.is_empty());
+        }
+    }
+
+    #[test]
+    fn completes_on_protocol_success_while_chunked_connection_remains_open() {
+        for protocol in ["openai-chat-completions", "openai-responses"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (close_tx, close_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 4096];
+                    let read = stream.read(&mut chunk).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let payload = if protocol == "openai-chat-completions" {
+                    concat!(
+                        "data: {\"id\":\"chat_complete\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_saved\",\"function\":{\"name\":\"novel__dot__chapter__dot__submit_draft\",\"arguments\":\"{\\\"contentMarkdown\\\":\\\"chapter\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"item_saved\",\"call_id\":\"call_saved\",\"name\":\"novel.chapter.submit_draft\",\"arguments\":\"{\\\"contentMarkdown\\\":\\\"chapter\\\"}\"}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_complete\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"
+                    )
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:X}\r\n{}\r\n", payload.len(), payload).unwrap();
+                stream.flush().unwrap();
+                // Keep both the HTTP final chunk and EOF pending until the client finishes.
+                let _ = close_rx.recv_timeout(Duration::from_secs(5));
+            });
+            let mut runtime = mock_runtime(port);
+            runtime.protocol = protocol.to_string();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let scheduler = request_guard::isolated_for_tests();
+            let started = std::time::Instant::now();
+            let result = stream_provider_with_admission(
+                runtime,
+                CredentialSecret::for_test("test-key"),
+                Arc::new(LlmCancellation::default()),
+                move |event| {
+                    captured.lock().unwrap().push(event);
+                    Ok(())
+                },
+                true,
+                |origin, cancelled| scheduler.acquire(origin, || cancelled.is_cancelled()),
+            );
+            let elapsed = started.elapsed();
+            let _ = close_tx.send(());
+            server.join().unwrap();
+            result.unwrap();
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "waited for EOF: {elapsed:?}"
+            );
+            let events = events.lock().unwrap();
+            let Some(LlmStreamEvent::ToolCalls { calls, usage, .. }) = events.last() else {
+                panic!("missing completed tool call");
+            };
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "novel.chapter.submit_draft");
+            assert_eq!(calls[0].arguments_json, r#"{"contentMarkdown":"chapter"}"#);
+            assert_eq!(usage.as_ref().unwrap().total_tokens, Some(5));
+        }
     }
 }

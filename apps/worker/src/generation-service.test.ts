@@ -441,17 +441,15 @@ describe('GenerationService', () => {
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
       '# Agent document write policy',
     );
+    expect(generations.runtime(prepared.stream).systemInstruction).toContain('不要用聊天正文代替');
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
-      'Do not paste the document into the chat',
-    );
-    expect(generations.runtime(prepared.stream).systemInstruction).toContain(
-      'one document per character',
+      '按每个角色或命名组合分别提交',
     );
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
       '# Agent system tool policy',
     );
     expect(generations.runtime(prepared.stream).systemInstruction).toContain(
-      '不要用相同参数重复调用',
+      '不添加 schema 未定义的定位字段',
     );
   });
 
@@ -481,6 +479,8 @@ describe('GenerationService', () => {
       prompt: '介绍角色',
       providerProfileId: 'profile-selection',
       modelId: 'model-selection',
+      agentMode: 'document',
+      selectedChapterIds: ['selected-hint-only'],
     });
     generations.configureAgentTools(prepared.stream, [
       {
@@ -490,6 +490,8 @@ describe('GenerationService', () => {
       },
     ]);
     const runtime = generations.runtime(prepared.stream);
+    expect(runtime.systemInstruction).toContain('selected-hint-only');
+    expect(runtime.systemInstruction).toContain('可选 UI 目标提示');
     expect(runtime.systemInstruction).toContain('工作助理');
     expect(runtime.systemInstruction).toContain('library.search');
     expect(runtime.systemInstruction).toContain('Do not repeat a successful library.search');

@@ -2705,6 +2705,12 @@ export interface NovelWritingIntent {
   displayLabel?: string;
 }
 
+export {
+  splitNovelChapterCreationRequest,
+  hasMultipleNovelChapterTargets,
+  type NovelChapterRequest,
+} from './novel-chapter-requests.js';
+
 export interface AgentPendingIntentInfo {
   id: string;
   projectId: string;

@@ -8,6 +8,7 @@ import type {
 } from '@ai-video/contracts';
 import type { AppSettingsService } from './app-settings-service.js';
 import type { AgentProviderLoopService } from './agent-provider-loop-service.js';
+import type { AgentOrchestrationService } from './agent-orchestration-service.js';
 import type { GenerationService } from './generation-service.js';
 import type { ImageGenerationService } from './image-generation-service.js';
 import type { MaintenanceService } from './maintenance-service.js';
@@ -37,6 +38,7 @@ export interface InfrastructureCommandServices {
   imageGenerationService: ImageGenerationService;
   videoGenerationService: VideoGenerationService;
   agentProviderLoopService: AgentProviderLoopService;
+  agentOrchestrationService: AgentOrchestrationService;
   partialArtifactService: PartialArtifactService;
   markdownExportService: MarkdownExportService;
   mediaOrchestrationService: MediaOrchestrationService;
@@ -66,6 +68,7 @@ function recoverRuntime(services: InfrastructureCommandServices): void {
   services.partialArtifactService.recoverInterrupted();
   services.generationService.recoverInterrupted();
   services.agentProviderLoopService.recoverInterrupted();
+  services.agentOrchestrationService.recoverInterruptedPreparations();
   services.mediaOrchestrationService.recoverInterrupted();
   services.imageGenerationService.recoverInterrupted();
   services.videoGenerationService.recoverInterrupted();

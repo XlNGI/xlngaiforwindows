@@ -1,10 +1,15 @@
 import type {
   GenerationJobEventInfo,
+  ImageGenerationJobInfo,
   VideoGenerationFailureKind,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
 
 const statusLabels: Record<string, string> = {
+  draft: '待提交',
+  awaiting_confirmation: '等待确认',
+  submitting: '正在提交',
+  submission_unknown: '提交结果未知',
   pending: '正在提交',
   queued: '排队中',
   running: '执行中',
@@ -50,6 +55,15 @@ export interface GenerationErrorFeedback {
 
 export function generationStatusLabel(status: string): string {
   return statusLabels[status] ?? status;
+}
+
+export function generationTaskStatus(
+  job: Pick<ImageGenerationJobInfo, 'status' | 'mediaState'> | VideoGenerationJobInfo,
+): string {
+  return job.mediaState &&
+    ['draft', 'awaiting_confirmation', 'submitting', 'submission_unknown'].includes(job.mediaState)
+    ? job.mediaState
+    : job.status;
 }
 
 export function generationPhaseLabel(phase: GenerationJobEventInfo['phase']): string {
@@ -102,6 +116,18 @@ export function generationErrorFeedback(
 ): GenerationErrorFeedback {
   const normalized = message.trim();
   const technicalDetail = /[\u3400-\u9fff]/u.test(normalized) ? undefined : normalized;
+  if (/^Provider image response received; local output processing failed:/i.test(normalized)) {
+    return {
+      userMessage: '已收到生成结果，但图片下载或保存失败。请先查看服务商已有结果，避免重复生成。',
+      technicalDetail: normalized,
+    };
+  }
+  if (/^Submission status is unknown[: ]/i.test(normalized)) {
+    return {
+      userMessage: '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。',
+      technicalDetail: normalized,
+    };
+  }
   if (failureKind === 'download') {
     return { userMessage: '结果已生成，但保存到本地时失败，请重试。', technicalDetail: normalized };
   }
