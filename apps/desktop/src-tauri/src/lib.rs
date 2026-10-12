@@ -2143,6 +2143,12 @@ impl WorkerProcess {
     }
 
     fn spawn_command(mut command: Command) -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // Keep the console Worker in the background while retaining its IPC pipes.
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
