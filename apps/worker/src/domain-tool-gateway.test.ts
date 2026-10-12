@@ -126,8 +126,30 @@ describe('DomainToolGateway', () => {
       .find((tool) => tool.name === 'novel.episode.submit_structure')!;
     await structure.execute('call-structure', {
       episodeTitle: '第 1 集',
-      scenes: [{ title: '旧码头', shots: [{ title: '远景', prompt: '海雾中的旧码头。' }] }],
+      scenes: [
+        { title: '旧码头', shots: [{ title: '远景', prompt: '海雾中的旧码头。' }] },
+        { title: '街道', shots: [{ title: '近景', prompt: '雨中的街道。' }] },
+        { title: '房间', shots: [{ title: '特写', prompt: '桌上的信。' }] },
+      ],
     });
+
+    const changeSets = new ChangeSetService(project);
+    const proposed = changeSets.list({ includeTerminal: false })[0]!;
+    expect(
+      proposed.items
+        .filter((item) => item.entityType === 'shot')
+        .map((item) => item.parentItemOrdinal),
+    ).toEqual([0, 2, 4]);
+    changeSets.apply({ changeSetId: proposed.id, expectedRowVersion: proposed.rowVersion });
+    const content = new ContentService(project);
+    for (const [title, shotTitle] of [
+      ['旧码头', '远景'],
+      ['街道', '近景'],
+      ['房间', '特写'],
+    ]) {
+      const scene = content.listScenes().find((item) => item.title === title)!;
+      expect(content.listShots(scene.id).map((item) => item.title)).toEqual([shotTitle]);
+    }
 
     const rows = project.access(false, (database) => ({
       links: database

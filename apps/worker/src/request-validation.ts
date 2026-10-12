@@ -930,6 +930,13 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['messageId']);
       requireId(params, 'messageId');
       break;
+    case 'scene.save':
+      rejectUnknown(params, ['sceneId', 'title', 'sceneDocumentId', 'expectedRowVersion']);
+      optionalId(params, 'sceneId');
+      requireString(params, 'title', MAX_TITLE_LENGTH);
+      if (params.sceneDocumentId !== null) optionalId(params, 'sceneDocumentId');
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
     case 'shot.storyboard.save':
       rejectUnknown(params, ['shotId', 'title', 'contentMarkdown']);
       requireId(params, 'shotId');
@@ -1779,6 +1786,7 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'targetId',
       'parentSceneId',
       'parentItemOrdinal',
+      'sceneDocumentId',
       'title',
       'shotStatus',
       'prompt',
@@ -1793,6 +1801,9 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
     requireEnum(item, 'action', new Set(['create', 'update']));
     optionalId(item, 'targetId');
     optionalId(item, 'parentSceneId');
+    optionalId(item, 'sceneDocumentId');
+    if (item.sceneDocumentId !== undefined && item.entityType !== 'scene')
+      throw new RequestValidationError('sceneDocumentId is only allowed on scene items.');
     optionalInteger(item, 'parentItemOrdinal', 0, items.length - 1);
     requireString(item, 'title', MAX_TITLE_LENGTH);
     optionalString(item, 'shotStatus', 80);

@@ -232,23 +232,29 @@ export class DomainToolGateway {
         if (!task) throw new Error('Pi task no longer belongs to the current project.');
         if (definition.name === 'novel.episode.submit_structure') {
           const structure = parseStructure(args);
+          let nextSceneOrdinal = 0;
           const changeSet = this.changeSets.create({
             taskId: this.identity.taskId,
             title: structure.episodeTitle,
-            items: structure.scenes.flatMap((scene, sceneIndex) => [
-              {
-                entityType: 'scene' as const,
-                action: 'create' as const,
-                title: scene.title,
-              },
-              ...scene.shots.map((shot) => ({
-                entityType: 'shot' as const,
-                action: 'create' as const,
-                parentItemOrdinal: sceneIndex,
-                title: shot.title,
-                prompt: shot.prompt,
-              })),
-            ]),
+            items: structure.scenes.flatMap((scene) => {
+              const sceneOrdinal = nextSceneOrdinal;
+              nextSceneOrdinal += 1 + scene.shots.length;
+              return [
+                {
+                  entityType: 'scene' as const,
+                  action: 'create' as const,
+                  title: scene.title,
+                  sceneDocumentId: scene.sceneDocumentId,
+                },
+                ...scene.shots.map((shot) => ({
+                  entityType: 'shot' as const,
+                  action: 'create' as const,
+                  parentItemOrdinal: sceneOrdinal,
+                  title: shot.title,
+                  prompt: shot.prompt,
+                })),
+              ];
+            }),
           });
           return { entityType: 'change-set' as const, entityId: changeSet.id };
         }
@@ -337,7 +343,11 @@ function documentKindFor(
 
 function parseStructure(args: ToolArguments): {
   episodeTitle: string;
-  scenes: Array<{ title: string; shots: Array<{ title: string; prompt: string }> }>;
+  scenes: Array<{
+    title: string;
+    sceneDocumentId?: string;
+    shots: Array<{ title: string; prompt: string }>;
+  }>;
 } {
   const episodeTitle = requiredString(args.episodeTitle, 'episodeTitle', 200);
   if (!Array.isArray(args.scenes) || args.scenes.length < 1 || args.scenes.length > 20) {
@@ -348,7 +358,7 @@ function parseStructure(args: ToolArguments): {
       throw new Error(`scene ${sceneIndex} must be an object.`);
     }
     const scene = raw as Record<string, unknown>;
-    if (Object.keys(scene).some((key) => !['title', 'shots'].includes(key))) {
+    if (Object.keys(scene).some((key) => !['title', 'sceneDocumentId', 'shots'].includes(key))) {
       throw new Error(`scene ${sceneIndex} contains an unsupported field.`);
     }
     if (!Array.isArray(scene.shots) || scene.shots.length < 1 || scene.shots.length > 30) {
@@ -356,6 +366,9 @@ function parseStructure(args: ToolArguments): {
     }
     return {
       title: requiredString(scene.title, `scene ${sceneIndex} title`, 200),
+      ...(scene.sceneDocumentId !== undefined
+        ? { sceneDocumentId: requiredString(scene.sceneDocumentId, 'sceneDocumentId', 200) }
+        : {}),
       shots: scene.shots.map((rawShot, shotIndex) => {
         if (!rawShot || typeof rawShot !== 'object' || Array.isArray(rawShot)) {
           throw new Error(`shot ${sceneIndex}.${shotIndex} must be an object.`);

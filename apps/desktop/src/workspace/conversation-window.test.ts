@@ -6,8 +6,6 @@ import {
   conversationWindowToggleLabel,
   isConversationAutoHidden,
   isConversationWindowPresented,
-  shouldCloseConversationAtMinWidth,
-  shouldCloseConversationLayout,
   usableConversationDockLayout,
 } from './conversation-window';
 
@@ -93,39 +91,6 @@ describe('conversation window toggle', () => {
       title: '显示独立会话窗口',
       ariaLabel: '显示独立会话窗口',
     });
-  });
-});
-
-describe('shouldCloseConversationAtMinWidth', () => {
-  it('closes when a resize reaches the minimum width', () => {
-    expect(shouldCloseConversationAtMinWidth(360, 420)).toBe(true);
-  });
-
-  it('closes a collapsed strip after the conversation was already usable', () => {
-    expect(shouldCloseConversationAtMinWidth(0, 420)).toBe(true);
-    expect(shouldCloseConversationAtMinWidth(8, 360)).toBe(true);
-  });
-
-  it('does not close a conversation while it is opening or staying usable', () => {
-    expect(shouldCloseConversationAtMinWidth(0, undefined)).toBe(false);
-    expect(shouldCloseConversationAtMinWidth(24, undefined)).toBe(false);
-    expect(shouldCloseConversationAtMinWidth(360, undefined)).toBe(false);
-    expect(shouldCloseConversationAtMinWidth(360, 360)).toBe(false);
-    expect(shouldCloseConversationAtMinWidth(480, 520)).toBe(false);
-  });
-});
-
-describe('shouldCloseConversationLayout', () => {
-  it('closes when the user drags the conversation down to its minimum width', () => {
-    expect(shouldCloseConversationLayout(0, 1200, 420)).toBe(true);
-    expect(shouldCloseConversationLayout(30, 1200, 480)).toBe(true);
-  });
-
-  it('does not close the first layout frame so the conversation can reopen', () => {
-    expect(shouldCloseConversationLayout(0, 1200, undefined)).toBe(false);
-    expect(shouldCloseConversationLayout(0, 0, 420)).toBe(false);
-    expect(shouldCloseConversationLayout(30, 1200, undefined)).toBe(false);
-    expect(shouldCloseConversationLayout(40, 1200, 520)).toBe(false);
   });
 });
 

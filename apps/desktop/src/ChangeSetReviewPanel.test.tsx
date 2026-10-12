@@ -48,18 +48,19 @@ describe('ChangeSetReviewPanel', () => {
       rowVersion: 3,
       items: [{ ...proposal.items[0]!, status: 'applied' as const }, proposal.items[1]!],
     };
+    const onApplied = vi.fn();
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'agent.changeSet.list') return Promise.resolve([proposal]);
       if (method === 'agent.changeSet.apply') return Promise.resolve(applied);
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
-    render(<ChangeSetReviewPanel projectId="project-1" writable />);
+    render(<ChangeSetReviewPanel projectId="project-1" writable onApplied={onApplied} />);
     expect(await screen.findByText('Opening proposal')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Opening proposal/i }));
     const sceneCheckbox = await screen.findByRole('checkbox', { name: 'Select scene Scene 01' });
     fireEvent.click(sceneCheckbox);
-    fireEvent.click(screen.getByRole('button', { name: /Approve/i }));
+    fireEvent.click(screen.getByRole('button', { name: '批准并写入目录' }));
 
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('agent.changeSet.apply', {
@@ -68,7 +69,8 @@ describe('ChangeSetReviewPanel', () => {
         itemIds: ['item-1'],
       }),
     );
-    expect(await screen.findByText('Selected proposal changes applied.')).toBeInTheDocument();
+    expect(await screen.findByText('所选场次与镜头已写入目录。')).toBeInTheDocument();
+    expect(onApplied).toHaveBeenCalledWith(applied);
   });
 
   it('shows the shot prompt on scene and shot proposal items', async () => {

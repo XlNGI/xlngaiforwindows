@@ -696,6 +696,10 @@ export function App() {
 
   const [scenes, setScenes] = useState<SceneInfo[]>([]);
   const [scene, setScene] = useState<SceneInfo>();
+  const [proposalRefreshRevision, setProposalRefreshRevision] = useState(0);
+  const [focusChangeSetId, setFocusChangeSetId] = useState<string>();
+  const [sceneBindingBusy, setSceneBindingBusy] = useState(false);
+  const [sceneBindingMessage, setSceneBindingMessage] = useState('');
   const [shots, setShots] = useState<ShotInfo[]>([]);
   const [shot, setShot] = useState<ShotInfo>();
   const [shotPrompt, setShotPrompt] = useState('');
@@ -903,11 +907,8 @@ export function App() {
       detail.target?.targetKind !== 'novel-chapter' ||
       !detail.target.chapterId ||
       !detail.target.documentVersionId ||
-      !detail.documents.some(
-        (artifact) =>
-          artifact.documentId === detail.target?.documentId &&
-          artifact.documentVersionId === detail.target.documentVersionId,
-      ) ||
+      detail.documents.at(-1)?.documentId !== detail.target.documentId ||
+      detail.documents.at(-1)?.documentVersionId !== detail.target.documentVersionId ||
       activeProjectIdRef.current !== expectedProjectId
     ) {
       return false;
@@ -1336,11 +1337,13 @@ export function App() {
       if (!isAgentGeneration || agentDocumentRefreshStarted) return;
       agentDocumentRefreshStarted = true;
       const projectId = prepared.stream.projectId;
-      const refreshDocumentList = () =>
+      const refreshDocumentList = (artifactDocumentId?: string, verifiedTask = false) =>
         callWorker('document.list', {}).then((nextDocuments) => {
           if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
           setDocuments(nextDocuments);
-          const created = nextDocuments.filter((item) => !previousDocumentIds.has(item.id));
+          const created = nextDocuments.filter((item) =>
+            verifiedTask ? item.id === artifactDocumentId : !previousDocumentIds.has(item.id),
+          );
           const createdWorkspace = created.filter(isWorkspaceDocument);
           const createdWorkspaceDocument = createdWorkspace[0];
           if (createdWorkspace.length === 1 && createdWorkspaceDocument) {
@@ -1350,7 +1353,9 @@ export function App() {
             openProjectView('documents');
             setDocumentKindFilter('all');
           }
-          const createdDocument = createdWorkspaceDocument ?? created[0];
+          const createdDocument = verifiedTask
+            ? nextDocuments.find((item) => item.id === artifactDocumentId)
+            : (createdWorkspaceDocument ?? created[0]);
           if (createdDocument) void openDocumentById(createdDocument.id, nextDocuments);
         });
       void callWorker('agent.task.get', { taskId: agentTaskId })
@@ -1359,7 +1364,24 @@ export function App() {
           if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
           if (detail) {
             rememberAgentTask(detail);
+            const proposal = detail.changeSets?.at(-1);
+            const lastDocument = detail.documents.at(-1);
+            if (proposal && (!lastDocument || proposal.createdAt >= lastDocument.createdAt)) {
+              const nextDocuments = await callWorker('document.list', {});
+              if (activeProjectIdRef.current !== projectId) return;
+              setDocuments(nextDocuments);
+              setFocusChangeSetId(proposal.changeSetId);
+              setProposalRefreshRevision((revision) => revision + 1);
+              openProjectView('shots');
+              setChatMessage(
+                proposal.status === 'proposed' || proposal.status === 'partially_applied'
+                  ? '场次与镜头方案已保存，请在此页审核；批准后进入目录。'
+                  : '场次与镜头方案已保存。',
+              );
+              return;
+            }
             if (focusNovelArtifact(detail, projectId)) return;
+            return refreshDocumentList(detail.documents.at(-1)?.documentId, true);
           }
           return refreshDocumentList();
         })
@@ -1960,10 +1982,72 @@ export function App() {
     openProjectView('shots');
   };
 
+  const bindSceneDocument = async (sceneDocumentId: string) => {
+    if (!scene || !writable || sceneBindingBusy) return;
+    const expectedProjectId = project?.id;
+    const requestId = ++sceneRequest.current;
+    setSceneBindingBusy(true);
+    setSceneBindingMessage('');
+    try {
+      const updated = await callWorker('scene.save', {
+        sceneId: scene.id,
+        title: scene.title,
+        expectedRowVersion: scene.rowVersion,
+        sceneDocumentId: sceneDocumentId || null,
+      });
+      if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
+        return;
+      setScene(updated);
+      setScenes((rows) => rows.map((item) => (item.id === updated.id ? updated : item)));
+      setSceneBindingMessage(
+        sceneDocumentId ? '场次已绑定场景，下属镜头可沿用场景参考图。' : '场次的场景绑定已解除。',
+      );
+    } catch (error) {
+      if (activeProjectIdRef.current === expectedProjectId && requestId === sceneRequest.current)
+        setSceneBindingMessage(error instanceof Error ? error.message : '场景绑定失败');
+    } finally {
+      setSceneBindingBusy(false);
+    }
+  };
+
+  const refreshAppliedStructure = async (
+    changeSet: import('@ai-video/contracts').AgentChangeSetInfo,
+  ) => {
+    const expectedProjectId = project?.id;
+    const requestId = ++sceneRequest.current;
+    const nextScenes = await callWorker('scene.list', {});
+    if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
+      return;
+    setScenes(nextScenes);
+    const appliedSceneIds = new Set(
+      changeSet.items
+        .filter((item) => item.entityType === 'scene' && item.status === 'applied')
+        .map((item) => item.appliedEntityId),
+    );
+    const nextScene =
+      nextScenes.find((item) => appliedSceneIds.has(item.id)) ??
+      nextScenes.find((item) => item.id === scene?.id) ??
+      nextScenes[0];
+    const nextShots = nextScene ? await callWorker('shot.list', { sceneId: nextScene.id }) : [];
+    if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
+      return;
+    const appliedShotIds = new Set(
+      changeSet.items
+        .filter((item) => item.entityType === 'shot' && item.status === 'applied')
+        .map((item) => item.appliedEntityId),
+    );
+    const nextShot = nextShots.find((item) => appliedShotIds.has(item.id)) ?? nextShots[0];
+    setScene(nextScene);
+    setShots(nextShots);
+    setShot(nextShot);
+    setShotPrompt(nextShot?.prompt ?? '');
+  };
+
   const selectScene = async (selected: SceneInfo) => {
     const requestId = ++sceneRequest.current;
     conversationRequest.current += 1;
     setScene(selected);
+    setSceneBindingMessage('');
     setShot(undefined);
     try {
       const items = await callWorker('shot.list', { sceneId: selected.id });
@@ -4082,6 +4166,52 @@ export function App() {
                     新建镜头
                   </button>
                 </div>
+                {scene ? (
+                  <div className="workspace-toolbar">
+                    <label>
+                      绑定场景
+                      <select
+                        aria-label="场次绑定场景"
+                        value={scene.sceneDocumentId ?? ''}
+                        disabled={!writable || sceneBindingBusy}
+                        onChange={(event) => void bindSceneDocument(event.target.value)}
+                      >
+                        <option value="">未绑定场景</option>
+                        {scene.sceneDocumentId &&
+                        !documents.some(
+                          (item) =>
+                            item.id === scene.sceneDocumentId &&
+                            item.kind === 'scene' &&
+                            item.domainScope !== 'novel',
+                        ) ? (
+                          <option value={scene.sceneDocumentId}>已绑定的场景资料不可用</option>
+                        ) : null}
+                        {documents
+                          .filter(
+                            (item) =>
+                              item.kind === 'scene' &&
+                              item.domainScope !== 'novel' &&
+                              item.lifecycleStatus === 'active',
+                          )
+                          .map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.title}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    {scene.sceneDocumentId ? (
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => void openDocumentById(scene.sceneDocumentId!)}
+                      >
+                        打开场景资料
+                      </button>
+                    ) : null}
+                    {sceneBindingMessage ? <span role="status">{sceneBindingMessage}</span> : null}
+                  </div>
+                ) : null}
                 {project ? (
                   <div className="directory-layout">
                     <aside className="directory-index" aria-label="场次与镜头目录">
@@ -4145,6 +4275,7 @@ export function App() {
                         <ShotWorkspace
                           projectId={project.id}
                           shotId={shot.id}
+                          sceneDocumentId={scene?.sceneDocumentId}
                           shotTitle={shot.title}
                           shotStatus={shot.status}
                           shotPosition={shot.position}
@@ -4172,7 +4303,14 @@ export function App() {
                 ) : (
                   <EmptyWorkspace />
                 )}
-                <ChangeSetReviewPanel projectId={project?.id} writable={writable} />
+                <ChangeSetReviewPanel
+                  projectId={project?.id}
+                  writable={writable}
+                  refreshRevision={proposalRefreshRevision}
+                  focusChangeSetId={focusChangeSetId}
+                  onApplied={refreshAppliedStructure}
+                  documents={documents}
+                />
               </>
             ) : view === 'tasks' ? (
               <TaskLogView

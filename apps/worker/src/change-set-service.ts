@@ -11,6 +11,7 @@ import type {
 } from '@ai-video/contracts';
 import { rebuildLibraryChunksForChangeSet } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
+import { requireProductionSceneDocument } from './scene-document-binding.js';
 
 type ChangeSetRow = {
   id: string;
@@ -35,6 +36,7 @@ type ItemRow = {
   parent_item_ordinal: number | null;
   title: string;
   shot_status: string | null;
+  scene_document_id: string | null;
   shot_prompt: string | null;
   document_kind: AgentChangeSetItemInfo['documentKind'] | null;
   content_markdown: string | null;
@@ -67,6 +69,7 @@ function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
     parentSceneId: row.parent_scene_id ?? undefined,
     parentItemOrdinal: row.parent_item_ordinal ?? undefined,
     title: row.title,
+    sceneDocumentId: row.scene_document_id ?? undefined,
     shotStatus: row.shot_status ?? undefined,
     prompt: row.shot_prompt ?? undefined,
     documentKind: row.document_kind ?? undefined,
@@ -107,11 +110,13 @@ export class ChangeSetService {
             parent_scene_id, parent_item_id, title, shot_status, document_kind,
             content_markdown, shot_prompt, scope_type, scope_id, expected_row_version,
             expected_current_version_id,
-            status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+            scene_document_id, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
         );
         params.items.forEach((candidate, ordinal) => {
           const item = this.validateDraft(candidate, ordinal, params.items);
+          if (item.sceneDocumentId)
+            requireProductionSceneDocument(database, project.id, item.sceneDocumentId);
           insert.run(
             itemIds[ordinal],
             id,
@@ -131,6 +136,7 @@ export class ChangeSetService {
             item.scopeId ?? null,
             item.expectedRowVersion ?? null,
             item.expectedCurrentVersionId ?? null,
+            item.sceneDocumentId ?? null,
             now,
             now,
           );
@@ -261,6 +267,11 @@ export class ChangeSetService {
     all: AgentChangeSetItemDraft[],
   ): AgentChangeSetItemDraft {
     const item = { ...candidate, title: requiredText(candidate.title, 'Item title', 200) };
+    if (item.sceneDocumentId !== undefined) {
+      if (item.entityType !== 'scene')
+        throw new Error('Only scene proposals can bind scene documents.');
+      item.sceneDocumentId = requiredText(item.sceneDocumentId, 'Scene document ID', 200);
+    }
     if (item.action === 'create') {
       if (item.targetId || item.expectedRowVersion !== undefined) {
         throw new Error('Create proposals cannot include a target or expected row version.');
@@ -336,6 +347,13 @@ export class ChangeSetService {
     item: ItemRow,
     now: string,
   ): string {
+    if (item.scene_document_id) {
+      try {
+        requireProductionSceneDocument(database, projectId, item.scene_document_id);
+      } catch {
+        throw new ChangeSetConflict('SCENE_DOCUMENT_CONFLICT');
+      }
+    }
     if (item.entity_type === 'document') {
       return this.applyDocument(database, projectId, item, now);
     }
@@ -350,19 +368,27 @@ export class ChangeSetService {
       ).value;
       database
         .prepare(
-          `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version)
-           VALUES (?, ?, ?, ?, ?, ?, 0)`,
+          `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
         )
-        .run(id, projectId, item.title, position, now, now);
+        .run(id, projectId, item.title, position, now, now, item.scene_document_id);
       return id;
     }
     if (item.entity_type === 'scene') {
       const result = database
         .prepare(
-          `UPDATE scenes SET title = ?, updated_at = ?, row_version = row_version + 1
+          `UPDATE scenes SET title = ?, updated_at = ?, row_version = row_version + 1,
+           scene_document_id = COALESCE(?, scene_document_id)
            WHERE id = ? AND project_id = ? AND row_version = ?`,
         )
-        .run(item.title, now, item.target_id, projectId, item.expected_row_version);
+        .run(
+          item.title,
+          now,
+          item.scene_document_id,
+          item.target_id,
+          projectId,
+          item.expected_row_version,
+        );
       if (result.changes !== 1) throw new ChangeSetConflict('SCENE_ROW_VERSION_CONFLICT');
       return item.target_id!;
     }

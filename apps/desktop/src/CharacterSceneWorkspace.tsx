@@ -3,6 +3,7 @@ import { Image as ImageIcon, RotateCcw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { AssetInfo, AssetMediaSourceInfo, DocumentKind } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
+import { ImagePreview } from './ImagePreview';
 
 export function CharacterSceneWorkspace({
   title,
@@ -158,16 +159,23 @@ export function CharacterSceneWorkspace({
                 asset.alias?.trim() || asset.relativePath.split(/[\\/]/).pop() || asset.id;
               return (
                 <li key={asset.id}>
-                  <button type="button" onClick={() => onOpenAsset?.(asset.id)} title={name}>
-                    {src ? (
-                      <img src={src} alt={name} />
-                    ) : (
-                      <span className="character-scene-gallery-fallback">
-                        <ImageIcon size={22} />
-                        {name}
-                      </span>
-                    )}
-                  </button>
+                  {src ? (
+                    <ImagePreview key={src} src={src} alt={name} />
+                  ) : (
+                    <span className="character-scene-gallery-fallback">
+                      <ImageIcon size={22} />
+                      {name}
+                    </span>
+                  )}
+                  {onOpenAsset ? (
+                    <button
+                      className="image-library-link"
+                      type="button"
+                      onClick={() => onOpenAsset(asset.id)}
+                    >
+                      查看素材
+                    </button>
+                  ) : null}
                 </li>
               );
             })}

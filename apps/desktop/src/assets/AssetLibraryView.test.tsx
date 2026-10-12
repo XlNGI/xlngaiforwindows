@@ -346,5 +346,16 @@ describe('AssetLibraryView', () => {
     await waitFor(() =>
       expect(container.querySelector('.asset-inspector-preview video')).toHaveAttribute('controls'),
     );
+    const imageCard = (await screen.findAllByRole('option')).find((item) =>
+      item.textContent?.includes('image.png'),
+    )!;
+    fireEvent.click(imageCard);
+    const trigger = await screen.findByRole('button', { name: '放大查看image.png' });
+    fireEvent.click(trigger);
+    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+      'src',
+      '/worker-media/image-1',
+    );
+    fireEvent.keyDown(document, { key: 'Escape' });
   });
 });

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { ImagePreview } from './ImagePreview';
+import { AssetImagePreview } from './AssetImagePreview';
 import {
   CircleAlert,
   CircleCheck,
@@ -329,6 +331,10 @@ export function ProductionPanel({
   const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string>();
   const [preview, setPreview] = useState<ImagePreviewInfo>();
+  const [generatedImages, setGeneratedImages] = useState<{
+    projectId?: string;
+    assets: AssetInfo[];
+  }>();
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
   const [savingPreview, setSavingPreview] = useState(false);
   const currentProjectIdRef = useRef(projectId);
@@ -348,6 +354,10 @@ export function ProductionPanel({
       : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
   currentProjectIdRef.current = projectId;
+
+  useEffect(() => {
+    setGeneratedImages(undefined);
+  }, [projectId, shotId, sourceDocumentId]);
 
   useEffect(() => {
     if (preferredAssetKind) setAssetKind(preferredAssetKind);
@@ -810,6 +820,12 @@ export function ProductionPanel({
         setPreview(completed.preview);
       }
       const savedAsset = completed.results.find((result) => result.asset)?.asset;
+      if (completed.status === 'succeeded') {
+        setGeneratedImages({
+          projectId,
+          assets: completed.results.flatMap((result) => (result.asset ? [result.asset] : [])),
+        });
+      }
       if (completed.status === 'succeeded' && savedAsset) {
         const nextAssets = await callWorker('asset.list', {});
         publishAssets(nextAssets, savedAsset.id);
@@ -1357,7 +1373,8 @@ export function ProductionPanel({
                       </div>
                     )
                   ) : preview ? (
-                    <img
+                    <ImagePreview
+                      key={preview.dataUrl}
                       src={preview.dataUrl}
                       alt={selectedImageAsset?.relativePath ?? '生成图片预览'}
                     />
@@ -1419,58 +1436,70 @@ export function ProductionPanel({
               </div>
             )}
             {assets.length > 0 && (
-              <div className="asset-list" aria-label="素材列表">
-                {assets.map((asset) => (
-                  <div
-                    className={`asset-row${asset.id === selectedAssetId ? ' selected' : ''}`}
-                    key={asset.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedAssetId(asset.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') setSelectedAssetId(asset.id);
-                    }}
-                  >
-                    <span title={asset.sourceUrl}>{asset.relativePath}</span>
-                    <small title={localAssetPath(asset)}>
-                      {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
-                    </small>
-                    <button
-                      className="icon-button subtle"
-                      type="button"
-                      title="打开位置"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void revealAsset(asset);
-                      }}
-                    >
-                      <FolderOpen size={13} />
-                    </button>
-                    <button
-                      className="icon-button subtle"
-                      type="button"
-                      title="重命名素材"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void renameAsset(asset);
-                      }}
-                    >
-                      <Save size={13} />
-                    </button>
-                    <button
-                      className="icon-button danger"
-                      type="button"
-                      title="删除素材"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void removeAsset(asset);
-                      }}
-                    >
-                      <Trash2 size={13} />
-                    </button>
+              <>
+                {generatedImages &&
+                generatedImages.projectId === projectId &&
+                generatedImages.assets.length > 1 ? (
+                  <div className="generated-image-results" aria-label="本次生成的全部图片">
+                    {generatedImages.assets.map((item) => (
+                      <AssetImagePreview key={item.id} asset={item} />
+                    ))}
                   </div>
-                ))}
-              </div>
+                ) : null}
+                <div className="asset-list" aria-label="素材列表">
+                  {assets.map((asset) => (
+                    <div
+                      className={`asset-row${asset.id === selectedAssetId ? ' selected' : ''}`}
+                      key={asset.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedAssetId(asset.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ')
+                          setSelectedAssetId(asset.id);
+                      }}
+                    >
+                      <span title={asset.sourceUrl}>{asset.relativePath}</span>
+                      <small title={localAssetPath(asset)}>
+                        {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
+                      </small>
+                      <button
+                        className="icon-button subtle"
+                        type="button"
+                        title="打开位置"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void revealAsset(asset);
+                        }}
+                      >
+                        <FolderOpen size={13} />
+                      </button>
+                      <button
+                        className="icon-button subtle"
+                        type="button"
+                        title="重命名素材"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void renameAsset(asset);
+                        }}
+                      >
+                        <Save size={13} />
+                      </button>
+                      <button
+                        className="icon-button danger"
+                        type="button"
+                        title="删除素材"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void removeAsset(asset);
+                        }}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </div>

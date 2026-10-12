@@ -1,33 +1,82 @@
 import { Check, ChevronDown, CircleAlert, ListChecks, RefreshCw, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import type { AgentChangeSetInfo } from '@ai-video/contracts';
+import { useEffect, useRef, useState } from 'react';
+import type { AgentChangeSetInfo, DocumentSummary } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 
 interface ChangeSetReviewPanelProps {
   projectId?: string;
   writable: boolean;
+  refreshRevision?: number;
+  focusChangeSetId?: string;
+  onApplied?: (changeSet: AgentChangeSetInfo) => void | Promise<void>;
+  documents?: DocumentSummary[];
 }
 
 const terminalStatuses = new Set(['applied', 'rejected', 'conflicted']);
+const statusLabels: Record<string, string> = {
+  proposed: '待审核',
+  partially_applied: '部分已批准',
+  applied: '已写入目录',
+  rejected: '已拒绝',
+  conflicted: '版本冲突',
+  pending: '待审核',
+};
 
-export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPanelProps) {
+export function ChangeSetReviewPanel({
+  projectId,
+  writable,
+  refreshRevision,
+  focusChangeSetId,
+  onApplied,
+  documents = [],
+}: ChangeSetReviewPanelProps) {
   const [changeSets, setChangeSets] = useState<AgentChangeSetInfo[]>([]);
   const [expandedId, setExpandedId] = useState<string>();
   const [selectedItems, setSelectedItems] = useState<Record<string, string[]>>({});
   const [busyId, setBusyId] = useState<string>();
   const [message, setMessage] = useState('');
+  const currentProjectId = useRef(projectId);
+  currentProjectId.current = projectId;
+  const loadRequest = useRef(0);
+  const focusedEntry = useRef<HTMLElement>(null);
 
   const load = async () => {
+    const request = ++loadRequest.current;
     if (!projectId) {
       setChangeSets([]);
       return;
     }
-    setChangeSets(await callWorker('agent.changeSet.list', { includeTerminal: false }));
+    try {
+      const rows = await callWorker('agent.changeSet.list', { includeTerminal: false });
+      if (currentProjectId.current === projectId && request === loadRequest.current)
+        setChangeSets(rows);
+    } catch (error) {
+      if (currentProjectId.current === projectId && request === loadRequest.current)
+        setMessage(error instanceof Error ? error.message : '方案加载失败');
+    }
   };
 
   useEffect(() => {
-    void load();
+    setChangeSets([]);
+    setSelectedItems({});
+    setBusyId(undefined);
+    setMessage('');
   }, [projectId]);
+
+  useEffect(() => {
+    void load();
+    return () => {
+      loadRequest.current += 1;
+    };
+  }, [projectId, refreshRevision]);
+
+  useEffect(() => {
+    setExpandedId(focusChangeSetId);
+  }, [projectId, focusChangeSetId]);
+
+  useEffect(() => {
+    focusedEntry.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [focusChangeSetId, changeSets]);
 
   const pendingItems = (changeSet: AgentChangeSetInfo) =>
     changeSet.items.filter((item) => item.status === 'pending');
@@ -49,45 +98,50 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
         expectedRowVersion: changeSet.rowVersion,
         ...(selected.length > 0 && selected.length < pending.length ? { itemIds: selected } : {}),
       });
+      if (currentProjectId.current !== projectId) return;
       setChangeSets((rows) => rows.map((row) => (row.id === result.id ? result : row)));
       setSelectedItems((rows) => ({ ...rows, [result.id]: [] }));
       setMessage(
         result.status === 'conflicted'
-          ? 'The proposal conflicted with a newer scene or shot version.'
+          ? '场次或镜头已被修改，请重新检查方案。'
           : action === 'apply'
-            ? 'Selected proposal changes applied.'
-            : 'Selected proposal changes rejected.',
+            ? '所选场次与镜头已写入目录。'
+            : '所选方案内容已拒绝。',
       );
+      if (action === 'apply' && result.items.some((item) => item.status === 'applied'))
+        await onApplied?.(result);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Change set action failed.');
+      if (currentProjectId.current !== projectId) return;
+      setMessage(error instanceof Error ? error.message : '方案操作失败');
       await load();
     } finally {
-      setBusyId(undefined);
+      if (currentProjectId.current === projectId) setBusyId(undefined);
     }
   };
 
-  if (!projectId || changeSets.length === 0) return null;
+  if (!projectId || (changeSets.length === 0 && !message)) return null;
 
   return (
-    <section className="change-set-review" aria-label="Scene and shot proposals">
+    <section className="change-set-review" aria-label="场次与镜头待审核方案">
       <div className="change-set-review-heading">
         <div>
-          <span className="eyebrow">Agent proposals</span>
+          <span className="eyebrow">助手生成的方案</span>
           <h2>
-            <ListChecks size={16} /> Scene and shot changes
+            <ListChecks size={16} /> 场次与镜头方案
           </h2>
         </div>
         <button
           className="icon-button subtle"
           type="button"
-          title="Refresh proposals"
-          aria-label="Refresh proposals"
+          title="刷新方案"
+          aria-label="刷新方案"
           disabled={Boolean(busyId)}
           onClick={() => void load()}
         >
           <RefreshCw size={14} />
         </button>
       </div>
+      <p className="inline-status">审核并批准后，场次与镜头会显示在目录中。</p>
       {message && <p className="inline-status">{message}</p>}
       <div className="change-set-list">
         {changeSets.map((changeSet) => {
@@ -96,7 +150,11 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
           const expanded = expandedId === changeSet.id;
           const terminal = terminalStatuses.has(changeSet.status);
           return (
-            <article className="change-set-entry" key={changeSet.id}>
+            <article
+              className="change-set-entry"
+              key={changeSet.id}
+              ref={changeSet.id === focusChangeSetId ? focusedEntry : undefined}
+            >
               <button
                 className="change-set-entry-toggle"
                 type="button"
@@ -107,8 +165,7 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
                 <span>
                   <strong>{changeSet.title}</strong>
                   <small>
-                    {changeSet.status} · {pending.length} pending item
-                    {pending.length === 1 ? '' : 's'}
+                    {statusLabels[changeSet.status] ?? changeSet.status} · {pending.length} 项待审核
                   </small>
                 </span>
               </button>
@@ -134,10 +191,16 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
                         )}
                         <span>
                           <strong>
-                            {item.action} {item.entityType}: {item.title}
+                            {item.action === 'create' ? '新增' : '修改'}
+                            {item.entityType === 'scene'
+                              ? '场次'
+                              : item.entityType === 'shot'
+                                ? '镜头'
+                                : '文档'}
+                            ：{item.title}
                           </strong>
                           <small>
-                            {item.status}
+                            {statusLabels[item.status] ?? item.status}
                             {item.shotStatus ? ` · ${item.shotStatus}` : ''}
                             {item.expectedRowVersion !== undefined
                               ? ` · base v${item.expectedRowVersion}`
@@ -147,6 +210,15 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
                             <small className="change-set-item-prompt">
                               {`提示词：${item.prompt}`}
                             </small>
+                          ) : null}
+                          {item.sceneDocumentId ? (
+                            <small>
+                              绑定场景：
+                              {documents.find((document) => document.id === item.sceneDocumentId)
+                                ?.title ?? '场景资料不可用'}
+                            </small>
+                          ) : item.entityType === 'scene' ? (
+                            <small>未绑定场景</small>
                           ) : null}
                         </span>
                         {item.status === 'conflicted' && <CircleAlert size={14} />}
@@ -161,7 +233,7 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
                         disabled={!writable || Boolean(busyId)}
                         onClick={() => void mutate(changeSet, 'apply')}
                       >
-                        <Check size={14} /> Approve
+                        <Check size={14} /> 批准并写入目录
                       </button>
                       <button
                         className="button secondary"
@@ -169,7 +241,7 @@ export function ChangeSetReviewPanel({ projectId, writable }: ChangeSetReviewPan
                         disabled={!writable || Boolean(busyId)}
                         onClick={() => void mutate(changeSet, 'reject')}
                       >
-                        <X size={14} /> Reject
+                        <X size={14} /> 拒绝方案
                       </button>
                     </div>
                   )}

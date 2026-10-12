@@ -28,6 +28,7 @@ import type {
   AssetTagInfo,
 } from '@ai-video/contracts';
 import { callWorker } from '../worker-client';
+import { ImagePreview } from '../ImagePreview';
 
 type MediaFilter = 'all' | 'image' | 'video';
 const PAGE_SIZE = 60;
@@ -1117,8 +1118,9 @@ export function AssetLibraryView({
                       <Video size={32} />
                     )
                   ) : mediaSourceById[selected.id] ? (
-                    <img
-                      src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)}
+                    <ImagePreview
+                      key={selected.id}
+                      src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)!}
                       alt={displayName(selected)}
                     />
                   ) : (

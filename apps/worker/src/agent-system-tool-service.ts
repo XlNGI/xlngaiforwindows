@@ -15,6 +15,7 @@ import type {
   NovelChapterRestoreParams,
   ProviderModelInfo,
   ProviderProfileInfo,
+  ProjectStructureSnapshot,
   ResearchCacheCleanupResult,
   WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
@@ -26,6 +27,8 @@ import { ProjectService } from './project-service.js';
 import { ProjectStructureCompiler } from './structure-compiler.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { AgentDraftSubmissionService } from './agent-draft-submission-service.js';
+import { compileProjectResourceMap } from './project-resource-map.js';
+import { SceneStructureSubmissionService } from './scene-structure-submission-service.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -130,6 +133,8 @@ export class AgentSystemToolService {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
     switch (operation) {
+      case 'scene.submit_structure':
+        return new SceneStructureSubmissionService(this.projects).submit(args, identity);
       case 'document.submit_draft':
       case 'novel.chapter.write_draft':
         if (!this.documents) throw unavailable('Draft submission');
@@ -458,7 +463,12 @@ export class AgentSystemToolService {
           documents: scalarCount(database, 'documents', project.id),
           assets: scalarCount(database, 'assets', project.id),
         },
-        ...(structure ? { structure } : {}),
+        ...(structure
+          ? {
+              ...boundedStructurePreview(structure),
+              resourceMap: compileProjectResourceMap(database, project),
+            }
+          : {}),
       };
     });
   }
@@ -470,9 +480,12 @@ export class AgentSystemToolService {
     return this.projects.access(false, (database, project) => ({
       version: 1,
       status: 'succeeded',
-      structure: this.structureCompiler!.compileFromDatabase(database, project, {
-        includeArchived,
-      }),
+      resourceMap: compileProjectResourceMap(database, project, includeArchived),
+      ...boundedStructurePreview(
+        this.structureCompiler!.compileFromDatabase(database, project, {
+          includeArchived,
+        }),
+      ),
     }));
   }
 
@@ -1106,6 +1119,26 @@ export class AgentSystemToolService {
     if (!this.maintenance) throw unavailable('Maintenance');
     return this.maintenance;
   }
+}
+
+function boundedStructurePreview(snapshot: ProjectStructureSnapshot): {
+  structure: ProjectStructureSnapshot;
+  truncated: boolean;
+} {
+  const structure = structuredClone(snapshot);
+  let truncated = false;
+  while (Buffer.byteLength(JSON.stringify(structure), 'utf8') > 24_000) {
+    truncated = true;
+    if (structure.sources.length) structure.sources.pop();
+    else if (structure.novel?.references.length) structure.novel.references.pop();
+    else if (structure.novel?.unassignedChapters.length) structure.novel.unassignedChapters.pop();
+    else if (structure.novel?.volumes.length) {
+      const volume = structure.novel.volumes.at(-1)!;
+      if (volume.chapters.length) volume.chapters.pop();
+      else structure.novel.volumes.pop();
+    } else break;
+  }
+  return { structure, truncated };
 }
 
 function scalarCount(

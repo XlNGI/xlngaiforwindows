@@ -28,6 +28,51 @@ async function setup(name = 'change-set') {
 }
 
 describe('ChangeSetService', () => {
+  it('preserves scene bindings in proposals and rejects a scene document archived before approval', async () => {
+    const { projects, content, changeSets } = await setup();
+    const setting = content.saveDocument({
+      kind: 'scene',
+      title: '庭院',
+      contentMarkdown: '# 庭院',
+    });
+    const proposal = changeSets.create({
+      title: '相遇',
+      items: [
+        { entityType: 'scene', action: 'create', title: '晨间相遇', sceneDocumentId: setting.id },
+        {
+          entityType: 'shot',
+          action: 'create',
+          title: '远景',
+          parentItemOrdinal: 0,
+          prompt: '庭院相遇',
+        },
+      ],
+    });
+    expect(changeSets.list()[0]?.items[0]?.sceneDocumentId).toBe(setting.id);
+    expect(content.listScenes()).toHaveLength(0);
+    projects.access(true, (database) =>
+      database
+        .prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?")
+        .run(setting.id),
+    );
+    const conflicted = changeSets.apply({
+      changeSetId: proposal.id,
+      expectedRowVersion: proposal.rowVersion,
+    });
+    expect(conflicted.status).toBe('conflicted');
+    expect(content.listScenes()).toHaveLength(0);
+    projects.access(true, (database) =>
+      database.prepare("UPDATE documents SET lifecycle_status='active' WHERE id=?").run(setting.id),
+    );
+    const next = changeSets.create({
+      title: '再相遇',
+      items: [
+        { entityType: 'scene', action: 'create', title: '晨间相遇', sceneDocumentId: setting.id },
+      ],
+    });
+    changeSets.apply({ changeSetId: next.id, expectedRowVersion: next.rowVersion });
+    expect(content.listScenes()[0]?.sceneDocumentId).toBe(setting.id);
+  });
   it('creates and applies a scene plus dependent shot proposal', async () => {
     const { changeSets } = await setup();
     const proposed = changeSets.create({

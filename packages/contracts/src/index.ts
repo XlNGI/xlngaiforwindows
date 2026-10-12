@@ -1537,6 +1537,12 @@ export interface AgentTaskDetail {
   plan?: ConversationTaskPlanInfo;
   events: AgentTaskEventInfo[];
   documents: AgentTaskDocumentArtifact[];
+  changeSets?: Array<{
+    changeSetId: string;
+    title: string;
+    status: AgentChangeSetStatus;
+    createdAt: string;
+  }>;
   providerSteps: AgentProviderStepInfo[];
   researchSources: AgentResearchSourceInfo[];
   librarySources?: AgentLibrarySourceInfo[];
@@ -1676,6 +1682,8 @@ export interface SceneInfo {
   id: string;
   projectId: string;
   title: string;
+  /** Reusable production scene document (kind=scene). */
+  sceneDocumentId?: string;
   position: number;
   rowVersion: number;
   createdAt: string;
@@ -1685,6 +1693,8 @@ export interface SceneInfo {
 export interface SceneSaveParams {
   sceneId?: string;
   title: string;
+  /** Omitted preserves the binding; null clears it. */
+  sceneDocumentId?: string | null;
   expectedRowVersion?: number;
 }
 
@@ -1743,6 +1753,8 @@ export interface AgentChangeSetItemDraft {
   targetId?: string;
   parentSceneId?: string;
   parentItemOrdinal?: number;
+  /** Production scene document for a scene proposal. */
+  sceneDocumentId?: string;
   title: string;
   shotStatus?: string;
   /** Shot prompt for `shot` items; applied to `shots.prompt` when approved. */
@@ -2093,6 +2105,9 @@ export interface ProjectStructureResource {
   lifecycleStatus?: DocumentLifecycleStatus | 'active' | 'archived' | 'trash';
   rowVersion?: number;
   revision?: string;
+  /** Metadata describing how an empty workspace accepts content. */
+  writeTool?: string;
+  contentModel?: string;
   locator: {
     workspace: 'novel' | 'documents' | 'characters' | 'shots' | 'assets' | 'tasks' | 'settings';
     resourceId: string;
@@ -2100,6 +2115,10 @@ export interface ProjectStructureResource {
     versionId?: string;
     structureNodeId?: string;
     structurePath?: string[];
+    sceneId?: string;
+    sceneDocumentId?: string;
+    shotId?: string;
+    changeSetId?: string;
   };
   children?: ProjectStructureResource[];
 }

@@ -177,6 +177,7 @@ describe('compileProductionContext', () => {
       projectName: 'Drama',
       scope: { type: 'project', label: 'Project' },
       budgetTokens: 1_000,
+      systemInstruction: 'Preserve all supplied constraints.',
       sources: [
         {
           id: 'document',

@@ -477,6 +477,7 @@ export interface SceneRecord {
   id: string;
   projectId: string;
   title: string;
+  sceneDocumentId?: string;
   position: number;
   rowVersion: number;
   createdAt: string;

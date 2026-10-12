@@ -8,6 +8,7 @@ import type {
 export type SystemAgentToolOperation =
   | 'document.submit_draft'
   | 'novel.chapter.write_draft'
+  | 'scene.submit_structure'
   | 'project.get_context'
   | 'project.structure.get'
   | 'project.integrity.check'
@@ -235,9 +236,16 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['title', 'shots'],
+            required: ['title', 'sceneDocumentId', 'shots'],
             properties: {
               title: { type: 'string', minLength: 1, maxLength: 200 },
+              sceneDocumentId: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 200,
+                description:
+                  'Actual documentId of a reusable production scene prompt document (kind=scene) on 角色与场景; obtain from project.structure.get. Multiple scene occurrences may reuse it.',
+              },
               shots: {
                 type: 'array',
                 minItems: 1,
@@ -365,14 +373,31 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'scene.submit_structure',
+    description:
+      'Create actual scene/shot proposals for 场次与镜头, with one prompt per shot. First retrieve project.structure.get and choose workspace:shots. Supply episodeTitle and scenes:[{title,sceneDocumentId,shots:[{title,prompt}]}]. Every scene must bind the actual documentId of its production scene prompt on 角色与场景. Retrieve that ID from project.structure.get; create the production scene document with document.submit_draft first if absent. Choose the scene using the story and scene definitions retrieved with library.search/read; when the location is unclear or several settings fit, clarify before submitting. Several scene occurrences can share one scene document. This saves a reviewable change set on that page; the scene/shot directory is populated only after the user approves. Report the returned changeSetId and pending-review status, never claim applied scenes. Do not replace this operation with document.submit_draft or an unattached storyboard document. Call sequentially for multiple structures.',
+    parameters: {
+      ...DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
+        .parameters,
+      required: ['resourceId', 'episodeTitle', 'scenes'],
+      properties: {
+        ...(DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
+          .parameters.properties as Record<string, unknown>),
+        resourceId: RESOURCE_LOCATOR_PROPERTIES.resourceId,
+        expectedRevision: RESOURCE_LOCATOR_PROPERTIES.expectedRevision,
+      },
+    },
+  },
+  {
     name: 'document.submit_draft',
     description:
-      'Save one complete project document draft in an independent review task. Choose documentKind explicitly. For an existing document, first retrieve its actual documentId, expectedDocumentRowVersion and baseVersionId; include all three. Novel chapters must use novel.chapter.write_draft. Call sequentially for multiple documents. Successful saving requires no extra user confirmation.',
+      'Save one complete document draft in an independent review task. First call project.structure.get or project.get_context and echo resourceId from resourceMap. For a new novel outline or novel setting, choose the 小说 page workspace:novel and supply bindingRole (work-outline, character-bible, world-bible, timeline or style-guide); documentKind alone does not choose a page. Short-drama outlines/plans/notes use workspace:documents, production character/scene prompts use workspace:characters. Existing documents use the actual document or structure-node resourceId, documentId, expectedDocumentRowVersion and baseVersionId. Novel chapter bodies must use novel.chapter.write_draft. Call sequentially for multiple documents. Successful saving requires no extra user confirmation.',
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['title', 'contentMarkdown', 'documentKind'],
+      required: ['resourceId', 'title', 'contentMarkdown', 'documentKind'],
       properties: {
+        ...RESOURCE_LOCATOR_PROPERTIES,
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1000000 },
         documentKind: {
@@ -392,12 +417,13 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'novel.chapter.write_draft',
     description:
-      'Save one complete novel chapter draft in its own review task and chapter lock. Interpret the user intent yourself. For create_chapter provide title and optional displayLabel/volumeId, without existing IDs or CAS. For continue_chapter/rewrite_chapter first query novel.chapter.list and read the body, then supply chapterId, expectedChapterRowVersion, expectedDocumentRowVersion, baseVersionId and the full revised body. Multiple chapters use consecutive calls; saving one does not end the conversation or require a second authorization.',
+      'Save one complete novel chapter draft in its own review task and chapter lock. Interpret the user intent yourself. First retrieve project.structure.get and echo its resourceId. For create_chapter use the 小说 page workspace:novel with title and optional displayLabel/volumeId, without existing document/chapter IDs or CAS. For continue_chapter/rewrite_chapter choose the chapter document or structure-node resourceId, query novel.chapter.list and read the body, then supply chapterId, expectedChapterRowVersion, expectedDocumentRowVersion, baseVersionId and the full revised body. Novel outlines/settings are reference documents saved by document.submit_draft with workspace:novel and bindingRole. Multiple chapters use consecutive calls; saving one does not end the conversation or require a second authorization.',
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['action', 'title', 'contentMarkdown'],
+      required: ['resourceId', 'action', 'title', 'contentMarkdown'],
       properties: {
+        ...RESOURCE_LOCATOR_PROPERTIES,
         action: { type: 'string', enum: ['create_chapter', 'continue_chapter', 'rewrite_chapter'] },
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1000000 },
@@ -1025,6 +1051,7 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'adapter.schema.audit.list': readPolicy(),
   'document.create_draft': writePolicy(),
   'document.submit_draft': writePolicy(),
+  'scene.submit_structure': writePolicy(),
   'novel.chapter.write_draft': writePolicy(),
   'document.list': readPolicy(),
   'document.read': readPolicy(),

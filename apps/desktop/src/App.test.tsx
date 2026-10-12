@@ -1082,6 +1082,11 @@ describe('App', () => {
 
   it.each([
     ['帮我生成一个小说', 'selected'],
+    ['帮我生成一个小说', 'novel-reference'],
+    ['帮我生成一个小说', 'updated-novel-reference'],
+    ['帮我生成一个小说', 'novel-reference-after-chapter'],
+    ['生成场次与镜头', 'scene-proposal'],
+    ['生成场次与镜头', 'scene-proposal-open-page'],
     ['续写小说下一章', 'selected'],
     ['现在生成小说第一章', 'selected'],
     ['现在生成小说第一章', 'conversation-preference'],
@@ -1094,6 +1099,47 @@ describe('App', () => {
     const batchPrompt =
       batchModelState === 'novel-possessive' ? '生成小说的第四章和第五章' : '生成第四章和第五章';
     const isChapter = firstPrompt === '现在生成小说第一章';
+    const isSceneProposal = batchModelState.startsWith('scene-proposal');
+    let sceneProposalApplied = false;
+    let sceneProposalGenerated = false;
+    let sceneBoundDocumentId: string | null = 'document-created-by-agent';
+    let sceneBindingRowVersion = 0;
+    const sceneProposal = {
+      id: 'generated-proposal',
+      projectId: 'project',
+      taskId: 'agent-task',
+      title: '生成的场次方案',
+      status: 'proposed' as const,
+      rowVersion: 0,
+      createdAt: 'now',
+      updatedAt: 'now',
+      items: [
+        {
+          id: 'proposal-scene',
+          ordinal: 0,
+          entityType: 'scene' as const,
+          action: 'create' as const,
+          title: '生成的庭院',
+          sceneDocumentId: 'document-created-by-agent',
+          status: 'pending' as const,
+        },
+        {
+          id: 'proposal-shot',
+          ordinal: 1,
+          entityType: 'shot' as const,
+          action: 'create' as const,
+          title: '庭院远景',
+          prompt: '清晨的庭院镜头提示词',
+          parentItemOrdinal: 0,
+          status: 'pending' as const,
+        },
+      ],
+    };
+    const isNovelReference = [
+      'novel-reference',
+      'updated-novel-reference',
+      'novel-reference-after-chapter',
+    ].includes(batchModelState);
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -1177,7 +1223,14 @@ describe('App', () => {
     const createdDocument = {
       id: 'document-created-by-agent',
       projectId: 'project',
-      kind: 'character' as const,
+      kind: isNovelReference
+        ? ('outline' as const)
+        : isSceneProposal
+          ? ('scene' as const)
+          : ('character' as const),
+      ...(isNovelReference
+        ? { domainScope: 'novel' as const, bindingRole: 'work-outline' as const }
+        : {}),
       title: 'Agent 人工验收样本',
       scopeType: 'project' as const,
       currentVersionId: 'version-created-by-agent',
@@ -1245,11 +1298,175 @@ describe('App', () => {
         });
       if (method === 'document.list') {
         documentListCalls += 1;
-        return Promise.resolve(documentListCalls === 1 ? [] : [createdDocument]);
+        return Promise.resolve(
+          documentListCalls === 1 && batchModelState !== 'updated-novel-reference'
+            ? []
+            : isNovelReference
+              ? [
+                  {
+                    ...createdDocument,
+                    id: 'other-task-document',
+                    title: '其他任务的剧本',
+                    domainScope: undefined,
+                    bindingRole: undefined,
+                  },
+                  createdDocument,
+                ]
+              : [createdDocument],
+        );
       }
       if (method === 'document.get') return Promise.resolve(createdDocumentDetail);
       if (method === 'document.versions')
         return Promise.resolve([createdDocumentDetail.currentVersion]);
+      if (method === 'agent.task.get' && isSceneProposal) {
+        sceneProposalGenerated = true;
+        return Promise.resolve({
+          task: {
+            id: 'agent-task',
+            projectId: 'project',
+            taskType: 'document-query',
+            title: firstPrompt,
+            scopeType: 'project',
+            status: 'completed',
+            phase: 'model_running',
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          documents: [],
+          changeSets: [
+            {
+              changeSetId: sceneProposal.id,
+              title: sceneProposal.title,
+              status: 'proposed',
+              createdAt: 'now',
+            },
+          ],
+          events: [],
+          providerSteps: [],
+          researchSources: [],
+        } satisfies AgentTaskDetail);
+      }
+      if (method === 'agent.changeSet.list' && isSceneProposal)
+        return Promise.resolve(
+          sceneProposalGenerated
+            ? [
+                {
+                  ...sceneProposal,
+                  id: 'unrelated-proposal',
+                  taskId: 'another-task',
+                  title: '其他任务方案',
+                },
+                sceneProposal,
+              ]
+            : [],
+        );
+      if (method === 'agent.changeSet.apply' && isSceneProposal) {
+        sceneProposalApplied = true;
+        return Promise.resolve({
+          ...sceneProposal,
+          status: 'applied',
+          rowVersion: 1,
+          items: sceneProposal.items.map((item) => ({
+            ...item,
+            status: 'applied',
+            appliedEntityId: item.entityType === 'scene' ? 'applied-scene' : 'applied-shot',
+          })),
+        });
+      }
+      if (method === 'scene.list' && isSceneProposal)
+        return Promise.resolve(
+          sceneProposalApplied
+            ? [
+                {
+                  id: 'applied-scene',
+                  projectId: 'project',
+                  title: '生成的庭院',
+                  sceneDocumentId: sceneBoundDocumentId ?? undefined,
+                  position: 0,
+                  rowVersion: 0,
+                  createdAt: 'now',
+                  updatedAt: 'now',
+                },
+              ]
+            : [],
+        );
+      if (method === 'shot.list' && isSceneProposal)
+        return Promise.resolve([
+          {
+            id: 'applied-shot',
+            sceneId: 'applied-scene',
+            title: '庭院远景',
+            prompt: '清晨的庭院镜头提示词',
+            position: 0,
+            status: 'draft',
+            rowVersion: 0,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]);
+      if (method === 'scene.save' && isSceneProposal) {
+        sceneBoundDocumentId = (params as { sceneDocumentId: string | null }).sceneDocumentId;
+        sceneBindingRowVersion += 1;
+        return Promise.resolve({
+          id: 'applied-scene',
+          projectId: 'project',
+          title: '生成的庭院',
+          position: 0,
+          rowVersion: sceneBindingRowVersion,
+          sceneDocumentId: sceneBoundDocumentId ?? undefined,
+          createdAt: 'now',
+          updatedAt: 'now',
+        });
+      }
+      if (method === 'agent.task.get' && isNovelReference)
+        return Promise.resolve({
+          ...(batchModelState === 'novel-reference-after-chapter'
+            ? {
+                target: {
+                  targetKind: 'novel-chapter' as const,
+                  action: 'create_chapter' as const,
+                  chapterId: 'earlier-chapter',
+                  documentId: 'earlier-chapter-document',
+                  documentVersionId: 'earlier-version',
+                },
+              }
+            : {}),
+          task: {
+            id: prepared.agentTaskId,
+            projectId: 'project',
+            conversationId: conversation.id,
+            taskType: 'document-create',
+            scopeType: 'project',
+            title: firstPrompt,
+            status: 'completed',
+            phase: 'waiting_review',
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          documents: [
+            ...(batchModelState === 'novel-reference-after-chapter'
+              ? [
+                  {
+                    documentId: 'earlier-chapter-document',
+                    documentVersionId: 'earlier-version',
+                    operation: 'create' as const,
+                    createdAt: 'before',
+                  },
+                ]
+              : []),
+            {
+              documentId: createdDocument.id,
+              documentVersionId: createdDocument.currentVersionId,
+              operation: batchModelState === 'updated-novel-reference' ? 'update' : 'create',
+              createdAt: 'now',
+            },
+          ],
+          events: [],
+          providerSteps: [],
+          researchSources: [],
+        } satisfies AgentTaskDetail);
       if (method === 'agent.task.get' && !isChapter) return Promise.resolve(null);
       if (method === 'agent.task.get' && isChapter)
         return Promise.resolve({
@@ -1379,6 +1596,16 @@ describe('App', () => {
 
     render(<App />);
     await screen.findByDisplayValue('Project conversation');
+    if (batchModelState === 'scene-proposal-open-page') {
+      fireEvent.click(
+        screen
+          .getAllByRole('button', { name: /^场次与镜头/ })
+          .find((item) => item.classList.contains('nav-item'))!,
+      );
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith('agent.changeSet.list', { includeTerminal: false }),
+      );
+    }
     selectLlm(profile.id, model.id);
     fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: firstPrompt },
@@ -1420,6 +1647,67 @@ describe('App', () => {
       expect(
         screen.queryByText('请补充要操作的小说章节或新章节标题，助手会继续当前任务。'),
       ).not.toBeInTheDocument();
+    }
+    if (isSceneProposal) {
+      const proposalButton = await screen.findByRole('button', { name: /生成的场次方案/ });
+      expect(proposalButton).toHaveAttribute('aria-expanded', 'true');
+      expect(
+        screen
+          .getAllByRole('button', { name: /^场次与镜头/ })
+          .find((item) => item.classList.contains('nav-item')),
+      ).toHaveClass('active');
+      expect(screen.getByRole('button', { name: /其他任务方案/ })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+      fireEvent.click(screen.getByRole('button', { name: '批准并写入目录' }));
+      expect(await screen.findByRole('button', { name: '生成的庭院' })).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: '庭院远景' })).toBeInTheDocument();
+      expect(await screen.findByDisplayValue('清晨的庭院镜头提示词')).toBeInTheDocument();
+      expect(callWorker).toHaveBeenCalledWith('shot.list', { sceneId: 'applied-scene' });
+      expect(screen.getByLabelText('场次绑定场景')).toHaveValue(createdDocument.id);
+      expect(screen.getByText(`绑定场景：${createdDocument.title}`)).toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText('场次绑定场景'), { target: { value: '' } });
+      await waitFor(() => expect(screen.getByLabelText('场次绑定场景')).toHaveValue(''));
+      expect(callWorker).toHaveBeenCalledWith('scene.save', {
+        sceneId: 'applied-scene',
+        title: '生成的庭院',
+        sceneDocumentId: null,
+        expectedRowVersion: 0,
+      });
+      fireEvent.change(screen.getByLabelText('场次绑定场景'), {
+        target: { value: createdDocument.id },
+      });
+      await waitFor(() =>
+        expect(screen.getByLabelText('场次绑定场景')).toHaveValue(createdDocument.id),
+      );
+      expect(callWorker).toHaveBeenCalledWith('scene.save', {
+        sceneId: 'applied-scene',
+        title: '生成的庭院',
+        sceneDocumentId: createdDocument.id,
+        expectedRowVersion: 1,
+      });
+      return;
+    }
+    if (isNovelReference) {
+      expect(await screen.findByDisplayValue(createdDocument.title)).toBeInTheDocument();
+      expect(await screen.findByDisplayValue('Agent 桌面人工测试成功')).toBeInTheDocument();
+      expect(
+        screen
+          .getAllByRole('button', { name: /^小说/ })
+          .find((item) => item.classList.contains('nav-item')),
+      ).toHaveClass('active');
+      expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: createdDocument.id });
+      expect(
+        vi
+          .mocked(callWorker)
+          .mock.calls.some(
+            ([method, params]) =>
+              method === 'document.get' &&
+              (params as { documentId: string }).documentId === 'other-task-document',
+          ),
+      ).toBe(false);
+      return;
     }
     if (isChapter) {
       expect(await screen.findByLabelText('章节内容')).toHaveValue('Agent 桌面人工测试成功');

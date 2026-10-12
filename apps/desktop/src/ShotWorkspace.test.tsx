@@ -128,6 +128,152 @@ describe('shot reference storage', () => {
 });
 
 describe('ShotWorkspace', () => {
+  it('shows generated shot images inline and opens an enlarged preview', async () => {
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'asset.list') return Promise.resolve([firstFrameAsset]);
+      if (method === 'asset.mediaSource')
+        return Promise.resolve({
+          assetId: firstFrameAsset.id,
+          path: 'D:/Project/assets/images/shot.png',
+          contentType: 'image/png',
+        });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    renderWorkspace();
+    expect(await screen.findByRole('img', { name: 'shot.png' })).toHaveAttribute(
+      'src',
+      '/worker-media/first-frame-asset',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '放大查看shot.png' }));
+    expect(screen.getByRole('dialog', { name: '图片预览：shot.png' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(callWorker).toHaveBeenCalledWith('asset.list', {
+      shotId: 'shot',
+      sort: 'created-desc',
+      limit: 60,
+    });
+  });
+  it('inherits a bound scene image by document ID without persisting an override or using a same-title document', async () => {
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'asset.list')
+        return Promise.resolve(
+          (params as { sourceDocumentId?: string }).sourceDocumentId === sceneDoc.id
+            ? [sceneAsset]
+            : [characterAsset],
+        );
+      if (method === 'asset.mediaSource')
+        return Promise.resolve({
+          assetId: sceneAsset.id,
+          path: 'D:/Project/assets/images/dock.png',
+          contentType: 'image/png',
+        });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const { onGenerateVideo } = renderWorkspace({
+      sceneDocumentId: sceneDoc.id,
+      assets: [],
+      documents: [{ ...sceneDoc, id: 'same-title-other-document' }, sceneDoc],
+      prompt: '远景，人物走过庭院',
+    });
+    await waitFor(() => expect(screen.getByLabelText('场景参考')).toHaveValue(sceneAsset.id));
+    fireEvent.click(screen.getByRole('button', { name: '用参考图生成视频' }));
+    await waitFor(() =>
+      expect(onGenerateVideo).toHaveBeenCalledWith({ sceneAssetId: sceneAsset.id }),
+    );
+    expect(loadShotReferences('project', 'shot').sceneAssetId).toBeUndefined();
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'asset.list',
+      expect.objectContaining({ sourceDocumentId: 'same-title-other-document' }),
+    );
+  });
+
+  it('keeps explicit shot references and can clear or restore scene inheritance', async () => {
+    saveShotReferences('project', 'shot', { sceneAssetId: firstFrameAsset.id });
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'asset.list') return Promise.resolve([sceneAsset]);
+      if (method === 'asset.mediaSource')
+        return Promise.resolve({
+          assetId: sceneAsset.id,
+          path: 'D:/Project/assets/images/ref.png',
+          contentType: 'image/png',
+        });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const { onGenerateVideo } = renderWorkspace({
+      sceneDocumentId: sceneDoc.id,
+      prompt: '庭院远景',
+    });
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'asset.list',
+        expect.objectContaining({ sourceDocumentId: sceneDoc.id }),
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '用参考图生成视频' }));
+    await waitFor(() =>
+      expect(onGenerateVideo).toHaveBeenCalledWith({ sceneAssetId: firstFrameAsset.id }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '恢复场次场景图' }));
+    await waitFor(() => expect(screen.getByLabelText('场景参考')).toHaveValue(sceneAsset.id));
+    fireEvent.click(screen.getByRole('button', { name: '清除' }));
+    expect(screen.getByLabelText('场景参考')).toHaveValue('');
+    expect(loadShotReferences('project', 'shot').ignoreSceneBinding).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '恢复场次场景图' }));
+    expect(screen.getByLabelText('场景参考')).toHaveValue(sceneAsset.id);
+  });
+
+  it('ignores a stale inherited image when the scene binding changes', async () => {
+    let resolveOld!: (assets: AssetInfo[]) => void;
+    const nextDoc = { ...sceneDoc, id: 'next-scene-document', title: '书房' };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'asset.list') {
+        if ((params as { sourceDocumentId?: string }).sourceDocumentId === sceneDoc.id)
+          return new Promise<AssetInfo[]>((resolve) => {
+            resolveOld = resolve;
+          });
+        return Promise.resolve([firstFrameAsset]);
+      }
+      if (method === 'asset.mediaSource')
+        return Promise.resolve({
+          assetId: firstFrameAsset.id,
+          path: 'D:/Project/assets/images/new.png',
+          contentType: 'image/png',
+        });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const workspace = renderWorkspace({
+      sceneDocumentId: sceneDoc.id,
+      documents: [sceneDoc, nextDoc],
+    });
+    await waitFor(() => expect(resolveOld).toBeDefined());
+    const props: import('react').ComponentProps<typeof ShotWorkspace> = {
+      projectId: 'project',
+      shotId: 'shot',
+      shotTitle: '镜头',
+      shotStatus: 'draft',
+      shotPosition: 0,
+      prompt: '书房特写',
+      writable: true,
+      assets: [sceneAsset, firstFrameAsset],
+      documents: [sceneDoc, nextDoc],
+      sceneDocumentId: nextDoc.id,
+      storyboardTitle: '',
+      storyboardContent: '',
+      storyboardBusy: false,
+      hasStoryboard: false,
+      onPromptChange: vi.fn(),
+      onSavePrompt: vi.fn(),
+      onGenerateImage: vi.fn(),
+      onGenerateVideo: vi.fn(),
+      onStoryboardTitleChange: vi.fn(),
+      onStoryboardContentChange: vi.fn(),
+      onSaveStoryboard: vi.fn(),
+    };
+    workspace.rerender(<ShotWorkspace {...props} />);
+    await waitFor(() => expect(screen.getByLabelText('场景参考')).toHaveValue(firstFrameAsset.id));
+    resolveOld([sceneAsset]);
+    await waitFor(() => expect(screen.getByLabelText('场景参考')).toHaveValue(firstFrameAsset.id));
+  });
   it('fills empty reference slots from mentioned documents before generating an image', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
       if (method === 'asset.list') {

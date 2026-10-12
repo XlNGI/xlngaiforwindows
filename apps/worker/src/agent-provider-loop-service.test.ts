@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmProvider } from '@ai-video/llm';
-import { AGENT_TOOL_RESULT_LIMITS } from '@ai-video/contracts';
+import { AGENT_TOOL_RESULT_LIMITS, type ProjectStructureResult } from '@ai-video/contracts';
 import {
   AgentProviderLoopService,
   inferNovelReference,
@@ -214,6 +214,149 @@ function taskSnapshot(project: ProjectService, taskId: string): Record<string, u
 
 describe('AgentProviderLoopService', () => {
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'resolves page IDs before saving and rejects incomplete or mismatched locators through %s',
+    async (protocol) => {
+      const { conversation, generations, project, workflow } = await setup(protocol);
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: '就按刚才的方向保存',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, '就按刚才的方向保存', undefined, {
+        operation: 'document.list',
+      });
+      let tools = agent.tools;
+      let ordinal = 0;
+      const invoke = async (name: string, args: Record<string, unknown>) => {
+        loop.startProviderStep(prepared.stream);
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: `routing-${ordinal}`,
+          calls: [
+            {
+              id: `routing-call-${ordinal++}`,
+              name,
+              authorizationHandle: tools.find((tool) => tool.name === name)!.authorizationHandle,
+              argumentsJson: JSON.stringify(args),
+            },
+          ],
+        });
+        tools = result.tools!;
+        return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
+      };
+      const context = await invoke('project.get_context', {});
+      const map = context.resourceMap as ProjectStructureResult;
+      expect(
+        map.resources.filter((item) => item.kind === 'workspace').map((item) => item.id),
+      ).toEqual([
+        'workspace:novel',
+        'workspace:documents',
+        'workspace:characters',
+        'workspace:shots',
+        'workspace:assets',
+        'workspace:tasks',
+        'workspace:settings',
+      ]);
+      const draft = {
+        title: '《剑开天门》玄幻短篇小说大纲',
+        documentKind: 'outline',
+        contentMarkdown: '# 大纲\n\n故事设定。',
+      };
+      // The actual screenshot call must now fail before any artifact is created.
+      const missingPage = await invoke('document.submit_draft', draft);
+      expect(missingPage.status).toBe('rejected');
+      expect(JSON.stringify(missingPage)).toContain('resourceId is required');
+      const missingRole = await invoke('document.submit_draft', {
+        ...draft,
+        resourceId: 'workspace:novel',
+      });
+      expect(missingRole.status).toBe('rejected');
+      expect(JSON.stringify(missingRole)).toContain('bindingRole');
+      expect(
+        await invoke('document.submit_draft', {
+          ...draft,
+          resourceId: 'workspace:documents',
+          bindingRole: 'work-outline',
+        }),
+      ).toMatchObject({ status: 'rejected' });
+      expect(workflow.listDocuments()).toHaveLength(0);
+      expect(workflow.listTasks()).toHaveLength(1);
+      const novel = await invoke('document.submit_draft', {
+        ...draft,
+        resourceId: map.resources.find((item) => item.locator.workspace === 'novel')!.id,
+        bindingRole: 'work-outline',
+      });
+      expect(novel).toMatchObject({
+        status: 'draft_saved',
+        domainScope: 'novel',
+        bindingRole: 'work-outline',
+        locator: {
+          workspace: 'novel',
+          documentId: novel.documentId,
+          versionId: novel.documentVersionId,
+          resourceId: `document:${String(novel.documentId)}`,
+        },
+      });
+      expect(workflow.getDocument(novel.documentId as string).domainScope).toBe('novel');
+      const script = await invoke('document.submit_draft', {
+        ...draft,
+        title: '短剧大纲',
+        resourceId: 'workspace:documents',
+      });
+      expect(script).toMatchObject({ status: 'draft_saved', locator: { workspace: 'documents' } });
+      expect(workflow.getDocument(script.documentId as string).domainScope).not.toBe('novel');
+      const character = await invoke('document.submit_draft', {
+        title: '陈缺',
+        documentKind: 'character',
+        contentMarkdown: '制作立绘提示词。',
+        resourceId: 'workspace:characters',
+      });
+      expect(character).toMatchObject({
+        status: 'draft_saved',
+        locator: { workspace: 'characters' },
+      });
+      const current = (await invoke('project.structure.get', {}))
+        .resourceMap as ProjectStructureResult;
+      const node = current.resources.find(
+        (item) => item.kind === 'structure-node' && item.documentId === novel.documentId,
+      )!;
+      const otherNode = current.resources.find(
+        (item) => item.kind === 'structure-node' && item.documentId === script.documentId,
+      )!;
+      expect(node.locator.workspace).toBe('novel');
+      expect(JSON.stringify(current)).not.toContain('故事设定。');
+      const update = {
+        ...draft,
+        resourceId: node.id,
+        documentId: node.documentId,
+        structureNodeId: node.locator.structureNodeId,
+        versionId: node.versionId,
+        expectedRevision: current.revision,
+        expectedRowVersion: node.rowVersion,
+        expectedDocumentRowVersion: node.rowVersion,
+        baseVersionId: node.versionId,
+        contentMarkdown: '# 修订大纲\n\n新设定。',
+      };
+      expect(
+        await invoke('document.submit_draft', {
+          ...update,
+          structureNodeId: otherNode.locator.structureNodeId,
+        }),
+      ).toMatchObject({ status: 'rejected' });
+      const revised = await invoke('document.submit_draft', update);
+      expect(revised).toMatchObject({
+        status: 'draft_saved',
+        documentId: novel.documentId,
+        locator: { workspace: 'novel' },
+      });
+      expect(await invoke('document.submit_draft', update)).toMatchObject({ status: 'rejected' });
+      expect(workflow.listDocuments()).toHaveLength(3);
+      expect(workflow.getTask({ taskId: agent.taskId }).documents).toHaveLength(4);
+    },
+  );
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'Pi lets the model query and submit two independent chapter drafts through %s',
     async (protocol) => {
       const { conversation, generations, project, workflow, novels } = await setup(protocol);
@@ -250,6 +393,7 @@ describe('AgentProviderLoopService', () => {
               fauxToolCall(
                 'novel.chapter.write_draft',
                 {
+                  resourceId: 'workspace:novel',
                   action: 'create_chapter',
                   title: `${label} 雾港`,
                   displayLabel: label,
@@ -352,6 +496,142 @@ describe('AgentProviderLoopService', () => {
     },
   );
 
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'makes ordinary scene submissions discoverable and reviewable through %s',
+    async (protocol) => {
+      const { conversation, generations, project, workflow } = await setup(protocol);
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: '按刚才商量的保存',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, '按刚才商量的保存', undefined, {
+        operation: 'document.list',
+      });
+      let tools = agent.tools;
+      let ordinal = 0;
+      const invoke = async (name: string, args: Record<string, unknown>) => {
+        loop.startProviderStep(prepared.stream);
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: `scene-response-${ordinal}`,
+          calls: [
+            {
+              id: `scene-call-${ordinal++}`,
+              name,
+              argumentsJson: JSON.stringify(args),
+              authorizationHandle: tools.find((tool) => tool.name === name)!.authorizationHandle,
+            },
+          ],
+        });
+        expect(result.confirmation).toBeUndefined();
+        tools = result.tools!;
+        return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
+      };
+      const courtyard = await invoke('document.submit_draft', {
+        resourceId: 'workspace:characters',
+        documentKind: 'scene',
+        title: '庭院',
+        contentMarkdown: '# 庭院\n清晨或夜间的院落',
+      });
+      const study = await invoke('document.submit_draft', {
+        resourceId: 'workspace:characters',
+        documentKind: 'scene',
+        title: '书房',
+        contentMarkdown: '# 书房\n木桌和信件',
+      });
+      const structure = await invoke('project.structure.get', {});
+      const map = structure.resourceMap as ProjectStructureResult;
+      expect(map.resources.find((item) => item.id === 'workspace:shots')?.writeTool).toBe(
+        'scene.submit_structure',
+      );
+      const scenes = [
+        {
+          title: '庭院',
+          sceneDocumentId: courtyard.documentId,
+          shots: [
+            { title: '远景', prompt: '清晨的庭院' },
+            { title: '近景', prompt: '门上的霜' },
+          ],
+        },
+        {
+          title: '书房',
+          sceneDocumentId: study.documentId,
+          shots: [{ title: '特写', prompt: '桌上的信' }],
+        },
+      ];
+      for (const args of [
+        { episodeTitle: '第1集', scenes },
+        { resourceId: 'workspace:novel', episodeTitle: '第1集', scenes },
+        { resourceId: 'workspace:shots', episodeTitle: '第1集', scenes, expectedRevision: 'stale' },
+        {
+          resourceId: 'workspace:shots',
+          episodeTitle: '第1集',
+          scenes: [{ title: '未绑定', shots: [{ title: '远景', prompt: '院落' }] }],
+        },
+        {
+          resourceId: 'workspace:shots',
+          episodeTitle: '第1集',
+          scenes: [{ title: '空场次', shots: [] }],
+        },
+      ])
+        expect(await invoke('scene.submit_structure', args)).toMatchObject({ status: 'rejected' });
+      expect(new ChangeSetService(project).list()).toHaveLength(0);
+      expect(
+        await invoke('document.submit_draft', {
+          resourceId: 'workspace:shots',
+          title: '不可见的分镜',
+          documentKind: 'storyboard',
+          contentMarkdown: '# 场次\n## 镜头',
+        }),
+      ).toMatchObject({ status: 'rejected' });
+      expect(workflow.listDocuments()).toHaveLength(2);
+      const saved = await invoke('scene.submit_structure', {
+        resourceId: 'workspace:shots',
+        expectedRevision: map.revision,
+        episodeTitle: '第1集',
+        scenes,
+      });
+      expect(saved).toMatchObject({
+        status: 'scene_structure_proposed',
+        reviewRequired: true,
+        applied: false,
+        locator: { workspace: 'shots', changeSetId: saved.changeSetId },
+      });
+      const content = new ContentService(project);
+      expect(content.listScenes()).toHaveLength(0);
+      const proposal = new ChangeSetService(project).list()[0]!;
+      expect(workflow.getTask({ taskId: agent.taskId }).changeSets).toEqual([
+        expect.objectContaining({ changeSetId: proposal.id, status: 'proposed' }),
+      ]);
+      loop.startProviderStep(prepared.stream);
+      loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' });
+      expect(workflow.getTask({ taskId: agent.taskId }).task.outcome).not.toBe('read-only');
+      const applied = new ChangeSetService(project).apply({
+        changeSetId: proposal.id,
+        expectedRowVersion: proposal.rowVersion,
+      });
+      expect(applied.status).toBe('applied');
+      const parents = content.listScenes();
+      expect(parents.find((item) => item.title === '庭院')?.sceneDocumentId).toBe(
+        courtyard.documentId,
+      );
+      expect(parents.find((item) => item.title === '书房')?.sceneDocumentId).toBe(study.documentId);
+      expect(
+        content
+          .listShots(parents.find((item) => item.title === '庭院')!.id)
+          .map((item) => item.prompt),
+      ).toEqual(['清晨的庭院', '门上的霜']);
+      expect(
+        content
+          .listShots(parents.find((item) => item.title === '书房')!.id)
+          .map((item) => item.prompt),
+      ).toEqual(['桌上的信']);
+    },
+  );
+
   it('rolls back invalid model targets and stale CAS, and preserves chapter review locks', async () => {
     const { conversation, generations, project, workflow, novels } = await setup();
     const chapter = novels.importNovel({ chapters: [{ title: '雾港', contentMarkdown: '原文' }] })
@@ -385,9 +665,18 @@ describe('AgentProviderLoopService', () => {
       tools = result.tools!;
       return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
     };
-    const common = { title: '不要归档的雾港', contentMarkdown: '修订正文' };
+    const common = {
+      resourceId: `document:${chapter.documentId}`,
+      title: '不要归档的雾港',
+      contentMarkdown: '修订正文',
+    };
     for (const args of [
-      { ...common, action: 'create_chapter', volumeId: 'foreign-or-missing-volume' },
+      {
+        ...common,
+        resourceId: 'workspace:novel',
+        action: 'create_chapter',
+        volumeId: 'foreign-or-missing-volume',
+      },
       {
         ...common,
         action: 'rewrite_chapter',
@@ -404,7 +693,7 @@ describe('AgentProviderLoopService', () => {
         expectedDocumentRowVersion: chapter.documentRowVersion + 1,
         baseVersionId: workflow.getDocument(chapter.documentId).currentVersionId ?? null,
       },
-      { ...common, action: 'create_chapter', unexpectedField: true },
+      { ...common, resourceId: 'workspace:novel', action: 'create_chapter', unexpectedField: true },
     ])
       expect(await invoke('novel.chapter.write_draft', args)).toMatchObject({ status: 'rejected' });
     expect(novels.listChapters()).toHaveLength(1);
@@ -469,6 +758,7 @@ describe('AgentProviderLoopService', () => {
             authorizationHandle: tools.find((tool) => tool.name === 'document.submit_draft')!
               .authorizationHandle,
             argumentsJson: JSON.stringify({
+              resourceId: i === 0 ? 'workspace:novel' : 'workspace:characters',
               title: `资料${i}`,
               documentKind: kind,
               contentMarkdown: `完整内容${i}`,
@@ -506,6 +796,7 @@ describe('AgentProviderLoopService', () => {
           authorizationHandle: tools.find((tool) => tool.name === 'document.submit_draft')!
             .authorizationHandle,
           argumentsJson: JSON.stringify({
+            resourceId: `document:${existing.id}`,
             title: existing.title,
             contentMarkdown: '修订后的完整内容',
             documentKind: existing.kind,
@@ -562,6 +853,7 @@ describe('AgentProviderLoopService', () => {
             authorizationHandle: tools.find((tool) => tool.name === 'novel.chapter.write_draft')!
               .authorizationHandle,
             argumentsJson: JSON.stringify({
+              resourceId: `document:${chapter.documentId}`,
               action: 'rewrite_chapter',
               chapterId: chapter.id,
               expectedChapterRowVersion: chapter.rowVersion,
@@ -604,6 +896,7 @@ describe('AgentProviderLoopService', () => {
     );
     const old = agent.tools.find((tool) => tool.name === 'document.submit_draft')!;
     const args = JSON.stringify({
+      resourceId: 'workspace:documents',
       title: '已授权草稿',
       contentMarkdown: '完整内容',
       documentKind: 'note',
@@ -2967,6 +3260,7 @@ describe('AgentProviderLoopService', () => {
           authorizationHandle: agent.tools.find((tool) => tool.name === 'document.submit_draft')
             ?.authorizationHandle,
           argumentsJson: JSON.stringify({
+            resourceId: 'workspace:novel',
             title: '都市小说大纲',
             documentKind: 'outline',
             bindingRole: 'work-outline',
@@ -3492,6 +3786,14 @@ describe('AgentProviderLoopService', () => {
                   },
                 ],
               },
+              {
+                title: '街道',
+                shots: [{ title: '雨中街道', prompt: '街道上的雨。' }],
+              },
+              {
+                title: '房间',
+                shots: [{ title: '信件特写', prompt: '桌上的信件。' }],
+              },
             ],
           }),
         },
@@ -3509,7 +3811,12 @@ describe('AgentProviderLoopService', () => {
         entityType: 'shot',
         title: '海雾中的码头',
         prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+        parentItemOrdinal: 0,
       },
+      { entityType: 'scene', title: '街道' },
+      { entityType: 'shot', title: '雨中街道', parentItemOrdinal: 2 },
+      { entityType: 'scene', title: '房间' },
+      { entityType: 'shot', title: '信件特写', parentItemOrdinal: 4 },
     ]);
     const applied = changeSets.apply({
       changeSetId: proposed[0]!.id,
@@ -3517,6 +3824,13 @@ describe('AgentProviderLoopService', () => {
     });
     expect(applied.status).toBe('applied');
     const content = new ContentService(project);
+    for (const [title, shotTitle] of [
+      ['街道', '雨中街道'],
+      ['房间', '信件特写'],
+    ]) {
+      const parent = content.listScenes().find((item) => item.title === title)!;
+      expect(content.listShots(parent.id).map((item) => item.title)).toEqual([shotTitle]);
+    }
     const scene = content.listScenes()[0]!;
     expect(content.listShots(scene.id)).toMatchObject([
       { title: '海雾中的码头', prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。' },
@@ -4024,6 +4338,14 @@ describe('AgentProviderLoopService', () => {
             name: operation,
             authorizationHandle: tool.authorizationHandle,
             argumentsJson: JSON.stringify({
+              ...(operation === 'document.create_draft'
+                ? { resourceId: 'workspace:documents', documentKind: 'note' }
+                : {
+                    resourceId: `document:${previous.id}`,
+                    documentId: previous.id,
+                    versionId: previous.currentVersionId,
+                    expectedRowVersion: previous.rowVersion,
+                  }),
               title: '分镜文档',
               contentMarkdown: '# 第一章\n\n镜头一：青萝村。',
             }),

@@ -128,9 +128,9 @@ export class ProjectStructureCompiler {
     }
     for (const reference of novel?.references ?? []) {
       sources.push({
-        id: `novel-reference:${reference.id}`,
+        id: `novel-reference:${reference.documentId}`,
         type: 'novel-reference',
-        sourceId: reference.id,
+        sourceId: reference.documentId,
         title: reference.title,
         role: reference.role,
         kind: reference.domainScope,

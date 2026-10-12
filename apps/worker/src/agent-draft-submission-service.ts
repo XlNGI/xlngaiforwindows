@@ -7,6 +7,11 @@ import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
 import { linkResearchCitations } from './agent-research-citations.js';
+import {
+  documentWorkspace,
+  RESOURCE_ARGUMENT_KEYS,
+  resolveWriteResource,
+} from './project-resource-map.js';
 
 const KINDS = new Set<DocumentKind>([
   'outline',
@@ -51,6 +56,7 @@ export class AgentDraftSubmissionService {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const parent = this.requireParent(database, identity);
+        const resource = resolveWriteResource(database, project, args)!;
         const title = text(args.title, 'title', 200);
         const contentMarkdown = text(args.contentMarkdown, 'contentMarkdown', 1_000_000);
         const requestHash = createHash('sha256')
@@ -62,6 +68,9 @@ export class AgentDraftSubmissionService {
           parentTaskId: parent.id,
           parentToolCallId: identity.toolCallId,
           operation,
+          resourceId: resource.id,
+          workspace: resource.locator.workspace,
+          ...(args.bindingRole !== undefined ? { bindingRole: args.bindingRole } : {}),
           title,
           contentHash: createHash('sha256').update(contentMarkdown).digest('hex'),
           contentLength: Buffer.byteLength(contentMarkdown, 'utf8'),
@@ -77,6 +86,8 @@ export class AgentDraftSubmissionService {
         let kind: DocumentKind = 'note';
         if (operation === 'novel.chapter.write_draft') {
           keys(args, [
+            ...RESOURCE_ARGUMENT_KEYS,
+            'documentId',
             'action',
             'chapterId',
             'volumeId',
@@ -91,8 +102,11 @@ export class AgentDraftSubmissionService {
           if (!['create_chapter', 'continue_chapter', 'rewrite_chapter'].includes(action))
             throw new Error('Invalid chapter action.');
           if (action === 'create_chapter') {
+            if (resource.kind !== 'workspace' || resource.locator.workspace !== 'novel')
+              throw new Error('New novel chapters require the 小说 workspace resourceId.');
             if (
               args.chapterId !== undefined ||
+              args.documentId !== undefined ||
               args.expectedChapterRowVersion !== undefined ||
               args.expectedDocumentRowVersion !== undefined ||
               args.baseVersionId !== undefined
@@ -104,18 +118,24 @@ export class AgentDraftSubmissionService {
             chapterId = text(args.chapterId, 'chapterId', 200);
             const chapter = database
               .prepare(
-                `SELECT chapters.row_version, documents.row_version AS document_row_version, documents.current_version_id
+                `SELECT chapters.document_id, chapters.row_version, documents.row_version AS document_row_version, documents.current_version_id
             FROM novel_chapters chapters JOIN documents ON documents.id = chapters.document_id
             WHERE chapters.id = ? AND chapters.project_id = ? AND chapters.lifecycle_status IN ('active', 'reserved') AND documents.lifecycle_status = 'active'`,
               )
               .get(chapterId, project.id) as
               | {
                   row_version: number;
+                  document_id: string;
                   document_row_version: number;
                   current_version_id: string | null;
                 }
               | undefined;
             if (!chapter) throw new Error('Writable chapter was not found in the current project.');
+            if (
+              resource.documentId !== chapter.document_id ||
+              resource.locator.workspace !== 'novel'
+            )
+              throw new Error('chapterId does not match the chapter resourceId.');
             if (integer(args.expectedChapterRowVersion) !== chapter.row_version)
               throw new Error('Chapter row version is stale.');
             expectedDocumentRowVersion = integer(args.expectedDocumentRowVersion);
@@ -173,6 +193,7 @@ export class AgentDraftSubmissionService {
           orchestration.markTaskGenerationStarted(taskId);
         } else {
           keys(args, [
+            ...RESOURCE_ARGUMENT_KEYS,
             'title',
             'contentMarkdown',
             'documentKind',
@@ -197,6 +218,8 @@ export class AgentDraftSubmissionService {
               );
             if (target.kind !== kind)
               throw new Error('Document kind does not match the existing target.');
+            if (resource.documentId !== documentId)
+              throw new Error('Existing documents require their actual document resourceId.');
             if (args.bindingRole !== undefined)
               throw new Error('Binding roles can only be set on new documents.');
             expectedDocumentRowVersion = integer(args.expectedDocumentRowVersion);
@@ -206,6 +229,29 @@ export class AgentDraftSubmissionService {
             args.baseVersionId !== undefined
           )
             throw new Error('New documents cannot specify CAS for an existing target.');
+          if (args.documentId === undefined) {
+            if (kind === 'storyboard')
+              throw new Error(
+                'Standalone storyboard documents are not visible in the scene/shot directory. Use scene.submit_structure with workspace:shots to create reviewable scenes and shots.',
+              );
+            if (resource.kind !== 'workspace')
+              throw new Error(
+                'New documents require a workspace resourceId; existing resources require documentId and CAS.',
+              );
+            const workspace = documentWorkspace({
+              chapter_id: null,
+              domain_scope: args.bindingRole !== undefined ? 'novel' : null,
+              kind,
+            });
+            if (resource.locator.workspace === 'novel' && args.bindingRole === undefined)
+              throw new Error(
+                'Novel outlines/settings require bindingRole so they appear in 小说参考资料.',
+              );
+            if (resource.locator.workspace !== workspace)
+              throw new Error(
+                'The destination resourceId does not match documentKind/bindingRole. Choose the matching page from project.structure.get.',
+              );
+          }
           if (
             args.bindingRole !== undefined &&
             !ROLES.has(text(args.bindingRole, 'bindingRole', 80) as DocumentBindingRole)
@@ -295,6 +341,19 @@ export class AgentDraftSubmissionService {
           documentId: document.id,
           documentVersionId: document.currentVersion!.id,
           documentRowVersion: document.rowVersion,
+          resourceId: `document:${document.id}`,
+          locator: {
+            workspace: resource.locator.workspace,
+            resourceId: `document:${document.id}`,
+            documentId: document.id,
+            versionId: document.currentVersion!.id,
+          },
+          ...(resource.locator.workspace === 'novel'
+            ? {
+                domainScope: 'novel',
+                ...(args.bindingRole !== undefined ? { bindingRole: args.bindingRole } : {}),
+              }
+            : {}),
           reviewRequired: true,
         };
       })(),

@@ -1,8 +1,10 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Image as ImageIcon, Save } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AssetInfo, AssetMediaSourceInfo, DocumentSummary } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
+import { ImagePreview } from './ImagePreview';
+import { AssetImagePreview } from './AssetImagePreview';
 
 const DRAG_MIME = 'application/x-ai-video-asset+json';
 const STORAGE_PREFIX = 'ai-video.shot-reference-assets:';
@@ -13,6 +15,7 @@ export interface ShotReferenceAssets {
   characterAssetId?: string;
   sceneAssetId?: string;
   firstFrameAssetId?: string;
+  ignoreSceneBinding?: boolean;
 }
 
 export function loadShotReferences(projectId: string, shotId: string): ShotReferenceAssets {
@@ -67,6 +70,7 @@ function isVideoKind(kind: string): boolean {
 export function ShotWorkspace({
   projectId,
   shotId,
+  sceneDocumentId,
   shotTitle,
   shotStatus,
   shotPosition,
@@ -88,6 +92,7 @@ export function ShotWorkspace({
 }: {
   projectId?: string;
   shotId: string;
+  sceneDocumentId?: string;
   shotTitle: string;
   shotStatus: string;
   shotPosition: number;
@@ -111,6 +116,87 @@ export function ShotWorkspace({
     projectId ? loadShotReferences(projectId, shotId) : {},
   );
   const [mediaById, setMediaById] = useState<Record<string, AssetMediaSourceInfo>>({});
+  const [inheritedSceneAsset, setInheritedSceneAsset] = useState<AssetInfo>();
+  const [referenceMessage, setReferenceMessage] = useState('');
+  const [shotImageResults, setShotImageResults] = useState<{
+    shotId: string;
+    projectId?: string;
+    assets: AssetInfo[];
+  }>();
+
+  useEffect(() => {
+    let active = true;
+    if (projectId)
+      void callWorker('asset.list', { shotId, sort: 'created-desc', limit: 60 })
+        .then((items) => {
+          if (active)
+            setShotImageResults({
+              shotId,
+              projectId,
+              assets: items.filter(
+                (item) =>
+                  item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
+              ),
+            });
+        })
+        .catch(() => {
+          if (active) setShotImageResults({ shotId, projectId, assets: [] });
+        });
+    return () => {
+      active = false;
+    };
+  }, [projectId, shotId, assets]);
+  const boundSceneAvailable = documents.some(
+    (document) =>
+      document.id === sceneDocumentId &&
+      document.kind === 'scene' &&
+      document.domainScope !== 'novel' &&
+      document.lifecycleStatus === 'active',
+  );
+  const currentScope = useRef('');
+  currentScope.current = `${projectId}:${shotId}:${sceneDocumentId}:${boundSceneAvailable}`;
+
+  useEffect(() => {
+    let active = true;
+    setInheritedSceneAsset(undefined);
+    setReferenceMessage('');
+    if (projectId && sceneDocumentId && boundSceneAvailable) {
+      void callWorker('asset.list', {
+        sourceDocumentId: sceneDocumentId,
+        sort: 'created-desc',
+        limit: 1,
+      })
+        .then((items) => {
+          if (active)
+            setInheritedSceneAsset(
+              items.find(
+                (item) =>
+                  item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
+              ),
+            );
+        })
+        .catch((error: unknown) => {
+          if (active)
+            setReferenceMessage(error instanceof Error ? error.message : '场景参考图读取失败');
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [projectId, shotId, sceneDocumentId, boundSceneAvailable]);
+
+  const availableAssets = useMemo(
+    () =>
+      inheritedSceneAsset && !assets.some((item) => item.id === inheritedSceneAsset.id)
+        ? [...assets, inheritedSceneAsset]
+        : assets,
+    [assets, inheritedSceneAsset],
+  );
+  const effectiveRefs = {
+    ...refs,
+    sceneAssetId:
+      refs.sceneAssetId ?? (refs.ignoreSceneBinding ? undefined : inheritedSceneAsset?.id),
+  };
 
   useEffect(() => {
     setRefs(projectId ? loadShotReferences(projectId, shotId) : {});
@@ -123,10 +209,14 @@ export function ShotWorkspace({
 
   const selectedAssets = useMemo(
     () =>
-      [refs.characterAssetId, refs.sceneAssetId, refs.firstFrameAssetId]
-        .map((id) => assets.find((item) => item.id === id))
+      [
+        refs.characterAssetId,
+        refs.sceneAssetId ?? (refs.ignoreSceneBinding ? undefined : inheritedSceneAsset?.id),
+        refs.firstFrameAssetId,
+      ]
+        .map((id) => availableAssets.find((item) => item.id === id))
         .filter((item): item is AssetInfo => Boolean(item)),
-    [assets, refs],
+    [availableAssets, inheritedSceneAsset, refs],
   );
 
   useEffect(() => {
@@ -158,15 +248,21 @@ export function ShotWorkspace({
   }, [selectedAssets]);
 
   const assign = (slot: ShotReferenceSlot, assetId?: string) => {
-    persist({
+    const next = {
       ...refs,
       characterAssetId: slot === 'character' ? assetId : refs.characterAssetId,
       sceneAssetId: slot === 'scene' ? assetId : refs.sceneAssetId,
       firstFrameAssetId: slot === 'firstFrame' ? assetId : refs.firstFrameAssetId,
-    });
+    };
+    if (slot === 'scene' && sceneDocumentId) {
+      if (!assetId) next.ignoreSceneBinding = true;
+      else delete next.ignoreSceneBinding;
+    }
+    persist(next);
   };
 
   const resolveMentions = async (): Promise<ShotReferenceAssets> => {
+    const expectedScope = currentScope.current;
     let next = { ...refs };
     const characterTitle = mentionedTitle(prompt, 'character');
     const sceneTitle = mentionedTitle(prompt, 'scene');
@@ -183,9 +279,13 @@ export function ShotWorkspace({
         if (items[0]) next = { ...next, characterAssetId: items[0].id };
       }
     }
-    if (sceneTitle && !next.sceneAssetId) {
-      const document = documents.find(
-        (item) => item.kind === 'scene' && item.title.includes(sceneTitle),
+    if ((sceneDocumentId || sceneTitle) && !next.sceneAssetId && !refs.ignoreSceneBinding) {
+      if (sceneDocumentId && !boundSceneAvailable)
+        throw new Error('绑定场景资料不可用，请重新选择场次的场景。');
+      const document = documents.find((item) =>
+        sceneDocumentId
+          ? item.id === sceneDocumentId
+          : item.kind === 'scene' && item.title.includes(sceneTitle!),
       );
       if (document) {
         const items = await callWorker('asset.list', {
@@ -193,15 +293,48 @@ export function ShotWorkspace({
           sort: 'created-desc',
           limit: 1,
         });
-        if (items[0]) next = { ...next, sceneAssetId: items[0].id };
+        const asset = items.find(
+          (item) => item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
+        );
+        if (asset) {
+          next = { ...next, sceneAssetId: asset.id };
+          if (sceneDocumentId && currentScope.current === expectedScope)
+            setInheritedSceneAsset(asset);
+        }
       }
     }
-    persist(next);
+    if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
+    if (sceneDocumentId && !refs.sceneAssetId) {
+      const explicitRefs = { ...next };
+      delete explicitRefs.sceneAssetId;
+      persist(explicitRefs);
+    } else persist(next);
     return next;
   };
 
+  const generate = async (mode: 'image' | 'video') => {
+    const expectedScope = currentScope.current;
+    setReferenceMessage('');
+    try {
+      const resolved = await resolveMentions();
+      if (currentScope.current !== expectedScope) return;
+      if (
+        mode === 'video' &&
+        ![resolved.characterAssetId, resolved.sceneAssetId, resolved.firstFrameAssetId].some(
+          Boolean,
+        )
+      )
+        throw new Error('请先生成或选择参考图。');
+      if (mode === 'image') onGenerateImage(resolved);
+      else onGenerateVideo(resolved);
+    } catch (error) {
+      if (currentScope.current === expectedScope)
+        setReferenceMessage(error instanceof Error ? error.message : '参考图读取失败');
+    }
+  };
+
   const hasSelectedRefs = Boolean(
-    refs.characterAssetId || refs.sceneAssetId || refs.firstFrameAssetId,
+    refs.characterAssetId || effectiveRefs.sceneAssetId || refs.firstFrameAssetId,
   );
   const hasMentionedRefs = Boolean(
     mentionedTitle(prompt, 'character') || mentionedTitle(prompt, 'scene'),
@@ -245,7 +378,7 @@ export function ShotWorkspace({
             type="button"
             disabled={!writable || !prompt.trim()}
             onClick={() => {
-              void resolveMentions().then((resolved) => onGenerateImage(resolved));
+              void generate('image');
             }}
           >
             {'\u751f\u6210\u672c\u955c\u753b\u9762'}
@@ -255,7 +388,7 @@ export function ShotWorkspace({
             type="button"
             disabled={!writable || (!hasSelectedRefs && !hasMentionedRefs)}
             onClick={() => {
-              void resolveMentions().then((resolved) => onGenerateVideo(resolved));
+              void generate('video');
             }}
           >
             {'\u7528\u53c2\u8003\u56fe\u751f\u6210\u89c6\u9891'}
@@ -263,6 +396,30 @@ export function ShotWorkspace({
         </div>
       </section>
       <section className="shot-reference-panel" aria-labelledby="shot-reference-heading">
+        {sceneDocumentId ? (
+          <p>
+            场次场景：
+            {documents.find((document) => document.id === sceneDocumentId)?.title ??
+              '场景资料不可用'}
+            。默认沿用场景参考图，手动镜头参考图优先。
+          </p>
+        ) : null}
+        {referenceMessage ? <p role="status">{referenceMessage}</p> : null}
+        {sceneDocumentId && (refs.sceneAssetId || refs.ignoreSceneBinding) ? (
+          <button
+            type="button"
+            className="button secondary"
+            disabled={!writable}
+            onClick={() => {
+              const next = { ...refs };
+              delete next.sceneAssetId;
+              delete next.ignoreSceneBinding;
+              persist(next);
+            }}
+          >
+            恢复场次场景图
+          </button>
+        ) : null}
         <h2 id="shot-reference-heading">{'\u53c2\u8003\u56fe'}</h2>
         <p className="shot-reference-hint">
           {
@@ -281,9 +438,9 @@ export function ShotWorkspace({
           />
           <ReferenceSlot
             label={'\u573a\u666f\u53c2\u8003'}
-            asset={assets.find((item) => item.id === refs.sceneAssetId)}
+            asset={availableAssets.find((item) => item.id === effectiveRefs.sceneAssetId)}
             candidates={assets.filter((item) => item.kind === 'scene')}
-            source={refs.sceneAssetId ? mediaById[refs.sceneAssetId] : undefined}
+            source={effectiveRefs.sceneAssetId ? mediaById[effectiveRefs.sceneAssetId] : undefined}
             writable={writable}
             projectId={projectId}
             onSelect={(id) => assign('scene', id)}
@@ -301,6 +458,18 @@ export function ShotWorkspace({
           />
         </div>
       </section>
+      {shotImageResults?.shotId === shotId &&
+      shotImageResults.projectId === projectId &&
+      shotImageResults.assets.length > 0 ? (
+        <section className="shot-generated-images" aria-label="本镜头已生成图片">
+          <h2>已生成图片</h2>
+          <div className="generated-image-results">
+            {shotImageResults.assets.map((item) => (
+              <AssetImagePreview key={item.id} asset={item} />
+            ))}
+          </div>
+        </section>
+      ) : null}
       <section className="shot-notes-panel" aria-labelledby="shot-notes-heading">
         <h2 id="shot-notes-heading">{'\u5206\u955c\u8bf4\u660e'}</h2>
         <p>
@@ -392,7 +561,7 @@ function ReferenceSlot({
     >
       <strong>{label}</strong>
       {src ? (
-        <img src={src} alt={asset ? assetName(asset) : label} />
+        <ImagePreview key={src} src={src} alt={asset ? assetName(asset) : label} />
       ) : (
         <span className="shot-reference-empty">
           <ImageIcon size={18} />

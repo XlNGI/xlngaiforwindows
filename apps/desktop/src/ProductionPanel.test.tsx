@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AdapterCatalogResult,
@@ -971,6 +971,11 @@ describe('ProductionPanel', () => {
       `/worker-media/${savedAsset.id}`,
     );
     expect(onAssetsChanged).toHaveBeenCalledWith([savedAsset], savedAsset.id);
+    fireEvent.click(screen.getByRole('button', { name: `放大查看${savedAsset.relativePath}` }));
+    expect(
+      screen.getByRole('dialog', { name: `图片预览：${savedAsset.relativePath}` }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '关闭图片预览' }));
 
     fireEvent.click(screen.getAllByRole('button', { name: '打开位置' })[0]!);
     await waitFor(() =>
@@ -978,6 +983,51 @@ describe('ProductionPanel', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: '查看素材库' }));
     expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedAsset.id);
+  });
+
+  it('previews every image returned by one generation and enlarges each independently', async () => {
+    const generated = [
+      savedAsset,
+      { ...savedAsset, id: 'second-image', relativePath: 'assets/images/second.png' },
+    ];
+    const completed = {
+      ...imageJob('succeeded'),
+      results: generated.map((asset, index) => ({
+        id: `result-${index}`,
+        jobId: 'job',
+        asset,
+        createdAt: 'now',
+      })),
+    };
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({ kind: 'image', job: completed });
+      if (method === 'asset.list') return Promise.resolve(generated);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    render(<ProductionPanel projectId="project" shotId="shot" writable />);
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), { target: { value: '电影画面' } });
+    await submitPaidGeneration('生成图片');
+    const results = await screen.findByLabelText('本次生成的全部图片');
+    expect(await within(results).findByRole('img', { name: 'second.png' })).toHaveAttribute(
+      'src',
+      '/worker-media/second-image',
+    );
+    expect(within(results).getAllByRole('img')).toHaveLength(2);
+    fireEvent.click(within(results).getByRole('button', { name: '放大查看second.png' }));
+    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+      'src',
+      '/worker-media/second-image',
+    );
+    fireEvent.keyDown(document, { key: 'Escape' });
   });
 
   it('selects the automatically saved result after clearing a previously selected asset', async () => {

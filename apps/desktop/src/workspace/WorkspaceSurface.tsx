@@ -8,14 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
-import {
-  Group,
-  Panel,
-  Separator,
-  useDefaultLayout,
-  usePanelRef,
-  type Layout,
-} from 'react-resizable-panels';
+import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from 'react-resizable-panels';
 import {
   CONVERSATION_DEFAULT_DOCK_SIZE,
   WORKSPACE_DOCK_LAYOUT_ID,
@@ -23,7 +16,6 @@ import {
   isConversationAutoHidden,
   isUnusableConversationLayoutShare,
   isWorkspaceNarrow,
-  shouldCloseConversationAtMinWidth,
   usableConversationDockLayout,
 } from './conversation-window';
 import type { WorkspaceAction, WorkspaceLayoutState } from './workspace-reducer';
@@ -96,8 +88,6 @@ export function WorkspaceSurface({
   const suppressTabClickRef = useRef(false);
   const conversationPanelElementRef = useRef<HTMLDivElement>(null);
   const conversationPanelRef = usePanelRef();
-  const conversationSizePxRef = useRef<number | undefined>(undefined);
-  const conversationUserResizeRef = useRef(false);
   const documentPanel = layout.panels.document;
   const conversationPanel = layout.panels.conversation;
   const conversationWindowOptions = {
@@ -164,33 +154,6 @@ export function WorkspaceSurface({
     setPaneOrder(readWorkspacePaneOrder(layout.projectId));
   }, [layout.projectId]);
 
-  const conversationPixelSize = (nextLayout: Layout) => {
-    const group = surfaceRef.current?.querySelector('.workspace-dock-group');
-    const groupWidth = group instanceof HTMLElement ? group.clientWidth : 0;
-    const share = nextLayout.conversation;
-    if (typeof share !== 'number' || groupWidth <= 0) return undefined;
-    return (share / 100) * groupWidth;
-  };
-
-  const closeConversationDock = () => {
-    conversationUserResizeRef.current = false;
-    conversationSizePxRef.current = undefined;
-    dispatch({ type: 'close', panelId: 'conversation' });
-  };
-
-  const considerConversationLayout = (nextLayout: Layout) => {
-    const sizePx = conversationPixelSize(nextLayout);
-    if (sizePx === undefined) return;
-    if (
-      conversationUserResizeRef.current &&
-      shouldCloseConversationAtMinWidth(sizePx, conversationSizePxRef.current)
-    ) {
-      closeConversationDock();
-      return;
-    }
-    conversationSizePxRef.current = sizePx;
-  };
-
   useEffect(() => {
     const element = conversationPanelElementRef.current;
     if (!element) return;
@@ -214,18 +177,6 @@ export function WorkspaceSurface({
     const timer = window.setTimeout(restoreUsableSize, 0);
     return () => window.clearTimeout(timer);
   }, [conversationPanelRef, showConversationDock]);
-
-  useEffect(() => {
-    const endResize = () => {
-      conversationUserResizeRef.current = false;
-    };
-    window.addEventListener('pointerup', endResize);
-    window.addEventListener('pointercancel', endResize);
-    return () => {
-      window.removeEventListener('pointerup', endResize);
-      window.removeEventListener('pointercancel', endResize);
-    };
-  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(
@@ -497,16 +448,7 @@ export function WorkspaceSurface({
         panelRef={conversationPanelRef}
         defaultSize={CONVERSATION_DEFAULT_DOCK_SIZE}
         minSize={`${CONVERSATION_MIN_SIZE.width}px`}
-        onResize={(size) => {
-          if (
-            conversationUserResizeRef.current &&
-            shouldCloseConversationAtMinWidth(size.inPixels, conversationSizePxRef.current)
-          ) {
-            closeConversationDock();
-            return;
-          }
-          if (size.inPixels > 0) conversationSizePxRef.current = size.inPixels;
-        }}
+        collapsible={false}
       >
         <section className="workspace-docked-page workspace-conversation-page">
           {renderPaneHeader(paneId, index)}
@@ -552,18 +494,8 @@ export function WorkspaceSurface({
         className="workspace-dock-group"
         orientation="horizontal"
         defaultLayout={dockDefaultLayout}
-        onLayoutChange={considerConversationLayout}
         onLayoutChanged={(nextLayout, meta) => {
           if (isUnusableConversationLayoutShare(nextLayout.conversation)) {
-            return;
-          }
-          const sizePx = conversationPixelSize(nextLayout);
-          if (
-            conversationUserResizeRef.current &&
-            sizePx !== undefined &&
-            shouldCloseConversationAtMinWidth(sizePx, conversationSizePxRef.current)
-          ) {
-            closeConversationDock();
             return;
           }
           persistedDockLayout.onLayoutChanged(nextLayout, meta);
@@ -582,13 +514,6 @@ export function WorkspaceSurface({
                     key={`separator-${paneId}`}
                     id={`workspace-${visiblePaneOrder[index - 1]}-${paneId}`}
                     className="workspace-dock-separator"
-                    onPointerDown={
-                      paneId === 'conversation'
-                        ? () => {
-                            conversationUserResizeRef.current = true;
-                          }
-                        : undefined
-                    }
                   />,
                 ]
               : []),
@@ -629,16 +554,9 @@ export function WorkspaceSurface({
           onDetach={onDetachConversation}
           onMaximize={() => maximize('conversation')}
           onRestore={() => dispatch({ type: 'restore', panelId: 'conversation' })}
-          onBoundsChange={(bounds) => {
-            if (
-              conversationPanel.bounds.width > CONVERSATION_MIN_SIZE.width &&
-              bounds.width <= CONVERSATION_MIN_SIZE.width
-            ) {
-              dispatch({ type: 'close', panelId: 'conversation' });
-              return;
-            }
-            dispatch({ type: 'setBounds', panelId: 'conversation', bounds });
-          }}
+          onBoundsChange={(bounds) =>
+            dispatch({ type: 'setBounds', panelId: 'conversation', bounds })
+          }
         >
           {conversationContent}
         </FloatingWindow>

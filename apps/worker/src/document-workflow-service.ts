@@ -1611,6 +1611,12 @@ export class DocumentWorkflowService {
         ...(plan ? { plan } : {}),
         events,
         documents,
+        changeSets: database
+          .prepare(
+            `SELECT id AS changeSetId, title, status, created_at AS createdAt
+          FROM agent_change_sets WHERE project_id = ? AND task_id = ? ORDER BY created_at, id`,
+          )
+          .all(project.id, task.id) as NonNullable<AgentTaskDetail['changeSets']>,
         providerSteps,
         researchSources,
         librarySources: librarySourcesFromToolCalls(database, task.id),

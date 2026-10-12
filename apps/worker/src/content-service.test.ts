@@ -23,6 +23,96 @@ async function setup() {
 }
 
 describe('ContentService', () => {
+  it('persists reusable scene document bindings, preserves them on rename and clears them explicitly', async () => {
+    const { content } = await setup();
+    const setting = content.saveDocument({
+      kind: 'scene',
+      title: '庭院',
+      contentMarkdown: '# 庭院\n场景提示词',
+    });
+    const scene = content.saveScene({ title: '晨间相遇', sceneDocumentId: setting.id });
+    const evening = content.saveScene({ title: '夜间告别', sceneDocumentId: setting.id });
+    expect(content.listScenes().map((item) => item.sceneDocumentId)).toEqual([
+      setting.id,
+      setting.id,
+    ]);
+    const renamed = content.saveScene({
+      sceneId: scene.id,
+      title: '庭院相遇',
+      expectedRowVersion: scene.rowVersion,
+    });
+    expect(renamed.sceneDocumentId).toBe(setting.id);
+    expect(() =>
+      content.saveScene({
+        sceneId: scene.id,
+        title: '过期',
+        sceneDocumentId: null,
+        expectedRowVersion: scene.rowVersion,
+      }),
+    ).toThrow('SCENE_ROW_VERSION_CONFLICT');
+    const unbound = content.saveScene({
+      sceneId: renamed.id,
+      title: renamed.title,
+      sceneDocumentId: null,
+      expectedRowVersion: renamed.rowVersion,
+    });
+    expect(unbound.sceneDocumentId).toBeUndefined();
+    expect(content.listScenes().find((item) => item.id === evening.id)?.sceneDocumentId).toBe(
+      setting.id,
+    );
+  });
+
+  it('rejects wrong-kind, archived, novel, missing and foreign scene documents without changing the scene', async () => {
+    const { projects, content } = await setup();
+    const scene = content.saveScene({ title: '原场次' });
+    const character = content.saveDocument({
+      kind: 'character',
+      title: '人物',
+      contentMarkdown: '# 人物',
+    });
+    const archived = content.saveDocument({
+      kind: 'scene',
+      title: '归档',
+      contentMarkdown: '# 归档',
+    });
+    const novelSetting = content.saveDocument({
+      kind: 'scene',
+      title: '小说地点',
+      contentMarkdown: '# 小说地点',
+    });
+    projects.access(true, (database, project) => {
+      database
+        .prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?")
+        .run(archived.id);
+      database
+        .prepare(
+          "INSERT INTO document_bindings (id,project_id,document_id,role,domain_scope,status,row_version,created_at,updated_at) VALUES ('novel-setting-binding',?,?,'world-bible','novel','active',0,'now','now')",
+        )
+        .run(project.id, novelSetting.id);
+      database.exec(
+        "INSERT INTO projects(id,name,created_at,updated_at) VALUES ('foreign-binding-project','Foreign','now','now'); INSERT INTO documents(id,project_id,kind,title,scope_type,lifecycle_status,row_version,created_at,updated_at) VALUES ('foreign-setting','foreign-binding-project','scene','Foreign','project','active',0,'now','now')",
+      );
+    });
+    for (const sceneDocumentId of [
+      character.id,
+      archived.id,
+      novelSetting.id,
+      'missing-setting',
+      'foreign-setting',
+    ]) {
+      expect(() =>
+        content.saveScene({
+          sceneId: scene.id,
+          title: '不能更新',
+          sceneDocumentId,
+          expectedRowVersion: scene.rowVersion,
+        }),
+      ).toThrow('制作场景资料');
+      expect(content.listScenes()).toMatchObject([
+        { id: scene.id, title: '原场次', rowVersion: scene.rowVersion },
+      ]);
+    }
+  });
   it('persists and clears model preferences per conversation and capability', async () => {
     const { content } = await setup();
     const conversation = content.createConversation({ scopeType: 'project' });

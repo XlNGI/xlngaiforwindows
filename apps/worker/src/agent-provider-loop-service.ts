@@ -62,6 +62,16 @@ import type {
 } from './agent-tool-definitions.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
 import {
+  documentWorkspace,
+  RESOURCE_ARGUMENT_KEYS,
+  resolveWriteResource,
+} from './project-resource-map.js';
+import {
+  parseEpisodeStructureArguments,
+  validateEpisodeReferences,
+  type EpisodeStructure,
+} from './episode-structure.js';
+import {
   MediaPreparationService,
   type MediaSelectionContext,
 } from './media-preparation-service.js';
@@ -1900,6 +1910,34 @@ export class AgentProviderLoopService {
         let args: ReturnType<typeof parseToolArguments>;
         try {
           args = parseToolArguments(call.name, call.argumentsJson);
+          const resource = resolveWriteResource(
+            database,
+            project,
+            args,
+            false,
+            call.name === 'document.restore',
+          );
+          if (resource) {
+            if (call.name === 'document.create_draft') {
+              const reference = (
+                JSON.parse(task.request_snapshot_json) as {
+                  novelReference?: { kind: DocumentKind };
+                }
+              ).novelReference;
+              const workspace = documentWorkspace({
+                chapter_id: null,
+                domain_scope: reference ? 'novel' : null,
+                kind:
+                  reference?.kind ?? resolveDocumentToolKind(database, call.name, undefined, args),
+              });
+              if (resource.kind !== 'workspace' || resource.locator.workspace !== workspace)
+                throw new Error(
+                  'Creation resourceId does not match the authorized destination page.',
+                );
+            } else if (resource.documentId !== authorization.targetDocumentId) {
+              throw new Error('resourceId does not match the Worker-authorized document.');
+            }
+          }
           if (call.name === 'document.create_draft' || call.name === 'document.update_draft') {
             assertSingleCharacterPromptDocument(
               resolveDocumentToolKind(database, call.name, authorization.targetDocumentId, args),
@@ -2171,9 +2209,14 @@ export class AgentProviderLoopService {
             return toolErrorContinuation(activeGeneration.protocol, params, call, error);
           }
           const items: AgentChangeSetItemDraft[] = [];
-          let sceneOrdinal = 0;
           for (const scene of structure.scenes) {
-            items.push({ entityType: 'scene', action: 'create', title: scene.title });
+            const sceneOrdinal = items.length;
+            items.push({
+              entityType: 'scene',
+              action: 'create',
+              title: scene.title,
+              sceneDocumentId: scene.sceneDocumentId,
+            });
             for (const shot of scene.shots) {
               items.push({
                 entityType: 'shot',
@@ -2183,7 +2226,6 @@ export class AgentProviderLoopService {
                 prompt: shot.prompt,
               });
             }
-            sceneOrdinal += 1;
           }
           const changeSet = this.changeSets.create({
             taskId: task.id,
@@ -2397,6 +2439,17 @@ export class AgentProviderLoopService {
           throw new Error('Provider tool is not supported.');
         }
         unifiedAgentToolRegistry.assertResultText(result);
+        if (document) {
+          const resource = resolveWriteResource(database, project, {
+            resourceId: `document:${document.id}`,
+          })!;
+          result = JSON.stringify({
+            ...(JSON.parse(result) as Record<string, unknown>),
+            resourceId: resource.id,
+            locator: resource.locator,
+          });
+          resultSummary = result;
+        }
         if (call.name === 'novel.chapter.submit_draft' && document) {
           const activated = database
             .prepare(
@@ -3302,7 +3355,7 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft')
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure')
              ) THEN NULL ELSE 'read-only' END,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
              WHERE id = ? AND status = 'running' AND phase = 'model_running'`,
@@ -4060,7 +4113,7 @@ function resolveDocumentToolKind(
 function parseToolArguments(
   operation: string,
   value: string,
-): { title?: string; contentMarkdown?: string; documentKind?: string } {
+): Record<string, unknown> & { title?: string; contentMarkdown?: string; documentKind?: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -4082,14 +4135,17 @@ function parseToolArguments(
     operation === 'novel.reference.submit_draft' ||
     operation === 'novel.adaptation.submit_proposal' ||
     operation === 'novel.episode.submit_draft';
-  const allowedKeys =
-    operation === 'document.create_draft'
+  const allowedKeys = !needsContent
+    ? []
+    : operation === 'document.create_draft'
       ? ['title', 'contentMarkdown', 'documentKind']
       : ['title', 'contentMarkdown'];
+  if (needsContent || operation === 'document.archive' || operation === 'document.restore')
+    allowedKeys.push('documentId', ...RESOURCE_ARGUMENT_KEYS);
   if (needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
     throw new Error('Tool arguments contain unsupported fields.');
   }
-  if (!needsContent && Object.keys(record).length > 0) {
+  if (!needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
     throw new Error('Tool arguments contain unsupported fields.');
   }
   if (
@@ -4098,7 +4154,7 @@ function parseToolArguments(
   ) {
     throw new Error('Tool title and contentMarkdown are required.');
   }
-  if (!needsContent) return {};
+  if (!needsContent) return record;
   const rawTitle = record.title as string;
   const rawContent = record.contentMarkdown as string;
   const title = normalizeTitle(rawTitle);
@@ -4112,7 +4168,7 @@ function parseToolArguments(
   if (documentKind !== undefined && !DOCUMENT_KIND_SET.has(documentKind)) {
     throw new Error('Tool documentKind is invalid.');
   }
-  return { title, contentMarkdown: rawContent, documentKind };
+  return { ...record, title, contentMarkdown: rawContent, documentKind };
 }
 
 function parseResearchToolArguments(
@@ -4726,6 +4782,7 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 }
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
+  'scene.submit_structure',
   'document.submit_draft',
   'novel.chapter.write_draft',
   'project.get_context',
@@ -4972,107 +5029,6 @@ function taskTypeFor(operation: AgentToolOperation): string {
 }
 
 const DOCUMENT_KIND_SET = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
-
-interface EpisodeStructure {
-  episodeTitle: string;
-  scenes: Array<{
-    title: string;
-    shots: Array<{ title: string; prompt: string }>;
-  }>;
-}
-
-function parseEpisodeStructureArguments(value: string): EpisodeStructure {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error(`Episode structure arguments are not valid JSON: ${excerptArguments(value)}`);
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Episode structure arguments must be an object.');
-  }
-  const record = parsed as Record<string, unknown>;
-  const unknown = Object.keys(record).find((key) => !['episodeTitle', 'scenes'].includes(key));
-  if (unknown) throw new Error(`Episode structure has unsupported field: ${unknown}.`);
-  const episodeTitle = normalizeTitle(
-    typeof record.episodeTitle === 'string' ? record.episodeTitle : '',
-  );
-  if (!Array.isArray(record.scenes) || record.scenes.length < 1 || record.scenes.length > 20) {
-    throw new Error('Episode structure scenes must contain between one and 20 items.');
-  }
-  const scenes: EpisodeStructure['scenes'] = [];
-  for (const [sceneIndex, rawScene] of record.scenes.entries()) {
-    if (!rawScene || typeof rawScene !== 'object' || Array.isArray(rawScene)) {
-      throw new Error(`Episode scene ${sceneIndex} must be an object.`);
-    }
-    const scene = rawScene as Record<string, unknown>;
-    const sceneUnknown = Object.keys(scene).find((key) => !['title', 'shots'].includes(key));
-    if (sceneUnknown)
-      throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
-    const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
-    if (!Array.isArray(scene.shots) || scene.shots.length < 1 || scene.shots.length > 30) {
-      throw new Error(`Episode scene ${sceneIndex} shots must contain between one and 30 items.`);
-    }
-    const shots: EpisodeStructure['scenes'][number]['shots'] = [];
-    for (const [shotIndex, rawShot] of scene.shots.entries()) {
-      if (!rawShot || typeof rawShot !== 'object' || Array.isArray(rawShot)) {
-        throw new Error(`Episode shot ${sceneIndex}:${shotIndex} must be an object.`);
-      }
-      const shot = rawShot as Record<string, unknown>;
-      const shotUnknown = Object.keys(shot).find((key) => !['title', 'prompt'].includes(key));
-      if (shotUnknown)
-        throw new Error(
-          `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
-        );
-      const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
-      if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 2000) {
-        throw new Error(
-          `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 2000 characters.`,
-        );
-      }
-      shots.push({ title: shotTitle, prompt: shot.prompt.trim() });
-    }
-    scenes.push({ title: sceneTitle, shots });
-  }
-  return { episodeTitle, scenes };
-}
-
-function validateEpisodeReferences(
-  database: Database.Database,
-  projectId: string,
-  structure: EpisodeStructure,
-): void {
-  const rows = database
-    .prepare(
-      `SELECT documents.kind AS kind, versions.content_markdown AS content_markdown
-       FROM documents
-       INNER JOIN document_versions versions ON versions.id = documents.published_version_id
-       WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
-         AND documents.kind IN ('character', 'scene')`,
-    )
-    .all(projectId) as Array<{ kind: string; content_markdown: string }>;
-  const names = new Set<string>();
-  for (const row of rows) {
-    for (const line of row.content_markdown.split(/\r?\n/)) {
-      const match = /^#\s+(.+)$/.exec(line.trim());
-      if (match?.[1]?.trim()) names.add(match[1].trim());
-    }
-  }
-  const referencePattern = /\[(角色|场景):([^\]]+)\]/g;
-  for (const scene of structure.scenes) {
-    for (const shot of scene.shots) {
-      for (const match of shot.prompt.matchAll(referencePattern)) {
-        const label = match[1] === '角色' ? 'character' : 'scene';
-        const name = (match[2] ?? '').trim();
-        if (!name || !names.has(name)) {
-          throw new Error(
-            `Episode structure references unknown ${label} "${name}". Publish the character/scene prompt first or fix the placeholder.`,
-          );
-        }
-      }
-    }
-  }
-}
 
 function normalizeTitle(value: string): string {
   const title = value.normalize('NFC').trim();

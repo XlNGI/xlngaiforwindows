@@ -46,6 +46,7 @@ import {
 } from '@ai-video/persistence';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
+import { requireProductionSceneDocument } from './scene-document-binding.js';
 
 const documentKinds = new Set<DocumentKind>([
   'outline',
@@ -124,46 +125,54 @@ export class ContentService {
 
   saveScene(params: SceneSaveParams): SceneInfo {
     const title = required(params.title, 'Scene title');
-    return this.projects.access(true, (database, project) => {
-      const repositories = createRepositories(database);
-      const existing = params.sceneId ? repositories.scenes.get(params.sceneId) : undefined;
-      if (params.sceneId && (!existing || existing.projectId !== project.id)) {
-        throw new Error('Scene was not found.');
-      }
-      if (existing && params.expectedRowVersion !== existing.rowVersion) {
-        throw new Error('SCENE_ROW_VERSION_CONFLICT');
-      }
-      const now = new Date().toISOString();
-      const record: SceneInfo = {
-        id: existing?.id ?? randomUUID(),
-        projectId: project.id,
-        title,
-        position:
-          existing?.position ??
-          (repositories.scenes.listByProject(project.id).at(-1)?.position ?? -1) + 1,
-        rowVersion: existing?.rowVersion ?? 0,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      };
-      repositories.scenes.save(record);
-      rebuildLibraryChunksForRecord(
-        database,
-        project.id,
-        {
-          sourceType: 'scene',
-          sourceId: record.id,
-          status: 'active',
-          title: record.title,
-          content: record.title,
-          scopeType: 'scene',
-          scopeId: record.id,
-        },
-        now,
-      );
-      repositories.projects.touch(now);
-      project.updatedAt = now;
-      return repositories.scenes.get(record.id)!;
-    });
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const repositories = createRepositories(database);
+        const existing = params.sceneId ? repositories.scenes.get(params.sceneId) : undefined;
+        if (params.sceneId && (!existing || existing.projectId !== project.id)) {
+          throw new Error('Scene was not found.');
+        }
+        if (existing && params.expectedRowVersion !== existing.rowVersion) {
+          throw new Error('SCENE_ROW_VERSION_CONFLICT');
+        }
+        const sceneDocumentId =
+          params.sceneDocumentId === undefined
+            ? existing?.sceneDocumentId
+            : (params.sceneDocumentId ?? undefined);
+        if (sceneDocumentId) requireProductionSceneDocument(database, project.id, sceneDocumentId);
+        const now = new Date().toISOString();
+        const record: SceneInfo = {
+          id: existing?.id ?? randomUUID(),
+          projectId: project.id,
+          title,
+          sceneDocumentId,
+          position:
+            existing?.position ??
+            (repositories.scenes.listByProject(project.id).at(-1)?.position ?? -1) + 1,
+          rowVersion: existing?.rowVersion ?? 0,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        };
+        repositories.scenes.save(record);
+        rebuildLibraryChunksForRecord(
+          database,
+          project.id,
+          {
+            sourceType: 'scene',
+            sourceId: record.id,
+            status: 'active',
+            title: record.title,
+            content: record.title,
+            scopeType: 'scene',
+            scopeId: record.id,
+          },
+          now,
+        );
+        repositories.projects.touch(now);
+        project.updatedAt = now;
+        return repositories.scenes.get(record.id)!;
+      })(),
+    );
   }
 
   listShots(sceneId: string): ShotInfo[] {

@@ -1,34 +1,7 @@
 import type { WorkspacePanelId, WorkspacePanelState } from './workspace-types';
-import { CONVERSATION_MIN_SIZE } from './workspace-geometry';
 
-export const CONVERSATION_STRIP_MAX_WIDTH = 80;
 export const CONVERSATION_DEFAULT_DOCK_SIZE = '420px';
 export const WORKSPACE_DOCK_LAYOUT_ID = 'ai-video.workspace-docks.v5';
-
-export function shouldCloseConversationAtMinWidth(
-  sizePx: number,
-  previousSizePx: number | undefined,
-  minWidthPx: number = CONVERSATION_MIN_SIZE.width,
-): boolean {
-  if (!Number.isFinite(sizePx) || sizePx < 0) return false;
-  if (previousSizePx === undefined || previousSizePx <= CONVERSATION_STRIP_MAX_WIDTH) return false;
-  if (previousSizePx > minWidthPx && sizePx <= minWidthPx) return true;
-  return sizePx <= CONVERSATION_STRIP_MAX_WIDTH;
-}
-
-export function shouldCloseConversationLayout(
-  share: number | undefined,
-  groupWidthPx: number,
-  previousSizePx: number | undefined,
-  minWidthPx: number = CONVERSATION_MIN_SIZE.width,
-): boolean {
-  if (typeof share !== 'number' || !Number.isFinite(share) || groupWidthPx <= 0) return false;
-  return shouldCloseConversationAtMinWidth(
-    (share / 100) * groupWidthPx,
-    previousSizePx,
-    minWidthPx,
-  );
-}
 
 export function isUnusableConversationLayoutShare(share: number | undefined): boolean {
   return typeof share === 'number' && Number.isFinite(share) && share <= 0;

@@ -7,6 +7,7 @@ import { DocumentWorkflowService } from './document-workflow-service.js';
 import { NovelService } from './novel-service.js';
 import { ProjectService } from './project-service.js';
 import { ProjectStructureCompiler, renderProjectStructure } from './structure-compiler.js';
+import { compileProjectResourceMap, resolveWriteResource } from './project-resource-map.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -32,6 +33,164 @@ async function setup(name = 'Structure Project') {
 }
 
 describe('ProjectStructureCompiler', () => {
+  it('describes the scene page and gives shots their actual scene parent without bodies', async () => {
+    const { project } = await setup();
+    const content = new ContentService(project);
+    const setting = content.saveDocument({
+      kind: 'scene',
+      title: '庭院设定',
+      contentMarkdown: '# 庭院\n场景设定私有正文',
+    });
+    const scene = content.saveScene({ title: '庭院', sceneDocumentId: setting.id });
+    const shot = content.saveShot({
+      sceneId: scene.id,
+      title: '远景',
+      prompt: '不应进入目录的提示词正文',
+    });
+    project.access(false, (database, opened) => {
+      const map = compileProjectResourceMap(database, opened);
+      const page = map.resources.find((resource) => resource.id === 'workspace:shots');
+      expect(page).toMatchObject({
+        writeTool: 'scene.submit_structure',
+      });
+      expect(page?.contentModel).toContain('待审核');
+      expect(map.resources.find((resource) => resource.id === `shot:${shot.id}`)).toMatchObject({
+        parentId: `scene:${scene.id}`,
+        locator: {
+          workspace: 'shots',
+          sceneId: scene.id,
+          shotId: shot.id,
+          sceneDocumentId: setting.id,
+        },
+      });
+      expect(
+        map.resources.find((resource) => resource.id === `scene:${scene.id}`)?.locator
+          .sceneDocumentId,
+      ).toBe(setting.id);
+      expect(JSON.stringify(map)).not.toContain(shot.prompt);
+      expect(JSON.stringify(map)).not.toContain('场景设定私有正文');
+    });
+  });
+  it('keeps page IDs usable when the catalog is truncated and validates revisions beyond the preview', async () => {
+    const { project, workflow } = await setup();
+    const omitted = workflow.saveDraft({ title: '旧资料', contentMarkdown: '不注入正文' });
+    project.access(true, (database) =>
+      database.transaction(() => {
+        database
+          .prepare("UPDATE documents SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?")
+          .run(omitted.id);
+        for (let index = 0; index < 105; index++)
+          workflow.saveDraft({ title: `新资料${index}`, contentMarkdown: '# 标题\n正文' });
+      })(),
+    );
+    const before = project.access(false, (database, opened) => {
+      const map = compileProjectResourceMap(database, opened);
+      expect(map.truncated).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(map), 'utf8')).toBeLessThan(31_000);
+      expect(map.resources.some((item) => item.documentId === omitted.id)).toBe(false);
+      expect(
+        resolveWriteResource(database, opened, { resourceId: `document:${omitted.id}` })
+          ?.documentId,
+      ).toBe(omitted.id);
+      return map.revision;
+    });
+    project.access(true, (database) =>
+      database
+        .prepare('UPDATE documents SET row_version = row_version + 1 WHERE id = ?')
+        .run(omitted.id),
+    );
+    project.access(false, (database, opened) => {
+      expect(compileProjectResourceMap(database, opened).revision).not.toBe(before);
+      expect(() =>
+        resolveWriteResource(database, opened, {
+          resourceId: `document:${omitted.id}`,
+          expectedRevision: before,
+        }),
+      ).toThrow('revision is stale');
+    });
+  });
+  it('exposes every empty page and keeps novel references in 小说 before a novel profile exists', async () => {
+    const { project, novel, workflow } = await setup();
+    const reference = workflow.saveDraft({
+      title: '同名大纲',
+      kind: 'outline',
+      contentMarkdown: '# 设定\n小说私有正文',
+    });
+    novel.saveBinding({ documentId: reference.id, role: 'work-outline', domainScope: 'novel' });
+    const script = workflow.saveDraft({
+      title: '同名大纲',
+      kind: 'outline',
+      contentMarkdown: '# 设定\n短剧私有正文',
+    });
+    project.access(false, (database, opened) => {
+      const map = compileProjectResourceMap(database, opened);
+      expect(map.resources.filter((item) => item.kind === 'workspace')).toHaveLength(7);
+      expect(
+        map.resources.find((item) => item.id === `document:${reference.id}`)?.locator.workspace,
+      ).toBe('novel');
+      expect(
+        map.resources.find((item) => item.id === `document:${script.id}`)?.locator.workspace,
+      ).toBe('documents');
+      expect(JSON.stringify(map)).not.toContain('私有正文');
+      expect(() =>
+        resolveWriteResource(database, opened, {
+          resourceId: `document:${reference.id}`,
+          documentId: script.id,
+        }),
+      ).toThrow('documentId does not match');
+      expect(() =>
+        resolveWriteResource(database, opened, {
+          resourceId: `document:${script.id}`,
+          versionId: reference.currentVersionId,
+        }),
+      ).toThrow('versionId does not match');
+      expect(() =>
+        resolveWriteResource(database, opened, {
+          resourceId: `document:${script.id}`,
+          expectedRevision: 'stale',
+        }),
+      ).toThrow('revision is stale');
+    });
+  });
+
+  it('rejects cross-project, archived, and stale-node resource locators', async () => {
+    const local = await setup();
+    const foreign = await setup();
+    const remote = foreign.workflow.saveDraft({ title: '外部', contentMarkdown: '外部正文' });
+    const original = local.workflow.saveDraft({ title: '草稿', contentMarkdown: '# 标题\n原文' });
+    const node = local.project.access(false, (database, opened) =>
+      compileProjectResourceMap(database, opened).resources.find(
+        (item) => item.kind === 'structure-node' && item.documentId === original.id,
+      )!,
+    );
+    local.workflow.saveDraft({
+      documentId: original.id,
+      title: '草稿',
+      contentMarkdown: '# 新标题\n修订正文',
+      expectedDocumentRowVersion: original.rowVersion,
+    });
+    local.project.access(false, (database, opened) => {
+      expect(() =>
+        resolveWriteResource(database, opened, { resourceId: `document:${remote.id}` }),
+      ).toThrow('not found');
+      expect(() => resolveWriteResource(database, opened, { resourceId: node.id })).toThrow();
+    });
+    local.project.access(true, (database) =>
+      database
+        .prepare("UPDATE documents SET lifecycle_status = 'archived' WHERE id = ?")
+        .run(original.id),
+    );
+    local.project.access(false, (database, opened) => {
+      expect(
+        compileProjectResourceMap(database, opened).resources.some(
+          (item) => item.documentId === original.id,
+        ),
+      ).toBe(false);
+      expect(() =>
+        resolveWriteResource(database, opened, { resourceId: `document:${original.id}` }),
+      ).toThrow('not found');
+    });
+  });
   it('compiles an empty project without inventing a novel structure', async () => {
     const { project, compiler } = await setup('空项目');
     const snapshot = project.access(false, (database, opened) =>
@@ -122,7 +281,7 @@ describe('ProjectStructureCompiler', () => {
     expect(snapshot.sources).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: 'novel-chapter', sourceId: firstImported.id }),
-        expect.objectContaining({ type: 'novel-reference', sourceId: binding.id }),
+        expect.objectContaining({ type: 'novel-reference', sourceId: referenceDocument.id }),
       ]),
     );
     expect(JSON.stringify(snapshot)).not.toContain('这是不能进入结构快照的正文');

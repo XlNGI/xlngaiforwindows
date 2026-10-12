@@ -1,4 +1,27 @@
-export const CURRENT_SCHEMA_VERSION = 41;
+export const CURRENT_SCHEMA_VERSION = 42;
+
+export const MIGRATION_V42 = `
+ALTER TABLE scenes ADD COLUMN scene_document_id TEXT REFERENCES documents(id) ON DELETE RESTRICT;
+ALTER TABLE agent_change_set_items ADD COLUMN scene_document_id TEXT REFERENCES documents(id) ON DELETE RESTRICT;
+CREATE INDEX idx_scenes_scene_document ON scenes(project_id, scene_document_id);
+
+CREATE TRIGGER scenes_validate_scene_document_insert
+BEFORE INSERT ON scenes WHEN NEW.scene_document_id IS NOT NULL
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM documents WHERE id = NEW.scene_document_id AND project_id = NEW.project_id
+      AND kind = 'scene' AND lifecycle_status = 'active'
+  ) THEN RAISE(ABORT, 'Invalid production scene document') END;
+END;
+CREATE TRIGGER scenes_validate_scene_document_update
+BEFORE UPDATE OF scene_document_id, project_id ON scenes WHEN NEW.scene_document_id IS NOT NULL
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM documents WHERE id = NEW.scene_document_id AND project_id = NEW.project_id
+      AND kind = 'scene' AND lifecycle_status = 'active'
+  ) THEN RAISE(ABORT, 'Invalid production scene document') END;
+END;
+`;
 
 export const MIGRATION_V40 = `
 CREATE TABLE IF NOT EXISTS asset_group_assets (

@@ -125,6 +125,10 @@ try {
         if (method === 'agent.run') assert.equal(prepared.status, 'started');
         assert.equal(prepared.runtimeMode, 'document');
         let runtime = await request('llm.generation.runtime', prepared.stream);
+        assert.ok(
+          !runtime.tools.some((item) => item.name === 'document.create_draft'),
+          'Ordinary sessions cannot bypass destination validation via a legacy draft tool',
+        );
         assert.equal(runtime.prompt, prompt);
         assert.ok(
           !JSON.stringify(runtime.context).includes(referenceBody),
@@ -142,6 +146,7 @@ try {
         );
         for (const name of [
           'document.submit_draft',
+          'scene.submit_structure',
           'novel.chapter.write_draft',
           'project.structure.get',
           'novel.chapter.list',
@@ -175,6 +180,7 @@ try {
         await execute('document.list', {});
         await execute('project.structure.get', {});
         const invalid = await execute('novel.chapter.write_draft', {
+          resourceId: 'workspace:novel',
           action: 'create_chapter',
           title: '错误目标',
           contentMarkdown: '不应保存',
@@ -187,6 +193,7 @@ try {
           'Failed writes rolled back',
         );
         const fourth = await execute('novel.chapter.write_draft', {
+          resourceId: 'workspace:novel',
           action: 'create_chapter',
           title: '第四章 夜行',
           displayLabel: '第四章',
@@ -203,6 +210,7 @@ try {
         const read = await execute('library.read', { sourceHandle: source.sourceHandle });
         assert.ok(read.content.includes('完整第四章正文'));
         const fifth = await execute('novel.chapter.write_draft', {
+          resourceId: 'workspace:novel',
           action: 'create_chapter',
           title: '第五章 来客',
           displayLabel: '第五章',
@@ -218,11 +226,156 @@ try {
             (await request('agent.task.get', { taskId: artifact.taskId })).task.status,
             'waiting_review',
           );
+        const directory = await execute('project.structure.get', {});
+        const documentsBeforeInvalid = inspect(rootPath, 'SELECT id FROM documents').length;
+        const tasksBeforeInvalid = inspect(rootPath, 'SELECT id FROM agent_tasks').length;
+        assert.ok(directory.resourceMap.resources.some((item) => item.id === 'workspace:novel'));
+        assert.ok(
+          directory.resourceMap.resources.some((item) => item.id === 'workspace:documents'),
+        );
+        const outline = {
+          title: '《剑开天门》玄幻短篇小说大纲',
+          documentKind: 'outline',
+          contentMarkdown: '# 大纲\n\n已确定的小说设定。',
+        };
+        const incomplete = await execute('document.submit_draft', outline);
+        assert.equal(
+          incomplete.status,
+          'rejected',
+          'Screenshot call without a destination must fail',
+        );
+        assert.match(incomplete.error.message, /resourceId/);
+        const mismatch = await execute('document.submit_draft', {
+          ...outline,
+          resourceId: 'workspace:documents',
+          bindingRole: 'work-outline',
+        });
+        assert.equal(mismatch.status, 'rejected', 'Novel binding cannot target the script page');
+        assert.equal(
+          inspect(rootPath, 'SELECT id FROM documents').length,
+          documentsBeforeInvalid,
+          'Rejected writes have no document',
+        );
+        assert.equal(
+          inspect(rootPath, 'SELECT id FROM agent_tasks').length,
+          tasksBeforeInvalid,
+          'Rejected writes have no child task',
+        );
+        const savedOutline = await execute('document.submit_draft', {
+          ...outline,
+          resourceId: 'workspace:novel',
+          bindingRole: 'work-outline',
+        });
+        assert.equal(savedOutline.status, 'draft_saved');
+        assert.equal(savedOutline.locator.workspace, 'novel');
+        assert.equal(savedOutline.locator.documentId, savedOutline.documentId);
+        assert.equal(savedOutline.locator.versionId, savedOutline.documentVersionId);
+        assert.equal(
+          inspect(
+            rootPath,
+            'SELECT domain_scope FROM document_bindings WHERE document_id = ?',
+            savedOutline.documentId,
+          )[0].domain_scope,
+          'novel',
+        );
         assert.equal(
           inspect(rootPath, 'SELECT chapter_id FROM novel_chapter_task_locks').length,
           2,
         );
         assert.equal(inspect(rootPath, 'SELECT id FROM agent_task_confirmations').length, 0);
+        const shotsPage = directory.resourceMap.resources.find(
+          (item) => item.id === 'workspace:shots',
+        );
+        assert.equal(shotsPage.writeTool, 'scene.submit_structure');
+        const courtyardSetting = await execute('document.submit_draft', {
+          resourceId: 'workspace:characters',
+          documentKind: 'scene',
+          title: '庭院',
+          contentMarkdown: '# 庭院\n青石地面的庭院场景提示词',
+        });
+        const studySetting = await execute('document.submit_draft', {
+          resourceId: 'workspace:characters',
+          documentKind: 'scene',
+          title: '书房',
+          contentMarkdown: '# 书房\n木桌和信件的场景提示词',
+        });
+        assert.equal(courtyardSetting.status, 'draft_saved');
+        assert.equal(studySetting.status, 'draft_saved');
+        const sceneStructure = {
+          episodeTitle: '场次可见性验收',
+          scenes: [
+            {
+              title: '庭院',
+              sceneDocumentId: courtyardSetting.documentId,
+              shots: [
+                { title: '远景', prompt: '清晨的庭院' },
+                { title: '近景', prompt: '门上的霜' },
+              ],
+            },
+            {
+              title: '书房',
+              sceneDocumentId: studySetting.documentId,
+              shots: [{ title: '信件特写', prompt: '桌上的信' }],
+            },
+          ],
+        };
+        const wrongPage = await execute('scene.submit_structure', {
+          ...sceneStructure,
+          resourceId: 'workspace:documents',
+        });
+        assert.equal(wrongPage.status, 'rejected');
+        assert.equal(inspect(rootPath, 'SELECT id FROM agent_change_sets').length, 0);
+        const structureProposal = await execute('scene.submit_structure', {
+          ...sceneStructure,
+          resourceId: 'workspace:shots',
+        });
+        assert.equal(structureProposal.status, 'scene_structure_proposed');
+        assert.equal(structureProposal.locator.workspace, 'shots');
+        assert.equal(structureProposal.locator.changeSetId, structureProposal.changeSetId);
+        assert.equal(structureProposal.applied, false);
+        assert.equal(
+          (await request('scene.list')).length,
+          0,
+          'Proposals preserve approval boundary',
+        );
+        const structureDetail = await request('agent.task.get', { taskId: prepared.agentTaskId });
+        assert.equal(structureDetail.changeSets[0].changeSetId, structureProposal.changeSetId);
+        const proposals = await request('agent.changeSet.list', { includeTerminal: false });
+        const proposal = proposals.find((item) => item.id === structureProposal.changeSetId);
+        assert.deepEqual(
+          proposal.items
+            .filter((item) => item.entityType === 'shot')
+            .map((item) => item.parentItemOrdinal),
+          [0, 0, 3],
+        );
+        const appliedStructure = await request('agent.changeSet.apply', {
+          changeSetId: proposal.id,
+          expectedRowVersion: proposal.rowVersion,
+        });
+        assert.equal(appliedStructure.status, 'applied');
+        const appliedScenes = await request('scene.list');
+        assert.equal(appliedScenes.length, 2);
+        assert.equal(
+          appliedScenes.find((item) => item.title === '庭院').sceneDocumentId,
+          courtyardSetting.documentId,
+        );
+        assert.equal(
+          appliedScenes.find((item) => item.title === '书房').sceneDocumentId,
+          studySetting.documentId,
+        );
+        const bindingDirectory = await request('agent.task.get', { taskId: prepared.agentTaskId });
+        assert.equal(bindingDirectory.changeSets[0].changeSetId, structureProposal.changeSetId);
+        for (const [title, prompts] of [
+          ['庭院', ['清晨的庭院', '门上的霜']],
+          ['书房', ['桌上的信']],
+        ]) {
+          const parentScene = appliedScenes.find((item) => item.title === title);
+          const shots = await request('shot.list', { sceneId: parentScene.id });
+          assert.deepEqual(
+            shots.map((item) => item.prompt),
+            prompts,
+          );
+        }
         await request('agent.providerStep.start', prepared.stream);
         await request('agent.providerStep.complete', {
           ...prepared.stream,
@@ -244,11 +397,17 @@ try {
           withHint,
           rawPromptPreserved: true,
           prebuiltChapters: 0,
-          childDraftTasks: 2,
+          childDraftTasks: 5,
           reviewLocks: 2,
           confirmations: 0,
           invalidWriteRolledBack: true,
           draftRetrievedOnDemand: true,
+          missingDestinationRejected: true,
+          mismatchedPageRejected: true,
+          novelOutlinePageVerified: true,
+          sceneStructureProposalLocated: true,
+          sceneStructureAppliedToCorrectParents: true,
+          sceneDocumentBindingsPreserved: true,
         });
       }
     }
