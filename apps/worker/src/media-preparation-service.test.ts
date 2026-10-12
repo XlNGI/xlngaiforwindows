@@ -109,6 +109,53 @@ async function setup(attachments: LlmInputAttachment[] = []) {
 }
 
 describe('MediaPreparationService', () => {
+  it('prepares HappyHorse with nine references through its official contract without a channel template', async () => {
+    const { settings, profile, service, identity, projectsService } = await setup();
+    const model = settings.createManualModel({
+      profileId: profile.id,
+      remoteModelId: 'happyhorse-1.1-r2v',
+      capabilities: {
+        ...settings.listModels(profile.id)[0]!.capabilities,
+        text: false,
+        imageGeneration: false,
+        imageEditing: false,
+        videoGeneration: true,
+      },
+      enabled: true,
+    });
+    const images = Array.from({ length: 9 }, (_, i) => `https://example.com/${i}.png`);
+    const context = service.selectionContext(
+      'video',
+      { prompt: '[Image 1] walks through the scene', parameters: { images } },
+      identity,
+    );
+    const candidate = context.candidates.find((item) => item.modelId === model.id)!;
+    expect(candidate.adapters.map((item) => item.key)).toEqual([
+      'REFERENCE_TO_VIDEO:unicompapi:cn.happyhorse.1.1.r2v:contract-1',
+    ]);
+    const draft = service.prepareSelected(
+      context,
+      {
+        providerProfileId: profile.id,
+        modelId: model.id,
+        adapterKey: candidate.adapters[0]!.key,
+        parameters: { images },
+      },
+      identity,
+    );
+    expect(draft.mediaModelSelection).toMatchObject({
+      contractId: 'cn.happyhorse.1.1.r2v',
+      contractRevision: 1,
+    });
+    projectsService.access(false, (database) => {
+      const saved = createRepositories(database).jobs.get(draft.draftId)!;
+      const snapshot = JSON.parse(saved.taskSnapshotJson!) as {
+        contractSnapshot: { parameterSchema: { properties: { images: { maxItems: number } } } };
+      };
+      expect(snapshot.contractSnapshot.parameterSchema.properties.images.maxItems).toBe(9);
+    });
+  });
+
   it('lists only ready official models whose capability and adapter match the inputs', async () => {
     const { settings, profile, service, identity } = await setup();
     const draftProfile = settings.createProfile({

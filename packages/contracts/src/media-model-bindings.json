@@ -1,0 +1,159 @@
+[
+  {
+    "bindingId": "unicomp-happyhorse-1.0-t2v",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.0-t2v",
+    "contractId": "cn.happyhorse.1.0.t2v",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-happyhorse-1.0-i2v",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.0-i2v",
+    "contractId": "cn.happyhorse.1.0.i2v",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-happyhorse-1.0-r2v",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.0-r2v",
+    "contractId": "cn.happyhorse.1.0.r2v",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-happyhorse-1.1-t2v",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.1-t2v",
+    "contractId": "cn.happyhorse.1.1.t2v",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-happyhorse-1.1-i2v",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.1-i2v",
+    "contractId": "cn.happyhorse.1.1.i2v",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-happyhorse-1.1-r2v",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.1-r2v",
+    "contractId": "cn.happyhorse.1.1.r2v",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-happyhorse-1.0-video-edit",
+    "providerType": "unicompapi",
+    "remoteModelId": "happyhorse-1.0-video-edit",
+    "contractId": "cn.happyhorse.1.0.video-edit",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-wan3.0-video",
+    "providerType": "unicompapi",
+    "remoteModelId": "wan3.0-video",
+    "contractId": "cn.qwen.wan3-0-video",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-wan3.0-video-prime",
+    "providerType": "unicompapi",
+    "remoteModelId": "wan3.0-video-prime",
+    "contractId": "cn.qwen.wan3-0-video-prime",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-3.0-pro",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-3.0-pro",
+    "contractId": "cn.qwen.qwen-image-3-0-pro",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "unicomp-qwen-image-3.0",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-3.0",
+    "contractId": "cn.qwen.qwen-image-3-0",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "unicomp-qwen-image-2.1-pro",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-2.1-pro",
+    "contractId": "cn.qwen.qwen-image-2-1-pro",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "unicomp-qwen-image-2.1-turbo",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-2.1-turbo",
+    "contractId": "cn.qwen.qwen-image-2-1-turbo",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled"
+  }
+]

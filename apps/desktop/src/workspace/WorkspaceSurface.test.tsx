@@ -182,8 +182,8 @@ describe('WorkspaceSurface', () => {
     const { container, rerender } = render(<WorkspaceFixture productionOpen />);
 
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
-    expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
-    expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(1);
+    expect(container.querySelector('.workspace-editor-page')).toBeVisible();
+    expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(2);
 
     rerender(<WorkspaceFixture productionOpen={false} />);
 
@@ -193,7 +193,7 @@ describe('WorkspaceSurface', () => {
   });
 
   it.each([1440, 1100, 800])(
-    'hides the novel page during production and preserves edits at %i px',
+    'keeps the novel page beside production when the workspace supports split panes at %i px',
     (width) => {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
       const children = <input aria-label="章节内容" defaultValue="已保存的小说正文" />;
@@ -202,17 +202,22 @@ describe('WorkspaceSurface', () => {
           {children}
         </WorkspaceFixture>,
       );
-      fireEvent.change(screen.getByLabelText('章节内容'), {
-        target: { value: '未保存的小说修改' },
-      });
+      if (width >= 1000) {
+        fireEvent.change(screen.getByLabelText('章节内容'), {
+          target: { value: '未保存的小说修改' },
+        });
+      }
 
       rerender(
         <WorkspaceFixture productionOpen documentActive={false} editorTitle="小说">
           {children}
         </WorkspaceFixture>,
       );
-      expect(screen.getByLabelText('章节内容')).not.toBeVisible();
-      expect(screen.queryByRole('button', { name: '关闭小说' })).not.toBeInTheDocument();
+      if (width >= 1000) {
+        expect(screen.getByLabelText('章节内容')).toBeVisible();
+      } else {
+        expect(screen.queryByLabelText('章节内容')).not.toBeInTheDocument();
+      }
       expect(screen.getByText('生产内容')).toBeVisible();
 
       rerender(
@@ -220,8 +225,10 @@ describe('WorkspaceSurface', () => {
           {children}
         </WorkspaceFixture>,
       );
-      expect(screen.getByLabelText('章节内容')).toBeVisible();
-      expect(screen.getByLabelText('章节内容')).toHaveValue('未保存的小说修改');
+      if (width >= 1000) {
+        expect(screen.getByLabelText('章节内容')).toBeVisible();
+        expect(screen.getByLabelText('章节内容')).toHaveValue('未保存的小说修改');
+      }
     },
   );
 
@@ -252,7 +259,7 @@ describe('WorkspaceSurface', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
     const { container } = render(<WorkspaceFixture productionOpen />);
 
-    expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
+    expect(container.querySelector('.workspace-editor-page')).toBeVisible();
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();

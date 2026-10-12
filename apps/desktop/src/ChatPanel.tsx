@@ -18,6 +18,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { AssistantReply } from './AssistantReply';
 import type {
   AgentResearchMode,
   ChatMessageInfo,
@@ -540,7 +541,14 @@ export function ChatPanel({
                     <Copy size={12} />
                   </button>
                 </header>
-                <p>{message.content}</p>
+                {message.role === 'assistant' ? (
+                  <AssistantReply
+                    content={message.content}
+                    streaming={generationLocked && generation?.assistantMessage.id === message.id}
+                  />
+                ) : (
+                  <p>{message.content}</p>
+                )}
                 {message.role === 'assistant' &&
                   message.status === 'failed' &&
                   !timelineByMessageId.has(message.id) &&

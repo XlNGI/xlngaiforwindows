@@ -9,6 +9,7 @@ import type {
   ProviderProfileInfo,
 } from '@ai-video/contracts';
 import { getAdapter } from '@ai-video/generation-adapters';
+import { createRepositories } from '@ai-video/persistence';
 import type { AppSettingsService } from './app-settings-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { MediaOrchestrationService } from './media-orchestration-service.js';
@@ -157,6 +158,64 @@ function prepareVideo(videos: VideoGenerationService) {
 }
 
 describe('MediaOrchestrationService', () => {
+  it('submits a HappyHorse draft through the existing media boundary and freezes the official contract', async () => {
+    const { profile, models, videos, service, request, projectsService } = await setup();
+    Object.assign(profile, {
+      providerType: 'unicompapi',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    });
+    const model = providerModel(
+      'happyhorse-model',
+      'happyhorse-1.1-t2v',
+      'HappyHorse 1.1',
+      'video',
+    );
+    Object.assign(model, {
+      contractId: 'cn.happyhorse.1.1.t2v',
+      contractRevision: 1,
+      contractStatus: 'enabled',
+    });
+    models.push(model);
+    const adapterKey = 'TEXT_TO_VIDEO:unicompapi:cn.happyhorse.1.1.t2v:contract-1';
+    const parameters = {
+      prompt: 'A horse running',
+      duration: 15,
+      resolution: '1080P',
+      ratio: '21:9',
+      seed: 2147483647,
+      watermark: false,
+    };
+    const job = videos.prepare({
+      adapterKey,
+      parameters,
+      providerRegion: 'unicompapi',
+      providerProfileId,
+      modelId: model.id,
+    });
+    request.mockResolvedValue({ status: 200, taskId: 'official-task', state: 'PENDING' });
+    const pending = service.requestSubmission({ jobId: job.id });
+    const result = await service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(result.job).toMatchObject({ status: 'polling', providerTaskId: 'official-task' });
+    expect(request).toHaveBeenCalledWith(
+      'provider.media.submit',
+      expect.objectContaining({ adapterKey, remoteModelId: 'happyhorse-1.1-t2v', parameters }),
+    );
+    expect(
+      projectsService.access(
+        false,
+        (database) =>
+          JSON.parse(createRepositories(database).jobs.get(job.id)!.taskSnapshotJson!) as {
+            contractSnapshot: { contract: { source: { url: string } } };
+          },
+      ).contractSnapshot.contract.source.url,
+    ).toContain('help.aliyun.com');
+  });
+
   it('persists only a token hash and invokes Native exactly once after confirmation', async () => {
     const { projectsService, videos, request, service } = await setup();
     const job = prepareVideo(videos);

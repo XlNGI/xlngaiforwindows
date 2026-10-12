@@ -50,6 +50,7 @@ interface WorkspaceSurfaceProps {
   onOpenConversation: () => void;
   onOpenDocument: () => void;
   onCloseDocument: () => void;
+  onCloseProduction?: () => void;
   onDetachDocument: () => void;
   onDetachConversation: () => void;
   detachedPanels: Partial<Record<'document' | 'conversation', string>>;
@@ -76,6 +77,7 @@ export function WorkspaceSurface({
   onOpenConversation,
   onOpenDocument,
   onCloseDocument,
+  onCloseProduction,
   onDetachDocument,
   onDetachConversation,
   detachedPanels,
@@ -131,12 +133,12 @@ export function WorkspaceSurface({
     !detachedPanels.conversation &&
     !narrow &&
     !conversationAutoHidden;
-  const showEditorDock = !productionOpen && (narrow || documentDocked || !showConversationDock);
-  // Keep the project editor mounted while production owns the visible page.
-  const keepEditorMounted = productionOpen && documentDocked;
+  const showEditorDock = productionOpen
+    ? !narrow && documentDocked
+    : !narrow && (documentDocked || !showConversationDock);
   const showProductionPage = showProductionDock || (!showEditorDock && productionOpen);
   const dockedPanelIds = [
-    ...(showEditorDock || keepEditorMounted ? ['editor'] : []),
+    ...(showEditorDock ? ['editor'] : []),
     ...(showProductionPage ? ['production'] : []),
     ...(showConversationDock ? ['conversation'] : []),
   ];
@@ -418,6 +420,16 @@ export function WorkspaceSurface({
               <X size={15} />
             </button>
           )}
+          {paneId === 'production' && onCloseProduction && (
+            <button
+              type="button"
+              title="关闭生产参数"
+              aria-label="关闭生产参数"
+              onClick={onCloseProduction}
+            >
+              <X size={15} />
+            </button>
+          )}
           {paneId === 'conversation' && (
             <button
               type="button"
@@ -439,17 +451,12 @@ export function WorkspaceSurface({
         <Panel
           id="editor"
           key="editor"
-          defaultSize={keepEditorMounted ? '0%' : showConversationDock ? '44%' : '100%'}
-          minSize={keepEditorMounted ? '0px' : '360px'}
-          maxSize={keepEditorMounted ? '0px' : '100%'}
-          disabled={keepEditorMounted}
-          aria-hidden={keepEditorMounted || undefined}
+          defaultSize={showProductionDock ? '50%' : showConversationDock ? '44%' : '100%'}
+          minSize={showProductionDock ? '320px' : '360px'}
+          maxSize="100%"
         >
-          <section
-            className="workspace-docked-page workspace-editor-page"
-            hidden={keepEditorMounted}
-          >
-            {!keepEditorMounted && renderPaneHeader(paneId, index)}
+          <section className="workspace-docked-page workspace-editor-page" hidden={false}>
+            {renderPaneHeader(paneId, index)}
             {documentDocked && <div className="workspace-base-content">{children}</div>}
             {!documentDocked && (
               <div className="workspace-closed-panel">
@@ -566,7 +573,7 @@ export function WorkspaceSurface({
         {paneOrder.flatMap((paneId) => {
           const index = visiblePaneOrder.indexOf(paneId);
           if (index < 0) {
-            return paneId === 'editor' && keepEditorMounted ? [renderDockPane(paneId, 0)] : [];
+            return [];
           }
           return [
             ...(index > 0

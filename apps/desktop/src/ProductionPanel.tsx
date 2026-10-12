@@ -17,7 +17,6 @@ import {
   WandSparkles,
   Square,
   Video,
-  X,
 } from 'lucide-react';
 import type {
   AdapterCatalogResult,
@@ -39,6 +38,7 @@ import type {
   VideoGenerationMetadataInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
+import { adapterBindsCatalogModel } from '@ai-video/contracts';
 import {
   generationErrorFeedback,
   generationStatusLabel,
@@ -72,7 +72,6 @@ interface ProductionPanelProps {
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
   onOpenAssetLibrary?: (assetId?: string) => void;
   onOpenProviderSettings?: () => void;
-  onClose?: () => void;
   providerSettingsRevision?: number;
 }
 
@@ -143,6 +142,32 @@ function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
   );
 }
 
+/**
+ * Contracts are schema-first. Legacy descriptors may still provide an
+ * explicit uiSchema, but a descriptor without one gets a deterministic form
+ * derived from its JSON Schema so new provider bindings do not require a new
+ * React component.
+ */
+function schemaDerivedFields(adapter: AdapterDescriptor): AdapterUiField[] {
+  const explicit = adapter.uiSchema?.fields ?? [];
+  if (explicit.length > 0) return [...explicit].sort((a, b) => a.order - b.order);
+  return Object.entries(adapter.parameterSchema.properties).map(([key, property], index) => {
+    const control: AdapterUiField['control'] =
+      property.type === 'boolean'
+        ? 'toggle'
+        : property.type === 'integer'
+          ? 'number'
+          : property.enum?.length
+            ? 'select'
+            : property.type === 'array' && property.items?.format === 'uri'
+              ? 'url-list'
+              : property.title.length > 40 || /prompt|message|description|content|text/iu.test(key)
+                ? 'textarea'
+                : 'text';
+    return { key, control, group: 'basic', order: index * 10 };
+  });
+}
+
 function normalizeErrorPath(path: string): string {
   return path.replace(/^\//, '');
 }
@@ -205,6 +230,7 @@ function isVideoCapability(capability: GenerationCapability | undefined): boolea
     capability === 'TEXT_TO_VIDEO' ||
     capability === 'IMAGE_TO_VIDEO' ||
     capability === 'REFERENCE_TO_VIDEO' ||
+    capability === 'VIDEO_TO_VIDEO' ||
     capability === 'START_END_TO_VIDEO'
   );
 }
@@ -265,7 +291,6 @@ export function ProductionPanel({
   onAssetsChanged,
   onOpenAssetLibrary,
   onOpenProviderSettings,
-  onClose,
   providerSettingsRevision = 0,
 }: ProductionPanelProps) {
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
@@ -456,10 +481,15 @@ export function ProductionPanel({
         }
         const selectedModel =
           models.find((model) => model.id === catalogModelId) ??
-          models.find((model) =>
-            selectedProfile?.providerType === 'unicompapi'
-              ? model.parameterTemplateKey === resolved.model
-              : model.remoteModelId === resolved.model,
+          models.find(
+            (model) =>
+              selectedProfile &&
+              adapterBindsCatalogModel(resolved, {
+                providerType: selectedProfile.providerType,
+                remoteModelId: model.remoteModelId,
+                parameterTemplateKey: model.parameterTemplateKey,
+                contractStatus: model.contractStatus,
+              }),
           );
         if (!selectedProfile || !selectedModel) {
           // Without a project draft the remembered form values are the only
@@ -567,10 +597,12 @@ export function ProductionPanel({
       if (!supportsCapability) return [];
       return capabilityAdapters
         .filter((adapter) =>
-          selectedProfile.providerType === 'unicompapi'
-            ? adapter.provider === 'unicompapi' && adapter.model === model.parameterTemplateKey
-            : adapter.provider === selectedProfile.providerType &&
-              adapter.model === model.remoteModelId,
+          adapterBindsCatalogModel(adapter, {
+            providerType: selectedProfile.providerType,
+            remoteModelId: model.remoteModelId,
+            parameterTemplateKey: model.parameterTemplateKey,
+            contractStatus: model.contractStatus,
+          }),
         )
         .map((adapter) => ({
           optionKey: `${model.id}::${adapter.key}`,
@@ -957,9 +989,7 @@ export function ProductionPanel({
     }
   };
 
-  const fields: AdapterUiField[] = [...(adapter?.uiSchema.fields ?? [])].sort(
-    (a, b) => a.order - b.order,
-  );
+  const fields = adapter ? schemaDerivedFields(adapter) : [];
   const basicFields = fields.filter((field) => field.group === 'basic');
   const advancedFields = fields.filter((field) => field.group === 'advanced');
 
@@ -979,23 +1009,6 @@ export function ProductionPanel({
           onDecide={(approved) => paidSubmissionResolver.current?.(approved)}
         />
       )}
-      <div className="panel-heading">
-        <span>生产参数</span>
-        <div className="production-panel-heading-actions">
-          {adapter && <small>Schema {adapter.schemaVersion}</small>}
-          {onClose && (
-            <button
-              className="icon-button subtle"
-              type="button"
-              title="关闭生产参数"
-              aria-label="关闭生产参数"
-              onClick={onClose}
-            >
-              <X size={15} />
-            </button>
-          )}
-        </div>
-      </div>
       {!catalog ? (
         <div className="parameter-placeholder">正在读取适配器目录</div>
       ) : (
@@ -1494,6 +1507,7 @@ function ParameterField({
       {required && <span aria-label="必填">*</span>}
     </label>
   );
+  const description = property.description ? <small>{property.description}</small> : null;
 
   if (field.control === 'toggle') {
     return (
@@ -1507,6 +1521,7 @@ function ParameterField({
           />
           <span>{property.title}</span>
         </label>
+        {description}
         {error && <small>{error}</small>}
       </div>
     );
@@ -1595,6 +1610,7 @@ function ParameterField({
         onDrop={(event) => void dropAssets(event)}
       >
         {label}
+        {description}
         <div className="url-list">
           {items.map((item, index) => {
             const selectedFile = localFiles[index];
@@ -1719,12 +1735,17 @@ function ParameterField({
   return (
     <div className={`parameter-field ${error ? 'invalid' : ''}`}>
       {label}
+      {description}
       {field.control === 'select' ? (
         <select
           id={inputId}
           value={value === undefined ? '' : String(value)}
           onChange={(event) =>
-            onChange(property.type === 'integer' ? Number(event.target.value) : event.target.value)
+            onChange(
+              property.type === 'integer' || property.type === 'number'
+                ? Number(event.target.value)
+                : event.target.value,
+            )
           }
         >
           {enumValues.map((item) => (

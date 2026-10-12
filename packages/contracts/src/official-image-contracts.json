@@ -1,0 +1,682 @@
+[
+  {
+    "contractId": "cn.qwen.qwen-image-3-0-pro",
+    "contractRevision": 1,
+    "providerFamily": "qwen",
+    "officialModelName": "qwen-image-3.0-pro",
+    "taskCapability": "TEXT_TO_IMAGE",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "imageInput": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": true,
+      "imageEditing": false,
+      "videoGeneration": false,
+      "videoAsync": false,
+      "videoPolling": false,
+      "videoCancellation": false,
+      "maxImages": 0,
+      "supportedImageFormats": ["png", "jpeg", "jpg", "bmp", "tiff", "webp", "gif"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "正向提示词",
+          "minLength": 1,
+          "maxLength": 18000,
+          "description": "官方支持中英文；推荐不超过 4500 Token。"
+        },
+        "n": {
+          "type": "integer",
+          "title": "生成数量",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 1
+        },
+        "size": {
+          "type": "string",
+          "title": "输出尺寸",
+          "maxLength": 32,
+          "default": "auto",
+          "description": "格式为宽x高，例如 1024x1024；也可使用 auto。官方面积范围为 512x512 至 2048x2048。"
+        },
+        "prompt_extend": {
+          "type": "boolean",
+          "title": "智能改写提示词",
+          "default": true
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "negative_prompt": {
+          "type": "string",
+          "title": "反向提示词",
+          "maxLength": 2000
+        },
+        "prompt_extend_mode": {
+          "type": "string",
+          "title": "提示词改写方式",
+          "enum": ["direct", "agent"],
+          "default": "direct"
+        },
+        "enable_thinking": {
+          "type": "boolean",
+          "title": "思考模式",
+          "default": true
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "openai-compatible-image",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "n",
+          "to": "n"
+        },
+        {
+          "operation": "copy",
+          "from": "size",
+          "to": "size"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "seed"
+        },
+        {
+          "operation": "copy",
+          "from": "negative_prompt",
+          "to": "negative_prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend_mode",
+          "to": "prompt_extend_mode"
+        },
+        {
+          "operation": "copy",
+          "from": "enable_thinking",
+          "to": "enable_thinking"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "data[0].url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "qwen-image-3.0-pro",
+            "prompt": "一只小猫在月光下奔跑",
+            "size": "1024x1024",
+            "n": 1,
+            "prompt_extend": true
+          },
+          "response": {
+            "created": 1788339600,
+            "data": [
+              {
+                "url": "https://example.com/result.png"
+              }
+            ],
+            "usage": {
+              "output_image_count": 1
+            }
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "synchronous",
+      "output": "data[0].url"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "title": "qwen-image-3.0-pro 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled"
+  },
+  {
+    "contractId": "cn.qwen.qwen-image-3-0",
+    "contractRevision": 1,
+    "providerFamily": "qwen",
+    "officialModelName": "qwen-image-3.0",
+    "taskCapability": "TEXT_TO_IMAGE",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "imageInput": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": true,
+      "imageEditing": false,
+      "videoGeneration": false,
+      "videoAsync": false,
+      "videoPolling": false,
+      "videoCancellation": false,
+      "maxImages": 0,
+      "supportedImageFormats": ["png", "jpeg", "jpg", "bmp", "tiff", "webp", "gif"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "正向提示词",
+          "minLength": 1,
+          "maxLength": 18000,
+          "description": "官方支持中英文；推荐不超过 4500 Token。"
+        },
+        "n": {
+          "type": "integer",
+          "title": "生成数量",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 1
+        },
+        "size": {
+          "type": "string",
+          "title": "输出尺寸",
+          "maxLength": 32,
+          "default": "auto",
+          "description": "格式为宽x高，例如 1024x1024；也可使用 auto。官方面积范围为 512x512 至 2048x2048。"
+        },
+        "prompt_extend": {
+          "type": "boolean",
+          "title": "智能改写提示词",
+          "default": true
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "negative_prompt": {
+          "type": "string",
+          "title": "反向提示词",
+          "maxLength": 2000
+        },
+        "prompt_extend_mode": {
+          "type": "string",
+          "title": "提示词改写方式",
+          "enum": ["direct", "agent"],
+          "default": "direct"
+        },
+        "enable_thinking": {
+          "type": "boolean",
+          "title": "思考模式",
+          "default": true
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "openai-compatible-image",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "n",
+          "to": "n"
+        },
+        {
+          "operation": "copy",
+          "from": "size",
+          "to": "size"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "seed"
+        },
+        {
+          "operation": "copy",
+          "from": "negative_prompt",
+          "to": "negative_prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend_mode",
+          "to": "prompt_extend_mode"
+        },
+        {
+          "operation": "copy",
+          "from": "enable_thinking",
+          "to": "enable_thinking"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "data[0].url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "qwen-image-3.0",
+            "prompt": "一只小猫在月光下奔跑",
+            "size": "1024x1024",
+            "n": 1,
+            "prompt_extend": true
+          },
+          "response": {
+            "created": 1788339600,
+            "data": [
+              {
+                "url": "https://example.com/result.png"
+              }
+            ],
+            "usage": {
+              "output_image_count": 1
+            }
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "synchronous",
+      "output": "data[0].url"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "title": "qwen-image-3.0 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled"
+  },
+  {
+    "contractId": "cn.qwen.qwen-image-2-1-pro",
+    "contractRevision": 1,
+    "providerFamily": "qwen",
+    "officialModelName": "qwen-image-2.1-pro",
+    "taskCapability": "TEXT_TO_IMAGE",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "imageInput": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": true,
+      "imageEditing": false,
+      "videoGeneration": false,
+      "videoAsync": false,
+      "videoPolling": false,
+      "videoCancellation": false,
+      "maxImages": 0,
+      "supportedImageFormats": ["png", "jpeg", "jpg", "bmp", "tiff", "webp", "gif"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "正向提示词",
+          "minLength": 1,
+          "maxLength": 18000,
+          "description": "官方支持中英文；推荐不超过 4500 Token。"
+        },
+        "n": {
+          "type": "integer",
+          "title": "生成数量",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 1
+        },
+        "size": {
+          "type": "string",
+          "title": "输出尺寸",
+          "maxLength": 32,
+          "default": "auto",
+          "description": "格式为宽x高，例如 1024x1024；也可使用 auto。官方面积范围为 512x512 至 2048x2048。"
+        },
+        "prompt_extend": {
+          "type": "boolean",
+          "title": "智能改写提示词",
+          "default": true
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "prompt_extend_mode": {
+          "type": "string",
+          "title": "提示词改写方式",
+          "enum": ["direct"],
+          "default": "direct"
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "openai-compatible-image",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "n",
+          "to": "n"
+        },
+        {
+          "operation": "copy",
+          "from": "size",
+          "to": "size"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "seed"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend_mode",
+          "to": "prompt_extend_mode"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "data[0].url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "qwen-image-2.1-pro",
+            "prompt": "一只小猫在月光下奔跑",
+            "size": "1024x1024",
+            "n": 1,
+            "prompt_extend": true
+          },
+          "response": {
+            "created": 1788339600,
+            "data": [
+              {
+                "url": "https://example.com/result.png"
+              }
+            ],
+            "usage": {
+              "output_image_count": 1
+            }
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "synchronous",
+      "output": "data[0].url"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "title": "qwen-image-2.1-pro 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled"
+  },
+  {
+    "contractId": "cn.qwen.qwen-image-2-1-turbo",
+    "contractRevision": 1,
+    "providerFamily": "qwen",
+    "officialModelName": "qwen-image-2.1-turbo",
+    "taskCapability": "TEXT_TO_IMAGE",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "imageInput": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": true,
+      "imageEditing": false,
+      "videoGeneration": false,
+      "videoAsync": false,
+      "videoPolling": false,
+      "videoCancellation": false,
+      "maxImages": 0,
+      "supportedImageFormats": ["png", "jpeg", "jpg", "bmp", "tiff", "webp", "gif"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "正向提示词",
+          "minLength": 1,
+          "maxLength": 18000,
+          "description": "官方支持中英文；推荐不超过 4500 Token。"
+        },
+        "n": {
+          "type": "integer",
+          "title": "生成数量",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 1
+        },
+        "size": {
+          "type": "string",
+          "title": "输出尺寸",
+          "maxLength": 32,
+          "default": "auto",
+          "description": "格式为宽x高，例如 1024x1024；也可使用 auto。官方面积范围为 512x512 至 2048x2048。"
+        },
+        "prompt_extend": {
+          "type": "boolean",
+          "title": "智能改写提示词",
+          "default": true
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "prompt_extend_mode": {
+          "type": "string",
+          "title": "提示词改写方式",
+          "enum": ["direct"],
+          "default": "direct"
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "openai-compatible-image",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "n",
+          "to": "n"
+        },
+        {
+          "operation": "copy",
+          "from": "size",
+          "to": "size"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "seed"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend_mode",
+          "to": "prompt_extend_mode"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "data[0].url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "qwen-image-2.1-turbo",
+            "prompt": "一只小猫在月光下奔跑",
+            "size": "1024x1024",
+            "n": 1,
+            "prompt_extend": true
+          },
+          "response": {
+            "created": 1788339600,
+            "data": [
+              {
+                "url": "https://example.com/result.png"
+              }
+            ],
+            "usage": {
+              "output_image_count": 1
+            }
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "synchronous",
+      "output": "data[0].url"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "title": "qwen-image-2.1-turbo 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled"
+  }
+]

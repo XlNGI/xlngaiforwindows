@@ -9,6 +9,7 @@ import {
 } from './app-settings-service.js';
 import { emptyModelCapabilities } from './provider-registry.js';
 import { getAdapter } from '@ai-video/generation-adapters';
+import { openAppDatabase } from '@ai-video/persistence';
 
 const temporaryDirectories: string[] = [];
 
@@ -27,6 +28,80 @@ async function createService() {
 }
 
 describe('AppSettingsService', () => {
+  it('preserves an explicitly disabled official media contract across directory reseeding', async () => {
+    const service = await createService();
+    const contractId = 'cn.happyhorse.1.1.t2v';
+    service.setModelContractEnabled({ contractId, contractRevision: 1, enabled: false });
+    service.close();
+    const reopened = new AppSettingsService({ appDataDirectory: temporaryDirectories.at(-1)! });
+    try {
+      expect(reopened.getModelContract(contractId, 1)?.status).toBe('verified');
+      reopened.setModelContractEnabled({ contractId, contractRevision: 1, enabled: true });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('backfills previously synced HappyHorse models and uses only the official contract', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'UniComp',
+      category: 'multi',
+      providerType: 'unicompapi',
+      accessType: 'official',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    });
+    const model = service.createManualModel({
+      profileId: profile.id,
+      remoteModelId: 'happyhorse-1.1-r2v',
+      capabilities: emptyModelCapabilities(),
+    });
+    const legacyDatabase = openAppDatabase(
+      join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'),
+    );
+    legacyDatabase
+      .prepare(
+        'UPDATE provider_models SET contract_id = NULL, contract_revision = NULL, contract_status = NULL, parameter_template_key = ? WHERE id = ?',
+      )
+      .run('openai-compatible-video', model.id);
+    legacyDatabase.close();
+    expect(service.listModels(profile.id)[0]).toMatchObject({
+      contractId: 'cn.happyhorse.1.1.r2v',
+      capabilities: { videoGeneration: true, text: false, tools: false },
+    });
+    const enabled = service.updateModel({
+      profileId: profile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: emptyModelCapabilities(),
+      enabled: true,
+    });
+    expect(enabled.parameterTemplateKey).toBeUndefined();
+    expect(() =>
+      service.updateModel({
+        ...enabled,
+        profileId: profile.id,
+        modelId: model.id,
+        parameterTemplateKey: 'openai-compatible-video',
+      }),
+    ).toThrow('cannot use a channel parameter template');
+    expect(() =>
+      service.updateModel({
+        ...enabled,
+        profileId: profile.id,
+        modelId: model.id,
+        capabilities: { ...enabled.capabilities, tools: true },
+      }),
+    ).toThrow('cannot exceed the official contract');
+    service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'happyhorse-1.1-r2v' }],
+    });
+    service.close();
+  });
+
   it('creates, updates, lists, and archives provider profiles', async () => {
     const service = await createService();
     const created = service.createProfile({
@@ -120,6 +195,40 @@ describe('AppSettingsService', () => {
     service.close();
   });
 
+  it('persists canonical contract metadata for a verified model binding candidate', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'MiniMax',
+      category: 'llm',
+      providerType: 'minimax',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://api.minimaxi.com/v1',
+    });
+    const model = service.createManualModel({
+      profileId: profile.id,
+      remoteModelId: 'MiniMax-H3',
+      displayName: 'MiniMax H3',
+      capabilities: { ...emptyModelCapabilities(), text: true, streaming: true, tools: true },
+      enabled: false,
+    });
+    expect(model).toMatchObject({
+      remoteModelId: 'MiniMax-H3',
+      contractId: 'cn.minimax.h3',
+      contractRevision: 1,
+      contractStatus: 'discovered',
+    });
+    const enabled = service.updateModel({
+      profileId: profile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: model.capabilities,
+      enabled: true,
+    });
+    expect(enabled.contractStatus).toBe('enabled');
+    service.close();
+  });
+
   it('tracks adapter schema proposals, confirmation, rollback, and audits', async () => {
     const service = await createService();
     const base = getAdapter('TEXT_TO_IMAGE:vidu:viduq2:v2');
@@ -199,6 +308,83 @@ describe('AppSettingsService', () => {
     });
     expect(syncFailed.modelSyncStatus).toBe('failed');
     expect(syncFailed.models).toEqual([classified]);
+    service.close();
+  });
+
+  it('uses an explicit canonical contract for known current model IDs', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'DeepSeek',
+      category: 'llm',
+      providerType: 'deepseek',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://api.deepseek.com',
+    });
+    const synchronized = service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'deepseek-flash' }],
+    });
+    expect(synchronized.models[0]).toMatchObject({
+      remoteModelId: 'deepseek-flash',
+      contractId: 'cn.deepseek.v4.1-flash',
+      contractRevision: 1,
+      contractStatus: 'discovered',
+      capabilities: {
+        text: true,
+        vision: true,
+        streaming: true,
+        tools: true,
+      },
+    });
+    service.close();
+  });
+
+  it('binds confirmed UniComp model IDs to canonical contracts', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'UniCompAPI',
+      category: 'multi',
+      providerType: 'unicompapi',
+      accessType: 'official',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    });
+    const model = service.createManualModel({
+      profileId: profile.id,
+      remoteModelId: 'glm-5.3',
+      displayName: 'GLM-5.3',
+      capabilities: { ...emptyModelCapabilities(), text: true, streaming: true, tools: true },
+      enabled: true,
+    });
+    expect(model).toMatchObject({
+      contractId: 'cn.zhipu.glm-5.3',
+      contractRevision: 1,
+      contractStatus: 'enabled',
+    });
+    service.close();
+  });
+
+  it('fills default capabilities for an already discovered contract-bound model', async () => {
+    const service = await createService();
+    const profile = service.createProfile({
+      name: 'UniCompAPI',
+      category: 'multi',
+      providerType: 'unicompapi',
+      accessType: 'official',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    });
+    const first = service.completeConnectionTest({
+      profileId: profile.id,
+      status: 'ready',
+      models: [{ id: 'deepseek-v4-flash-0731' }],
+    });
+    expect(first.models[0]).toMatchObject({
+      contractId: 'cn.deepseek.v4.1-flash',
+      capabilities: { text: true, streaming: true, tools: true, vision: true },
+    });
     service.close();
   });
 

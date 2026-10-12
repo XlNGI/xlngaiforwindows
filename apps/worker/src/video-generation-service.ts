@@ -27,6 +27,7 @@ import type {
   VideoGenerationPrepareParams,
   VideoProviderRegion,
 } from '@ai-video/contracts';
+import { officialVideoContracts, mediaModelBindings } from '@ai-video/contracts';
 import type { AssetRecord, GenerationResultRecord, JobRecord } from '@ai-video/domain';
 import {
   extractVideoCost,
@@ -58,6 +59,7 @@ const VIDEO_CAPABILITIES = new Set([
   'TEXT_TO_VIDEO',
   'IMAGE_TO_VIDEO',
   'REFERENCE_TO_VIDEO',
+  'VIDEO_TO_VIDEO',
   'START_END_TO_VIDEO',
 ]);
 
@@ -144,6 +146,22 @@ export class VideoGenerationService {
           capability: 'video',
           adapterKey: params.adapterKey,
           schemaVersion: adapter.schemaVersion,
+          contractId: adapter.contractId,
+          contractRevision: adapter.contractRevision,
+          contractSnapshot:
+            adapter.apiVersion === 'contract-1'
+              ? {
+                  ...adapter,
+                  contract: officialVideoContracts.find(
+                    (contract) => contract.contractId === adapter.contractId,
+                  ),
+                  bindings: mediaModelBindings.filter(
+                    (binding) =>
+                      binding.contractId === adapter.contractId &&
+                      binding.providerType === adapter.provider,
+                  ),
+                }
+              : undefined,
           schemaSource: 'official-adapter',
           providerProfileId,
           providerRegion,
@@ -278,7 +296,7 @@ export class VideoGenerationService {
     }
 
     const state = providerState(params.providerBody);
-    if (state && isActiveProviderState(state, metadata.providerRegion)) {
+    if (state && isActiveProviderState(state, metadata.providerRegion, job.adapterKey)) {
       return this.persistObservation(
         job.id,
         providerTaskId,
@@ -1094,14 +1112,21 @@ function priceProviderCost(
 function providerState(body: unknown): string | undefined {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
   const object = body as Record<string, unknown>;
-  const direct = object.state ?? object.status;
+  const direct = object.task_status ?? object.state ?? object.status;
   if (typeof direct === 'string' && direct.trim()) return direct.trim().toLowerCase();
-  const data = object.data;
+  const data = object.output ?? object.data;
   return data && typeof data === 'object' && !Array.isArray(data) ? providerState(data) : undefined;
 }
 
-function isActiveProviderState(state: string, providerRegion: VideoProviderRegion): boolean {
-  return ACTIVE_STATES.has(state) || (providerRegion === 'unicompapi' && state === 'unknown');
+function isActiveProviderState(
+  state: string,
+  providerRegion: VideoProviderRegion,
+  adapterKey: string,
+): boolean {
+  return (
+    ACTIVE_STATES.has(state) ||
+    (providerRegion === 'unicompapi' && !adapterKey.endsWith(':contract-1') && state === 'unknown')
+  );
 }
 
 function providerFailureMessage(body: unknown): string {
@@ -1119,7 +1144,7 @@ function findNamedString(value: unknown, keys: string[]): string | undefined {
     const candidate = object[key];
     if (typeof candidate === 'string' && candidate.trim()) return candidate.trim().slice(0, 200);
   }
-  const data = object.data;
+  const data = object.output ?? object.data;
   return data && typeof data === 'object' ? findNamedString(data, keys) : undefined;
 }
 
@@ -1173,6 +1198,8 @@ function findVideoCreationSource(value: unknown): string | undefined {
   }
   if (!value || typeof value !== 'object') return undefined;
   const object = value as Record<string, unknown>;
+  if (typeof object.video_url === 'string' && /^https:\/\//i.test(object.video_url))
+    return object.video_url;
   for (const key of ['creations', 'Creations']) {
     const creations = object[key];
     if (!Array.isArray(creations)) continue;

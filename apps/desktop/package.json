@@ -20,7 +20,9 @@
     "lucide-react": "^0.536.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "react-resizable-panels": "4.12.2"
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "4.12.2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.7.1",

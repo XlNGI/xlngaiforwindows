@@ -25,6 +25,11 @@ import type {
   LlmPricingSnapshotInfo,
   ModelPricingInfo,
   ModelPricingUpdateParams,
+  ModelBinding,
+  ModelBindingEnableParams,
+  ModelContract,
+  ModelContractEnableParams,
+  ModelCatalogStatus,
   ProviderDefaultInfo,
   ProviderDefaultRole,
   ProviderDefaultUpdateParams,
@@ -38,9 +43,17 @@ import type {
   ProviderRuntimeProfile,
   RemoteProviderModelInfo,
 } from '@ai-video/contracts';
-import { isUniCompApiMediaTemplateKey } from '@ai-video/contracts';
+import { isUniCompApiMediaTemplateKey, mediaModelBindings } from '@ai-video/contracts';
 import { createAppRepositories, migrateAppDatabase, openAppDatabase } from '@ai-video/persistence';
 import {
+  listModelBindings as listStaticModelBindings,
+  listModelContracts as listStaticModelContracts,
+  setCatalogStatus,
+  setRegisteredBindingStatus,
+  setRegisteredContractStatus,
+} from './model-contract-registry.js';
+import {
+  emptyModelCapabilities,
   hasAnyModelCapability,
   inferKnownModelCapabilities,
   listBuiltInProviderModels,
@@ -48,6 +61,7 @@ import {
   ProviderRegistryValidationError,
   validateProviderConfiguration,
 } from './provider-registry.js';
+import { resolveModelBinding } from './model-contract-registry.js';
 import { normalizeCurrency, normalizeDecimalPrice } from './usage-cost.js';
 
 const DEFAULT_APP_DATA_DIRECTORY = '.ai-video-workspace';
@@ -75,6 +89,9 @@ export interface ResolvedLlmSelection {
   modelId: string;
   modelName: string;
   remoteModelId: string;
+  contractId?: string;
+  contractRevision?: number;
+  contractStatus?: ProviderModelInfo['contractStatus'];
   protocol: 'openai-responses' | 'openai-chat-completions';
   baseUrl: string;
   pricingSnapshot?: LlmPricingSnapshotInfo;
@@ -82,6 +99,7 @@ export interface ResolvedLlmSelection {
 
 export class AppSettingsService {
   private database?: Database.Database;
+  private modelContractDirectorySeeded = false;
   private readonly appDataDirectory: string;
   private readonly nativeBinding?: object;
   private readonly now: () => string;
@@ -130,10 +148,86 @@ export class AppSettingsService {
       });
   }
 
+  listModelContracts(status?: ProviderModelInfo['contractStatus']): ModelContract[] {
+    return this.repositories()
+      .modelContracts.list()
+      .map((record) => JSON.parse(record.descriptorJson) as ModelContract)
+      .filter((contract) => !status || contract.status === status);
+  }
+
+  getModelContract(contractId: string, contractRevision: number): ModelContract | null {
+    const record = this.repositories().modelContracts.get(contractId, contractRevision);
+    return record ? (JSON.parse(record.descriptorJson) as ModelContract) : null;
+  }
+
+  listModelBindings(
+    status?: ProviderModelInfo['contractStatus'],
+    providerType?: string,
+  ): ModelBinding[] {
+    return this.repositories()
+      .modelBindings.list()
+      .map((record) => JSON.parse(record.descriptorJson) as ModelBinding)
+      .filter(
+        (binding) =>
+          (!status || binding.status === status) &&
+          (!providerType || binding.providerType === providerType),
+      );
+  }
+
+  setModelContractEnabled(params: ModelContractEnableParams): ModelContract {
+    const repositories = this.repositories();
+    const existing = repositories.modelContracts.get(params.contractId, params.contractRevision);
+    if (!existing) throw new Error('Model contract revision was not found.');
+    const contract = setCatalogStatus(
+      JSON.parse(existing.descriptorJson) as ModelContract,
+      params.enabled,
+    );
+    repositories.modelContracts.save({
+      ...existing,
+      status: contract.status,
+      descriptorJson: JSON.stringify(contract),
+      updatedAt: this.now(),
+    });
+    setRegisteredContractStatus(contract.contractId, contract.contractRevision, contract.status);
+    return contract;
+  }
+
+  setModelBindingEnabled(params: ModelBindingEnableParams): ModelBinding {
+    const repositories = this.repositories();
+    const existing = repositories.modelBindings.get(params.bindingId);
+    if (!existing) throw new Error('Model binding was not found.');
+    const contract = repositories.modelContracts.get(
+      existing.contractId,
+      existing.contractRevision,
+    );
+    if (params.enabled && (!contract || contract.status !== 'enabled')) {
+      throw new ProviderProfileValidationError(
+        'Enable and verify the canonical model contract before enabling this binding.',
+      );
+    }
+    const binding = setCatalogStatus(
+      JSON.parse(existing.descriptorJson) as ModelBinding,
+      params.enabled,
+    );
+    repositories.modelBindings.save({
+      ...existing,
+      status: binding.status,
+      descriptorJson: JSON.stringify(binding),
+      updatedAt: this.now(),
+    });
+    setRegisteredBindingStatus(binding.bindingId, binding.status);
+    return binding;
+  }
+
   proposeAdapterSchema(
     params: UnifiedAgentAdapterSchemaProposeParams,
     diff: string[],
   ): UnifiedAgentAdapterSchemaProposeResult {
+    if (params.adapterKey.endsWith(':contract-1')) {
+      throw new AdapterSchemaValidationError(
+        'Official contract parameters can only change through a verified contract revision.',
+      );
+    }
     const now = this.now();
     const repositories = this.repositories();
     const existing = repositories.adapterSchemas.get(params.adapterKey);
@@ -310,6 +404,7 @@ export class AppSettingsService {
           capabilitiesJson: JSON.stringify(model.capabilities),
           source: 'built-in',
           enabled: true,
+          ...contractMetadata(profile.providerType, model.remoteModelId, true),
           createdAt: now,
           updatedAt: now,
         });
@@ -393,6 +488,7 @@ export class AppSettingsService {
           capabilitiesJson: JSON.stringify(model.capabilities),
           source: 'built-in',
           enabled: true,
+          ...contractMetadata(profile.providerType, model.remoteModelId, true),
           createdAt: now,
           updatedAt: now,
         });
@@ -467,9 +563,60 @@ export class AppSettingsService {
 
   listModels(profileId: string): ProviderModelInfo[] {
     const profile = this.requireActiveProfile(profileId);
-    return this.repositories()
-      .providerModels.listByProfile(profile.id)
-      .map((record) => toModelInfo(record));
+    const repository = this.repositories().providerModels;
+    return repository.listByProfile(profile.id).map((record) => {
+      // Backfill already-synced rows when a newly verified official contract ships.
+      const metadata = contractMetadata(profile.providerType, record.remoteModelId, record.enabled);
+      const officialBinding = mediaModelBindings.find(
+        (binding) =>
+          binding.providerType === profile.providerType &&
+          binding.remoteModelId === record.remoteModelId,
+      );
+      if (officialBinding) {
+        const existing = toModelInfo(record).capabilities;
+        const official = inferContractCapabilities(profile.providerType, record.remoteModelId);
+        const capabilities = hasAnyModelCapability(existing)
+          ? Object.fromEntries(
+              Object.entries(official).map(([key, value]) => [
+                key,
+                value && existing[key as keyof ProviderModelCapabilities],
+              ]),
+            )
+          : official;
+        const capabilitiesJson = JSON.stringify(capabilities);
+        if (record.parameterTemplateKey || record.capabilitiesJson !== capabilitiesJson) {
+          record = {
+            ...record,
+            capabilitiesJson,
+            parameterTemplateKey: undefined,
+            updatedAt: this.now(),
+          };
+          repository.save(record);
+        }
+      }
+      if (
+        metadata.contractId &&
+        (record.contractId !== metadata.contractId ||
+          record.contractStatus !== metadata.contractStatus)
+      ) {
+        record = { ...record, ...metadata, updatedAt: this.now() };
+        repository.save(record);
+      }
+      const model = toModelInfo(record);
+      if (model.contractId && !hasAnyModelCapability(model.capabilities)) {
+        const capabilities = inferContractCapabilities(profile.providerType, model.remoteModelId);
+        if (hasAnyModelCapability(capabilities)) {
+          const updated = {
+            ...record,
+            capabilitiesJson: JSON.stringify(capabilities),
+            updatedAt: this.now(),
+          };
+          repository.save(updated);
+          return { ...model, capabilities, updatedAt: updated.updatedAt };
+        }
+      }
+      return model;
+    });
   }
 
   createManualModel(params: ProviderModelCreateParams): ProviderModelInfo {
@@ -481,7 +628,13 @@ export class AppSettingsService {
         'A model with this remote model ID already exists for the provider profile.',
       );
     }
-    const capabilities = normalizeModelCapabilities(params.capabilities);
+    const requestedCapabilities = normalizeModelCapabilities(params.capabilities);
+    const capabilities =
+      params.enabled &&
+      !hasAnyModelCapability(requestedCapabilities) &&
+      resolveModelBinding(profile.providerType, remoteModelId)
+        ? inferContractCapabilities(profile.providerType, remoteModelId)
+        : requestedCapabilities;
     const enabled = params.enabled === true;
     if (enabled && !hasAnyModelCapability(capabilities)) {
       throw new ProviderProfileValidationError(
@@ -491,6 +644,12 @@ export class AppSettingsService {
     const parameterTemplateKey = normalizeParameterTemplateKey(
       profile.providerType,
       params.parameterTemplateKey,
+    );
+    assertOfficialMediaConfiguration(
+      profile.providerType,
+      remoteModelId,
+      capabilities,
+      parameterTemplateKey,
     );
     const now = this.now();
     const model = {
@@ -502,6 +661,7 @@ export class AppSettingsService {
       source: 'manual' as const,
       enabled,
       parameterTemplateKey,
+      ...contractMetadata(profile.providerType, remoteModelId, enabled),
       createdAt: now,
       updatedAt: now,
     };
@@ -516,7 +676,11 @@ export class AppSettingsService {
     if (!model || model.providerProfileId !== profile.id) {
       throw new Error('Provider model was not found.');
     }
-    const capabilities = normalizeModelCapabilities(params.capabilities);
+    const requestedCapabilities = normalizeModelCapabilities(params.capabilities);
+    const capabilities =
+      params.enabled && !hasAnyModelCapability(requestedCapabilities) && model.contractId
+        ? inferContractCapabilities(profile.providerType, model.remoteModelId)
+        : requestedCapabilities;
     if (params.enabled && !hasAnyModelCapability(capabilities)) {
       throw new ProviderProfileValidationError(
         'Select at least one model capability before enabling the model.',
@@ -537,8 +701,28 @@ export class AppSettingsService {
       capabilitiesJson: JSON.stringify(capabilities),
       enabled: params.enabled,
       parameterTemplateKey,
+      contractStatus:
+        params.enabled && model.contractId ? 'enabled' : (model.contractStatus ?? undefined),
       updatedAt: this.now(),
     };
+    assertOfficialMediaConfiguration(
+      profile.providerType,
+      model.remoteModelId,
+      capabilities,
+      parameterTemplateKey,
+    );
+    if (
+      mediaModelBindings.some(
+        (binding) =>
+          binding.providerType === profile.providerType &&
+          binding.remoteModelId === model.remoteModelId,
+      )
+    ) {
+      Object.assign(
+        updated,
+        contractMetadata(profile.providerType, model.remoteModelId, params.enabled),
+      );
+    }
     repositories.providerModels.save(updated);
     return toModelInfo(updated);
   }
@@ -677,6 +861,9 @@ export class AppSettingsService {
       modelId: model.id,
       modelName: model.displayName,
       remoteModelId: model.remoteModelId,
+      contractId: model.contractId,
+      contractRevision: model.contractRevision,
+      contractStatus: model.contractStatus,
       protocol: profile.protocol,
       baseUrl: profile.baseUrl,
       pricingSnapshot: toPricingSnapshot(repositories.modelPricing.get(profile.id, model.id)),
@@ -716,8 +903,68 @@ export class AppSettingsService {
         nativeBinding: this.nativeBinding,
       });
       migrateAppDatabase(this.database);
+      if (!this.modelContractDirectorySeeded) {
+        this.seedModelContractDirectory();
+        this.modelContractDirectorySeeded = true;
+      }
     }
     return this.database;
+  }
+
+  private seedModelContractDirectory(): void {
+    if (!this.database) throw new Error('Application database is not open.');
+    const repositories = createAppRepositories(this.database);
+    const now = new Date().toISOString();
+    for (const contract of listStaticModelContracts()) {
+      const existing = repositories.modelContracts.get(
+        contract.contractId,
+        contract.contractRevision,
+      );
+      const isOfficialMediaContract = mediaModelBindings.some(
+        (binding) => binding.contractId === contract.contractId,
+      );
+      const status = isOfficialMediaContract
+        ? ((existing?.status as ModelCatalogStatus | undefined) ?? contract.status)
+        : contract.status === 'enabled' &&
+            existing?.status !== 'rejected' &&
+            existing?.status !== 'revalidation_required'
+          ? 'enabled'
+          : ((existing?.status as ModelCatalogStatus | undefined) ?? contract.status);
+      repositories.modelContracts.save({
+        contractId: contract.contractId,
+        contractRevision: contract.contractRevision,
+        status,
+        descriptorJson: JSON.stringify({ ...contract, status }),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+      setRegisteredContractStatus(contract.contractId, contract.contractRevision, status);
+    }
+    for (const binding of listStaticModelBindings()) {
+      const existing = repositories.modelBindings.get(binding.bindingId);
+      const isOfficialMediaBinding = mediaModelBindings.some(
+        (item) => item.bindingId === binding.bindingId,
+      );
+      const status = isOfficialMediaBinding
+        ? ((existing?.status as ModelCatalogStatus | undefined) ?? binding.status)
+        : binding.status === 'enabled' &&
+            existing?.status !== 'rejected' &&
+            existing?.status !== 'revalidation_required'
+          ? 'enabled'
+          : ((existing?.status as ModelCatalogStatus | undefined) ?? binding.status);
+      repositories.modelBindings.save({
+        bindingId: binding.bindingId,
+        providerType: binding.providerType,
+        remoteModelId: binding.remoteModelId,
+        contractId: binding.contractId,
+        contractRevision: binding.contractRevision,
+        status,
+        descriptorJson: JSON.stringify({ ...binding, status }),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+      setRegisteredBindingStatus(binding.bindingId, status);
+    }
   }
 
   private requireActiveProfile(profileId: string): ProviderProfileInfo {
@@ -742,15 +989,18 @@ export class AppSettingsService {
         providerProfileId: profileId,
         remoteModelId: remote.id,
         displayName: remote.displayName ?? existing?.displayName ?? remote.id,
-        capabilitiesJson:
-          existing?.capabilitiesJson ??
-          JSON.stringify(inferKnownModelCapabilities(providerType, remote.id)),
+        capabilitiesJson: JSON.stringify(
+          existing?.capabilitiesJson
+            ? normalizeSyncedCapabilities(existing.capabilitiesJson, providerType, remote.id)
+            : inferContractCapabilities(providerType, remote.id),
+        ),
         source:
           existing?.source === 'manual' || existing?.source === 'built-in'
             ? existing.source
             : 'remote',
         enabled: existing?.enabled ?? false,
         parameterTemplateKey: existing?.parameterTemplateKey,
+        ...contractMetadata(providerType, remote.id, existing?.enabled ?? false),
         lastSyncedAt: now,
         lastSeenAt: now,
         unavailableAt: undefined,
@@ -961,6 +1211,9 @@ function toModelInfo(record: {
   lastSyncedAt?: string;
   lastSeenAt?: string;
   unavailableAt?: string;
+  contractId?: string;
+  contractRevision?: number;
+  contractStatus?: ProviderModelInfo['contractStatus'];
   createdAt: string;
   updatedAt: string;
 }): ProviderModelInfo {
@@ -971,6 +1224,82 @@ function toModelInfo(record: {
       JSON.parse(capabilitiesJson) as ProviderModelCapabilities,
     ),
   };
+}
+
+function contractMetadata(
+  providerType: string,
+  remoteModelId: string,
+  enabled = false,
+): Pick<ProviderModelInfo, 'contractId' | 'contractRevision' | 'contractStatus'> {
+  const resolved = resolveModelBinding(providerType, remoteModelId);
+  return resolved
+    ? {
+        contractId: resolved.binding.contractId,
+        contractRevision: resolved.binding.contractRevision,
+        contractStatus:
+          resolved.contract.status !== 'enabled'
+            ? resolved.contract.status
+            : resolved.binding.status !== 'enabled'
+              ? resolved.binding.status
+              : enabled
+                ? 'enabled'
+                : resolved.binding.status,
+      }
+    : {};
+}
+
+function assertOfficialMediaConfiguration(
+  providerType: string,
+  remoteModelId: string,
+  capabilities: ProviderModelCapabilities,
+  templateKey?: string,
+): void {
+  const binding = mediaModelBindings.find(
+    (item) => item.providerType === providerType && item.remoteModelId === remoteModelId,
+  );
+  if (!binding) return;
+  if (templateKey)
+    throw new ProviderProfileValidationError(
+      'This media model binds an official contract and cannot use a channel parameter template.',
+    );
+  const official = inferContractCapabilities(providerType, remoteModelId);
+  for (const key of Object.keys(capabilities) as (keyof ProviderModelCapabilities)[]) {
+    if (capabilities[key] && !official[key])
+      throw new ProviderProfileValidationError(
+        'Model capabilities cannot exceed the official contract.',
+      );
+  }
+}
+
+function normalizeSyncedCapabilities(
+  capabilitiesJson: string,
+  providerType: string,
+  remoteModelId: string,
+): ProviderModelCapabilities {
+  const existing = normalizeModelCapabilities(
+    JSON.parse(capabilitiesJson) as ProviderModelCapabilities,
+  );
+  if (hasAnyModelCapability(existing)) return existing;
+  return inferContractCapabilities(providerType, remoteModelId);
+}
+
+function inferContractCapabilities(
+  providerType: string,
+  remoteModelId: string,
+): ProviderModelCapabilities {
+  const resolved = resolveModelBinding(providerType, remoteModelId);
+  if (!resolved) return inferKnownModelCapabilities(providerType, remoteModelId);
+  const capabilities = emptyModelCapabilities();
+  capabilities.text = resolved.contract.capabilities.text;
+  capabilities.vision = resolved.contract.capabilities.vision;
+  capabilities.streaming = resolved.contract.capabilities.streaming;
+  capabilities.reasoning = resolved.contract.capabilities.reasoning;
+  capabilities.tools = resolved.contract.capabilities.tools;
+  capabilities.structuredOutput = resolved.contract.capabilities.structuredOutput;
+  capabilities.imageGeneration = resolved.contract.capabilities.imageGeneration;
+  capabilities.imageEditing = resolved.contract.capabilities.imageEditing;
+  capabilities.videoGeneration = resolved.contract.capabilities.videoGeneration;
+  return capabilities;
 }
 
 function normalizeParameterTemplateKey(

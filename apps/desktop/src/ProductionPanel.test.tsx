@@ -9,6 +9,7 @@ import type {
   ProviderProfileInfo,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
+import { officialVideoContracts } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
 import { callWorker } from './worker-client';
 
@@ -346,6 +347,76 @@ const savedVideoAsset: AssetInfo = {
 };
 
 describe('ProductionPanel', () => {
+  it('selects HappyHorse by official contract without a parameter-template selection', async () => {
+    const contract = officialVideoContracts.find(
+      (item) => item.officialModelName === 'happyhorse-1.1-t2v',
+    )!;
+    const profile: ProviderProfileInfo = {
+      ...providerProfile,
+      providerType: 'unicompapi',
+      name: 'UniCompAPI',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://unicompapi.com/v1',
+    };
+    const adapter: AdapterDescriptor = {
+      ...descriptor,
+      key: 'TEXT_TO_VIDEO:unicompapi:cn.happyhorse.1.1.t2v:contract-1',
+      capability: 'TEXT_TO_VIDEO',
+      provider: 'unicompapi',
+      providerLabel: 'UniCompAPI',
+      model: contract.contractId,
+      modelLabel: contract.officialModelName,
+      contractId: contract.contractId,
+      apiVersion: 'contract-1',
+      parameterSchema: {
+        ...descriptor.parameterSchema,
+        required: ['prompt'],
+        properties: contract.parameterSchema
+          .properties as AdapterDescriptor['parameterSchema']['properties'],
+      },
+      uiSchema: { fields: [] },
+    };
+    const model: ProviderModelInfo = {
+      ...providerModels[0]!,
+      remoteModelId: contract.officialModelName,
+      displayName: 'HappyHorse 1.1',
+      contractId: contract.contractId,
+      contractStatus: 'enabled',
+      capabilities: {
+        ...providerModels[0]!.capabilities,
+        imageGeneration: false,
+        videoGeneration: true,
+      },
+    };
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          ...catalog,
+          capabilities: [{ key: 'TEXT_TO_VIDEO', label: '文生视频' }],
+          adapters: [adapter],
+        });
+      if (method === 'provider.profile.list') return Promise.resolve([profile]);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'adapter.resolve') return Promise.resolve(adapter);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(<ProductionPanel capability="TEXT_TO_VIDEO" writable />);
+    expect(await screen.findByRole('option', { name: 'HappyHorse 1.1' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
+        capability: 'TEXT_TO_VIDEO',
+        provider: 'unicompapi',
+        model: contract.contractId,
+        apiVersion: 'contract-1',
+      }),
+    );
+    expect(await screen.findByLabelText(/分辨率/)).toHaveValue('1080P');
+    expect(screen.getByLabelText(/时长（秒）/)).toHaveValue(5);
+    expect(screen.queryByLabelText(/生成音频/)).not.toBeInTheDocument();
+  });
+
   afterEach(() => cleanup());
 
   beforeEach(() => {

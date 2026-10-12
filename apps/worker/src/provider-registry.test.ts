@@ -47,6 +47,10 @@ describe('provider registry', () => {
   it('locks official provider configuration to a built-in definition', () => {
     expect(listProviderDefinitions().map((definition) => definition.id)).toEqual([
       'openai',
+      'deepseek',
+      'zhipu',
+      'qwen',
+      'kimi',
       'unicompapi',
       'vidu-global',
       'vidu-china',

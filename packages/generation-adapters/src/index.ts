@@ -3,9 +3,13 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
 import {
   UNICOMPAPI_MEDIA_TEMPLATES,
+  officialVideoContracts,
+  officialImageContracts,
+  mediaModelBindings,
   isUniCompApiMediaTemplateKey,
   uniCompApiTemplateAdapterKey,
   type AdapterCatalogResult,
+  type AdapterControl,
   type AdapterDescriptor,
   type AdapterParameterSchema,
   type AdapterParameterProperty,
@@ -14,10 +18,137 @@ import {
   type AdapterValidationError,
   type AdapterValidationResult,
   type GenerationCapability,
+  type ModelContract,
   type UniCompApiMediaTemplateKey,
 } from '@ai-video/contracts';
 
 const schemaUri = 'https://json-schema.org/draft/2020-12/schema' as const;
+
+export interface ContractAdapterDescriptorParams {
+  contract: ModelContract;
+  capability: GenerationCapability;
+  provider: string;
+  providerLabel: string;
+  model: string;
+  modelLabel: string;
+  apiVersion: string;
+  endpoint: string;
+  documentationUrl: string;
+  credentialProvider: string;
+  bindingId?: string;
+}
+
+/** Convert a canonical contract Schema into the legacy descriptor shape. */
+export function adapterDescriptorFromModelContract(
+  params: ContractAdapterDescriptorParams,
+): AdapterDescriptor {
+  const schema = params.contract.parameterSchema;
+  const rawProperties = isRecord(schema.properties) ? schema.properties : {};
+  const properties = Object.fromEntries(
+    Object.entries(rawProperties).map(([key, value]) => [key, contractProperty(key, value)]),
+  );
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((key): key is string => typeof key === 'string')
+    : [];
+  const parameterSchema: AdapterParameterSchema = {
+    $schema: schemaUri,
+    type: 'object',
+    additionalProperties: false,
+    required,
+    properties,
+    ...(Array.isArray(schema.allOf) ? { allOf: schema.allOf as Record<string, unknown>[] } : {}),
+  };
+  return {
+    key: `${params.capability}:${params.provider}:${params.model}:contract-${params.contract.contractRevision}`,
+    capability: params.capability,
+    capabilityLabel: capabilityLabel(params.capability),
+    provider: params.provider,
+    providerLabel: params.providerLabel,
+    model: params.model,
+    modelLabel: params.modelLabel,
+    apiVersion: params.apiVersion,
+    schemaVersion: params.contract.contractRevision,
+    endpoint: params.endpoint,
+    documentationUrl: params.documentationUrl,
+    credentialProvider: params.credentialProvider,
+    contractId: params.contract.contractId,
+    contractRevision: params.contract.contractRevision,
+    bindingId: params.bindingId,
+    parameterSchema,
+    uiSchema: {
+      fields: Object.entries(properties).map(([key, property], index) => ({
+        key,
+        control: contractControl(key, property),
+        group: 'basic' as const,
+        order: index * 10,
+      })),
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function contractProperty(key: string, value: unknown): AdapterParameterProperty {
+  const source = isRecord(value) ? value : {};
+  const rawType = source.type;
+  const type: AdapterParameterProperty['type'] =
+    rawType === 'integer' || rawType === 'number' || rawType === 'boolean' || rawType === 'array'
+      ? rawType
+      : 'string';
+  const property: AdapterParameterProperty = {
+    type,
+    title: typeof source.title === 'string' ? source.title : key,
+  };
+  for (const field of [
+    'description',
+    'default',
+    'enum',
+    'const',
+    'minLength',
+    'maxLength',
+    'minimum',
+    'maximum',
+    'minItems',
+    'maxItems',
+    'format',
+    'pattern',
+  ] as const) {
+    if (source[field] !== undefined)
+      (property as unknown as Record<string, unknown>)[field] = source[field];
+  }
+  if (type === 'array' && isRecord(source.items) && source.items.type === 'string') {
+    property.items = {
+      type: 'string',
+      ...(source.items.format === 'uri' ? { format: 'uri' as const } : {}),
+      ...(typeof source.items.pattern === 'string' ? { pattern: source.items.pattern } : {}),
+    };
+  }
+  return property;
+}
+
+function contractControl(key: string, property: AdapterParameterProperty): AdapterControl {
+  if (property.type === 'boolean') return 'toggle';
+  if (property.type === 'integer' || property.type === 'number') return 'number';
+  if (property.enum?.length) return 'select';
+  if (property.type === 'array' && property.items?.format === 'uri') return 'url-list';
+  return /prompt|message|description|content|text/iu.test(`${key} ${property.title}`)
+    ? 'textarea'
+    : 'text';
+}
+
+function capabilityLabel(capability: GenerationCapability): string {
+  return {
+    TEXT_TO_IMAGE: '文生图',
+    REFERENCE_TO_IMAGE: '参考生图',
+    TEXT_TO_VIDEO: '文生视频',
+    IMAGE_TO_VIDEO: '图生视频',
+    REFERENCE_TO_VIDEO: '参考生视频',
+    START_END_TO_VIDEO: '首尾帧生视频',
+    VIDEO_TO_VIDEO: '视频编辑',
+  }[capability];
+}
 
 const imageAspectRatios = ['16:9', '9:16', '1:1', '3:4', '4:3'] as const;
 const q2ImageAspectRatios = ['auto', ...imageAspectRatios, '21:9', '2:3', '3:2'] as const;
@@ -28,6 +159,7 @@ const capabilityOrder: GenerationCapability[] = [
   'IMAGE_TO_VIDEO',
   'REFERENCE_TO_VIDEO',
   'START_END_TO_VIDEO',
+  'VIDEO_TO_VIDEO',
 ];
 
 const baseAdapters: AdapterDescriptor[] = [
@@ -675,7 +807,19 @@ const generatedReferenceVideoAdapters = [
   }),
 ];
 
-const adapters: AdapterDescriptor[] = [...baseAdapters, ...generatedReferenceVideoAdapters];
+const adapters: AdapterDescriptor[] = [...baseAdapters, ...generatedReferenceVideoAdapters].map(
+  annotateCanonicalContract,
+);
+
+function annotateCanonicalContract(adapter: AdapterDescriptor): AdapterDescriptor {
+  if (adapter.key === 'REFERENCE_TO_VIDEO:vidu:viduq3:v2') {
+    return { ...adapter, contractId: 'vidu.q3.reference-video', contractRevision: 1 };
+  }
+  if (adapter.key === 'START_END_TO_VIDEO:vidu:viduq3-pro:v2') {
+    return { ...adapter, contractId: 'vidu.q3.start-end-video', contractRevision: 1 };
+  }
+  return adapter;
+}
 
 const UNICOMPAPI_TEMPLATE_LABELS: Record<UniCompApiMediaTemplateKey, string> = {
   'openai-compatible-image': 'OpenAI 兼容生图',
@@ -757,6 +901,18 @@ const unicompVideoSchema = (imageRequired: boolean): AdapterParameterSchema => (
 });
 
 function unicompTemplateCommon(templateKey: UniCompApiMediaTemplateKey) {
+  const contractId =
+    templateKey === 'qwen-image-edit'
+      ? 'cn.qwen.image.latest'
+      : templateKey === 'openai-compatible-image'
+        ? 'media.openai-compatible-image'
+        : templateKey === 'openai-compatible-video'
+          ? 'media.openai-compatible-video'
+          : templateKey === 'vidu-compatible-reference'
+            ? 'vidu.q3.reference-video'
+            : templateKey === 'vidu-compatible-start-end'
+              ? 'vidu.q3.start-end-video'
+              : undefined;
   return {
     provider: 'unicompapi',
     providerLabel: 'UniCompAPI',
@@ -766,6 +922,7 @@ function unicompTemplateCommon(templateKey: UniCompApiMediaTemplateKey) {
     schemaVersion: 1,
     documentationUrl: 'https://unicompapi.com',
     credentialProvider: 'unicompapi',
+    ...(contractId ? { contractId, contractRevision: 1 } : {}),
   } as const;
 }
 
@@ -945,22 +1102,7 @@ function historicalUniCompAdapter(adapterKey: string): AdapterDescriptor | undef
   };
 }
 
-export function adapterBindsCatalogModel(
-  adapter: Pick<AdapterDescriptor, 'provider' | 'model'>,
-  selection: {
-    providerType: string;
-    remoteModelId: string;
-    parameterTemplateKey?: string;
-  },
-): boolean {
-  if (adapter.provider !== selection.providerType) return false;
-  if (selection.providerType === 'unicompapi') {
-    return (
-      Boolean(selection.parameterTemplateKey) && adapter.model === selection.parameterTemplateKey
-    );
-  }
-  return adapter.model === selection.remoteModelId;
-}
+export { adapterBindsCatalogModel } from '@ai-video/contracts';
 
 export function listUniCompMediaTemplateAdapters(): AdapterDescriptor[] {
   return unicompAdapters.map((adapter) => structuredClone(adapter));
@@ -983,7 +1125,39 @@ const legacyAdapters: AdapterDescriptor[] = [
 ];
 
 const unicompAdapters = unicompApiTemplateAdapters();
-const catalogAdapters = [...adapters, ...unicompAdapters];
+const contractAdapters: AdapterDescriptor[] = [
+  ...officialVideoContracts,
+  ...officialImageContracts,
+].flatMap((contract) => {
+  const capability = contract.taskCapability;
+  if (!capability) return [];
+  return [
+    ...new Set(
+      mediaModelBindings
+        .filter((binding) => binding.contractId === contract.contractId)
+        .map((binding) => binding.providerType),
+    ),
+  ].map((provider) =>
+    adapterDescriptorFromModelContract({
+      contract,
+      capability,
+      provider,
+      providerLabel: provider === 'unicompapi' ? 'UniCompAPI' : provider,
+      model: contract.contractId,
+      modelLabel: contract.officialModelName,
+      apiVersion: 'contract-1',
+      endpoint:
+        provider === 'unicompapi'
+          ? capability === 'TEXT_TO_IMAGE' || capability === 'REFERENCE_TO_IMAGE'
+            ? 'https://unicompapi.com/v1/images/generations'
+            : 'https://unicompapi.com/v1/videos'
+          : (contract.lifecycle.submit ?? ''),
+      documentationUrl: contract.source.url,
+      credentialProvider: provider,
+    }),
+  );
+});
+const catalogAdapters = [...adapters, ...unicompAdapters, ...contractAdapters];
 const lookupAdapters = [...catalogAdapters, ...legacyAdapters];
 const keySet = new Set(lookupAdapters.map((adapter) => adapter.key));
 if (keySet.size !== lookupAdapters.length) throw new Error('Adapter keys must be unique.');
@@ -996,7 +1170,11 @@ let runtimeOverrides = new Map<string, AdapterDescriptor>();
 
 /** Replace built-in adapters with confirmed, locally persisted descriptors. */
 export function setAdapterOverrides(overrides: AdapterDescriptor[]): void {
-  runtimeOverrides = new Map(overrides.map((adapter) => [adapter.key, adapter]));
+  runtimeOverrides = new Map(
+    overrides
+      .filter((adapter) => !adapter.key.endsWith(':contract-1'))
+      .map((adapter) => [adapter.key, adapter]),
+  );
   validators.clear();
 }
 
@@ -1077,6 +1255,18 @@ export function validateAdapterParameters(
     validators.set(adapter.key, compiled);
     validator = compiled;
   }
-  const valid = validator(parameters);
+  // Project/temporary image handles are domain references, resolved by Native before transport.
+  const validationParameters =
+    adapter.apiVersion === 'contract-1' && Array.isArray(parameters.images)
+      ? {
+          ...parameters,
+          images: parameters.images.map((image) =>
+            /^(?:asset|controlled-file):\/\//u.test(image)
+              ? 'https://controlled-input.invalid/image'
+              : image,
+          ),
+        }
+      : parameters;
+  const valid = validator(validationParameters);
   return { valid: Boolean(valid), errors: validationErrors(validator.errors) };
 }

@@ -683,6 +683,10 @@ export interface ProviderModelRecord {
   lastSyncedAt?: string;
   lastSeenAt?: string;
   unavailableAt?: string;
+  contractId?: string;
+  contractRevision?: number;
+  contractStatus?:
+    'discovered' | 'verified' | 'enabled' | 'deprecated' | 'rejected' | 'revalidation_required';
   createdAt: string;
   updatedAt: string;
 }
@@ -1097,6 +1101,39 @@ export interface ProviderModelRepository {
   get(id: string): ProviderModelRecord | undefined;
   getByRemoteId(providerProfileId: string, remoteModelId: string): ProviderModelRecord | undefined;
   listByProfile(providerProfileId: string): ProviderModelRecord[];
+}
+
+export interface ModelContractRecord {
+  contractId: string;
+  contractRevision: number;
+  status: string;
+  descriptorJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelBindingRecord {
+  bindingId: string;
+  providerType: string;
+  remoteModelId: string;
+  contractId: string;
+  contractRevision: number;
+  status: string;
+  descriptorJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelContractRepository {
+  save(record: ModelContractRecord): void;
+  get(contractId: string, contractRevision: number): ModelContractRecord | undefined;
+  list(): ModelContractRecord[];
+}
+
+export interface ModelBindingRepository {
+  save(record: ModelBindingRecord): void;
+  get(bindingId: string): ModelBindingRecord | undefined;
+  list(): ModelBindingRecord[];
 }
 
 export type AdapterSchemaRecordSource =

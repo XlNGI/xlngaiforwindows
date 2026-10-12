@@ -273,14 +273,14 @@ export function ProviderConnectionsView({
     }
   };
 
-  const archiveSelected = async () => {
-    if (!selectedProfile) return;
-    if (!window.confirm(`删除连接“${selectedProfile.name}”？对应安全密钥也会被删除。`)) return;
+  const archiveSelected = async (profileToArchive = selectedProfile) => {
+    if (!profileToArchive) return;
+    if (!window.confirm(`删除连接“${profileToArchive.name}”？对应安全密钥也会被删除。`)) return;
     setBusy(true);
     setMessage('');
     try {
-      await deleteCredential(selectedProfile.id);
-      await providerProfileClient.archiveProfile(selectedProfile.id);
+      await deleteCredential(profileToArchive.id);
+      await providerProfileClient.archiveProfile(profileToArchive.id);
       setEditor(undefined);
       await loadProfiles();
       setMessage('供应商连接和安全密钥已删除。');
@@ -321,57 +321,61 @@ export function ProviderConnectionsView({
             </button>
           ) : (
             profiles.map((profile) => (
-              <button
+              <article
                 key={profile.id}
-                type="button"
                 className={
                   profile.id === selectedProfileId
-                    ? 'provider-list-item selected'
-                    : 'provider-list-item'
+                    ? 'provider-list-card selected'
+                    : 'provider-list-card'
                 }
-                onClick={() => setSelectedProfileId(profile.id)}
               >
-                <span className="provider-logo">{profile.name.slice(0, 2)}</span>
-                <span>
-                  <strong>{profile.name}</strong>
-                  <small>
-                    {duplicateNames.get(profile.name)! > 1 ? `${profile.id.slice(-6)} · ` : ''}
-                    {profile.migrationSource ? '旧版迁移 · ' : ''}
-                    {profile.protocol}
-                  </small>
-                </span>
-                <span className={`connection-status status-${profile.connectionStatus}`}>
-                  {statusLabels[profile.connectionStatus]}
-                </span>
-              </button>
+                <button
+                  type="button"
+                  className="provider-list-item"
+                  onClick={() => setSelectedProfileId(profile.id)}
+                >
+                  <span className="provider-logo">{profile.name.slice(0, 2)}</span>
+                  <span>
+                    <strong>{profile.name}</strong>
+                    <small>
+                      {duplicateNames.get(profile.name)! > 1 ? `${profile.id.slice(-6)} · ` : ''}
+                      {profile.migrationSource ? '旧版迁移 · ' : ''}
+                      {profile.protocol}
+                    </small>
+                  </span>
+                  <span className={`connection-status status-${profile.connectionStatus}`}>
+                    {statusLabels[profile.connectionStatus]}
+                  </span>
+                </button>
+                <div className="provider-card-actions">
+                  <span>
+                    <KeyRound size={12} />
+                    {credentialStatus[profile.id] ? '密钥已配置' : '密钥未配置'}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setEditor({ kind: 'edit', profileId: profile.id })}
+                  >
+                    <Pencil size={12} />
+                    编辑
+                  </button>
+                  <button
+                    className="danger-command"
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      void archiveSelected(profile);
+                    }}
+                  >
+                    <Trash2 size={12} />
+                    删除
+                  </button>
+                </div>
+              </article>
             ))
           )}
         </div>
-        {selectedProfile && (
-          <div className="provider-list-actions">
-            <span>
-              <KeyRound size={13} />
-              {credentialStatus[selectedProfile.id] ? '密钥已配置' : '密钥未配置'}
-            </span>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setEditor({ kind: 'edit', profileId: selectedProfile.id })}
-            >
-              <Pencil size={13} />
-              编辑
-            </button>
-            <button
-              className="danger-command"
-              type="button"
-              disabled={busy}
-              onClick={() => void archiveSelected()}
-            >
-              <Trash2 size={13} />
-              删除
-            </button>
-          </div>
-        )}
       </aside>
 
       <main className="provider-detail-pane">
@@ -405,6 +409,53 @@ export function ProviderConnectionsView({
             onSynchronize={synchronize}
             onCreate={createModel}
             onUpdate={updateModel}
+            onToggleAll={async (enabled) => {
+              setBusy(true);
+              setMessage('');
+              try {
+                const changed = models.filter(
+                  (model) =>
+                    !model.unavailableAt &&
+                    model.enabled !== enabled &&
+                    (!enabled || Object.values(model.capabilities).some(Boolean)),
+                );
+                const skipped = enabled
+                  ? models.filter(
+                      (model) =>
+                        !model.unavailableAt &&
+                        !model.enabled &&
+                        !Object.values(model.capabilities).some(Boolean),
+                    ).length
+                  : 0;
+                const updated = await Promise.all(
+                  changed.map((model) =>
+                    providerProfileClient.updateModel({
+                      profileId: selectedProfile!.id,
+                      modelId: model.id,
+                      displayName: model.displayName,
+                      capabilities: model.capabilities,
+                      enabled,
+                      parameterTemplateKey: model.parameterTemplateKey ?? null,
+                    }),
+                  ),
+                );
+                if (updated.length > 0) {
+                  const byId = new Map(updated.map((model) => [model.id, model]));
+                  setModels((current) => current.map((model) => byId.get(model.id) ?? model));
+                }
+                setMessage(
+                  enabled
+                    ? skipped > 0
+                      ? `已启用 ${changed.length} 个模型，跳过 ${skipped} 个未配置能力的模型。`
+                      : `已启用 ${changed.length} 个模型。`
+                    : `已关闭 ${changed.length} 个模型。`,
+                );
+              } catch (reason) {
+                setMessage(reason instanceof Error ? reason.message : '批量更新模型失败。');
+              } finally {
+                setBusy(false);
+              }
+            }}
             onUpdatePricing={updatePricing}
             onUpdateDefault={updateDefault}
           />

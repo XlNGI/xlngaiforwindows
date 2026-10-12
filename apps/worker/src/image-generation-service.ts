@@ -156,10 +156,13 @@ export class ImageGenerationService {
     });
     if (job.status !== 'running') return this.get(job.id);
     if (params.providerStatus < 200 || params.providerStatus >= 300) {
+      const providerMessage = providerErrorMessage(params.providerBody);
       const message =
         params.providerStatus === 401
           ? 'Provider authentication failed with HTTP 401. Check the selected service region and API key.'
-          : `Provider request failed with HTTP ${params.providerStatus}.`;
+          : providerMessage
+            ? `Provider request failed with HTTP ${params.providerStatus}: ${providerMessage}`
+            : `Provider request failed with HTTP ${params.providerStatus}.`;
       return this.fail(job.id, message, projectSessionId);
     }
     let images: DownloadedImage[];
@@ -1032,6 +1035,28 @@ export class ImageGenerationService {
       updatedAt: job.updatedAt,
     };
   }
+}
+
+function providerErrorMessage(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const object = body as Record<string, unknown>;
+  const error = object.error;
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const details = error as Record<string, unknown>;
+    const code = typeof details.code === 'string' ? details.code.trim() : '';
+    const message = typeof details.message === 'string' ? details.message.trim() : '';
+    if (code && message) return `${code}: ${message}`.slice(0, 500);
+    if (message) return message.slice(0, 500);
+    if (code) return code.slice(0, 500);
+  }
+  const code = ['code', 'error_code', 'err_code']
+    .map((key) => object[key])
+    .find((value): value is string => typeof value === 'string' && Boolean(value.trim()));
+  const message = ['message', 'detail']
+    .map((key) => object[key])
+    .find((value): value is string => typeof value === 'string' && Boolean(value.trim()));
+  if (code && message) return `${code.trim()}: ${message.trim()}`.slice(0, 500);
+  return (message ?? code)?.trim().slice(0, 500);
 }
 
 function toAssetInfo(asset: AssetRecord): AssetInfo {

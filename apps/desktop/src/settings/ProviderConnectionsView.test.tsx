@@ -101,6 +101,44 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('ProviderConnectionsView', () => {
+  it('updates a model when its collapsed-row enable switch is clicked', () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const model = {
+      id: '123e4567-e89b-42d3-a456-426614174001',
+      providerProfileId: profile.id,
+      remoteModelId: 'model-toggle',
+      displayName: 'Toggle Model',
+      capabilities: capabilities({ text: true, streaming: true }),
+      source: 'remote' as const,
+      enabled: false,
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+    render(
+      <ModelManagementView
+        profile={profile}
+        models={[model]}
+        pricing={[]}
+        defaults={[]}
+        busy={false}
+        onSynchronize={vi.fn()}
+        onCreate={vi.fn()}
+        onUpdate={onUpdate}
+        onUpdatePricing={vi.fn()}
+        onUpdateDefault={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '启用' }));
+    expect(onUpdate).toHaveBeenCalledWith({
+      profileId: profile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: model.capabilities,
+      enabled: true,
+    });
+  });
+
   it('clears a stored secret while retaining the form after a failed connection test', async () => {
     let profiles: ProviderProfileInfo[] = [];
     vi.mocked(providerProfileClient.listProfiles).mockImplementation(() =>

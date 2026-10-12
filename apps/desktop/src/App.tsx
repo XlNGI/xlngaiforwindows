@@ -852,18 +852,18 @@ export function App() {
   };
 
   const openDocumentWorkspace = (kind?: DocumentKind) => {
-    setView((current) => {
-      if (kind && CHARACTER_DOCUMENT_KINDS.includes(kind)) return 'characters';
-      if (kind && SCRIPT_DOCUMENT_KINDS.includes(kind)) return 'documents';
-      if (current === 'characters' || current === 'documents') return current;
-      return 'documents';
-    });
-    workspaceDispatch({ type: 'open', panelId: 'document' });
+    const nextView =
+      kind && CHARACTER_DOCUMENT_KINDS.includes(kind)
+        ? 'characters'
+        : kind && SCRIPT_DOCUMENT_KINDS.includes(kind)
+          ? 'documents'
+          : view === 'characters' || view === 'documents'
+            ? view
+            : 'documents';
+    openProjectView(nextView);
   };
 
   const openProjectView = (nextView: WorkspaceView) => {
-    setNavigationMode('project');
-    if (nextView !== view) setDocumentKindFilter('all');
     if (nextView === 'documents' && detachedPanels.document) {
       setView('documents');
       void focusDetachedPanelWindow(detachedPanels.document);
@@ -1926,8 +1926,7 @@ export function App() {
       openSettings('maintenance');
       return;
     }
-    setNavigationMode('project');
-    setView('assets');
+    openProjectView('assets');
     if (handoff.focusId) setAssetLibrarySelectedId(handoff.focusId);
     setAssetTrashRequest((revision) => revision + 1);
   };
@@ -1957,7 +1956,7 @@ export function App() {
     setScene(created);
     setShots([]);
     setShot(undefined);
-    setView('shots');
+    openProjectView('shots');
   };
 
   const selectScene = async (selected: SceneInfo) => {
@@ -1970,7 +1969,7 @@ export function App() {
       if (requestId !== sceneRequest.current) return;
       setShots(items);
       setShot(items[0]);
-      setView('shots');
+      openProjectView('shots');
     } catch (reason) {
       if (requestId === sceneRequest.current) {
         setContentMessage(reason instanceof Error ? reason.message : '镜头加载失败');
@@ -3048,8 +3047,7 @@ export function App() {
         void rejectSchemaProposal(adapterKey, version);
       }}
       onOpenTaskLog={() => {
-        setNavigationMode('project');
-        setView('tasks');
+        openProjectView('tasks');
       }}
       onContinueAgentTask={() => {
         const prompt = '请继续完成尚未成功的短剧交付物，并调用已授权工具。';
@@ -3165,14 +3163,9 @@ export function App() {
       onOpenAssetLibrary={(assetId) => {
         updateAssets(assets, assetId);
         setAssetLibrarySelectedId(assetId);
-        setNavigationMode('project');
-        setView('assets');
+        openProjectView('assets');
       }}
       onOpenProviderSettings={() => openSettings('providers')}
-      onClose={() => {
-        setProductionSeed(undefined);
-        setNavigationMode('project');
-      }}
       providerSettingsRevision={providerSettingsRevision}
     />
   );
@@ -3385,7 +3378,7 @@ export function App() {
         onOpenAsset={(assetId) => {
           updateAssets(assets, assetId);
           setAssetLibrarySelectedId(assetId);
-          setView('assets');
+          openProjectView('assets');
         }}
       />
     ) : (
@@ -3928,6 +3921,10 @@ export function App() {
               }
             }}
             onCloseDocument={requestCloseEditor}
+            onCloseProduction={() => {
+              setProductionSeed(undefined);
+              setNavigationMode('project');
+            }}
             onDetachDocument={() => void detachPanel('document')}
             onDetachConversation={() => void detachPanel('conversation')}
           >

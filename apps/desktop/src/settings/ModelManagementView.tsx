@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { CircleDollarSign, Plus, RefreshCw, TriangleAlert } from 'lucide-react';
 import {
   UNICOMPAPI_MEDIA_TEMPLATES,
+  mediaModelBindings,
   type ModelPricingInfo,
   type ModelPricingUpdateParams,
   type ProviderDefaultInfo,
@@ -59,6 +60,7 @@ interface ModelManagementViewProps {
   onSynchronize: () => Promise<void>;
   onCreate: (params: ProviderModelCreateParams) => Promise<void>;
   onUpdate: (params: ProviderModelUpdateParams) => Promise<void>;
+  onToggleAll?: (enabled: boolean) => Promise<void>;
   onUpdatePricing: (params: ModelPricingUpdateParams) => Promise<void>;
   onUpdateDefault: (params: ProviderDefaultUpdateParams) => Promise<void>;
 }
@@ -72,6 +74,7 @@ export function ModelManagementView({
   onSynchronize,
   onCreate,
   onUpdate,
+  onToggleAll = async () => {},
   onUpdatePricing,
   onUpdateDefault,
 }: ModelManagementViewProps) {
@@ -80,6 +83,14 @@ export function ModelManagementView({
   const [displayName, setDisplayName] = useState('');
   const [manualCapabilities, setManualCapabilities] = useState(emptyCapabilities);
   const [search, setSearch] = useState('');
+  const availableModels = models.filter((model) => !model.unavailableAt);
+  const configurableModels = availableModels.filter(
+    (model) => model.enabled || hasModelCapability(model.capabilities),
+  );
+  const enabledModelCount = configurableModels.filter((model) => model.enabled).length;
+  const allModelsEnabled =
+    configurableModels.length > 0 && enabledModelCount === configurableModels.length;
+  const someModelsEnabled = enabledModelCount > 0 && !allModelsEnabled;
 
   const filteredModels = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -132,6 +143,21 @@ export function ModelManagementView({
           <small>{models.length} 个模型 · 未知模型需先选择能力再启用</small>
         </div>
         <div className="settings-header-actions">
+          <label
+            className="model-bulk-toggle"
+            title={allModelsEnabled ? '关闭全部模型' : '启用全部模型'}
+          >
+            <input
+              type="checkbox"
+              checked={allModelsEnabled}
+              disabled={busy || configurableModels.length === 0}
+              ref={(element) => {
+                if (element) element.indeterminate = someModelsEnabled;
+              }}
+              onChange={(event) => void onToggleAll(event.target.checked)}
+            />
+            <span>{allModelsEnabled ? '全部已启用' : '全部启用'}</span>
+          </label>
           <button
             className="button secondary"
             type="button"
@@ -207,102 +233,143 @@ export function ModelManagementView({
               data-unavailable={Boolean(model.unavailableAt)}
               key={model.id}
             >
-              <header>
-                <div>
-                  <input
-                    className="model-name-input"
-                    defaultValue={model.displayName}
-                    aria-label={`${model.remoteModelId} 显示名称`}
-                    onBlur={(event) => {
-                      const next = event.target.value.trim();
-                      if (next && next !== model.displayName)
-                        void update(model, { displayName: next });
-                    }}
-                  />
-                  <small>{model.remoteModelId}</small>
-                  <CapabilitySummary capabilities={model.capabilities} />
-                </div>
-                <label className="model-enabled-toggle">
-                  <input
-                    type="checkbox"
-                    checked={model.enabled}
-                    disabled={busy || Boolean(model.unavailableAt)}
-                    onChange={(event) => void update(model, { enabled: event.target.checked })}
-                  />
-                  启用
-                </label>
-              </header>
-              {model.unavailableAt && (
-                <div className="model-warning">
-                  <TriangleAlert size={13} />
-                  最近一次同步未发现此模型，重新出现前不能启用。
-                </div>
-              )}
-              <CapabilityEditor
-                capabilities={model.capabilities}
-                disabled={busy}
-                onChange={(capabilities) => void update(model, { capabilities })}
-              />
-              {profile.providerType === 'unicompapi' && (
-                <label className="model-template-field">
-                  参数模板
-                  <select
-                    aria-label={`${model.remoteModelId} 参数模板`}
-                    value={model.parameterTemplateKey ?? ''}
-                    disabled={busy}
-                    onChange={(event) =>
-                      void update(model, {
-                        parameterTemplateKey: event.target.value || null,
-                      })
-                    }
+              <details className="model-details">
+                <summary>
+                  <strong>{model.displayName}</strong>
+                  <label
+                    className="model-enabled-toggle"
+                    onClick={(event) => event.stopPropagation()}
+                    onMouseDown={(event) => event.stopPropagation()}
                   >
-                    <option value="">未绑定，不能进入制作</option>
-                    {UNICOMPAPI_MEDIA_TEMPLATES.map((template) => (
-                      <option key={template.key} value={template.key}>
-                        {template.label}
-                      </option>
-                    ))}
-                  </select>
-                  <small>
-                    {model.parameterTemplateKey
-                      ? (UNICOMPAPI_MEDIA_TEMPLATES.find(
-                          (item) => item.key === model.parameterTemplateKey,
-                        )?.description ?? '已绑定模板')
-                      : '媒体模型需要绑定模板后才能进入制作候选'}
-                  </small>
-                </label>
-              )}
-              <ModelRoleEditor
-                profileId={profile.id}
-                model={model}
-                defaults={defaults}
-                disabled={busy}
-                onSave={onUpdateDefault}
-              />
-              <ModelPricingEditor
-                profileId={profile.id}
-                model={model}
-                creditBased={profile.providerType === 'vidu'}
-                pricing={pricing.find((item) => item.modelId === model.id)}
-                disabled={busy}
-                onSave={onUpdatePricing}
-              />
-              <footer>
-                <span>
-                  {model.source === 'manual'
-                    ? '手动模型'
-                    : model.source === 'built-in'
-                      ? '内置模型'
-                      : '远程同步'}
-                </span>
-                <span>{model.lastSeenAt ? `最近发现 ${model.lastSeenAt}` : '尚未同步'}</span>
-              </footer>
+                    <input
+                      type="checkbox"
+                      checked={model.enabled}
+                      disabled={
+                        busy ||
+                        Boolean(model.unavailableAt) ||
+                        (!model.enabled && !hasModelCapability(model.capabilities))
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onChange={(event) => void update(model, { enabled: event.target.checked })}
+                    />
+                    {model.enabled || hasModelCapability(model.capabilities)
+                      ? '启用'
+                      : '先配置能力'}
+                  </label>
+                </summary>
+                <div className="model-details-body">
+                  <header className="model-detail-header">
+                    <div>
+                      <input
+                        className="model-name-input"
+                        defaultValue={model.displayName}
+                        aria-label={`${model.remoteModelId} 显示名称`}
+                        onBlur={(event) => {
+                          const next = event.target.value.trim();
+                          if (next && next !== model.displayName)
+                            void update(model, { displayName: next });
+                        }}
+                      />
+                      <small>{model.remoteModelId}</small>
+                      {model.contractId && (
+                        <small className="model-contract-badge">
+                          合同 {model.contractId} · {model.contractStatus ?? 'discovered'}
+                        </small>
+                      )}
+                      <CapabilitySummary capabilities={model.capabilities} />
+                    </div>
+                  </header>
+                  {model.unavailableAt && (
+                    <div className="model-warning">
+                      <TriangleAlert size={13} />
+                      最近一次同步未发现此模型，重新出现前不能启用。
+                    </div>
+                  )}
+                  <CapabilityEditor
+                    capabilities={model.capabilities}
+                    disabled={
+                      busy ||
+                      mediaModelBindings.some(
+                        (binding) =>
+                          binding.providerType === profile.providerType &&
+                          binding.remoteModelId === model.remoteModelId,
+                      )
+                    }
+                    onChange={(capabilities) => void update(model, { capabilities })}
+                  />
+                  {profile.providerType === 'unicompapi' &&
+                    !mediaModelBindings.some(
+                      (binding) =>
+                        binding.providerType === profile.providerType &&
+                        binding.remoteModelId === model.remoteModelId &&
+                        binding.contractId === model.contractId,
+                    ) && (
+                      <label className="model-template-field">
+                        参数模板
+                        <select
+                          aria-label={`${model.remoteModelId} 参数模板`}
+                          value={model.parameterTemplateKey ?? ''}
+                          disabled={busy}
+                          onChange={(event) =>
+                            void update(model, {
+                              parameterTemplateKey: event.target.value || null,
+                            })
+                          }
+                        >
+                          <option value="">未绑定，不能进入制作</option>
+                          {UNICOMPAPI_MEDIA_TEMPLATES.map((template) => (
+                            <option key={template.key} value={template.key}>
+                              {template.label}
+                            </option>
+                          ))}
+                        </select>
+                        <small>
+                          {model.parameterTemplateKey
+                            ? (UNICOMPAPI_MEDIA_TEMPLATES.find(
+                                (item) => item.key === model.parameterTemplateKey,
+                              )?.description ?? '已绑定模板')
+                            : '媒体模型需要绑定模板后才能进入制作候选'}
+                        </small>
+                      </label>
+                    )}
+                  <ModelRoleEditor
+                    profileId={profile.id}
+                    model={model}
+                    defaults={defaults}
+                    disabled={busy}
+                    onSave={onUpdateDefault}
+                  />
+                  <ModelPricingEditor
+                    profileId={profile.id}
+                    model={model}
+                    creditBased={profile.providerType === 'vidu'}
+                    pricing={pricing.find((item) => item.modelId === model.id)}
+                    disabled={busy}
+                    onSave={onUpdatePricing}
+                  />
+                  <footer>
+                    <span>
+                      {model.source === 'manual'
+                        ? '手动模型'
+                        : model.source === 'built-in'
+                          ? '内置模型'
+                          : '远程同步'}
+                    </span>
+                    <span>{model.lastSeenAt ? `最近发现 ${model.lastSeenAt}` : '尚未同步'}</span>
+                  </footer>
+                </div>
+              </details>
             </article>
           ))
         )}
       </div>
     </section>
   );
+}
+
+function hasModelCapability(capabilities: ProviderModelCapabilities): boolean {
+  return Object.values(capabilities).some(Boolean);
 }
 
 function CapabilitySummary({ capabilities }: { capabilities: ProviderModelCapabilities }) {

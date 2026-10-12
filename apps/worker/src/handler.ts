@@ -233,6 +233,7 @@ function resolveMediaSelectionForRequest(
       providerType: profile.providerType,
       remoteModelId: model.remoteModelId,
       parameterTemplateKey: model.parameterTemplateKey,
+      contractStatus: model.contractStatus,
     })
   ) {
     throw new ProviderProfileValidationError(
@@ -286,6 +287,9 @@ function resolveMediaSelectionForRequest(
       adapterKey: adapter.key,
       adapterSchemaVersion: adapter.schemaVersion,
       adapterSchemaSource: schemaRecord?.source === 'manual' ? 'manual' : 'official-adapter',
+      contractId: adapter.contractId,
+      contractRevision: adapter.contractRevision,
+      contractStatus: model.contractStatus,
     },
   };
 }
@@ -377,6 +381,7 @@ export function modelMatchesUnifiedAgentRequest(
     unavailableAt?: string | null;
     remoteModelId: string;
     parameterTemplateKey?: string;
+    contractStatus?: string;
     capabilities: {
       text: boolean;
       streaming: boolean;
@@ -404,6 +409,7 @@ export function modelMatchesUnifiedAgentRequest(
         providerType,
         remoteModelId: model.remoteModelId,
         parameterTemplateKey: model.parameterTemplateKey,
+        contractStatus: model.contractStatus,
       }) &&
       (capability === 'image'
         ? adapter.capability === 'REFERENCE_TO_IMAGE'
@@ -417,7 +423,7 @@ export function modelMatchesUnifiedAgentRequest(
 function adapterMatchesCapability(
   adapter: { provider: string; model: string; capability: string },
   profile: { providerType: string },
-  model: { remoteModelId: string; parameterTemplateKey?: string },
+  model: { remoteModelId: string; parameterTemplateKey?: string; contractStatus?: string },
   capability: UnifiedAgentCapability | undefined,
 ): boolean {
   if (
@@ -425,6 +431,7 @@ function adapterMatchesCapability(
       providerType: profile.providerType,
       remoteModelId: model.remoteModelId,
       parameterTemplateKey: model.parameterTemplateKey,
+      contractStatus: model.contractStatus,
     })
   ) {
     return false;
@@ -451,6 +458,7 @@ function toModelSchemaInfo(
         providerType: profile.providerType,
         remoteModelId: model.remoteModelId,
         parameterTemplateKey: model.parameterTemplateKey,
+        contractStatus: model.contractStatus,
       })
         ? [record]
         : [];
@@ -482,6 +490,9 @@ function toModelSchemaInfo(
     modelSource: model.source,
     modelEnabled: model.enabled,
     modelUnavailableAt: model.unavailableAt,
+    contractId: model.contractId,
+    contractRevision: model.contractRevision,
+    contractStatus: model.contractStatus,
     schemaStatus: !schemaRelevant
       ? 'confirmed'
       : pendingSchema
@@ -521,6 +532,13 @@ const methods = new Set<WorkerMethod>([
   'provider.profile.archive',
   'provider.profile.migrateLegacy',
   'provider.definition.list',
+  'model.contract.list',
+  'model.contract.get',
+  'model.contract.setEnabled',
+  'model.binding.list',
+  'model.binding.setEnabled',
+  'model.protocol.list',
+  'model.task-adapter.list',
   'provider.connection.begin',
   'provider.connection.complete',
   'provider.model.list',

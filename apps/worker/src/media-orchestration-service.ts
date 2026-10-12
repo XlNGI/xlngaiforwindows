@@ -550,12 +550,23 @@ export class MediaOrchestrationService {
         providerType: route.providerType,
         remoteModelId: model.remoteModelId,
         parameterTemplateKey: model.parameterTemplateKey,
+        contractStatus: model.contractStatus,
       }) ||
       (kind === 'image') !== adapter.capability.endsWith('TO_IMAGE')
     ) {
       throw new Error('The frozen media adapter is no longer compatible.');
     }
     const frozenSchemaVersion = frozen.adapterSchemaVersion ?? snapshot.schemaVersion;
+    assertFrozenValue(
+      frozen.contractId ?? snapshot.contractId,
+      adapter.contractId,
+      'Model contract',
+    );
+    assertFrozenValue(
+      frozen.contractRevision ?? snapshot.contractRevision,
+      adapter.contractRevision,
+      'Contract revision',
+    );
     if (frozenSchemaVersion !== undefined && frozenSchemaVersion !== adapter.schemaVersion) {
       throw new Error('The frozen media Adapter Schema version is no longer available.');
     }
@@ -627,7 +638,7 @@ function requiredSnapshotString(value: unknown, label: string): string {
   }
   return value.trim();
 }
-function assertFrozenValue(value: unknown, current: string, label: string): void {
+function assertFrozenValue(value: unknown, current: unknown, label: string): void {
   if (value !== undefined && value !== current) {
     throw new Error(`${label} no longer matches the frozen media task snapshot.`);
   }

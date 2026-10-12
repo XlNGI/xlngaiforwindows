@@ -9,6 +9,7 @@ const productionCapabilities = new Set<GenerationCapability>([
   'IMAGE_TO_VIDEO',
   'REFERENCE_TO_VIDEO',
   'START_END_TO_VIDEO',
+  'VIDEO_TO_VIDEO',
 ]);
 
 function initialProductionCapability(): GenerationCapability {

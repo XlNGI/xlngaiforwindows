@@ -1,5 +1,12 @@
 export const IPC_PROTOCOL_VERSION = 1 as const;
 
+export {
+  officialVideoContracts,
+  officialImageContracts,
+  mediaModelBindings,
+  adapterBindsCatalogModel,
+} from './official-media-contracts.js';
+
 export interface HealthResult {
   protocolVersion: typeof IPC_PROTOCOL_VERSION;
   workerVersion: string;
@@ -252,8 +259,162 @@ export interface ProviderModelInfo {
   lastSyncedAt?: string;
   lastSeenAt?: string;
   unavailableAt?: string;
+  /** Canonical model contract selected for this provider model, when verified. */
+  contractId?: string;
+  /** Immutable revision of the canonical contract used by this model. */
+  contractRevision?: number;
+  contractStatus?: ModelCatalogStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export type ModelCatalogStatus =
+  'discovered' | 'verified' | 'enabled' | 'deprecated' | 'rejected' | 'revalidation_required';
+
+export type ModelBindingCompatibility = 'exact' | 'partial' | 'incompatible';
+
+export interface ModelContractCapabilities {
+  text: boolean;
+  vision: boolean;
+  imageInput: boolean;
+  audioInput: boolean;
+  videoInput: boolean;
+  streaming: boolean;
+  reasoning: boolean;
+  tools: boolean;
+  parallelToolCalls: boolean;
+  toolChoice: boolean;
+  structuredOutput: boolean;
+  jsonMode: boolean;
+  imageGeneration: boolean;
+  imageEditing: boolean;
+  videoGeneration: boolean;
+  videoAsync: boolean;
+  videoPolling: boolean;
+  videoCancellation: boolean;
+  maxContextTokens?: number;
+  maxOutputTokens?: number;
+  maxImages?: number;
+  supportedImageFormats?: string[];
+}
+
+export interface ModelContractSource {
+  url: string;
+  title: string;
+  checkedAt: string;
+  locale?: string;
+  verificationStatus: 'pending' | 'verified' | 'revalidation_required';
+}
+
+export type ContractMappingOperation =
+  | 'copy'
+  | 'rename'
+  | 'constant'
+  | 'template'
+  | 'enumMap'
+  | 'unitConvert'
+  | 'arrayMap'
+  | 'conditional'
+  | 'extract';
+
+export interface ContractFieldMapping {
+  operation: ContractMappingOperation;
+  from?: string;
+  to: string;
+  value?: unknown;
+  enumMap?: Record<string, string>;
+  factor?: number;
+}
+
+export interface ContractTransport {
+  protocolFamily: string;
+  request: ContractFieldMapping[];
+  response: ContractFieldMapping[];
+  samples?: { request: unknown; response: unknown }[];
+}
+
+export interface ProtocolAdapter {
+  id: string;
+  protocol: string;
+  providerTypes: string[];
+  transport: ContractTransport;
+  supportsStreaming: boolean;
+  supportsToolCalls: boolean;
+}
+
+export interface ModelContractLifecycle {
+  mode: 'synchronous' | 'asynchronous';
+  submit?: string;
+  status?: string;
+  cancel?: string;
+  output?: string;
+}
+
+export interface TaskAdapterDescriptor {
+  id: string;
+  capability: string;
+  contractId: string;
+  contractRevision: number;
+  protocolAdapterId: string;
+  lifecycle: ModelContractLifecycle;
+  parameterSchema: Record<string, unknown>;
+}
+
+export type TaskAdapter = TaskAdapterDescriptor;
+
+export interface ModelContract {
+  contractId: string;
+  contractRevision: number;
+  providerFamily: string;
+  officialModelName: string;
+  /** Explicit production mode for contracts that expose a media task. */
+  taskCapability?: GenerationCapability;
+  capabilities: ModelContractCapabilities;
+  parameterSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  transport: ContractTransport;
+  lifecycle: ModelContractLifecycle;
+  source: ModelContractSource;
+  status: ModelCatalogStatus;
+}
+
+export interface ModelBinding {
+  bindingId: string;
+  providerProfileId?: string;
+  providerType: string;
+  remoteModelId: string;
+  contractId: string;
+  contractRevision: number;
+  protocol: string;
+  compatibility: ModelBindingCompatibility;
+  capabilitiesOverride?: Partial<ModelContractCapabilities>;
+  transportOverride?: Partial<ContractTransport>;
+  status: ModelCatalogStatus;
+}
+
+export interface ModelContractListParams {
+  status?: ModelCatalogStatus;
+}
+
+export interface ModelContractGetParams {
+  contractId: string;
+  contractRevision?: number;
+}
+
+export interface ModelBindingListParams {
+  status?: ModelCatalogStatus;
+  providerType?: string;
+}
+
+export interface ModelContractEnableParams {
+  contractId: string;
+  contractRevision: number;
+  enabled: boolean;
+}
+
+export interface ModelBindingEnableParams {
+  bindingId: string;
+  enabled: boolean;
 }
 
 export type UnifiedAgentSchemaSource = 'official-adapter' | 'manual' | 'synced-catalog' | 'missing';
@@ -276,6 +437,9 @@ export interface UnifiedAgentModelSchemaInfo {
   modelSource: ProviderModelSource;
   modelEnabled: boolean;
   modelUnavailableAt?: string;
+  contractId?: string;
+  contractRevision?: number;
+  contractStatus?: ModelCatalogStatus;
   schemaStatus: UnifiedAgentSchemaStatus;
   schemaSource: UnifiedAgentSchemaSource;
   adapters: AdapterDescriptor[];
@@ -2714,6 +2878,9 @@ export interface MediaModelSelectionSnapshot {
   adapterKey: string;
   adapterSchemaVersion: number;
   adapterSchemaSource: 'official-adapter' | 'manual';
+  contractId?: string;
+  contractRevision?: number;
+  contractStatus?: ModelCatalogStatus;
 }
 
 export interface MediaModelCandidate {
@@ -2724,6 +2891,9 @@ export interface MediaModelCandidate {
   modelId: string;
   remoteModelId: string;
   modelName: string;
+  contractId?: string;
+  contractRevision?: number;
+  contractStatus?: ModelCatalogStatus;
   adapters: AdapterDescriptor[];
   costNotice: { required: true; summary: string };
 }
@@ -2989,13 +3159,14 @@ export type GenerationCapability =
   | 'TEXT_TO_VIDEO'
   | 'IMAGE_TO_VIDEO'
   | 'REFERENCE_TO_VIDEO'
+  | 'VIDEO_TO_VIDEO'
   | 'START_END_TO_VIDEO';
 
 export type AdapterParameterValue = string | number | boolean | string[];
 export type AdapterParameters = Record<string, AdapterParameterValue>;
 
 export interface AdapterParameterProperty {
-  type: 'string' | 'integer' | 'boolean' | 'array';
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'array';
   title: string;
   description?: string;
   default?: AdapterParameterValue;
@@ -3003,6 +3174,8 @@ export interface AdapterParameterProperty {
   const?: AdapterParameterValue;
   minLength?: number;
   maxLength?: number;
+  format?: 'uri';
+  pattern?: string;
   minimum?: number;
   maximum?: number;
   minItems?: number;
@@ -3015,6 +3188,7 @@ export interface AdapterParameterProperty {
   items?: {
     type: 'string';
     format?: 'uri';
+    pattern?: string;
   };
 }
 
@@ -3056,6 +3230,10 @@ export interface AdapterDescriptor {
   credentialProvider: string;
   parameterSchema: AdapterParameterSchema;
   uiSchema: AdapterUiSchema;
+  /** New contract identity; omitted for legacy descriptors. */
+  contractId?: string;
+  contractRevision?: number;
+  bindingId?: string;
 }
 
 export interface AdapterCatalogResult {
@@ -3498,6 +3676,34 @@ export interface WorkerMethodMap {
   'provider.definition.list': {
     params: Record<string, never>;
     result: ProviderDefinitionInfo[];
+  };
+  'model.contract.list': {
+    params: ModelContractListParams;
+    result: ModelContract[];
+  };
+  'model.contract.get': {
+    params: ModelContractGetParams;
+    result: ModelContract | null;
+  };
+  'model.contract.setEnabled': {
+    params: ModelContractEnableParams;
+    result: ModelContract;
+  };
+  'model.binding.list': {
+    params: ModelBindingListParams;
+    result: ModelBinding[];
+  };
+  'model.binding.setEnabled': {
+    params: ModelBindingEnableParams;
+    result: ModelBinding;
+  };
+  'model.protocol.list': {
+    params: Record<string, never>;
+    result: ProtocolAdapter[];
+  };
+  'model.task-adapter.list': {
+    params: Record<string, never>;
+    result: TaskAdapter[];
   };
   'provider.connection.begin': {
     params: ProviderProfileGetParams;

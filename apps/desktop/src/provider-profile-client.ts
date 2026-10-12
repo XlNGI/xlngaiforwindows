@@ -10,6 +10,12 @@ import type {
   ProviderProfileCreateParams,
   ProviderProfileInfo,
   ProviderProfileUpdateParams,
+  ModelBinding,
+  ModelBindingEnableParams,
+  ModelContract,
+  ModelContractEnableParams,
+  ProtocolAdapter,
+  TaskAdapter,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 
@@ -34,6 +40,18 @@ export const providerProfileClient = {
     callWorker('provider.model.createManual', params),
   updateModel: (params: ProviderModelUpdateParams): Promise<ProviderModelInfo> =>
     callWorker('provider.model.update', params),
+  listModelContracts: (status?: ModelContract['status']): Promise<ModelContract[]> =>
+    callWorker('model.contract.list', status ? { status } : {}),
+  getModelContract: (contractId: string, contractRevision = 1): Promise<ModelContract | null> =>
+    callWorker('model.contract.get', { contractId, contractRevision }),
+  setModelContractEnabled: (params: ModelContractEnableParams): Promise<ModelContract> =>
+    callWorker('model.contract.setEnabled', params),
+  listModelBindings: (providerType?: string): Promise<ModelBinding[]> =>
+    callWorker('model.binding.list', providerType ? { providerType } : {}),
+  setModelBindingEnabled: (params: ModelBindingEnableParams): Promise<ModelBinding> =>
+    callWorker('model.binding.setEnabled', params),
+  listProtocolAdapters: (): Promise<ProtocolAdapter[]> => callWorker('model.protocol.list', {}),
+  listTaskAdapters: (): Promise<TaskAdapter[]> => callWorker('model.task-adapter.list', {}),
   listModelPricing: (profileId: string): Promise<ModelPricingInfo[]> =>
     callWorker('provider.model.pricing.list', { profileId }),
   updateModelPricing: (params: ModelPricingUpdateParams): Promise<ModelPricingInfo> =>

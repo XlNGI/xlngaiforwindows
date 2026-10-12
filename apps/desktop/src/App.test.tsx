@@ -538,6 +538,23 @@ describe('App', () => {
     expect(container.querySelector('.production-panel')).not.toBeInTheDocument();
   });
 
+  it('keeps production open while switching the adjacent project page', () => {
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: '文生图' }));
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: '项目导航' })).getByRole('button', {
+        name: '小说',
+      }),
+    );
+
+    expect(container.querySelector('.workspace-production-page')).toBeVisible();
+    expect(container.querySelector('.workspace-editor-page')).toBeVisible();
+    expect(container.querySelector('.app-shell')).toHaveAttribute(
+      'data-navigation-mode',
+      'production',
+    );
+  });
+
   it.each(['小说', '剧本', '角色与场景', '场次与镜头', '素材库', '任务日志'])(
     'keeps the %s page out of image and video production',
     (page) => {
@@ -548,13 +565,13 @@ describe('App', () => {
       expect(container.querySelector('.workspace-editor-page')).toBeVisible();
 
       fireEvent.click(screen.getByRole('button', { name: '文生图' }));
-      expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
-      expect(container.querySelector('[data-pane-id="editor"]')).not.toBeInTheDocument();
+      expect(container.querySelector('.workspace-editor-page')).toBeVisible();
+      expect(container.querySelector('[data-pane-id="editor"]')).toBeInTheDocument();
       expect(container.querySelector('.workspace-production-page')).toBeVisible();
 
       fireEvent.click(screen.getByRole('button', { name: '视频制作' }));
       fireEvent.click(screen.getByRole('button', { name: '文生视频' }));
-      expect(container.querySelector('.workspace-editor-page')).not.toBeVisible();
+      expect(container.querySelector('.workspace-editor-page')).toBeVisible();
 
       fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
       expect(container.querySelector('.workspace-editor-page')).toBeVisible();

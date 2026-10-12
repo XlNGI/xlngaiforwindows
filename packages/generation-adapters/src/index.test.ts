@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   adapterBindsCatalogModel,
+  adapterDescriptorFromModelContract,
   extractVideoCost,
   getAdapter,
   getAdapterCatalog,
@@ -167,6 +168,7 @@ describe('adapter registry', () => {
       'IMAGE_TO_VIDEO',
       'REFERENCE_TO_VIDEO',
       'START_END_TO_VIDEO',
+      'VIDEO_TO_VIDEO',
     ]);
     expect(
       validateAdapterParameters('TEXT_TO_VIDEO:vidu:viduq3-pro:v2', {
@@ -344,6 +346,12 @@ describe('adapter registry', () => {
       provider: 'unicompapi',
       model: 'vidu-compatible-reference',
       endpoint: 'https://unicompapi.com/v1/videos',
+      contractId: 'vidu.q3.reference-video',
+      contractRevision: 1,
+    });
+    expect(getAdapter('REFERENCE_TO_VIDEO:vidu:viduq3:v2')).toMatchObject({
+      contractId: 'vidu.q3.reference-video',
+      contractRevision: 1,
     });
     expect(
       validateAdapterParameters(referenceKey, {
@@ -375,6 +383,10 @@ describe('adapter registry', () => {
 
   it('binds UniCompAPI catalog rows to templates instead of remote model IDs', () => {
     const image = getAdapter('TEXT_TO_IMAGE:unicompapi:openai-compatible-image:v1')!;
+    expect(image).toMatchObject({
+      contractId: 'media.openai-compatible-image',
+      contractRevision: 1,
+    });
     expect(
       adapterBindsCatalogModel(image, {
         providerType: 'unicompapi',
@@ -388,5 +400,73 @@ describe('adapter registry', () => {
         remoteModelId: 'qwen-image',
       }),
     ).toBe(false);
+  });
+
+  it('derives a descriptor and controls from a canonical JSON Schema', () => {
+    const descriptor = adapterDescriptorFromModelContract({
+      contract: {
+        contractId: 'test.image',
+        contractRevision: 2,
+        providerFamily: 'test',
+        officialModelName: 'Test Image',
+        capabilities: {
+          text: false,
+          vision: false,
+          imageInput: true,
+          audioInput: false,
+          videoInput: false,
+          streaming: false,
+          reasoning: false,
+          tools: false,
+          parallelToolCalls: false,
+          toolChoice: false,
+          structuredOutput: false,
+          jsonMode: false,
+          imageGeneration: true,
+          imageEditing: false,
+          videoGeneration: false,
+          videoAsync: false,
+          videoPolling: false,
+          videoCancellation: false,
+        },
+        parameterSchema: {
+          type: 'object',
+          required: ['prompt'],
+          properties: {
+            prompt: { type: 'string', title: '提示词', description: '官方说明' },
+            size: { type: 'string', enum: ['1024x1024'] },
+            count: { type: 'integer', minimum: 1 },
+          },
+        },
+        transport: { protocolFamily: 'test', request: [], response: [] },
+        lifecycle: { mode: 'synchronous' },
+        source: {
+          url: 'https://example.com',
+          title: 'Test',
+          checkedAt: '2026-10-10',
+          verificationStatus: 'verified',
+        },
+        status: 'enabled',
+      },
+      capability: 'TEXT_TO_IMAGE',
+      provider: 'test',
+      providerLabel: 'Test',
+      model: 'test-image',
+      modelLabel: 'Test Image',
+      apiVersion: 'v1',
+      endpoint: 'https://example.com/images',
+      documentationUrl: 'https://example.com',
+      credentialProvider: 'test',
+    });
+    expect(descriptor).toMatchObject({
+      contractId: 'test.image',
+      contractRevision: 2,
+      parameterSchema: { required: ['prompt'] },
+    });
+    expect(descriptor.uiSchema.fields.map((field) => [field.key, field.control])).toEqual([
+      ['prompt', 'textarea'],
+      ['size', 'select'],
+      ['count', 'number'],
+    ]);
   });
 });

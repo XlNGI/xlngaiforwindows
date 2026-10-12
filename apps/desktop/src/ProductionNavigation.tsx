@@ -31,6 +31,7 @@ const groups: Array<{
       { capability: 'TEXT_TO_VIDEO', label: '文生视频' },
       { capability: 'IMAGE_TO_VIDEO', label: '图生视频' },
       { capability: 'REFERENCE_TO_VIDEO', label: '参考生视频' },
+      { capability: 'VIDEO_TO_VIDEO', label: '视频编辑' },
       { capability: 'START_END_TO_VIDEO', label: '首尾帧生视频' },
     ],
   },

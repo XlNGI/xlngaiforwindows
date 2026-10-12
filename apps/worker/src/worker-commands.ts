@@ -1,4 +1,11 @@
-import type { WorkerMethod } from '@ai-video/contracts';
+import type {
+  ModelBindingListParams,
+  ModelContractGetParams,
+  ModelContractListParams,
+  ModelContractEnableParams,
+  ModelBindingEnableParams,
+  WorkerMethod,
+} from '@ai-video/contracts';
 import type { AppSettingsService } from './app-settings-service.js';
 import type { AgentProviderLoopService } from './agent-provider-loop-service.js';
 import type { GenerationService } from './generation-service.js';
@@ -12,6 +19,13 @@ import type { PartialArtifactService } from './partial-artifact-service.js';
 import type { SampleProjectService } from './sample-project-service.js';
 import type { UsageService } from './usage-service.js';
 import type { VideoGenerationService } from './video-generation-service.js';
+import {
+  getModelContract,
+  listModelBindings,
+  listModelContracts,
+  listProtocolAdapters,
+  listTaskAdapters,
+} from './model-contract-registry.js';
 
 export interface InfrastructureCommandServices {
   projectService: ProjectService;
@@ -164,6 +178,45 @@ export async function executeInfrastructureCommand(
       };
     case 'provider.definition.list':
       return { handled: true, result: services.appSettingsService.listProviderDefinitions() };
+    case 'model.contract.list':
+      return {
+        handled: true,
+        result: listModelContracts((params as unknown as ModelContractListParams).status),
+      };
+    case 'model.contract.get': {
+      const query = params as unknown as ModelContractGetParams;
+      return {
+        handled: true,
+        result: getModelContract(query.contractId, query.contractRevision) ?? null,
+      };
+    }
+    case 'model.contract.setEnabled':
+      return {
+        handled: true,
+        result: services.appSettingsService.setModelContractEnabled(
+          params as unknown as ModelContractEnableParams,
+        ),
+      };
+    case 'model.binding.list': {
+      const query = params as unknown as ModelBindingListParams;
+      return {
+        handled: true,
+        result: listModelBindings(query.status).filter(
+          (binding) => !query.providerType || binding.providerType === query.providerType,
+        ),
+      };
+    }
+    case 'model.binding.setEnabled':
+      return {
+        handled: true,
+        result: services.appSettingsService.setModelBindingEnabled(
+          params as unknown as ModelBindingEnableParams,
+        ),
+      };
+    case 'model.protocol.list':
+      return { handled: true, result: listProtocolAdapters() };
+    case 'model.task-adapter.list':
+      return { handled: true, result: listTaskAdapters() };
     case 'provider.connection.begin':
       return {
         handled: true,

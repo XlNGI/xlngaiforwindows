@@ -1,4 +1,4 @@
-export const CURRENT_APP_SCHEMA_VERSION = 5;
+export const CURRENT_APP_SCHEMA_VERSION = 7;
 
 export const APP_MIGRATION_V1 = `
 CREATE TABLE app_schema_migrations (
@@ -133,4 +133,49 @@ CREATE INDEX idx_adapter_schema_audits_key ON adapter_schema_audits(adapter_key,
 export const APP_MIGRATION_V5 = `
 ALTER TABLE provider_models ADD COLUMN parameter_template_key TEXT
   CHECK (parameter_template_key IS NULL OR length(trim(parameter_template_key)) > 0);
+`;
+
+export const APP_MIGRATION_V6 = `
+ALTER TABLE provider_models ADD COLUMN contract_id TEXT
+  CHECK (contract_id IS NULL OR length(trim(contract_id)) > 0);
+ALTER TABLE provider_models ADD COLUMN contract_revision INTEGER
+  CHECK (contract_revision IS NULL OR contract_revision > 0);
+ALTER TABLE provider_models ADD COLUMN contract_status TEXT
+  CHECK (contract_status IS NULL OR contract_status IN (
+    'discovered', 'verified', 'enabled', 'deprecated', 'rejected', 'revalidation_required'
+  ));
+CREATE INDEX idx_provider_models_contract ON provider_models(contract_id, contract_revision);
+`;
+
+export const APP_MIGRATION_V7 = `
+CREATE TABLE model_contracts (
+  contract_id TEXT NOT NULL,
+  contract_revision INTEGER NOT NULL CHECK (contract_revision > 0),
+  status TEXT NOT NULL CHECK (status IN (
+    'discovered', 'verified', 'enabled', 'deprecated', 'rejected', 'revalidation_required'
+  )),
+  descriptor_json TEXT NOT NULL CHECK (json_valid(descriptor_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(contract_id, contract_revision)
+);
+
+CREATE TABLE model_bindings (
+  binding_id TEXT PRIMARY KEY,
+  provider_type TEXT NOT NULL CHECK (length(trim(provider_type)) > 0),
+  remote_model_id TEXT NOT NULL CHECK (length(trim(remote_model_id)) > 0),
+  contract_id TEXT NOT NULL,
+  contract_revision INTEGER NOT NULL CHECK (contract_revision > 0),
+  status TEXT NOT NULL CHECK (status IN (
+    'discovered', 'verified', 'enabled', 'deprecated', 'rejected', 'revalidation_required'
+  )),
+  descriptor_json TEXT NOT NULL CHECK (json_valid(descriptor_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (contract_id, contract_revision)
+    REFERENCES model_contracts(contract_id, contract_revision)
+);
+
+CREATE INDEX idx_model_bindings_provider_model
+  ON model_bindings(provider_type, remote_model_id, status);
 `;

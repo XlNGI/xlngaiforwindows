@@ -33,11 +33,11 @@ describe('app settings database', () => {
     const projectDatabase = openProjectDatabase(join(directory, 'project.sqlite'));
 
     expect(getAppSchemaVersion(appDatabase)).toBe(0);
-    expect(migrateAppDatabase(appDatabase)).toBe(5);
-    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 5 });
+    expect(migrateAppDatabase(appDatabase)).toBe(7);
+    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 7 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
     expect(migrateDatabase(projectDatabase)).toBe(41);
-    expect(getAppSchemaVersion(appDatabase)).toBe(5);
+    expect(getAppSchemaVersion(appDatabase)).toBe(7);
 
     const providerColumns = appDatabase
       .prepare("SELECT name FROM pragma_table_info('provider_profiles')")
@@ -78,7 +78,7 @@ describe('app settings database', () => {
         '2026-08-03T00:00:00.000Z',
       );
 
-    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(5);
+    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(7);
     expect(createAppRepositories(database).providerProfiles.list()).toMatchObject([
       { name: 'Existing Vidu', migrationSource: undefined },
     ]);
@@ -115,6 +115,32 @@ describe('app settings database', () => {
       enabled: true,
       createdAt: '2026-08-03T00:00:00.000Z',
       updatedAt: '2026-08-03T00:00:00.000Z',
+    });
+    repositories.modelContracts.save({
+      contractId: 'cn.minimax.h3',
+      contractRevision: 1,
+      status: 'enabled',
+      descriptorJson: JSON.stringify({ contractId: 'cn.minimax.h3', contractRevision: 1 }),
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    });
+    repositories.modelBindings.save({
+      bindingId: 'minimax-h3',
+      providerType: 'minimax',
+      remoteModelId: 'MiniMax-H3',
+      contractId: 'cn.minimax.h3',
+      contractRevision: 1,
+      status: 'enabled',
+      descriptorJson: JSON.stringify({ bindingId: 'minimax-h3' }),
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    });
+    expect(repositories.modelContracts.get('cn.minimax.h3', 1)).toMatchObject({
+      status: 'enabled',
+    });
+    expect(repositories.modelBindings.get('minimax-h3')).toMatchObject({
+      remoteModelId: 'MiniMax-H3',
+      contractId: 'cn.minimax.h3',
     });
     repositories.modelPricing.save({
       providerProfileId: '11111111-1111-4111-8111-111111111111',

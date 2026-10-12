@@ -231,6 +231,24 @@ describe('VideoGenerationService', () => {
     });
   });
 
+  it('fails an expired official HappyHorse task instead of polling UNKNOWN forever', async () => {
+    const { service } = await setup();
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_VIDEO:unicompapi:cn.happyhorse.1.1.t2v:contract-1',
+      parameters: { prompt: 'A horse running' },
+      providerRegion: 'unicompapi',
+    });
+    service.attachTask({ jobId: job.id, providerTaskId: 'expired-task' });
+    expect(
+      service.observe({
+        jobId: job.id,
+        providerTaskId: 'expired-task',
+        providerStatus: 200,
+        providerBody: { output: { task_id: 'expired-task', task_status: 'UNKNOWN' } },
+      }),
+    ).toMatchObject({ status: 'failed' });
+  });
+
   it('keeps UniCompAPI unknown video states active while other providers fail closed', async () => {
     const { service } = await setup();
     const unicompJob = service.prepare({

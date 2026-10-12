@@ -137,7 +137,13 @@ export class MediaPreparationService {
       arguments: args,
       inputAttachmentCount,
       inputAttachments,
-      candidates: this.listCandidates(kind, args.inputAssetIds.length + inputAttachmentCount),
+      candidates: this.listCandidates(
+        kind,
+        args.inputAssetIds.length +
+          inputAttachmentCount +
+          (Array.isArray(args.parameters.images) ? args.parameters.images.length : 0),
+        typeof args.parameters.video === 'string',
+      ),
     };
   }
 
@@ -167,7 +173,12 @@ export class MediaPreparationService {
     this.assertInputAssets(context.arguments.inputAssetIds);
     const current = this.listCandidates(
       context.kind,
-      context.arguments.inputAssetIds.length + context.inputAttachmentCount,
+      context.arguments.inputAssetIds.length +
+        context.inputAttachmentCount +
+        (Array.isArray(context.arguments.parameters.images)
+          ? context.arguments.parameters.images.length
+          : 0),
+      typeof context.arguments.parameters.video === 'string',
     );
     const candidate = current.find(
       (item) =>
@@ -302,7 +313,11 @@ export class MediaPreparationService {
     });
   }
 
-  private listCandidates(kind: MediaGenerationKind, inputCount: number): MediaModelCandidate[] {
+  private listCandidates(
+    kind: MediaGenerationKind,
+    inputCount: number,
+    hasVideo = false,
+  ): MediaModelCandidate[] {
     const adapters = this.adapters.catalog().adapters;
     const candidates: MediaModelCandidate[] = [];
     for (const profile of this.settings.listProfiles(false)) {
@@ -316,8 +331,9 @@ export class MediaPreparationService {
               providerType: profile.providerType,
               remoteModelId: model.remoteModelId,
               parameterTemplateKey: model.parameterTemplateKey,
+              contractStatus: model.contractStatus,
             }) &&
-            adapterSupportsInputs(adapter, kind, inputCount) &&
+            adapterSupportsInputs(adapter, kind, inputCount, hasVideo) &&
             this.settings.getAdapterSchemaRecord(adapter.key)?.status !== 'needs_confirmation',
         );
         if (matching.length === 0) continue;
@@ -329,6 +345,9 @@ export class MediaPreparationService {
           modelId: model.id,
           remoteModelId: model.remoteModelId,
           modelName: model.displayName,
+          contractId: model.contractId,
+          contractRevision: model.contractRevision,
+          contractStatus: model.contractStatus,
           adapters: matching.map((adapter) => structuredClone(adapter)),
           costNotice: costNotice(this.settings.listModelPricing(profile.id), model),
         });
@@ -362,6 +381,13 @@ export class MediaPreparationService {
       adapterKey: adapter.key,
       adapterSchemaVersion: adapter.schemaVersion,
       adapterSchemaSource: schema?.source === 'manual' ? 'manual' : 'official-adapter',
+      ...(candidate.contractId
+        ? {
+            contractId: candidate.contractId,
+            contractRevision: candidate.contractRevision,
+            contractStatus: candidate.contractStatus,
+          }
+        : {}),
     };
   }
 
@@ -654,10 +680,15 @@ function adapterSupportsInputs(
   adapter: AdapterDescriptor,
   kind: MediaGenerationKind,
   inputCount: number,
+  hasVideo = false,
 ): boolean {
   if (kind === 'image' && !adapter.capability.endsWith('TO_IMAGE')) return false;
   if (kind === 'video' && !adapter.capability.endsWith('TO_VIDEO')) return false;
   const imageProperty = adapter.parameterSchema.properties.images;
+  if (adapter.capability === 'VIDEO_TO_VIDEO') {
+    return hasVideo && inputCount <= (imageProperty?.maxItems ?? 0);
+  }
+  if (hasVideo) return false;
   if (inputCount === 0) return !imageProperty && adapter.capability.startsWith('TEXT_TO_');
   if (!imageProperty) return false;
   return (

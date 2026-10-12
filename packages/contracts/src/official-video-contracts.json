@@ -1,0 +1,1677 @@
+[
+  {
+    "contractId": "cn.happyhorse.1.0.t2v",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.0-t2v",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": false,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 0,
+      "supportedImageFormats": []
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述生成内容；支持任意语言，官方上限为 2500 个中文字符或 5000 个非中文字符。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["480P", "720P", "1080P"],
+          "default": "1080P"
+        },
+        "ratio": {
+          "type": "string",
+          "title": "画幅比例",
+          "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"],
+          "default": "16:9"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 3,
+          "maximum": 15,
+          "default": 5
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.0-t2v",
+            "input": {
+              "prompt": "A person walking through a garden"
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "duration": 5,
+              "ratio": "16:9"
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-text-to-video-api-reference",
+      "title": "happyhorse-1.0-t2v 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "TEXT_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.happyhorse.1.0.i2v",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.0-i2v",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 1,
+      "supportedImageFormats": ["jpeg", "jpg", "png", "webp"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["images"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述生成内容；支持任意语言，官方上限为 2500 个中文字符或 5000 个非中文字符。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "images": {
+          "type": "array",
+          "title": "首帧图片",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^(?:https?://|data:image/(?:jpeg|png|webp);base64,)"
+          },
+          "description": "JPEG/JPG/PNG/WEBP，单张不超过 20 MB；首帧宽高至少 300 px、宽高比 1:2.5–2.5:1；参考图片短边至少 400 px。支持公开 URL 或图片 Data URL。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["480P", "720P", "1080P"],
+          "default": "1080P",
+          "description": "输出画幅比例与首帧图片近似一致，不单独设置 ratio。"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 3,
+          "maximum": 15,
+          "default": 5
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "arrayMap",
+          "from": "images",
+          "to": "input.media",
+          "value": {
+            "type": "first_frame",
+            "url": "$item"
+          }
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.0-i2v",
+            "input": {
+              "prompt": "A person walking through a garden",
+              "media": [
+                {
+                  "type": "first_frame",
+                  "url": "https://example.com/reference.png"
+                }
+              ]
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "duration": 5
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-image-to-video-api-reference",
+      "title": "happyhorse-1.0-i2v 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "IMAGE_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.happyhorse.1.0.r2v",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.0-r2v",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 9,
+      "supportedImageFormats": ["jpeg", "jpg", "png", "webp"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "images"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述生成内容；官方上限为 2500 个中文字符或 5000 个非中文字符。通过 [Image 1] 等按图片顺序指代参考对象。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "images": {
+          "type": "array",
+          "title": "参考图片",
+          "minItems": 1,
+          "maxItems": 9,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^(?:https?://|data:image/(?:jpeg|png|webp);base64,)"
+          },
+          "description": "JPEG/JPG/PNG/WEBP，单张不超过 20 MB；首帧宽高至少 300 px、宽高比 1:2.5–2.5:1；参考图片短边至少 400 px。支持公开 URL 或图片 Data URL。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["480P", "720P", "1080P"],
+          "default": "1080P"
+        },
+        "ratio": {
+          "type": "string",
+          "title": "画幅比例",
+          "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"],
+          "default": "16:9"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 3,
+          "maximum": 15,
+          "default": 5
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "arrayMap",
+          "from": "images",
+          "to": "input.media",
+          "value": {
+            "type": "reference_image",
+            "url": "$item"
+          }
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.0-r2v",
+            "input": {
+              "prompt": "A person walking through a garden",
+              "media": [
+                {
+                  "type": "reference_image",
+                  "url": "https://example.com/reference.png"
+                }
+              ]
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "duration": 5,
+              "ratio": "16:9"
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-reference-to-video-api-reference",
+      "title": "happyhorse-1.0-r2v 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "REFERENCE_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.happyhorse.1.1.t2v",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.1-t2v",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": false,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 0,
+      "supportedImageFormats": []
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述生成内容；支持任意语言，官方上限为 2500 个中文字符或 5000 个非中文字符。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["480P", "720P", "1080P"],
+          "default": "1080P"
+        },
+        "ratio": {
+          "type": "string",
+          "title": "画幅比例",
+          "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"],
+          "default": "16:9"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 3,
+          "maximum": 15,
+          "default": 5
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.1-t2v",
+            "input": {
+              "prompt": "A person walking through a garden"
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "duration": 5,
+              "ratio": "16:9"
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-text-to-video-api-reference",
+      "title": "happyhorse-1.1-t2v 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "TEXT_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.happyhorse.1.1.i2v",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.1-i2v",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 1,
+      "supportedImageFormats": ["jpeg", "jpg", "png", "webp"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["images"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述生成内容；支持任意语言，官方上限为 2500 个中文字符或 5000 个非中文字符。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "images": {
+          "type": "array",
+          "title": "首帧图片",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^(?:https?://|data:image/(?:jpeg|png|webp);base64,)"
+          },
+          "description": "JPEG/JPG/PNG/WEBP，单张不超过 20 MB；首帧宽高至少 300 px、宽高比 1:2.5–2.5:1；参考图片短边至少 400 px。支持公开 URL 或图片 Data URL。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["480P", "720P", "1080P"],
+          "default": "1080P",
+          "description": "输出画幅比例与首帧图片近似一致，不单独设置 ratio。"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 3,
+          "maximum": 15,
+          "default": 5
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "arrayMap",
+          "from": "images",
+          "to": "input.media",
+          "value": {
+            "type": "first_frame",
+            "url": "$item"
+          }
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.1-i2v",
+            "input": {
+              "prompt": "A person walking through a garden",
+              "media": [
+                {
+                  "type": "first_frame",
+                  "url": "https://example.com/reference.png"
+                }
+              ]
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "duration": 5
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-image-to-video-api-reference",
+      "title": "happyhorse-1.1-i2v 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "IMAGE_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.happyhorse.1.1.r2v",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.1-r2v",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 9,
+      "supportedImageFormats": ["jpeg", "jpg", "png", "webp"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "images"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述生成内容；官方上限为 2500 个中文字符或 5000 个非中文字符。通过 [Image 1] 等按图片顺序指代参考对象。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "images": {
+          "type": "array",
+          "title": "参考图片",
+          "minItems": 1,
+          "maxItems": 9,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^(?:https?://|data:image/(?:jpeg|png|webp);base64,)"
+          },
+          "description": "JPEG/JPG/PNG/WEBP，单张不超过 20 MB；首帧宽高至少 300 px、宽高比 1:2.5–2.5:1；参考图片短边至少 400 px。支持公开 URL 或图片 Data URL。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["480P", "720P", "1080P"],
+          "default": "1080P"
+        },
+        "ratio": {
+          "type": "string",
+          "title": "画幅比例",
+          "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"],
+          "default": "16:9"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 3,
+          "maximum": 15,
+          "default": 5
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "arrayMap",
+          "from": "images",
+          "to": "input.media",
+          "value": {
+            "type": "reference_image",
+            "url": "$item"
+          }
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.1-r2v",
+            "input": {
+              "prompt": "A person walking through a garden",
+              "media": [
+                {
+                  "type": "reference_image",
+                  "url": "https://example.com/reference.png"
+                }
+              ]
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "duration": 5,
+              "ratio": "16:9"
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-reference-to-video-api-reference",
+      "title": "happyhorse-1.1-r2v 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "REFERENCE_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.happyhorse.1.0.video-edit",
+    "contractRevision": 1,
+    "providerFamily": "happyhorse",
+    "officialModelName": "happyhorse-1.0-video-edit",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "audioInput": false,
+      "videoInput": true,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "imageInput": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 5,
+      "supportedImageFormats": ["jpeg", "jpg", "png", "webp"]
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "video"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 5000,
+          "description": "描述视频编辑意图；支持任意语言，官方上限为 2500 个中文字符或 5000 个非中文字符。",
+          "pattern": "^(?:[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*[\\u3400-\\u4DBF\\u4E00-\\u9FFF]){0,2500}[^\\u3400-\\u4DBF\\u4E00-\\u9FFF]*$"
+        },
+        "images": {
+          "type": "array",
+          "title": "参考图片",
+          "minItems": 0,
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^(?:https?://|data:image/(?:jpeg|png|webp);base64,)"
+          },
+          "description": "可选 0–5 张参考图片，JPEG/JPG/PNG/WEBP，最多 20 MB，宽高至少 300 px、宽高比 1:2.5–2.5:1。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["720P", "1080P"],
+          "default": "1080P"
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": true
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "video": {
+          "type": "string",
+          "title": "待编辑视频 URL",
+          "format": "uri",
+          "description": "必须为公网 HTTP/HTTPS URL；MP4/MOV（建议 H.264），3–60 秒，8–60 fps，最多 100 MB，短边至少 360 px、长边最多 4096 px，宽高比 1:2.5–2.5:1。输出最多保留前 15 秒。",
+          "pattern": "^https?://"
+        },
+        "audio_setting": {
+          "type": "string",
+          "title": "声音控制",
+          "enum": ["auto", "origin"],
+          "default": "auto"
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "arrayMap",
+          "from": "images",
+          "to": "input.media",
+          "value": {
+            "type": "reference_image",
+            "url": "$item"
+          }
+        },
+        {
+          "operation": "arrayMap",
+          "from": "video",
+          "to": "input.media",
+          "value": {
+            "type": "video",
+            "url": "$item"
+          }
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "audio_setting",
+          "to": "parameters.audio_setting"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "happyhorse-1.0-video-edit",
+            "input": {
+              "prompt": "A person walking through a garden",
+              "media": [
+                {
+                  "type": "video",
+                  "url": "https://example.com/input.mp4"
+                },
+                {
+                  "type": "reference_image",
+                  "url": "https://example.com/reference.png"
+                }
+              ]
+            },
+            "parameters": {
+              "resolution": "720P",
+              "watermark": true,
+              "seed": 1,
+              "audio_setting": "origin"
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "usage": {
+              "output_video_duration": 5
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/happyhorse-video-edit-api-reference",
+      "title": "happyhorse-1.0-video-edit 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled",
+    "taskCapability": "VIDEO_TO_VIDEO"
+  },
+  {
+    "contractId": "cn.qwen.wan3-0-video",
+    "contractRevision": 1,
+    "providerFamily": "qwen",
+    "officialModelName": "wan3.0-video",
+    "taskCapability": "TEXT_TO_VIDEO",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "imageInput": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 0,
+      "supportedImageFormats": []
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 20000,
+          "description": "官方支持中英文，不超过 20000 个字符。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["1080P", "720P", "480P"],
+          "default": "1080P"
+        },
+        "ratio": {
+          "type": "string",
+          "title": "画幅比例",
+          "enum": ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+          "default": "adaptive"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 2,
+          "maximum": 30,
+          "default": 5
+        },
+        "audio": {
+          "type": "boolean",
+          "title": "生成音频",
+          "default": true
+        },
+        "prompt_extend": {
+          "type": "boolean",
+          "title": "智能改写提示词",
+          "default": true
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": -1,
+          "maximum": 2147483647,
+          "default": -1
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "audio",
+          "to": "parameters.audio"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "parameters.prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "wan3.0-video",
+            "input": {
+              "prompt": "一只小猫在月光下奔跑"
+            },
+            "parameters": {
+              "resolution": "720P",
+              "ratio": "16:9",
+              "duration": 5,
+              "prompt_extend": true,
+              "watermark": false
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference",
+      "title": "wan3.0-video 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled"
+  },
+  {
+    "contractId": "cn.qwen.wan3-0-video-prime",
+    "contractRevision": 1,
+    "providerFamily": "qwen",
+    "officialModelName": "wan3.0-video-prime",
+    "taskCapability": "TEXT_TO_VIDEO",
+    "capabilities": {
+      "text": false,
+      "vision": false,
+      "imageInput": false,
+      "audioInput": false,
+      "videoInput": false,
+      "streaming": false,
+      "reasoning": false,
+      "tools": false,
+      "parallelToolCalls": false,
+      "toolChoice": false,
+      "structuredOutput": false,
+      "jsonMode": false,
+      "imageGeneration": false,
+      "imageEditing": false,
+      "videoCancellation": true,
+      "videoGeneration": true,
+      "videoAsync": true,
+      "videoPolling": true,
+      "maxImages": 0,
+      "supportedImageFormats": []
+    },
+    "parameterSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "title": "视频提示词",
+          "minLength": 1,
+          "maxLength": 20000,
+          "description": "官方支持中英文，不超过 20000 个字符。"
+        },
+        "resolution": {
+          "type": "string",
+          "title": "分辨率",
+          "enum": ["1080P", "720P", "480P"],
+          "default": "1080P"
+        },
+        "ratio": {
+          "type": "string",
+          "title": "画幅比例",
+          "enum": ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+          "default": "adaptive"
+        },
+        "duration": {
+          "type": "integer",
+          "title": "时长（秒）",
+          "minimum": 2,
+          "maximum": 30,
+          "default": 5
+        },
+        "audio": {
+          "type": "boolean",
+          "title": "生成音频",
+          "default": true
+        },
+        "prompt_extend": {
+          "type": "boolean",
+          "title": "智能改写提示词",
+          "default": true
+        },
+        "watermark": {
+          "type": "boolean",
+          "title": "添加水印",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "title": "随机种子",
+          "minimum": -1,
+          "maximum": 2147483647,
+          "default": -1
+        }
+      }
+    },
+    "transport": {
+      "protocolFamily": "dashscope-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "input.prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "audio",
+          "to": "parameters.audio"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "parameters.prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "parameters.watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "parameters.seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "output.task_id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "output.task_status",
+          "to": "state"
+        },
+        {
+          "operation": "extract",
+          "from": "output.video_url",
+          "to": "outputUrl"
+        }
+      ],
+      "samples": [
+        {
+          "request": {
+            "model": "wan3.0-video-prime",
+            "input": {
+              "prompt": "一只小猫在月光下奔跑"
+            },
+            "parameters": {
+              "resolution": "720P",
+              "ratio": "16:9",
+              "duration": 5,
+              "prompt_extend": true,
+              "watermark": false
+            }
+          },
+          "response": {
+            "output": {
+              "task_id": "example-task-id",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://example.com/result.mp4"
+            },
+            "request_id": "example-request-id"
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "mode": "asynchronous",
+      "submit": "/api/v1/services/aigc/video-generation/video-synthesis",
+      "status": "/api/v1/tasks/{taskId}",
+      "output": "output.video_url",
+      "cancel": "/api/v1/tasks/{taskId}/cancel"
+    },
+    "source": {
+      "url": "https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference",
+      "title": "wan3.0-video-prime 官方 API 参考",
+      "checkedAt": "2026-10-11",
+      "locale": "zh-CN",
+      "verificationStatus": "verified"
+    },
+    "status": "enabled"
+  }
+]

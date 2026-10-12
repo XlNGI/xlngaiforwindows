@@ -14,6 +14,10 @@ import type {
   AdapterSchemaRecord,
   AdapterSchemaAuditRecord,
   AdapterSchemaRepository,
+  ModelBindingRecord,
+  ModelBindingRepository,
+  ModelContractRecord,
+  ModelContractRepository,
 } from '@ai-video/domain';
 
 class SqliteProviderProfileRepository implements ProviderProfileRepository {
@@ -98,6 +102,140 @@ class SqliteProviderProfileRepository implements ProviderProfileRepository {
   }
 }
 
+class SqliteModelContractRepository implements ModelContractRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  save(record: ModelContractRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO model_contracts
+          (contract_id, contract_revision, status, descriptor_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(contract_id, contract_revision) DO UPDATE SET
+           status = excluded.status,
+           descriptor_json = excluded.descriptor_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        record.contractId,
+        record.contractRevision,
+        record.status,
+        record.descriptorJson,
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  get(contractId: string, contractRevision: number): ModelContractRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM model_contracts WHERE contract_id = ? AND contract_revision = ?')
+      .get(contractId, contractRevision) as ModelContractRow | undefined;
+    return row ? mapModelContract(row) : undefined;
+  }
+
+  list(): ModelContractRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM model_contracts ORDER BY contract_id, contract_revision')
+        .all() as ModelContractRow[]
+    ).map(mapModelContract);
+  }
+}
+
+class SqliteModelBindingRepository implements ModelBindingRepository {
+  constructor(private readonly database: Database.Database) {}
+
+  save(record: ModelBindingRecord): void {
+    this.database
+      .prepare(
+        `INSERT INTO model_bindings
+          (binding_id, provider_type, remote_model_id, contract_id, contract_revision,
+           status, descriptor_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(binding_id) DO UPDATE SET
+           provider_type = excluded.provider_type,
+           remote_model_id = excluded.remote_model_id,
+           contract_id = excluded.contract_id,
+           contract_revision = excluded.contract_revision,
+           status = excluded.status,
+           descriptor_json = excluded.descriptor_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        record.bindingId,
+        record.providerType,
+        record.remoteModelId,
+        record.contractId,
+        record.contractRevision,
+        record.status,
+        record.descriptorJson,
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  get(bindingId: string): ModelBindingRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM model_bindings WHERE binding_id = ?')
+      .get(bindingId) as ModelBindingRow | undefined;
+    return row ? mapModelBinding(row) : undefined;
+  }
+
+  list(): ModelBindingRecord[] {
+    return (
+      this.database
+        .prepare('SELECT * FROM model_bindings ORDER BY binding_id')
+        .all() as ModelBindingRow[]
+    ).map(mapModelBinding);
+  }
+}
+
+interface ModelContractRow {
+  contract_id: string;
+  contract_revision: number;
+  status: string;
+  descriptor_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ModelBindingRow {
+  binding_id: string;
+  provider_type: string;
+  remote_model_id: string;
+  contract_id: string;
+  contract_revision: number;
+  status: string;
+  descriptor_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapModelContract(row: ModelContractRow): ModelContractRecord {
+  return {
+    contractId: row.contract_id,
+    contractRevision: row.contract_revision,
+    status: row.status,
+    descriptorJson: row.descriptor_json,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapModelBinding(row: ModelBindingRow): ModelBindingRecord {
+  return {
+    bindingId: row.binding_id,
+    providerType: row.provider_type,
+    remoteModelId: row.remote_model_id,
+    contractId: row.contract_id,
+    contractRevision: row.contract_revision,
+    status: row.status,
+    descriptorJson: row.descriptor_json,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 interface ProviderProfileRow {
   id: string;
   name: string;
@@ -146,9 +284,9 @@ class SqliteProviderModelRepository implements ProviderModelRepository {
       .prepare(
         `INSERT INTO provider_models
          (id, provider_profile_id, remote_model_id, display_name, capabilities_json,
-          source, enabled, parameter_template_key, last_synced_at, last_seen_at, unavailable_at,
-          created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          source, enabled, parameter_template_key, contract_id, contract_revision, contract_status,
+          last_synced_at, last_seen_at, unavailable_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            remote_model_id = excluded.remote_model_id,
            display_name = excluded.display_name,
@@ -156,6 +294,9 @@ class SqliteProviderModelRepository implements ProviderModelRepository {
            source = excluded.source,
            enabled = excluded.enabled,
            parameter_template_key = excluded.parameter_template_key,
+           contract_id = excluded.contract_id,
+           contract_revision = excluded.contract_revision,
+           contract_status = excluded.contract_status,
            last_synced_at = excluded.last_synced_at,
            last_seen_at = excluded.last_seen_at,
            unavailable_at = excluded.unavailable_at,
@@ -170,6 +311,9 @@ class SqliteProviderModelRepository implements ProviderModelRepository {
         record.source,
         record.enabled ? 1 : 0,
         record.parameterTemplateKey ?? null,
+        record.contractId ?? null,
+        record.contractRevision ?? null,
+        record.contractStatus ?? null,
         record.lastSyncedAt ?? null,
         record.lastSeenAt ?? null,
         record.unavailableAt ?? null,
@@ -213,6 +357,9 @@ interface ProviderModelRow {
   source: ProviderModelRecord['source'];
   enabled: number;
   parameter_template_key: string | null;
+  contract_id: string | null;
+  contract_revision: number | null;
+  contract_status: ProviderModelRecord['contractStatus'] | null;
   last_synced_at: string | null;
   last_seen_at: string | null;
   unavailable_at: string | null;
@@ -230,6 +377,9 @@ function mapProviderModel(row: ProviderModelRow): ProviderModelRecord {
     source: row.source,
     enabled: row.enabled === 1,
     parameterTemplateKey: row.parameter_template_key ?? undefined,
+    contractId: row.contract_id ?? undefined,
+    contractRevision: row.contract_revision ?? undefined,
+    contractStatus: row.contract_status ?? undefined,
     lastSyncedAt: row.last_synced_at ?? undefined,
     lastSeenAt: row.last_seen_at ?? undefined,
     unavailableAt: row.unavailable_at ?? undefined,
@@ -604,6 +754,8 @@ export function createAppRepositories(database: Database.Database): {
   providerDefaults: ProviderDefaultRepository;
   usageIndex: UsageIndexRepository;
   adapterSchemas: AdapterSchemaRepository;
+  modelContracts: ModelContractRepository;
+  modelBindings: ModelBindingRepository;
 } {
   return {
     providerProfiles: new SqliteProviderProfileRepository(database),
@@ -612,5 +764,7 @@ export function createAppRepositories(database: Database.Database): {
     providerDefaults: new SqliteProviderDefaultRepository(database),
     usageIndex: new SqliteUsageIndexRepository(database),
     adapterSchemas: new SqliteAdapterSchemaRepository(database),
+    modelContracts: new SqliteModelContractRepository(database),
+    modelBindings: new SqliteModelBindingRepository(database),
   };
 }
