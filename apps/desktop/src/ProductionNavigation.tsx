@@ -5,7 +5,6 @@ import type { GenerationCapability } from '@ai-video/contracts';
 interface ProductionNavigationProps {
   capability: GenerationCapability;
   onCapabilityChange: (capability: GenerationCapability) => void;
-  compact?: boolean;
 }
 
 const groups: Array<{
@@ -45,7 +44,6 @@ function groupOf(capability: GenerationCapability): 'image' | 'video' {
 export function ProductionNavigation({
   capability,
   onCapabilityChange,
-  compact = false,
 }: ProductionNavigationProps) {
   /*
    * Both groups used to open at once, which put all six capabilities in the rail
@@ -76,12 +74,8 @@ export function ProductionNavigation({
   };
 
   return (
-    <nav
-      className={compact ? 'production-navigation compact' : 'production-navigation'}
-      aria-label="内容生产"
-      data-production-navigation
-    >
-      {!compact && <div className="navigation-group-title">内容生产</div>}
+    <nav className="production-navigation" aria-label="内容生产" data-production-navigation>
+      <div className="navigation-group-title">内容生产</div>
       {groups.map((group) => {
         const Icon = group.icon;
         const open = expanded[group.id];

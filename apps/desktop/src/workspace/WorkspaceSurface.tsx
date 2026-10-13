@@ -1,4 +1,4 @@
-import { ExternalLink, LayoutPanelTop, Rows3, SlidersHorizontal, X } from 'lucide-react';
+import { ExternalLink, Images, LayoutPanelTop, Rows3, SlidersHorizontal, X } from 'lucide-react';
 import {
   useEffect,
   useMemo,
@@ -36,6 +36,7 @@ interface WorkspaceSurfaceProps {
   editorTitle?: string;
   conversationContent: ReactNode;
   productionContent: ReactNode;
+  assetsContent?: ReactNode;
   productionOpen: boolean;
   documentActive: boolean;
   children: ReactNode;
@@ -63,6 +64,7 @@ export function WorkspaceSurface({
   editorTitle,
   conversationContent,
   productionContent,
+  assetsContent,
   productionOpen,
   documentActive,
   children,
@@ -90,10 +92,12 @@ export function WorkspaceSurface({
   const conversationPanelRef = usePanelRef();
   const documentPanel = layout.panels.document;
   const conversationPanel = layout.panels.conversation;
+  const assetsPanel = layout.panels.assets;
   const conversationWindowOptions = {
     panel: conversationPanel,
     detached: Boolean(detachedPanels.conversation),
     productionOpen,
+    assetsOpen: assetsPanel.open && assetsPanel.mode === 'docked',
     viewportWidth: viewport.width,
     activePanelId: layout.activePanelId,
   };
@@ -105,18 +109,22 @@ export function WorkspaceSurface({
     : documentPanel.open;
   const conversationAutoHidden = isConversationAutoHidden(conversationWindowOptions);
   const showDocumentFloating =
-    !productionOpen &&
-    documentActive &&
+    (!productionOpen || narrow) &&
     documentPanel.open &&
-    !detachedPanels.document &&
-    documentPanel.mode !== 'docked' &&
-    (!narrow || layout.activePanelId === 'document');
+    !editorDetached &&
+    (narrow || (documentActive && documentPanel.mode !== 'docked'));
   const showConversationFloating =
     conversationPanel.open &&
     !detachedPanels.conversation &&
     (conversationPanel.mode !== 'docked' || (narrow && !productionOpen)) &&
     (!narrow || layout.activePanelId === 'conversation');
   const showProductionDock = productionOpen && !narrow;
+  const showAssetsDock =
+    assetsPanel.open &&
+    assetsPanel.mode === 'docked' &&
+    !narrow &&
+    (!productionOpen || viewport.width >= 960);
+  const showAssetsFloating = assetsPanel.open && !showAssetsDock;
   const showConversationDock =
     conversationPanel.open &&
     conversationPanel.mode === 'docked' &&
@@ -125,11 +133,12 @@ export function WorkspaceSurface({
     !conversationAutoHidden;
   const showEditorDock = productionOpen
     ? !narrow && documentDocked
-    : !narrow && (documentDocked || !showConversationDock);
+    : !narrow && (documentDocked || (!showConversationDock && !showAssetsDock));
   const showProductionPage = showProductionDock || (!showEditorDock && productionOpen);
   const dockedPanelIds = [
     ...(showEditorDock ? ['editor'] : []),
     ...(showProductionPage ? ['production'] : []),
+    ...(showAssetsDock ? ['assets'] : []),
     ...(showConversationDock ? ['conversation'] : []),
   ];
   const visiblePaneOrder = useMemo(
@@ -138,9 +147,10 @@ export function WorkspaceSurface({
         (paneId) =>
           (paneId === 'editor' && showEditorDock) ||
           (paneId === 'production' && showProductionPage) ||
+          (paneId === 'assets' && showAssetsDock) ||
           (paneId === 'conversation' && showConversationDock),
       ),
-    [paneOrder, showConversationDock, showEditorDock, showProductionPage],
+    [paneOrder, showAssetsDock, showConversationDock, showEditorDock, showProductionPage],
   );
   const persistedDockLayout = useDefaultLayout({
     id: `${WORKSPACE_DOCK_LAYOUT_ID}:${layout.projectId ?? 'no-project'}${productionOpen ? ':production' : ''}`,
@@ -228,6 +238,7 @@ export function WorkspaceSurface({
   const detachPane = (paneId: WorkspacePaneId) => {
     if (paneId === 'editor') onDetachDocument();
     if (paneId === 'conversation') onDetachConversation();
+    if (paneId === 'assets') dispatch({ type: 'float', panelId: 'assets' });
   };
 
   const updateDropTarget = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -305,6 +316,7 @@ export function WorkspaceSurface({
   const paneTitle = (paneId: WorkspacePaneId) => {
     if (paneId === 'editor') return (documentActive && documentTitle) || resolvedEditorTitle;
     if (paneId === 'conversation') return '会话';
+    if (paneId === 'assets') return '素材库';
     return '生产参数';
   };
 
@@ -327,18 +339,31 @@ export function WorkspaceSurface({
             }
             if (paneId === 'editor') openDocument();
             if (paneId === 'conversation') openConversation();
+            if (paneId === 'assets') dispatch({ type: 'focus', panelId: 'assets' });
           }}
         >
           {paneId === 'editor' ? (
             <LayoutPanelTop size={14} />
           ) : paneId === 'conversation' ? (
             <Rows3 size={14} />
+          ) : paneId === 'assets' ? (
+            <Images size={14} />
           ) : (
             <SlidersHorizontal size={14} />
           )}
           <span>{paneTitle(paneId)}</span>
         </button>
         <div className="workspace-pane-actions">
+          {paneId === 'assets' && (
+            <button
+              type="button"
+              title="关闭素材库"
+              aria-label="关闭素材库"
+              onClick={() => dispatch({ type: 'close', panelId: 'assets' })}
+            >
+              <X size={15} />
+            </button>
+          )}
           {paneId === 'editor' && documentActive && (
             <button
               type="button"
@@ -397,12 +422,39 @@ export function WorkspaceSurface({
   };
 
   const renderDockPane = (paneId: WorkspacePaneId, index: number) => {
+    if (paneId === 'assets') {
+      return (
+        <Panel
+          id="assets"
+          key="assets"
+          defaultSize={showProductionDock ? '32%' : showConversationDock ? '30%' : '44%'}
+          minSize="320px"
+        >
+          <section className="workspace-docked-page workspace-assets-page">
+            {renderPaneHeader(paneId, index)}
+            <div className="workspace-assets-content">{assetsContent}</div>
+          </section>
+        </Panel>
+      );
+    }
     if (paneId === 'editor') {
       return (
         <Panel
           id="editor"
           key="editor"
-          defaultSize={showProductionDock ? '50%' : showConversationDock ? '44%' : '100%'}
+          defaultSize={
+            showProductionDock
+              ? showAssetsDock
+                ? '34%'
+                : '50%'
+              : showAssetsDock
+                ? showConversationDock
+                  ? '40%'
+                  : '56%'
+                : showConversationDock
+                  ? '44%'
+                  : '100%'
+          }
           minSize={showProductionDock ? '320px' : '360px'}
           maxSize="100%"
         >
@@ -429,7 +481,7 @@ export function WorkspaceSurface({
         <Panel
           id="production"
           key="production"
-          defaultSize={showConversationDock ? '70%' : '100%'}
+          defaultSize={showAssetsDock ? '34%' : showConversationDock ? '70%' : '100%'}
           minSize={showProductionDock ? '320px' : '0px'}
         >
           <section className="workspace-docked-page workspace-production-page">
@@ -479,8 +531,9 @@ export function WorkspaceSurface({
     dispatch({ type: 'open', panelId: 'conversation' });
     onOpenConversation();
   };
-  const dock = (panelId: 'document' | 'conversation') => dispatch({ type: 'dock', panelId });
-  const maximize = (panelId: 'document' | 'conversation') =>
+  const dock = (panelId: 'document' | 'conversation' | 'assets') =>
+    dispatch({ type: 'dock', panelId });
+  const maximize = (panelId: 'document' | 'conversation' | 'assets') =>
     dispatch({ type: 'maximize', panelId, viewport });
   return (
     <div
@@ -490,6 +543,24 @@ export function WorkspaceSurface({
       onPointerUp={finishPaneDrag}
       onPointerCancel={cancelPaneDrag}
     >
+      {narrow && (
+        <nav className="workspace-mobile-tabs" aria-label="工作区页面">
+          <button
+            type="button"
+            aria-pressed={layout.activePanelId === 'document'}
+            onClick={openDocument}
+          >
+            {resolvedEditorTitle}
+          </button>
+          <button
+            type="button"
+            aria-pressed={layout.activePanelId === 'assets'}
+            onClick={() => dispatch({ type: 'open', panelId: 'assets' })}
+          >
+            素材库
+          </button>
+        </nav>
+      )}
       <Group
         className="workspace-dock-group"
         orientation="horizontal"
@@ -521,18 +592,38 @@ export function WorkspaceSurface({
           ];
         })}
       </Group>
+      {showAssetsFloating && (
+        <FloatingWindow
+          panelId="assets"
+          title="素材库"
+          bounds={narrow ? maximizedBounds(viewport) : assetsPanel.bounds}
+          viewport={viewport}
+          zOrder={assetsPanel.zOrder}
+          maximized={narrow || assetsPanel.mode === 'maximized'}
+          hidden={narrow && layout.activePanelId !== 'assets'}
+          onFocus={() => dispatch({ type: 'focus', panelId: 'assets' })}
+          onClose={() => dispatch({ type: 'close', panelId: 'assets' })}
+          onDock={() => dock('assets')}
+          onMaximize={() => maximize('assets')}
+          onRestore={() => dispatch({ type: 'restore', panelId: 'assets' })}
+          onBoundsChange={(bounds) => dispatch({ type: 'setBounds', panelId: 'assets', bounds })}
+        >
+          <div className="workspace-assets-content">{assetsContent}</div>
+        </FloatingWindow>
+      )}
       {showDocumentFloating && (
         <FloatingWindow
           panelId="document"
-          title={documentTitle || '文档编辑器'}
-          bounds={documentPanel.bounds}
+          title={documentTitle || resolvedEditorTitle}
+          bounds={narrow ? maximizedBounds(viewport) : documentPanel.bounds}
           viewport={viewport}
           zOrder={documentPanel.zOrder}
-          maximized={documentPanel.mode === 'maximized'}
+          maximized={narrow || documentPanel.mode === 'maximized'}
+          hidden={narrow && layout.activePanelId !== 'document'}
           onFocus={() => dispatch({ type: 'focus', panelId: 'document' })}
           onClose={onCloseDocument}
           onDock={() => dock('document')}
-          onDetach={onDetachDocument}
+          onDetach={documentActive ? onDetachDocument : undefined}
           onMaximize={() => maximize('document')}
           onRestore={() => dispatch({ type: 'restore', panelId: 'document' })}
           onBoundsChange={(bounds) => dispatch({ type: 'setBounds', panelId: 'document', bounds })}

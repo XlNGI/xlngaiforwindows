@@ -1,8 +1,38 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FloatingWindow } from './FloatingWindow';
 
 describe('FloatingWindow', () => {
+  afterEach(cleanup);
+
+  it('retains a useful asset grid width when resizing its floating panel', () => {
+    const onBoundsChange = vi.fn();
+    const { container } = render(
+      <FloatingWindow
+        panelId="assets"
+        title="素材库"
+        bounds={{ x: 24, y: 48, width: 720, height: 600 }}
+        viewport={{ width: 1200, height: 800 }}
+        zOrder={1}
+        maximized={false}
+        onFocus={vi.fn()}
+        onClose={vi.fn()}
+        onDock={vi.fn()}
+        onMaximize={vi.fn()}
+        onRestore={vi.fn()}
+        onBoundsChange={onBoundsChange}
+      >
+        素材网格
+      </FloatingWindow>,
+    );
+    const resizer = container.querySelector('.floating-window-resizer-se')!;
+    fireEvent.pointerDown(resizer, { pointerId: 1, clientX: 744, clientY: 648 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 324, clientY: 248 });
+    fireEvent.pointerUp(window, { pointerId: 1 });
+
+    expect(onBoundsChange).toHaveBeenLastCalledWith({ x: 24, y: 48, width: 560, height: 400 });
+  });
+
   it('exposes dock, maximize, restore, and close actions through the title bar', () => {
     const onClose = vi.fn();
     const onDock = vi.fn();

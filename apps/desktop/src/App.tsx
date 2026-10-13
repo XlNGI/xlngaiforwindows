@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -25,7 +25,6 @@ import {
   Settings2,
   ShieldCheck,
   Square,
-  WandSparkles,
   X,
   BookOpen,
   Users,
@@ -88,7 +87,7 @@ import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { TaskLogView } from './TaskLogView';
-import { NovelWorkspace, composeEpisodeChapterPrompt } from './NovelWorkspace';
+import { NovelWorkspace } from './NovelWorkspace';
 import { ChangeSetReviewPanel } from './ChangeSetReviewPanel';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
@@ -110,22 +109,21 @@ import {
   type DetachedDocumentSnapshot,
   type DetachedPanelAction,
   type DetachedPanelConfig,
+  type DetachedPanelId,
   type DetachedPanelEnvelope,
   type DetachedPanelSnapshot,
 } from './workspace/detached-window';
-import type { WorkspacePanelId } from './workspace/workspace-types';
 import { MODAL_Z_INDEX } from './workspace/ui-layers';
 import { generationStatusLabel } from './generation-feedback';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'characters' | 'novel' | 'shots' | 'assets' | 'tasks';
+type WorkspaceView = 'documents' | 'characters' | 'novel' | 'shots' | 'tasks';
 const WORKSPACE_VIEW_TITLES: Record<WorkspaceView, string> = {
   documents: '剧本',
   characters: '角色与场景',
   novel: '小说',
   shots: '场次与镜头',
-  assets: '素材库',
   tasks: '任务日志',
 };
 type NavigationMode = 'project' | 'production';
@@ -682,6 +680,7 @@ export function App() {
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
   const [providerSettingsFocusId, setProviderSettingsFocusId] = useState<string>();
   const [assetTrashRequest, setAssetTrashRequest] = useState(0);
+  const [assetLibraryFocusRevision, setAssetLibraryFocusRevision] = useState(0);
   const [navigationMode, setNavigationMode] = useState<NavigationMode>('project');
   const workspaceMainRef = useRef<HTMLElement>(null);
   const [workspaceWidth, setWorkspaceWidth] = useState(() =>
@@ -690,7 +689,7 @@ export function App() {
 
   const [view, setView] = useState<WorkspaceView>('documents');
   const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
-  const [detachedPanels, setDetachedPanels] = useState<Partial<Record<WorkspacePanelId, string>>>(
+  const [detachedPanels, setDetachedPanels] = useState<Partial<Record<DetachedPanelId, string>>>(
     {},
   );
 
@@ -713,12 +712,6 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
-  const [pendingNovelIntent, setPendingNovelIntent] = useState<{
-    intent: NovelWritingIntent;
-    prompt: string;
-    projectId?: string;
-    conversationId?: string;
-  }>();
   const [chatMessage, setChatMessage] = useState('');
   const [agentModelSelection, setAgentModelSelection] = useState<
     UnifiedAgentModelSelectionRequest & {
@@ -808,7 +801,7 @@ export function App() {
   const sceneRequest = useRef(0);
   const detachedSnapshotRef = useRef<Record<string, DetachedPanelSnapshot>>({});
   const detachedRegistryRef = useRef<Record<string, DetachedPanelRegistration>>({});
-  const detachedPanelsRef = useRef<Partial<Record<WorkspacePanelId, string>>>({});
+  const detachedPanelsRef = useRef<Partial<Record<DetachedPanelId, string>>>({});
   const detachedActionSequenceRef = useRef<Record<string, number>>({});
   const detachedActionHandlerRef = useRef<
     (action: DetachedPanelAction, label: string, envelope: DetachedPanelEnvelope<unknown>) => void
@@ -821,6 +814,8 @@ export function App() {
     panel: workspaceLayout.panels.conversation,
     detached: Boolean(detachedPanels.conversation),
     productionOpen: navigationMode === 'production',
+    assetsOpen:
+      workspaceLayout.panels.assets.open && workspaceLayout.panels.assets.mode === 'docked',
     viewportWidth: workspaceWidth,
     activePanelId: workspaceLayout.activePanelId,
   };
@@ -859,7 +854,7 @@ export function App() {
     workspaceDispatch({ type: 'open', panelId: 'conversation' });
   };
 
-  const syncDetachedPanelForEntity = (panelId: WorkspacePanelId, entityId?: string) => {
+  const syncDetachedPanelForEntity = (panelId: DetachedPanelId, entityId?: string) => {
     const label = Object.values(detachedRegistryRef.current).find(
       (registration) =>
         registration.config.panelId === panelId &&
@@ -887,7 +882,15 @@ export function App() {
     openProjectView(nextView);
   };
 
-  const openProjectView = (nextView: WorkspaceView) => {
+  const openProjectView = (nextView: WorkspaceView | 'assets', assetId?: string) => {
+    if (nextView === 'assets') {
+      if (assetId) {
+        setAssetLibrarySelectedId(assetId);
+        setAssetLibraryFocusRevision((revision) => revision + 1);
+      }
+      workspaceDispatch({ type: 'open', panelId: 'assets' });
+      return;
+    }
     if (nextView === 'documents' && detachedPanels.document) {
       setView('documents');
       void focusDetachedPanelWindow(detachedPanels.document);
@@ -1032,8 +1035,7 @@ export function App() {
       return;
     }
     if (source.sourceType === 'asset') {
-      setAssetLibrarySelectedId(source.sourceId);
-      openProjectView('assets');
+      openProjectView('assets', source.sourceId);
       return;
     }
     if (source.sourceType === 'scene' || source.sourceType === 'shot') {
@@ -1122,12 +1124,7 @@ export function App() {
       .catch(() => undefined);
   }, [projectTasks]);
   const productionWorkspace = useProductionState({ setNavigationMode });
-  const {
-    productionCapability,
-    setProductionCapability,
-    productionMenuOpen,
-    setProductionMenuOpen,
-  } = productionWorkspace;
+  const { productionCapability, setProductionCapability } = productionWorkspace;
   const [productionSeed, setProductionSeed] = useState<{
     documentId?: string;
     shotId?: string;
@@ -1851,6 +1848,11 @@ export function App() {
       if (requestId !== projectActionRequest.current) return;
       if (typeof result === 'string') setProjectMessage(result);
       else if (result) {
+        if (result.id !== project?.id) {
+          resetAssetWorkspace();
+          setAssetTrashRequest(0);
+          setAssetLibraryFocusRevision(0);
+        }
         setGeneration(undefined);
         setProject(result);
         await loadProjectContent();
@@ -1949,8 +1951,7 @@ export function App() {
       openSettings('maintenance');
       return;
     }
-    openProjectView('assets');
-    if (handoff.focusId) setAssetLibrarySelectedId(handoff.focusId);
+    openProjectView('assets', handoff.focusId);
     setAssetTrashRequest((revision) => revision + 1);
   };
 
@@ -2207,13 +2208,6 @@ export function App() {
         const capability = 'text' as const;
         const agentPrompt = promptForAgent;
         const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
-        const shortcutIntent =
-          pendingNovelIntent?.prompt === prompt &&
-          pendingNovelIntent.projectId === project?.id &&
-          pendingNovelIntent.conversationId === conversation.id
-            ? pendingNovelIntent.intent
-            : undefined;
-        const novelIntent = shortcutIntent;
         const runModel = resolveAgentRunModelSelection(
           capability,
           modelSelection
@@ -2246,12 +2240,10 @@ export function App() {
             : {}),
           ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
           researchMode,
-          ...(novelIntent ? { novelIntent } : {}),
           ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
           ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
         };
         const unified = await callWorker('agent.run', runParams);
-        if (unified.status !== 'needs_model_selection') setPendingNovelIntent(undefined);
         if (
           unified.status !== 'needs_model_selection' &&
           providerProfileId &&
@@ -2570,7 +2562,7 @@ export function App() {
     }
   };
 
-  const detachPanel = async (panelId: WorkspacePanelId) => {
+  const detachPanel = async (panelId: DetachedPanelId) => {
     if (!project) {
       const message = '请先打开项目，再将面板分离为独立窗口。';
       if (panelId === 'document') setContentMessage(message);
@@ -2970,7 +2962,6 @@ export function App() {
       openSettings('providers');
       void getCurrentWindow().setFocus();
     } else if (action.type === 'conversation-composer') {
-      setPendingNovelIntent(undefined);
       setAgentModelSelection(undefined);
       setComposer(action.value);
     } else if (action.type === 'conversation-cancel') {
@@ -3153,7 +3144,6 @@ export function App() {
         setSettingsOpen(true);
       }}
       onComposerChange={(value) => {
-        setPendingNovelIntent(undefined);
         setAgentModelSelection(undefined);
         setComposer(value);
       }}
@@ -3236,8 +3226,7 @@ export function App() {
       onAssetsChanged={updateAssets}
       onOpenAssetLibrary={(assetId) => {
         updateAssets(assets, assetId);
-        setAssetLibrarySelectedId(assetId);
-        openProjectView('assets');
+        openProjectView('assets', assetId);
       }}
       onOpenProviderSettings={() => openSettings('providers')}
       providerSettingsRevision={providerSettingsRevision}
@@ -3451,8 +3440,7 @@ export function App() {
         }}
         onOpenAsset={(assetId) => {
           updateAssets(assets, assetId);
-          setAssetLibrarySelectedId(assetId);
-          openProjectView('assets');
+          openProjectView('assets', assetId);
         }}
       />
     ) : (
@@ -3520,15 +3508,6 @@ export function App() {
             <Settings2 size={17} />
           </button>
           <button
-            className="icon-button mobile-production-toggle"
-            type="button"
-            title="选择制作方式"
-            aria-expanded={productionMenuOpen}
-            onClick={() => setProductionMenuOpen((open) => !open)}
-          >
-            <WandSparkles size={17} />
-          </button>
-          <button
             className="icon-button"
             type="button"
             title={conversationToggleCopy.title}
@@ -3573,32 +3552,6 @@ export function App() {
           </button>
         </div>
       </header>
-
-      {productionMenuOpen && (
-        <section className="mobile-production-menu" aria-label="窄屏制作方式">
-          <header>
-            <strong>选择制作方式</strong>
-            <button
-              className="icon-button subtle"
-              type="button"
-              title="关闭制作方式"
-              onClick={() => setProductionMenuOpen(false)}
-            >
-              <X size={15} />
-            </button>
-          </header>
-          <ProductionNavigation
-            compact
-            capability={productionCapability}
-            onCapabilityChange={(capability) => {
-              setProductionSeed(undefined);
-              setProductionCapability(capability);
-              setNavigationMode('production');
-              setProductionMenuOpen(false);
-            }}
-          />
-        </section>
-      )}
 
       {settingsOpen && (
         <SettingsCenter
@@ -3749,7 +3702,8 @@ export function App() {
                 <span className="count">{shots.length}</span>
               </button>
               <button
-                className={`nav-item ${navigationMode === 'project' && view === 'assets' ? 'active' : ''}`}
+                className={`nav-item ${workspaceLayout.panels.assets.open ? 'active' : ''}`}
+                aria-pressed={workspaceLayout.panels.assets.open}
                 type="button"
                 onClick={() => openProjectView('assets')}
               >
@@ -3985,6 +3939,21 @@ export function App() {
             editorTitle={WORKSPACE_VIEW_TITLES[view]}
             conversationContent={conversationPanel}
             productionContent={productionPanel}
+            assetsContent={
+              project ? (
+                <AssetLibraryView
+                  key={project.id}
+                  writable={writable}
+                  selectedAssetId={assetLibrarySelectedId}
+                  selectedAssetRevision={assetLibraryFocusRevision}
+                  openTrashRequest={assetTrashRequest}
+                  taskCompletionRevision={taskCompletionRevision}
+                  onOpenSource={(source) => void openAssetSource(source)}
+                />
+              ) : (
+                <EmptyWorkspace title="请打开一个项目" />
+              )
+            }
             productionOpen={navigationMode === 'production'}
             documentActive={(view === 'documents' || view === 'characters') && !hasForeignDocument}
             detachedPanels={detachedPanels}
@@ -4009,19 +3978,6 @@ export function App() {
                 focusChapterId={novelFocusChapterId}
                 focusReferenceId={novelFocusReferenceId}
                 refreshToken={novelRefreshRevision || undefined}
-                onGenerateChapter={(chapter) => {
-                  const prompt = `请生成并保存“${chapter.title}”的小说正文。`;
-                  setAgentModelSelection(undefined);
-                  setPendingNovelIntent({
-                    intent: { action: 'rewrite_chapter', chapterId: chapter.id },
-                    prompt,
-                    projectId: project?.id,
-                    conversationId: conversation?.id,
-                  });
-                  setComposer(prompt);
-                  workspaceDispatch({ type: 'open', panelId: 'conversation' });
-                  setChatMessage(`已指定章节“${chapter.title}”，发送后会将正文写回对应章节。`);
-                }}
                 referenceDocuments={documents.filter((item) => item.domainScope === 'novel')}
                 onReferencesChanged={async () => {
                   setDocuments(await callWorker('document.list', {}));
@@ -4029,18 +3985,6 @@ export function App() {
                     setContextPreview(
                       await callWorker('context.preview', { conversationId: conversation.id }),
                     );
-                }}
-                onGenerateEpisode={(chapters) => {
-                  const prompt = composeEpisodeChapterPrompt(chapters);
-                  setPendingNovelIntent(undefined);
-                  setAgentModelSelection(undefined);
-                  setComposer((current) =>
-                    current.trim() ? `${current.trim()}\n\n${prompt}` : prompt,
-                  );
-                  workspaceDispatch({ type: 'open', panelId: 'conversation' });
-                  setChatMessage(
-                    `已写入 ${chapters.length} 个章节引用。确认后发送即可，助手会按需检索这些章节。`,
-                  );
                 }}
               />
             ) : view === 'documents' || view === 'characters' ? (
@@ -4166,52 +4110,6 @@ export function App() {
                     新建镜头
                   </button>
                 </div>
-                {scene ? (
-                  <div className="workspace-toolbar">
-                    <label>
-                      绑定场景
-                      <select
-                        aria-label="场次绑定场景"
-                        value={scene.sceneDocumentId ?? ''}
-                        disabled={!writable || sceneBindingBusy}
-                        onChange={(event) => void bindSceneDocument(event.target.value)}
-                      >
-                        <option value="">未绑定场景</option>
-                        {scene.sceneDocumentId &&
-                        !documents.some(
-                          (item) =>
-                            item.id === scene.sceneDocumentId &&
-                            item.kind === 'scene' &&
-                            item.domainScope !== 'novel',
-                        ) ? (
-                          <option value={scene.sceneDocumentId}>已绑定的场景资料不可用</option>
-                        ) : null}
-                        {documents
-                          .filter(
-                            (item) =>
-                              item.kind === 'scene' &&
-                              item.domainScope !== 'novel' &&
-                              item.lifecycleStatus === 'active',
-                          )
-                          .map((item) => (
-                            <option key={item.id} value={item.id}>
-                              {item.title}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    {scene.sceneDocumentId ? (
-                      <button
-                        className="button secondary"
-                        type="button"
-                        onClick={() => void openDocumentById(scene.sceneDocumentId!)}
-                      >
-                        打开场景资料
-                      </button>
-                    ) : null}
-                    {sceneBindingMessage ? <span role="status">{sceneBindingMessage}</span> : null}
-                  </div>
-                ) : null}
                 {project ? (
                   <div className="directory-layout">
                     <aside className="directory-index" aria-label="场次与镜头目录">
@@ -4228,15 +4126,66 @@ export function App() {
                         </button>
                       </div>
                       {scenes.map((item) => (
-                        <button
-                          className={`tree-item ${scene?.id === item.id ? 'selected' : ''}`}
-                          type="button"
-                          key={item.id}
-                          onClick={() => void selectScene(item)}
-                        >
-                          <Clapperboard size={13} />
-                          <span>{item.title}</span>
-                        </button>
+                        <Fragment key={item.id}>
+                          <button
+                            className={`tree-item ${scene?.id === item.id ? 'selected' : ''}`}
+                            type="button"
+                            onClick={() => void selectScene(item)}
+                          >
+                            <Clapperboard size={13} />
+                            <span>{item.title}</span>
+                          </button>
+                          {scene && scene.id === item.id ? (
+                            <div className="scene-binding">
+                              <label>
+                                绑定场景
+                                <select
+                                  aria-label="场次绑定场景"
+                                  value={scene.sceneDocumentId ?? ''}
+                                  disabled={!writable || sceneBindingBusy}
+                                  onChange={(event) => void bindSceneDocument(event.target.value)}
+                                >
+                                  <option value="">未绑定场景</option>
+                                  {scene.sceneDocumentId &&
+                                  !documents.some(
+                                    (document) =>
+                                      document.id === scene.sceneDocumentId &&
+                                      document.kind === 'scene' &&
+                                      document.domainScope !== 'novel',
+                                  ) ? (
+                                    <option value={scene.sceneDocumentId}>
+                                      已绑定的场景资料不可用
+                                    </option>
+                                  ) : null}
+                                  {documents
+                                    .filter(
+                                      (document) =>
+                                        document.kind === 'scene' &&
+                                        document.domainScope !== 'novel' &&
+                                        document.lifecycleStatus === 'active',
+                                    )
+                                    .map((document) => (
+                                      <option key={document.id} value={document.id}>
+                                        {document.title}
+                                      </option>
+                                    ))}
+                                </select>
+                              </label>
+                              {scene.sceneDocumentId ? (
+                                <button
+                                  className="text-button"
+                                  type="button"
+                                  onClick={() => void openDocumentById(scene.sceneDocumentId!)}
+                                >
+                                  打开场景资料
+                                </button>
+                              ) : null}
+                              {sceneBindingMessage ? (
+                                <span role="status">{sceneBindingMessage}</span>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </Fragment>
                       ))}
                       {scene && (
                         <>
@@ -4312,7 +4261,7 @@ export function App() {
                   documents={documents}
                 />
               </>
-            ) : view === 'tasks' ? (
+            ) : (
               <TaskLogView
                 projectId={project?.id}
                 taskRevision={projectTasks?.revision}
@@ -4320,16 +4269,6 @@ export function App() {
                 onOpenConversation={(conversationId) => void openConversationById(conversationId)}
                 onOpenLibrarySource={openLibrarySource}
               />
-            ) : project ? (
-              <AssetLibraryView
-                writable={writable}
-                selectedAssetId={assetLibrarySelectedId}
-                openTrashRequest={assetTrashRequest}
-                taskCompletionRevision={taskCompletionRevision}
-                onOpenSource={(source) => void openAssetSource(source)}
-              />
-            ) : (
-              <EmptyWorkspace title="请打开一个项目" />
             )}
           </WorkspaceSurface>
         </main>

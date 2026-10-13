@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentDetail, NovelChapterInfo, WorkerMethod } from '@ai-video/contracts';
-import { NovelWorkspace, composeEpisodeChapterPrompt } from './NovelWorkspace';
+import { NovelWorkspace } from './NovelWorkspace';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readNovelDocument } from './novel-import-client';
@@ -170,40 +170,18 @@ describe('NovelWorkspace', () => {
     ).toHaveLength(2);
   });
 
-  it('writes selected chapter titles into a retrievable prompt', () => {
-    expect(
-      composeEpisodeChapterPrompt([
-        { id: 'chapter-1', displayLabel: '第一章', title: '开篇' },
-        { id: 'chapter-2', displayLabel: '第二章', title: '风暴' },
-      ]),
-    ).toContain('第一章《开篇》、第二章《风暴》');
-  });
-
-  it('selects chapters and emits chapter refs for the conversation prompt', async () => {
-    const chapter2 = {
-      ...chapter,
-      id: 'chapter-2',
-      documentId: 'document-2',
-      title: 'Storm',
-      position: 1,
-      displayLabel: 'Chapter 2',
-    };
+  it('keeps novel generation entry points in the conversation', async () => {
     mockWorker((method) => {
-      if (method === 'novel.chapter.list') return [chapter, chapter2];
+      if (method === 'novel.chapter.list') return [chapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
       return {};
     });
-    const onGenerateEpisode = vi.fn();
-    render(<NovelWorkspace projectId="project-1" writable onGenerateEpisode={onGenerateEpisode} />);
+    render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.click(screen.getByLabelText('选择 Chapter 1 Opening'));
-    fireEvent.click(screen.getByLabelText('选择 Chapter 2 Storm'));
-    fireEvent.click(screen.getByRole('button', { name: /生成短剧内容/ }));
-    expect(onGenerateEpisode).toHaveBeenCalledWith([
-      { id: 'chapter-1', displayLabel: 'Chapter 1', title: 'Opening' },
-      { id: 'chapter-2', displayLabel: 'Chapter 2', title: 'Storm' },
-    ]);
+    expect(screen.queryByRole('button', { name: '生成本章正文' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /生成短剧内容/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('选择 Chapter 1 Opening')).not.toBeInTheDocument();
   });
 
   it('exports the immutable work package through Worker', async () => {

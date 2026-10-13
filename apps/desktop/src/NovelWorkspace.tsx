@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   BookOpen,
   CheckCircle2,
-  Clapperboard,
   ExternalLink,
   FileText,
   Plus,
@@ -27,12 +26,6 @@ import { callWorker } from './worker-client';
 import { readNovelDocument } from './novel-import-client';
 import { parseNovelSource, type NovelImportChapterDraft } from './novel-import';
 
-export interface NovelEpisodeChapterRef {
-  id: string;
-  displayLabel: string;
-  title: string;
-}
-
 interface NovelWorkspaceProps {
   projectId?: string;
   writable: boolean;
@@ -45,20 +38,6 @@ interface NovelWorkspaceProps {
   refreshToken?: number;
   onOpenDocument?: (documentId: string) => void;
   onChapterSelected?: (chapter: NovelChapterInfo) => void;
-  onGenerateChapter?: (chapter: NovelChapterInfo) => void;
-  /** Puts selected chapter titles into the current conversation prompt. */
-  onGenerateEpisode?: (chapters: NovelEpisodeChapterRef[]) => void;
-}
-
-export function composeEpisodeChapterPrompt(chapters: readonly NovelEpisodeChapterRef[]): string {
-  const names = chapters
-    .map((chapter) => `${chapter.displayLabel}《${chapter.title.trim() || '未命名'}》`)
-    .join('、');
-  return (
-    `请基于这些小说章节生成本集短剧内容：${names}。` +
-    '先用 library.search 检索 sourceType 为 novel-chapter 的对应章节，核对标题后再写草稿；' +
-    '不要用其它文档或未点名的章节代替。'
-  );
 }
 
 function documentStateLabel(state: DocumentVersionState): string {
@@ -118,8 +97,6 @@ export function NovelWorkspace({
   refreshToken,
   onOpenDocument,
   onChapterSelected,
-  onGenerateChapter,
-  onGenerateEpisode,
 }: NovelWorkspaceProps) {
   const [chapters, setChapters] = useState<NovelChapterInfo[]>([]);
   const [volumes, setVolumes] = useState<NovelVolumeInfo[]>([]);
@@ -137,7 +114,6 @@ export function NovelWorkspace({
   const [importPreview, setImportPreview] = useState<NovelImportChapterDraft[]>([]);
   const [importVolumeTitle, setImportVolumeTitle] = useState('');
   const [importBusy, setImportBusy] = useState(false);
-  const [selectedChapterIds, setSelectedChapterIds] = useState<ReadonlySet<string>>(new Set());
   const [searchKeyword, setSearchKeyword] = useState('');
 
   const normalizedSearch = searchKeyword.trim().toLocaleLowerCase('zh-CN');
@@ -149,26 +125,8 @@ export function NovelWorkspace({
       )
     : chapters;
 
-  const toggleChapterSelection = (chapterId: string, checked: boolean) => {
-    setSelectedChapterIds((current) => {
-      const next = new Set(current);
-      if (checked) {
-        next.add(chapterId);
-      } else {
-        next.delete(chapterId);
-      }
-      return next;
-    });
-  };
-
   const renderChapterItem = (chapter: NovelChapterInfo) => (
     <div className="novel-chapter-row" key={chapter.id}>
-      <input
-        type="checkbox"
-        aria-label={`选择 ${chapter.displayLabel} ${chapter.title}`}
-        checked={selectedChapterIds.has(chapter.id)}
-        onChange={(event) => void toggleChapterSelection(chapter.id, event.target.checked)}
-      />
       <button
         className={`tree-item ${selected?.id === chapter.id ? 'selected' : ''}`}
         type="button"
@@ -448,14 +406,6 @@ export function NovelWorkspace({
           显示已删除
         </label>
         <button
-          className="button secondary"
-          type="button"
-          disabled={!onGenerateChapter || !selected || busy}
-          onClick={() => selected && onGenerateChapter?.(selected)}
-        >
-          <BookOpen size={13} /> 生成本章正文
-        </button>
-        <button
           className="icon-button subtle"
           type="button"
           title="刷新章节"
@@ -497,24 +447,6 @@ export function NovelWorkspace({
           onClick={() => void createDraft()}
         >
           <Plus size={13} /> 新建草稿
-        </button>
-        <button
-          className="button primary"
-          type="button"
-          title="用所选章节生成短剧内容（本集整体把控、场次与镜头、角色与场景）"
-          disabled={!onGenerateEpisode || selectedChapterIds.size === 0}
-          onClick={() => {
-            const selected = chapters
-              .filter((chapter) => selectedChapterIds.has(chapter.id))
-              .map((chapter) => ({
-                id: chapter.id,
-                displayLabel: chapter.displayLabel,
-                title: chapter.title,
-              }));
-            if (selected.length > 0) onGenerateEpisode?.(selected);
-          }}
-        >
-          <Clapperboard size={13} /> 生成短剧内容（{selectedChapterIds.size}）
         </button>
         {message && <span className="inline-status">{message}</span>}
       </header>

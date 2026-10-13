@@ -1,6 +1,6 @@
 import { ExternalLink, Maximize2, Minimize2, PanelRightOpen, X } from 'lucide-react';
 import { useEffect, useRef } from 'react';
-import { clampBounds, CONVERSATION_MIN_SIZE, DOCUMENT_MIN_SIZE } from './workspace-geometry';
+import { clampBounds, WORKSPACE_PANEL_MIN_SIZES } from './workspace-geometry';
 import { workspaceFloatingZIndex } from './ui-layers';
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { FloatingBounds, WorkspacePanelId, WorkspaceViewport } from './workspace-types';
@@ -14,6 +14,7 @@ interface FloatingWindowProps {
   viewport: WorkspaceViewport;
   zOrder: number;
   maximized: boolean;
+  hidden?: boolean;
   onFocus: () => void;
   onClose: () => void;
   onDock: () => void;
@@ -40,6 +41,7 @@ export function FloatingWindow({
   viewport,
   zOrder,
   maximized,
+  hidden = false,
   onFocus,
   onClose,
   onDock,
@@ -50,7 +52,7 @@ export function FloatingWindow({
   children,
 }: FloatingWindowProps) {
   const interaction = useRef<PointerInteraction | undefined>(undefined);
-  const minimum = panelId === 'document' ? DOCUMENT_MIN_SIZE : CONVERSATION_MIN_SIZE;
+  const minimum = WORKSPACE_PANEL_MIN_SIZES[panelId];
 
   useEffect(() => {
     const onMove = (event: PointerEvent) => {
@@ -115,6 +117,7 @@ export function FloatingWindow({
     <section
       className={`floating-window floating-window-${panelId} ${maximized ? 'maximized' : ''}`}
       aria-label={title}
+      hidden={hidden}
       style={{
         left: bounds.x,
         top: bounds.y,

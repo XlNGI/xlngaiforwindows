@@ -1,10 +1,20 @@
-import type { FloatingBounds, WorkspaceViewport } from './workspace-types';
+import type { FloatingBounds, WorkspacePanelId, WorkspaceViewport } from './workspace-types';
 
 export const WORKSPACE_TOP_INSET = 48;
 export const WORKSPACE_PADDING = 12;
 
 export const DOCUMENT_MIN_SIZE = { width: 560, height: 400 };
+export const ASSETS_MIN_SIZE = { width: 560, height: 400 };
 export const CONVERSATION_MIN_SIZE = { width: 360, height: 420 };
+
+export const WORKSPACE_PANEL_MIN_SIZES: Record<
+  WorkspacePanelId,
+  { width: number; height: number }
+> = {
+  document: DOCUMENT_MIN_SIZE,
+  assets: ASSETS_MIN_SIZE,
+  conversation: CONVERSATION_MIN_SIZE,
+};
 
 export function viewportFromWindow(): WorkspaceViewport {
   return { width: window.innerWidth, height: window.innerHeight };
@@ -28,6 +38,14 @@ export function defaultConversationBounds(viewport: WorkspaceViewport): Floating
     },
     viewport,
     CONVERSATION_MIN_SIZE,
+  );
+}
+
+export function defaultAssetsBounds(viewport: WorkspaceViewport): FloatingBounds {
+  return clampBounds(
+    { x: 48, y: WORKSPACE_TOP_INSET + 24, width: 720, height: 620 },
+    viewport,
+    ASSETS_MIN_SIZE,
   );
 }
 

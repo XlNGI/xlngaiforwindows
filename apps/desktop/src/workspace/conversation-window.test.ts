@@ -16,6 +16,7 @@ function options(overrides?: {
   mode?: 'docked' | 'floating' | 'maximized';
   detached?: boolean;
   productionOpen?: boolean;
+  assetsOpen?: boolean;
   viewportWidth?: number;
   activePanelId?: 'document' | 'conversation';
 }) {
@@ -28,6 +29,7 @@ function options(overrides?: {
     },
     detached: overrides?.detached ?? false,
     productionOpen: overrides?.productionOpen ?? false,
+    assetsOpen: overrides?.assetsOpen ?? false,
     viewportWidth: overrides?.viewportWidth ?? viewport.width,
     activePanelId: overrides?.activePanelId ?? layout.activePanelId,
   };
@@ -77,6 +79,52 @@ describe('conversation window toggle', () => {
     expect(conversationWindowToggleAction(narrow)).toBe('float');
   });
 
+  it('floats an auto-hidden conversation beside the asset library', () => {
+    const autoHidden = options({ assetsOpen: true, viewportWidth: 1100 });
+    expect(isConversationAutoHidden(autoHidden)).toBe(true);
+    expect(isConversationWindowPresented(autoHidden)).toBe(false);
+    expect(conversationWindowOpenAction(autoHidden)).toBe('float');
+    expect(conversationWindowToggleAction(autoHidden)).toBe('float');
+
+    const closed = options({ open: false, assetsOpen: true, viewportWidth: 1100 });
+    expect(isConversationAutoHidden(closed)).toBe(false);
+    expect(conversationWindowOpenAction(closed)).toBe('float');
+  });
+
+  it.each([
+    { width: 1439, productionOpen: false, assetsOpen: true, hidden: true },
+    { width: 1440, productionOpen: false, assetsOpen: true, hidden: false },
+    { width: 1150, productionOpen: true, assetsOpen: false, hidden: false },
+    { width: 1799, productionOpen: true, assetsOpen: true, hidden: true },
+    { width: 1800, productionOpen: true, assetsOpen: true, hidden: false },
+  ])(
+    'reserves conversation space at $width px with production=$productionOpen and assets=$assetsOpen',
+    ({ width, productionOpen, assetsOpen, hidden }) => {
+      const docked = options({ viewportWidth: width, productionOpen, assetsOpen });
+      expect(isConversationAutoHidden(docked)).toBe(hidden);
+      expect(isConversationWindowPresented(docked)).toBe(!hidden);
+      expect(conversationWindowOpenAction(docked)).toBe(hidden ? 'float' : 'open');
+    },
+  );
+
+  it('opens conversation as a floating window in a narrow asset workspace', () => {
+    const narrow = options({ assetsOpen: true, viewportWidth: 800 });
+    expect(isConversationWindowPresented(narrow)).toBe(false);
+    expect(conversationWindowToggleAction(narrow)).toBe('float');
+  });
+
+  it('keeps a floating conversation visible beside both asset and production panes', () => {
+    const floating = options({
+      mode: 'floating',
+      productionOpen: true,
+      assetsOpen: true,
+      viewportWidth: 1200,
+    });
+    expect(isConversationAutoHidden(floating)).toBe(false);
+    expect(isConversationWindowPresented(floating)).toBe(true);
+    expect(conversationWindowToggleAction(floating)).toBe('close');
+  });
+
   it('closes a visible floating conversation instead of creating another one', () => {
     const floating = options({ mode: 'floating' });
     expect(isConversationWindowPresented(floating)).toBe(true);
@@ -84,7 +132,13 @@ describe('conversation window toggle', () => {
   });
 
   it('focuses a detached conversation window from the toggle', () => {
-    const detached = options({ open: false, detached: true });
+    const detached = options({
+      open: false,
+      detached: true,
+      productionOpen: true,
+      assetsOpen: true,
+      viewportWidth: 1100,
+    });
     expect(isConversationWindowPresented(detached)).toBe(true);
     expect(conversationWindowToggleAction(detached)).toBe('focus-detached');
     expect(conversationWindowToggleLabel(detached)).toEqual({

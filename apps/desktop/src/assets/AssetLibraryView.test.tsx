@@ -70,6 +70,108 @@ describe('AssetLibraryView', () => {
     );
   });
 
+  it('focuses an asset from another pane even when the library is already filtered', async () => {
+    const asset = {
+      id: 'focused-image',
+      projectId: 'project',
+      kind: 'generated-image',
+      alias: '指定镜头图片',
+      relativePath: 'assets/image.png',
+      contentHash: 'image',
+      sizeBytes: 10,
+      createdAt: '2026-10-13T00:00:00.000Z',
+      tags: [],
+    };
+    callWorker.mockImplementation(
+      (method: string, params: { keyword?: string; kind?: string; deleted?: string }) => {
+        if (method === 'asset.list')
+          return Promise.resolve(
+            params.keyword || params.kind === 'video' || params.deleted === 'trash' ? [] : [asset],
+          );
+        if (method === 'asset.mediaSource') return Promise.reject(new Error('no preview'));
+        return Promise.resolve([]);
+      },
+    );
+    const { rerender } = render(<AssetLibraryView writable selectedAssetId={asset.id} />);
+    await screen.findByDisplayValue(asset.alias);
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '另一个素材' } });
+    fireEvent.change(screen.getByLabelText('素材类型'), { target: { value: 'video' } });
+    fireEvent.click(screen.getByLabelText('打开回收站'));
+    await waitFor(() => expect(screen.queryByDisplayValue(asset.alias)).not.toBeInTheDocument());
+
+    rerender(<AssetLibraryView writable selectedAssetId={asset.id} selectedAssetRevision={1} />);
+    expect(screen.getByLabelText('搜索')).toHaveValue('');
+    expect(screen.getByLabelText('素材类型')).toHaveValue('all');
+    expect(screen.getByLabelText('打开回收站')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue(asset.alias)).toBeInTheDocument();
+  });
+
+  it('reloads all assets and selects a deep link outside the active asset group', async () => {
+    const groupedAsset = {
+      id: 'grouped-asset',
+      projectId: 'project',
+      kind: 'generated-image',
+      alias: '组内角色',
+      relativePath: 'assets/character.png',
+      contentHash: 'character',
+      sizeBytes: 10,
+      createdAt: '2026-10-12T00:00:00.000Z',
+      tags: [],
+    };
+    const outsideAsset = {
+      ...groupedAsset,
+      id: 'outside-asset',
+      alias: '组外镜头',
+      relativePath: 'assets/shot.png',
+      contentHash: 'shot',
+    };
+    const group = {
+      id: 'character-group',
+      projectId: 'project',
+      name: '角色组',
+      assetIds: [groupedAsset.id],
+      assetCount: 1,
+      tagIds: [],
+      createdBy: 'local-user',
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    callWorker.mockImplementation((method: string) => {
+      if (method === 'asset.list') return Promise.resolve([groupedAsset, outsideAsset]);
+      if (method === 'assetGroup.list') return Promise.resolve([group]);
+      if (method === 'assetGroup.resolve') return Promise.resolve([groupedAsset]);
+      if (method === 'asset.mediaSource') return Promise.reject(new Error('No fixture media'));
+      return Promise.resolve([]);
+    });
+    const { rerender } = render(
+      <AssetLibraryView writable selectedAssetId={outsideAsset.id} selectedAssetRevision={1} />,
+    );
+    const grid = screen.getByRole('listbox', { name: '素材' });
+    await within(grid).findByRole('option', { name: /组外镜头/ });
+    fireEvent.click(screen.getByText('筛选'));
+    fireEvent.click(await screen.findByRole('button', { name: /角色组/ }));
+    await waitFor(() => expect(within(grid).getAllByRole('option')).toHaveLength(1));
+    expect(within(grid).queryByRole('option', { name: /组外镜头/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('搜索')).toHaveValue('');
+    expect(screen.getByLabelText('素材类型')).toHaveValue('all');
+    const queriesBeforeDeepLink = callWorker.mock.calls.filter(
+      ([method]) => method === 'asset.list',
+    ).length;
+
+    rerender(
+      <AssetLibraryView writable selectedAssetId={outsideAsset.id} selectedAssetRevision={2} />,
+    );
+
+    expect(await within(grid).findByRole('option', { name: /组外镜头/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByLabelText('素材别名 (可检索)')).toHaveValue(outsideAsset.alias);
+    expect(
+      callWorker.mock.calls.filter(([method]) => method === 'asset.list').length,
+    ).toBeGreaterThan(queriesBeforeDeepLink);
+  });
+
   it('applies a tag to a ctrl selection', async () => {
     const assets = [
       {

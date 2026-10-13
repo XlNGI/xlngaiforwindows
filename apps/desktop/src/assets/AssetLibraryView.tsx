@@ -37,6 +37,7 @@ const DRAG_MIME = 'application/x-ai-video-asset+json';
 interface AssetLibraryViewProps {
   writable: boolean;
   selectedAssetId?: string;
+  selectedAssetRevision?: number;
   openTrashRequest?: number;
   taskCompletionRevision?: number;
   onOpenSource?: (source: AssetSourceInfo) => void;
@@ -66,6 +67,7 @@ function normalizeTagName(value: string) {
 export function AssetLibraryView({
   writable,
   selectedAssetId,
+  selectedAssetRevision = 0,
   openTrashRequest = 0,
   taskCompletionRevision = 0,
   onOpenSource,
@@ -200,8 +202,16 @@ export function AssetLibraryView({
   );
 
   useEffect(() => {
-    if (selectedAssetId) setSelectedIds([selectedAssetId]);
-  }, [selectedAssetId]);
+    if (!selectedAssetId) return;
+    setSelectedIds([selectedAssetId]);
+    setMediaFilter('all');
+    setShowTrash(false);
+    setKeyword('');
+    setCreatedFrom('');
+    setCreatedTo('');
+    setTagFilter([]);
+    setSelectedGroupId('');
+  }, [selectedAssetId, selectedAssetRevision]);
 
   useEffect(() => {
     if (openTrashRequest > 0) setShowTrash(true);
@@ -222,6 +232,8 @@ export function AssetLibraryView({
     createdTo,
     sort,
     tagFilter.join(','),
+    selectedGroupId,
+    selectedAssetRevision,
     taskCompletionRevision,
   ]);
 

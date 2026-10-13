@@ -1,8 +1,9 @@
-export type WorkspacePaneId = 'editor' | 'production' | 'conversation';
+export type WorkspacePaneId = 'editor' | 'production' | 'assets' | 'conversation';
 
 export const DEFAULT_WORKSPACE_PANE_ORDER: WorkspacePaneId[] = [
   'editor',
   'production',
+  'assets',
   'conversation',
 ];
 
@@ -13,7 +14,9 @@ function storageKey(projectId: string | undefined): string {
 }
 
 function isPaneId(value: unknown): value is WorkspacePaneId {
-  return value === 'editor' || value === 'production' || value === 'conversation';
+  return (
+    value === 'editor' || value === 'production' || value === 'assets' || value === 'conversation'
+  );
 }
 
 export function readWorkspacePaneOrder(projectId: string | undefined): WorkspacePaneId[] {
@@ -22,8 +25,16 @@ export function readWorkspacePaneOrder(projectId: string | undefined): Workspace
     if (!raw) return [...DEFAULT_WORKSPACE_PANE_ORDER];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [...DEFAULT_WORKSPACE_PANE_ORDER];
-    const order = parsed.filter(isPaneId);
-    return [...order, ...DEFAULT_WORKSPACE_PANE_ORDER.filter((paneId) => !order.includes(paneId))];
+    const order = [...new Set(parsed.filter(isPaneId))];
+    for (const [index, paneId] of DEFAULT_WORKSPACE_PANE_ORDER.entries()) {
+      if (order.includes(paneId)) continue;
+      const successor = DEFAULT_WORKSPACE_PANE_ORDER.slice(index + 1).find((id) =>
+        order.includes(id),
+      );
+      const targetIndex = successor === undefined ? order.length : order.indexOf(successor);
+      order.splice(targetIndex, 0, paneId);
+    }
+    return order;
   } catch {
     return [...DEFAULT_WORKSPACE_PANE_ORDER];
   }

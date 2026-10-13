@@ -346,11 +346,6 @@ export function ShotWorkspace({
         <div className="shot-prompt-heading">
           <div>
             <h2 id="shot-prompt-heading">{'\u955c\u5934\u63d0\u793a\u8bcd'}</h2>
-            <p>
-              {
-                '\u53ea\u7528\u4e8e\u751f\u6210\u672c\u955c\u753b\u9762\u6216\u9996\u5e27\u3002\u89d2\u8272\u548c\u573a\u666f\u8bf7\u7528\u4e0b\u65b9\u53c2\u8003\u56fe\uff0c\u4e0d\u8981\u628a\u8bbe\u5b9a\u6b63\u6587\u62fc\u8fdb\u89c6\u9891\u63d0\u793a\u8bcd\u3002'
-              }
-            </p>
           </div>
           <span className="shot-status">
             {`${shotTitle} · ${shotStatus} · #${shotPosition + 1}`}

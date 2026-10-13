@@ -1,6 +1,13 @@
+import { viewportFromWindow } from './workspace-geometry';
+import { createDefaultWorkspaceLayout } from './workspace-reducer';
 import type { FloatingBounds, WorkspaceLayoutState, WorkspacePanelState } from './workspace-types';
 
 const STORAGE_PREFIX = 'ai-video.workspace-layout.v1';
+
+type StoredPanelSet = Omit<WorkspaceLayoutState['panels'], 'assets'> &
+  Partial<Pick<WorkspaceLayoutState['panels'], 'assets'>>;
+
+type StoredWorkspaceLayout = Omit<WorkspaceLayoutState, 'panels'> & { panels: StoredPanelSet };
 
 export function workspaceStorageKey(projectId: string): string {
   return `${STORAGE_PREFIX}:${projectId}`;
@@ -10,21 +17,31 @@ export function readWorkspaceLayout(projectId: string): WorkspaceLayoutState | u
   try {
     const raw = window.localStorage.getItem(workspaceStorageKey(projectId));
     if (!raw) return undefined;
-    const parsed = JSON.parse(raw) as WorkspaceLayoutState;
+    const parsed = JSON.parse(raw) as StoredWorkspaceLayout;
     if (parsed.version !== 1 || parsed.projectId !== projectId || !isValidPanelSet(parsed.panels)) {
       return undefined;
     }
-    return parsed;
+    return {
+      ...parsed,
+      panels: {
+        ...parsed.panels,
+        assets:
+          parsed.panels.assets ??
+          createDefaultWorkspaceLayout(projectId, viewportFromWindow()).panels.assets,
+      },
+    };
   } catch {
     return undefined;
   }
 }
 
-function isValidPanelSet(value: unknown): value is WorkspaceLayoutState['panels'] {
+function isValidPanelSet(value: unknown): value is StoredPanelSet {
   if (!value || typeof value !== 'object') return false;
   const panels = value as Record<string, unknown>;
   return (
-    isValidPanel(panels.document, 'document') && isValidPanel(panels.conversation, 'conversation')
+    isValidPanel(panels.document, 'document') &&
+    isValidPanel(panels.conversation, 'conversation') &&
+    (panels.assets === undefined || isValidPanel(panels.assets, 'assets'))
   );
 }
 

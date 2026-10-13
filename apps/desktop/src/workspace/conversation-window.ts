@@ -21,6 +21,7 @@ export interface ConversationWindowOptions {
   panel: WorkspacePanelState;
   detached: boolean;
   productionOpen: boolean;
+  assetsOpen?: boolean;
   viewportWidth: number;
   activePanelId?: WorkspacePanelId;
 }
@@ -35,36 +36,43 @@ export function isWorkspaceCompactSplit(viewportWidth: number): boolean {
   return viewportWidth < WORKSPACE_COMPACT_SPLIT_MAX_WIDTH;
 }
 
-export function shouldFloatConversationOnOpen({
-  detached,
+function hasCompactDockNeighbors({
   productionOpen,
+  assetsOpen,
   viewportWidth,
-}: ConversationWindowOptions): boolean {
-  return !detached && productionOpen && isWorkspaceCompactSplit(viewportWidth);
+}: Pick<ConversationWindowOptions, 'productionOpen' | 'assetsOpen' | 'viewportWidth'>): boolean {
+  if (!productionOpen && !assetsOpen) return false;
+  if (assetsOpen) return viewportWidth < (productionOpen ? 1800 : 1440);
+  return isWorkspaceCompactSplit(viewportWidth);
+}
+
+export function shouldFloatConversationOnOpen(options: ConversationWindowOptions): boolean {
+  return !options.detached && hasCompactDockNeighbors(options);
 }
 
 export function isConversationAutoHidden({
   panel,
   detached,
   productionOpen,
+  assetsOpen,
   viewportWidth,
 }: ConversationWindowOptions): boolean {
   return (
     panel.open &&
     panel.mode === 'docked' &&
     !detached &&
-    productionOpen &&
-    isWorkspaceCompactSplit(viewportWidth) &&
+    hasCompactDockNeighbors({ productionOpen, assetsOpen, viewportWidth }) &&
     !isWorkspaceNarrow(viewportWidth)
   );
 }
 
 export function isConversationWindowPresented(options: ConversationWindowOptions): boolean {
-  const { panel, detached, productionOpen, viewportWidth, activePanelId } = options;
+  const { panel, detached, productionOpen, assetsOpen, viewportWidth, activePanelId } = options;
   if (detached) return true;
   if (!panel.open) return false;
   if (isConversationAutoHidden(options)) return false;
-  if (isWorkspaceNarrow(viewportWidth) && productionOpen && panel.mode === 'docked') return false;
+  if (isWorkspaceNarrow(viewportWidth) && (productionOpen || assetsOpen) && panel.mode === 'docked')
+    return false;
   if (isWorkspaceNarrow(viewportWidth) && activePanelId && activePanelId !== 'conversation') {
     return false;
   }

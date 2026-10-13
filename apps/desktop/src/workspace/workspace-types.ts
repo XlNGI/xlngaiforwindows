@@ -1,4 +1,4 @@
-export type WorkspacePanelId = 'document' | 'conversation';
+export type WorkspacePanelId = 'document' | 'assets' | 'conversation';
 
 export type WorkspacePanelMode = 'docked' | 'floating' | 'maximized';
 

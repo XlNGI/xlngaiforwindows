@@ -1,8 +1,10 @@
 import {
   clampBounds,
+  defaultAssetsBounds,
   defaultConversationBounds,
   defaultDocumentBounds,
   maximizedBounds,
+  WORKSPACE_PANEL_MIN_SIZES,
 } from './workspace-geometry';
 import type {
   FloatingBounds,
@@ -43,6 +45,14 @@ export function createDefaultWorkspaceLayout(
         bounds: defaultDocumentBounds(viewport),
         zOrder: 1,
         open: true,
+      },
+      assets: {
+        id: 'assets',
+        mode: 'docked',
+        dockTarget: 'center',
+        bounds: defaultAssetsBounds(viewport),
+        zOrder: 3,
+        open: false,
       },
       conversation: {
         id: 'conversation',
@@ -99,7 +109,14 @@ export function workspaceReducer(
 
   return normalizeZOrder({
     ...state,
-    activePanelId: action.type === 'close' ? state.activePanelId : action.panelId,
+    activePanelId:
+      action.type === 'close'
+        ? state.activePanelId === action.panelId
+          ? Object.values(state.panels)
+              .filter((item) => item.id !== action.panelId && item.open)
+              .sort((left, right) => right.zOrder - left.zOrder)[0]?.id
+          : state.activePanelId
+        : action.panelId,
     panels: { ...state.panels, [action.panelId]: nextPanel },
   });
 }
@@ -111,22 +128,35 @@ function clampWorkspace(
   return {
     ...state,
     panels: {
+      ...state.panels,
       document: {
         ...state.panels.document,
         bounds:
           state.panels.document.mode === 'maximized'
             ? maximizedBounds(viewport)
-            : clampBounds(state.panels.document.bounds, viewport, { width: 560, height: 400 }),
+            : clampBounds(
+                state.panels.document.bounds,
+                viewport,
+                WORKSPACE_PANEL_MIN_SIZES.document,
+              ),
+      },
+      assets: {
+        ...state.panels.assets,
+        bounds:
+          state.panels.assets.mode === 'maximized'
+            ? maximizedBounds(viewport)
+            : clampBounds(state.panels.assets.bounds, viewport, WORKSPACE_PANEL_MIN_SIZES.assets),
       },
       conversation: {
         ...state.panels.conversation,
         bounds:
           state.panels.conversation.mode === 'maximized'
             ? maximizedBounds(viewport)
-            : clampBounds(state.panels.conversation.bounds, viewport, {
-                width: 360,
-                height: 420,
-              }),
+            : clampBounds(
+                state.panels.conversation.bounds,
+                viewport,
+                WORKSPACE_PANEL_MIN_SIZES.conversation,
+              ),
       },
     },
   };
@@ -142,6 +172,7 @@ function tileWorkspace(
     {
       ...state,
       panels: {
+        ...state.panels,
         document: {
           ...state.panels.document,
           open: true,
@@ -173,6 +204,7 @@ function normalizeZOrder(state: WorkspaceLayoutState): WorkspaceLayoutState {
     ...state,
     panels: {
       document: ordered.find((panel) => panel.id === 'document')!,
+      assets: ordered.find((panel) => panel.id === 'assets')!,
       conversation: ordered.find((panel) => panel.id === 'conversation')!,
     },
   };

@@ -27,8 +27,8 @@ describe('ScriptWorkspace', () => {
     );
     expect(screen.getByRole('heading', { name: '\u9879\u76ee\u6587\u6863' })).toBeInTheDocument();
     expect(
-      screen.getByText(/\u4e0d\u4f1a\u53d1\u7ed9\u751f\u56fe\u6216\u751f\u89c6\u9891/),
-    ).toBeInTheDocument();
+      screen.queryByText(/\u4e0d\u4f1a\u53d1\u7ed9\u751f\u56fe\u6216\u751f\u89c6\u9891/),
+    ).not.toBeInTheDocument();
     expect(screen.getByText(/\u5df2\u6307\u5b9a 2 \u4e2a\u7ae0\u8282/)).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: '\u751f\u6210\u89d2\u8272\u56fe' }),

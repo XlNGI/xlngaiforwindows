@@ -23,7 +23,7 @@
 以下决策已与用户确认，实施期间不得在未获用户明确同意的情况下变更：
 
 - **D1 不新增“一集”实体**：分集是章节分组概念（如“第一卷 第1–3章 = 第1集”），分集范围记录在本集整体把控文档正文，不建表。
-- **D2 用户选定章节范围作为任务作用域**：在小说章节树多选章节（如第一卷 第1–3章），所选章节 ID 冻结进 Agent 任务，作为本集生成的内容来源。
+- **D2 用户选定章节范围作为任务作用域**：用户在会话中说明章节范围，或由助手检索后请用户确认；确认后的章节 ID 冻结进 Agent 任务，作为本集生成的内容来源。
 - **D3 每集生成两样正式产物**：
   1. 本集整体把控项目文档（草稿 → 用户审阅 → 发布，显示在“项目文档”页）；
   2. 本集场次/镜头结构 + 每个镜头的提示词（change set 提案 → 用户逐项批准 → 原子写入 `scenes`/`shots`，显示在“场次与镜头”页）。
@@ -36,13 +36,13 @@
 
 ### 3.1 首期范围
 
-- 小说章节多选与“生成短剧内容”会话入口；
+- 会话中按章节范围生成短剧内容；
 - `novel.episode.submit_draft`：本集整体把控文档工具；
 - `novel.episode.submit_structure`：场次/镜头 + 提示词工具（自动转 change set）；
 - `novel.reference.submit_draft` 支持 `documentKind`（character/scene），并按 kind 落库；
 - 短剧域上下文编译（注入已发布角色/场景、本集把控、约束与冻结章节）；
 - 引用校验（`[角色:X]` / `[场景:Y]` 必须存在于已发布资料）；
-- Desktop：章节多选入口、场次与镜头页 prompt 展示/编辑、文档编辑器 kind 选择器。
+- Desktop：会话驱动短剧生成、场次与镜头页 prompt 展示/编辑、文档编辑器 kind 选择器。
 
 ### 3.2 明确非目标
 
@@ -105,14 +105,14 @@
 
 ### 5.6 触发与入口（D2）
 
-- 小说章节树多选章节 → “生成短剧内容”按钮 → 打开会话并把 `selectedChapterIds` 传入 `agent.generation.prepare`。
-- 会话内由用户发提示词（可预填默认指令：如“把所选章节做成一集，生成整体把控、场次和镜头提示词”）。
+- 用户在会话中说明章节范围和生成目标；助手调用 `library.search` 检索对应章节并请用户确认。
+- Worker 将确认后的 `selectedChapterIds` 传入 `agent.generation.prepare` 并冻结来源版本；会话继续执行短剧生成。
 
 ## 6. 目标架构
 
 ```mermaid
 flowchart LR
-  A[小说章节页<br/>多选章节 1-3] --> B[生成短剧内容会话<br/>selectedChapterIds 冻结]
+  A[会话中说明章节范围] --> B[library.search 检索并确认<br/>selectedChapterIds 冻结]
   B --> C[novel.episode.submit_draft<br/>本集整体把控 草稿]
   C -->|用户审阅发布| D[短剧域上下文<br/>已发布角色/场景 + 本集把控 + 冻结章节]
   D --> E[novel.episode.submit_structure<br/>场次/镜头 + 提示词]
@@ -128,10 +128,10 @@ flowchart LR
 
 ### 7.1 场景 A：生成一集
 
-1. 用户在小说章节页勾选“第一卷 第1–3章”，点“生成短剧内容”；
-2. Desktop 创建/复用会话，调 `agent.generation.prepare` 并传入 `selectedChapterIds`；
-3. Worker 冻结所选章节 ID（任务快照），编译短剧域上下文（约束、已发布角色/场景、所选章节正文+摘要）；
-4. 用户发提示词（如“把这三章做成一集，生成本集整体把控”）；
+1. 用户在会话中说明“把第一卷第1–3章做成一集”；
+2. 助手调用 `library.search` 检索对应章节，核对后请用户确认范围；
+3. Desktop/Worker 调 `agent.generation.prepare` 并冻结 `selectedChapterIds` 与来源版本，编译短剧域上下文；
+4. 用户继续发提示词（如“生成本集整体把控”）；
 5. 模型调用 `novel.episode.submit_draft` → Worker 落“本集整体把控”草稿（kind=plan，binding screenplay）→ 显示在“项目文档”页 → 用户审阅发布；
 6. 用户继续发提示词（如“生成这一集的场次和镜头提示词”）；
 7. 模型调用 `novel.episode.submit_structure` → Worker 校验引用 → 自动生成 change set；
@@ -222,7 +222,7 @@ flowchart LR
 
 ## 11. Desktop 交互设计
 
-- **小说章节页（`NovelWorkspace.tsx`）**：章节树多选（checkbox）；选中后显示“生成短剧内容”按钮；点击打开会话并携带 `selectedChapterIds`。
+- **会话（`ChatPanel.tsx`）**：用户直接说明章节范围与生成目标；助手检索、确认并冻结 `selectedChapterIds`。
 - **场次与镜头页（`App.tsx` shots 视图）**：镜头条目显示 `prompt`（可编辑，保存走 `shot.save` 或新增 `shot.prompt.save`）；底部沿用 `ChangeSetReviewPanel` 审阅提案（条目展示 prompt 预览）。
 - **角色与场景页（`App.tsx` characters 视图）**：文档编辑器增加 kind 选择器（character/scene/outline/plan/storyboard/note），解决 Agent 文档固定 note 无法归类的问题。
 - **项目文档页**：本集整体把控草稿（kind=plan）与既有项目文档一致展示，支持审阅/发布。
@@ -285,21 +285,21 @@ flowchart LR
 
 主要文件：
 
-- `apps/desktop/src/NovelWorkspace.tsx`（多选 + 入口）
-- `apps/desktop/src/App.tsx`（selectedChapterIds 传递、镜头 prompt 展示/编辑、kind 选择器）
+- `apps/desktop/src/NovelWorkspace.tsx`（章节浏览，不提供生成入口）
+- `apps/desktop/src/App.tsx`（会话驱动生成、镜头 prompt 展示/编辑、kind 选择器）
 - `apps/desktop/src/ChangeSetReviewPanel.tsx`（prompt 预览）
 - `apps/desktop/src/use-document-workspace.ts`（kind 选择器状态）
 - `apps/desktop/src/ChatPanel.tsx`（预填指令）
 
 工作项：
 
-- [x] 章节多选 + “生成短剧内容”入口（NovelWorkspace，含选择计数）；
-- [x] 会话携带 `selectedChapterIds`，ChatPanel 新增“短剧创作”模式与意图推断（`inferShortDramaIntent`）；
+- [x] 会话携带并冻结 `selectedChapterIds`，ChatPanel 支持“短剧创作”模式与意图推断（`inferShortDramaIntent`）；
+- [x] 2026-10-13：移除小说页生成快捷按钮和章节勾选，正文与短剧生成统一由会话发起；
 - [x] 场次与镜头页 prompt 展示/编辑（保存走 `shot.save`，≤2000 字符）；
 - [x] ChangeSetReviewPanel 展示 shot prompt 预览；
 - [x] 文档编辑器 kind 选择器（角色与场景页可建 character/scene 文档）。
 
-退出门禁：Desktop 组件测试通过；手工路径“选章节 → 生成 → 审阅 → 查看”可走通。
+退出门禁：Desktop 组件测试通过；手工路径“会话指定章节 → 检索确认 → 生成 → 审阅 → 查看”可走通。
 
 ### S4：测试、文档与同步
 
@@ -318,7 +318,7 @@ flowchart LR
 |---|---|
 | Persistence | v27→v28 迁移、`shots.prompt` 默认/更新、change set item shot_prompt 应用/冲突 |
 | Worker | selectedChapterIds 校验与冻结、短剧域上下文注入、`novel.episode.submit_draft` 落库、`novel.episode.submit_structure` 转换与引用校验、reference kind 落库、跨项目隔离 |
-| Desktop | 章节多选、入口携带 selectedChapterIds、prompt 展示/编辑、kind 选择器、ChangeSetReviewPanel prompt 预览 |
+| Desktop | 会话指定/确认章节并冻结 selectedChapterIds、prompt 展示/编辑、kind 选择器、ChangeSetReviewPanel prompt 预览 |
 | 安全 | 未知字段拒绝、越界/空数组拒绝、引用占位符注入校验、项目边界 |
 
 ## 14. 风险与缓解
@@ -355,4 +355,5 @@ flowchart LR
 | 2026-08-25 | S1 数据与契约 | 完成 | Schema v29 迁移（`shots.prompt`、`agent_change_set_items.shot_prompt` + shot-only 触发器）；change set 应用后 `shots.prompt` 落库；`selectedChapterIds`/`short-drama`/`documentKind` 校验；Persistence 22 项、Worker 222 项、Desktop 全量测试通过 | 真实 Provider 端到端 |
 | 2026-08-25 | S2 Worker 业务与上下文 | 完成 | `compileShortDrama` + selectedChapterIds 上下文；`novel.episode.submit_draft`（plan + screenplay binding）；`novel.episode.submit_structure`（引用校验 + 自动 change set）；`document.create_draft` documentKind；任务快照冻结；Worker 227 项测试通过 | 真实 Provider、引用校验的人工提示词边界 |
 | 2026-08-25 | S3 Desktop 交互 | 完成 | 章节多选 + “生成短剧内容”；ChatPanel “短剧创作”模式与意图推断；镜头提示词展示/编辑；文档类型选择器；change set prompt 预览；Desktop 145 项测试通过 | Windows 多窗口人工验收 |
+| 2026-10-13 | S3 Desktop 入口调整 | 完成 | 移除小说页“生成本章正文”“生成短剧内容”按钮及章节勾选；更新会话统一入口；Desktop 全量 304 项、typecheck、ESLint、Prettier（修改文件）、`git diff --check` 通过 | 真实 Provider、Windows 人工验收 |
 | 2026-08-25 | S4 测试、文档与同步 | 部分完成 | 全仓 `pnpm.cmd test/typecheck/lint/format:check/build`、`git diff --check` 通过；NOVEL 计划 P8 子计划登记；验证记录已写入 | DOCX 同步、真实 Provider、Windows 人工验收 |

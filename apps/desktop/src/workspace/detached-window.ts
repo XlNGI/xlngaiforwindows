@@ -15,12 +15,14 @@ import type {
 } from '@ai-video/contracts';
 import type { WorkspacePanelId } from './workspace-types';
 
+export type DetachedPanelId = Exclude<WorkspacePanelId, 'assets'>;
+
 export const DETACHED_PANEL_READY_EVENT = 'workspace-panel-ready';
 export const DETACHED_PANEL_SNAPSHOT_EVENT = 'workspace-panel-snapshot';
 export const DETACHED_PANEL_ACTION_EVENT = 'workspace-panel-action';
 
 export interface DetachedPanelConfig {
-  panelId: WorkspacePanelId;
+  panelId: DetachedPanelId;
   projectId: string;
   entityId?: string;
   label: string;
@@ -79,7 +81,7 @@ export interface DetachedConversationSnapshot {
 export type DetachedPanelSnapshot = DetachedDocumentSnapshot | DetachedConversationSnapshot;
 
 export type DetachedPanelAction =
-  | { panelId: WorkspacePanelId; type: 'attach' }
+  | { panelId: DetachedPanelId; type: 'attach' }
   | { panelId: 'document'; type: 'document-title'; value: string }
   | { panelId: 'document'; type: 'document-kind'; value: string }
   | { panelId: 'document'; type: 'document-content'; value: string }
@@ -118,7 +120,7 @@ function safeLabelPart(value: string): string {
 }
 
 export function detachedPanelLabel(
-  panelId: WorkspacePanelId,
+  panelId: DetachedPanelId,
   projectId: string,
   entityId?: string,
 ): string {
@@ -145,7 +147,7 @@ export function parseDetachedPanelConfig(): DetachedPanelConfig | undefined {
 }
 
 export async function openDetachedPanelWindow(options: {
-  panelId: WorkspacePanelId;
+  panelId: DetachedPanelId;
   projectId: string;
   entityId?: string;
   title: string;

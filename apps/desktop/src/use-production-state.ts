@@ -32,7 +32,6 @@ export function useProductionState({
   const [productionCapability, setProductionCapability] = useState<GenerationCapability>(
     initialProductionCapability,
   );
-  const [productionMenuOpen, setProductionMenuOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -50,7 +49,5 @@ export function useProductionState({
   return {
     productionCapability,
     setProductionCapability: selectProductionCapability,
-    productionMenuOpen,
-    setProductionMenuOpen,
   };
 }

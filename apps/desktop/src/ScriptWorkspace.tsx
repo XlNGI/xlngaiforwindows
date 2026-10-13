@@ -47,11 +47,6 @@ export function ScriptWorkspace({
       <section className="script-document-panel" aria-labelledby="script-document-heading">
         <div className="script-document-heading">
           <h2 id="script-document-heading">{'\u9879\u76ee\u6587\u6863'}</h2>
-          <p>
-            {
-              '\u53ea\u7ed9\u4eba\u770b\uff1a\u5927\u7eb2\u3001\u8ba1\u5212\u3001\u672c\u96c6\u628a\u63a7\u548c\u7b14\u8bb0\u3002\u4e0d\u4f1a\u53d1\u7ed9\u751f\u56fe\u6216\u751f\u89c6\u9891\u3002\u955c\u5934\u63d0\u793a\u8bcd\u548c\u53c2\u8003\u56fe\u8bf7\u5230\u300c\u573a\u6b21\u4e0e\u955c\u5934\u300d\u3002'
-            }
-          </p>
         </div>
         {episodeChapterCount > 0 ? (
           <p className="script-episode-hint">
