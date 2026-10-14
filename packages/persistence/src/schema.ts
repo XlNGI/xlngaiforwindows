@@ -1,4 +1,10 @@
-export const CURRENT_SCHEMA_VERSION = 42;
+export const CURRENT_SCHEMA_VERSION = 43;
+
+export const MIGRATION_V43 = `
+ALTER TABLE scenes ADD COLUMN video_prompt TEXT;
+ALTER TABLE scenes ADD COLUMN material_bindings_json TEXT NOT NULL DEFAULT '[]'
+  CHECK (json_valid(material_bindings_json));
+`;
 
 export const MIGRATION_V42 = `
 ALTER TABLE scenes ADD COLUMN scene_document_id TEXT REFERENCES documents(id) ON DELETE RESTRICT;

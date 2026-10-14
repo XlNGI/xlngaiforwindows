@@ -1,13 +1,15 @@
 # 短剧分集生成实施计划
 
-版本：0.2  
+版本：0.3  
 日期：2026-08-25  
-状态：S1 数据与契约、S2 Worker 业务与上下文、S3 Desktop 交互已完成（2026-08-25 全仓质量门禁通过）；S4 文档同步与最终验收进行中  
+状态：S1 数据与契约、S2 Worker 业务与上下文、S3 Desktop 交互已完成；场次级视频生产与素材绑定已实现，S4 文档同步与最终验收进行中  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档定义“用户上传小说后，在会话中按章节分组（一集）自动生成：本集整体把控项目文档、本集场次与镜头（含镜头提示词）、按需生成整部小说的角色与场景提示词”的业务逻辑与实施顺序。本文档建立在 `docs/NOVEL-AGENT-TOOL-IMPLEMENTATION-PLAN.md` 与 `docs/AGENT-PROJECT-DOCUMENT-WORKFLOW-IMPLEMENTATION-PLAN.md` 已实现能力之上，不重复建设已有文档草稿、审核、发布、CAS、change set、任务事件和不可变审计能力。
 
 > **2026-08-28 输入边界更新：** 用户所选小说章节直接读取其当前已保存草稿的本地 RAG 切片，并冻结章节 ID 与当前版本；源小说无需先发布。生成出的本集整体把控、角色/场景提示词等派生文档仍按本计划的审阅与发布参考链执行。
+
+> **2026-10-13 生产粒度更新：** 短剧视频默认在“场次”页面生成完整场次视频。场次页面展示并允许编辑完整视频提示词；镜头提示词作为场次提示词的编排来源和时间节拍。提示词中的角色、场景、道具等引用自动匹配项目素材库图片，用户可替换或取消绑定；绑定和提示词由 Worker 持久化到当前项目 SQLite。单镜头视频保留为兼容和异常修复路径。
 
 ## 1. 背景与目标
 
@@ -30,6 +32,7 @@
 - **D4 角色与场景按需生成**：角色/场景提示词是整部小说的资料文档（`documents.kind ∈ {character, scene}`），不要求一次性全部生成；用户按需指定章节范围或范围描述后生成。
 - **D5 一致性通过“来源冻结 + 参考链”保证**：源小说读取用户所选章节的当前已保存 RAG 切片并冻结版本；派生文档只读已发布内容，上一步已发布产物作为下一步输入，同时执行结构化引用校验和人工审阅门禁（详见 §10）。
 - **D6 镜头提示词存 `shots.prompt`**：新增列直接保存本集场次对应镜头的提示词，页面可展示/编辑，生产面板可读取。
+- **D8 场次完整视频提示词与素材绑定**：`scenes.video_prompt` 保存可编辑的完整场次视频提示词；`scenes.material_bindings_json` 保存角色、场景、道具等素材引用快照。用户从场次页面进入生产面板，提示词和参考图片自动预填，仍需用户确认后提交。
 - **D7 信任边界**：Agent 只生成草稿/提案，不直接写正式记录；文档发布、change set 批准均由用户执行。
 
 ## 3. 范围与非目标
@@ -136,7 +139,7 @@ flowchart LR
 6. 用户继续发提示词（如“生成这一集的场次和镜头提示词”）；
 7. 模型调用 `novel.episode.submit_structure` → Worker 校验引用 → 自动生成 change set；
 8. 用户在场次与镜头页的 Agent proposals 面板逐项批准 → 原子写入 `scenes`/`shots`（含 `prompt`）；
-9. 用户选中镜头可查看/编辑提示词，并进入 ProductionPanel 生产。
+9. 用户选中场次可查看/编辑完整视频提示词，场次中的素材引用自动显示并可手动替换/取消，随后进入 ProductionPanel 生产；镜头页保留单镜头图片/视频修复入口。
 
 ### 7.2 场景 B：按需生成角色/场景
 
@@ -151,6 +154,7 @@ flowchart LR
 > 遵循“增量 Schema”原则，新增迁移版本（v29 起，2026-08-25 实施），不修改既有表语义。
 
 - `shots` 新增 `prompt TEXT`（允许 NULL/空）；
+- `scenes` 新增 `video_prompt TEXT` 与 `material_bindings_json TEXT`（MIGRATION_V43），分别保存场次完整视频提示词和素材绑定快照；
 - `agent_change_set_items` 新增 `shot_prompt TEXT`（shot 类 item 的提示词；复用现有 `parent_item_id`/`parent_item_ordinal` 表达父子）；
 - `agent_change_sets` 新增可选来源血缘字段：`source_chapter_ids_json TEXT`、`source_content_hash TEXT`（记录本集来源章节与内容哈希，模式对齐 `novel_adaptation_proposals`；若迁移成本高可先用 change set title 记录，血缘作为 S4 强化项）；
 - `AgentGenerationPrepareParams` 新增 `selectedChapterIds?: string[]`（上限 50）；
@@ -296,6 +300,7 @@ flowchart LR
 - [x] 会话携带并冻结 `selectedChapterIds`，ChatPanel 支持“短剧创作”模式与意图推断（`inferShortDramaIntent`）；
 - [x] 2026-10-13：移除小说页生成快捷按钮和章节勾选，正文与短剧生成统一由会话发起；
 - [x] 场次与镜头页 prompt 展示/编辑（保存走 `shot.save`，≤2000 字符）；
+- [x] 场次工作区展示/编辑完整视频提示词；自动识别 `[角色:]`、`[场景:]`、`[道具:]` 引用并显示可替换素材；场次视频沿用 ProductionPanel 的参数预填与付费确认链；
 - [x] ChangeSetReviewPanel 展示 shot prompt 预览；
 - [x] 文档编辑器 kind 选择器（角色与场景页可建 character/scene 文档）。
 
@@ -316,7 +321,7 @@ flowchart LR
 
 | 层 | 用例 |
 |---|---|
-| Persistence | v27→v28 迁移、`shots.prompt` 默认/更新、change set item shot_prompt 应用/冲突 |
+| Persistence | `shots.prompt` 默认/更新、场次视频提示词与素材绑定迁移/更新、change set item shot_prompt 应用/冲突 |
 | Worker | selectedChapterIds 校验与冻结、短剧域上下文注入、`novel.episode.submit_draft` 落库、`novel.episode.submit_structure` 转换与引用校验、reference kind 落库、跨项目隔离 |
 | Desktop | 会话指定/确认章节并冻结 selectedChapterIds、prompt 展示/编辑、kind 选择器、ChangeSetReviewPanel prompt 预览 |
 | 安全 | 未知字段拒绝、越界/空数组拒绝、引用占位符注入校验、项目边界 |
@@ -356,4 +361,5 @@ flowchart LR
 | 2026-08-25 | S2 Worker 业务与上下文 | 完成 | `compileShortDrama` + selectedChapterIds 上下文；`novel.episode.submit_draft`（plan + screenplay binding）；`novel.episode.submit_structure`（引用校验 + 自动 change set）；`document.create_draft` documentKind；任务快照冻结；Worker 227 项测试通过 | 真实 Provider、引用校验的人工提示词边界 |
 | 2026-08-25 | S3 Desktop 交互 | 完成 | 章节多选 + “生成短剧内容”；ChatPanel “短剧创作”模式与意图推断；镜头提示词展示/编辑；文档类型选择器；change set prompt 预览；Desktop 145 项测试通过 | Windows 多窗口人工验收 |
 | 2026-10-13 | S3 Desktop 入口调整 | 完成 | 移除小说页“生成本章正文”“生成短剧内容”按钮及章节勾选；更新会话统一入口；Desktop 全量 304 项、typecheck、ESLint、Prettier（修改文件）、`git diff --check` 通过 | 真实 Provider、Windows 人工验收 |
+| 2026-10-13 | 场次级视频生产与素材绑定 | 完成 | Schema v43；场次完整视频提示词与素材绑定持久化；场次页面自动识别角色/场景/道具引用并可替换素材；场次视频接入 ProductionPanel 与确认提交链；Persistence 52 项、Worker 563 项、Desktop 337 项、typecheck、build、lint 通过 | 真实 Provider、Windows 原生窗口与付费提交人工验收 |
 | 2026-08-25 | S4 测试、文档与同步 | 部分完成 | 全仓 `pnpm.cmd test/typecheck/lint/format:check/build`、`git diff --check` 通过；NOVEL 计划 P8 子计划登记；验证记录已写入 | DOCX 同步、真实 Provider、Windows 人工验收 |

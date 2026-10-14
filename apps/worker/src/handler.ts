@@ -2027,6 +2027,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'asset.list':
           result = imageGenerationService.listAssets({
             kind: typeof params.kind === 'string' ? params.kind : undefined,
+            sceneId: typeof params.sceneId === 'string' ? params.sceneId : undefined,
             sourceDocumentId:
               typeof params.sourceDocumentId === 'string' ? params.sourceDocumentId : undefined,
             shotId: typeof params.shotId === 'string' ? params.shotId : undefined,
@@ -2366,7 +2367,7 @@ function optionalVideoAssetKind(
 ): VideoAssetKind | undefined {
   const value = params[key];
   if (value === undefined) return undefined;
-  if (value === 'generated-video' || value === 'shot-video') return value;
+  if (value === 'generated-video' || value === 'shot-video' || value === 'scene-video') return value;
   throw new Error(`${key} must be a supported video asset kind.`);
 }
 

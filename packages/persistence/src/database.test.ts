@@ -42,7 +42,9 @@ function removeSceneBindingMigration(database: Awaited<ReturnType<typeof tempora
     DROP INDEX idx_scenes_scene_document;
     ALTER TABLE scenes DROP COLUMN scene_document_id;
     ALTER TABLE agent_change_set_items DROP COLUMN scene_document_id;
-    DELETE FROM schema_migrations WHERE version = 42;`);
+    ALTER TABLE scenes DROP COLUMN video_prompt;
+    ALTER TABLE scenes DROP COLUMN material_bindings_json;
+    DELETE FROM schema_migrations WHERE version >= 42;`);
 }
 
 describe('project database', () => {
@@ -56,7 +58,9 @@ describe('project database', () => {
       DROP INDEX idx_scenes_scene_document;
       ALTER TABLE scenes DROP COLUMN scene_document_id;
       ALTER TABLE agent_change_set_items DROP COLUMN scene_document_id;
-      DELETE FROM schema_migrations WHERE version = 42;
+      ALTER TABLE scenes DROP COLUMN video_prompt;
+      ALTER TABLE scenes DROP COLUMN material_bindings_json;
+      DELETE FROM schema_migrations WHERE version >= 42;
       INSERT INTO projects (id,name,created_at,updated_at) VALUES ('binding-project','Binding','now','now');
       INSERT INTO scenes (id,project_id,title,position,created_at,updated_at,row_version) VALUES ('legacy-scene','binding-project','庭院',0,'now','now',3);
       INSERT INTO shots (id,scene_id,title,position,prompt,created_at,updated_at,row_version) VALUES ('legacy-shot','legacy-scene','远景',0,'原提示词','now','now',2);`);
@@ -71,8 +75,8 @@ describe('project database', () => {
             .get(),
         ).toBeUndefined();
       } else {
-        expect(migrateDatabase(database)).toBe(42);
-        expect(migrateDatabase(database)).toBe(42);
+        expect(migrateDatabase(database)).toBe(43);
+        expect(migrateDatabase(database)).toBe(43);
         expect(
           database
             .prepare(
@@ -91,8 +95,8 @@ describe('project database', () => {
   it('migrates an empty database to the current schema', async () => {
     const database = await temporaryDatabase();
     expect(getSchemaVersion(database)).toBe(0);
-    expect(migrateDatabase(database)).toBe(42);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 42 });
+    expect(migrateDatabase(database)).toBe(43);
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 43 });
     expect(
       database
         .prepare("SELECT name FROM pragma_table_info('generation_jobs') WHERE name = ?")
@@ -258,7 +262,7 @@ describe('project database', () => {
       DELETE FROM schema_migrations WHERE version = 41;
     `);
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(
       database
         .prepare(
@@ -325,7 +329,7 @@ describe('project database', () => {
       insertJob.run(`job-${status}`, status, legacySnapshot);
     }
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     const states = database
       .prepare('SELECT id, media_state AS mediaState FROM generation_jobs ORDER BY id')
       .all();
@@ -362,7 +366,7 @@ describe('project database', () => {
         .prepare('UPDATE generation_jobs SET submission_idempotency_key = ? WHERE id = ?')
         .run('same-attempt', 'job-pending'),
     ).toThrow();
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 42 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 43 });
     database.close();
   });
 
@@ -449,7 +453,7 @@ describe('project database', () => {
     );
 
     expect(getSchemaVersion(database)).toBe(37);
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(
       database
         .prepare(
@@ -517,7 +521,7 @@ describe('project database', () => {
         updated_at: 'characters-updated',
       },
     ]);
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 42 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 43 });
     database.close();
   });
 
@@ -699,7 +703,7 @@ describe('project database', () => {
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     const chunks = database
       .prepare(
         `SELECT source_document_version_id, ordinal, length(content_text) AS content_length
@@ -949,7 +953,7 @@ describe('project database', () => {
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
@@ -976,7 +980,7 @@ describe('project database', () => {
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(
       database
         .prepare('SELECT content, reply_to_message_id FROM chat_messages WHERE id = ?')
@@ -1038,7 +1042,7 @@ describe('project database', () => {
         'now',
       );
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
     });
@@ -1086,7 +1090,7 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Legacy', 'now');
 
     expect(getSchemaVersion(database)).toBe(11);
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(
       database
         .prepare(
@@ -1159,8 +1163,8 @@ describe('project database', () => {
       .run('version', 'document', 1, '# Audit', 'now');
 
     expect(getSchemaVersion(database)).toBe(12);
-    expect(migrateDatabase(database)).toBe(42);
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
+    expect(migrateDatabase(database)).toBe(43);
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -1315,7 +1319,7 @@ describe('project database', () => {
         2,
       );
 
-    expect(migrateDatabase(database)).toBe(42);
+    expect(migrateDatabase(database)).toBe(43);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
     ).toEqual({
@@ -1353,7 +1357,7 @@ describe('project database', () => {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE sql LIKE '%__v13_old_%'")
         .get(),
     ).toEqual({ count: 0 });
-    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 42 });
+    expect(checkIntegrity(database)).toMatchObject({ ok: true, schemaVersion: 43 });
     database.close();
   });
 

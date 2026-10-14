@@ -62,6 +62,7 @@ interface ProductionPanelProps {
   projectId?: string;
   projectRootPath?: string;
   shotId?: string;
+  sceneId?: string;
   sourceDocumentId?: string;
   seedPrompt?: string;
   seedImages?: string[];
@@ -198,7 +199,11 @@ function cancellationMessage(cancellation?: MediaTaskCancellationOutcome): strin
 }
 
 function isVideoAsset(asset: AssetInfo | undefined): boolean {
-  return asset?.kind === 'generated-video' || asset?.kind === 'shot-video';
+  return (
+    asset?.kind === 'generated-video' ||
+    asset?.kind === 'shot-video' ||
+    asset?.kind === 'scene-video'
+  );
 }
 
 function isAssetReference(value: unknown): value is string {
@@ -281,6 +286,7 @@ export function ProductionPanel({
   projectId,
   projectRootPath,
   shotId,
+  sceneId,
   sourceDocumentId,
   seedPrompt,
   seedImages,
@@ -357,7 +363,7 @@ export function ProductionPanel({
 
   useEffect(() => {
     setGeneratedImages(undefined);
-  }, [projectId, shotId, sourceDocumentId]);
+  }, [projectId, shotId, sceneId, sourceDocumentId]);
 
   useEffect(() => {
     if (preferredAssetKind) setAssetKind(preferredAssetKind);
@@ -891,12 +897,13 @@ export function ProductionPanel({
       }
       const prepared = await callWorker('video.generate.prepare', {
         shotId,
+        sceneId,
         adapterKey: adapter.key,
         parameters: submissionParameters,
         providerRegion,
         providerProfileId: selectedProfile.id,
         modelId: selectedModel.remoteModelId,
-        assetKind: videoAssetKind,
+        assetKind: sceneId ? 'scene-video' : videoAssetKind,
       });
       if (currentProjectIdRef.current !== submissionProjectId) return;
       setGenerationStatus('正在提交视频任务...');
@@ -1011,7 +1018,7 @@ export function ProductionPanel({
 
   const draftSaveHint = !writable
     ? '当前项目为只读'
-    : !shotId
+    : !shotId && !sceneId
       ? '请先选择镜头'
       : !selectedProfile || !selectedModel
         ? '请先选择供应商连接和模型'
@@ -1192,13 +1199,17 @@ export function ProductionPanel({
                       <label className="asset-kind-field">
                         保存为
                         <select
-                          value={videoAssetKind}
+                          value={sceneId ? 'scene-video' : videoAssetKind}
                           onChange={(event) =>
                             setVideoAssetKind(event.target.value as VideoAssetKind)
                           }
-                          disabled={busy}
+                          disabled={busy || Boolean(sceneId)}
                         >
-                          <option value="shot-video">镜头视频</option>
+                          {sceneId ? (
+                            <option value="scene-video">场次视频</option>
+                          ) : (
+                            <option value="shot-video">镜头视频</option>
+                          )}
                           <option value="generated-video">普通视频素材</option>
                         </select>
                       </label>

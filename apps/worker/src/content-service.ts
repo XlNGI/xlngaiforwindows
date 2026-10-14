@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
 import type {
   ChatMessageInfo,
   ChatMessageListParams,
@@ -29,6 +30,7 @@ import type {
   MessageConstraintParams,
   MessageDocumentParams,
   SceneInfo,
+  SceneMaterialBindingInfo,
   SceneSaveParams,
   ShotInfo,
   ShotSaveParams,
@@ -63,6 +65,13 @@ function required(value: string, name: string): string {
   if (!result) throw new Error(`${name} is required.`);
   return result;
 }
+
+const sceneMaterialRoles = new Set<SceneMaterialBindingInfo['role']>([
+  'character',
+  'scene',
+  'prop',
+  'other',
+]);
 
 function asConversation(record: ConversationRecord): ConversationInfo {
   if (!scopeTypes.has(record.scopeType)) {
@@ -119,7 +128,9 @@ export class ContentService {
 
   listScenes(): SceneInfo[] {
     return this.projects.access(false, (database, project) =>
-      createRepositories(database).scenes.listByProject(project.id),
+      createRepositories(database)
+        .scenes.listByProject(project.id)
+        .map((scene) => this.toSceneInfo(scene)),
     );
   }
 
@@ -140,12 +151,25 @@ export class ContentService {
             ? existing?.sceneDocumentId
             : (params.sceneDocumentId ?? undefined);
         if (sceneDocumentId) requireProductionSceneDocument(database, project.id, sceneDocumentId);
+        const videoPrompt =
+          params.videoPrompt === undefined
+            ? existing?.videoPrompt
+            : params.videoPrompt.trim() || undefined;
+        if (videoPrompt && videoPrompt.length > 20_000) {
+          throw new Error('Scene video prompt must be at most 20000 characters.');
+        }
+        const materialBindings =
+          params.materialBindings === undefined
+            ? this.parseSceneMaterialBindings(existing?.materialBindingsJson)
+            : this.validateSceneMaterialBindings(database, project.id, params.materialBindings);
         const now = new Date().toISOString();
-        const record: SceneInfo = {
+        const record = {
           id: existing?.id ?? randomUUID(),
           projectId: project.id,
           title,
           sceneDocumentId,
+          videoPrompt,
+          materialBindingsJson: JSON.stringify(materialBindings),
           position:
             existing?.position ??
             (repositories.scenes.listByProject(project.id).at(-1)?.position ?? -1) + 1,
@@ -170,9 +194,90 @@ export class ContentService {
         );
         repositories.projects.touch(now);
         project.updatedAt = now;
-        return repositories.scenes.get(record.id)!;
+        return this.toSceneInfo(repositories.scenes.get(record.id)!);
       })(),
     );
+  }
+
+  private toSceneInfo(record: {
+    id: string;
+    projectId: string;
+    title: string;
+    sceneDocumentId?: string;
+    videoPrompt?: string;
+    materialBindingsJson?: string;
+    position: number;
+    rowVersion: number;
+    createdAt: string;
+    updatedAt: string;
+  }): SceneInfo {
+    return {
+      id: record.id,
+      projectId: record.projectId,
+      title: record.title,
+      sceneDocumentId: record.sceneDocumentId,
+      videoPrompt: record.videoPrompt,
+      materialBindings: this.parseSceneMaterialBindings(record.materialBindingsJson),
+      position: record.position,
+      rowVersion: record.rowVersion,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private parseSceneMaterialBindings(value?: string): SceneMaterialBindingInfo[] {
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((item): item is SceneMaterialBindingInfo => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+        const candidate = item as Record<string, unknown>;
+        return (
+          typeof candidate.id === 'string' &&
+          typeof candidate.label === 'string' &&
+          typeof candidate.assetId === 'string' &&
+          (candidate.source === 'auto' || candidate.source === 'manual') &&
+          sceneMaterialRoles.has(candidate.role as SceneMaterialBindingInfo['role'])
+        );
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  private validateSceneMaterialBindings(
+    database: Database.Database,
+    projectId: string,
+    bindings: SceneMaterialBindingInfo[],
+  ): SceneMaterialBindingInfo[] {
+    if (bindings.length > 30) throw new Error('A scene may bind at most 30 materials.');
+    const ids = new Set<string>();
+    return bindings.map((binding) => {
+      if (!sceneMaterialRoles.has(binding.role)) throw new Error('Scene material role is invalid.');
+      const label = required(binding.label, 'Scene material label');
+      const assetId = required(binding.assetId, 'Scene material asset ID');
+      if (ids.has(binding.id)) throw new Error('Scene material IDs must be unique.');
+      ids.add(binding.id);
+      const asset = createRepositories(database).assets.get(assetId);
+      if (!asset || asset.projectId !== projectId || asset.deletedAt) {
+        throw new Error('Scene material asset was not found.');
+      }
+      if (binding.sourceDocumentId) {
+        const document = createRepositories(database).documents.get(binding.sourceDocumentId);
+        if (!document || document.projectId !== projectId) {
+          throw new Error('Scene material source document was not found.');
+        }
+      }
+      return {
+        id: required(binding.id, 'Scene material ID'),
+        role: binding.role,
+        label,
+        assetId,
+        ...(binding.sourceDocumentId ? { sourceDocumentId: binding.sourceDocumentId } : {}),
+        source: binding.source,
+      };
+    });
   }
 
   listShots(sceneId: string): ShotInfo[] {

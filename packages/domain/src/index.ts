@@ -478,6 +478,8 @@ export interface SceneRecord {
   projectId: string;
   title: string;
   sceneDocumentId?: string;
+  videoPrompt?: string;
+  materialBindingsJson?: string;
   position: number;
   rowVersion: number;
   createdAt: string;

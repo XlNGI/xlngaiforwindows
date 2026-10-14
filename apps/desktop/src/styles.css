@@ -8813,3 +8813,62 @@ button {
 .generated-image-results img {
   height: 150px;
 }
+
+.scene-workspace {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.scene-prompt-panel,
+.scene-material-panel {
+  padding: 16px;
+  border: 1px solid var(--border, #30343a);
+  background: var(--panel, #1d2024);
+}
+.scene-prompt-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.scene-prompt-heading h1,
+.scene-prompt-heading h2 {
+  margin: 2px 0 0;
+}
+.scene-prompt-heading p {
+  margin: 4px 0 0;
+  color: var(--muted, #9ca3af);
+}
+.scene-video-prompt-editor {
+  min-height: 260px;
+  width: 100%;
+}
+.scene-material-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.scene-material-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border, #30343a);
+  background: var(--surface, #17191c);
+}
+.scene-material-card > span {
+  color: var(--muted, #9ca3af);
+  font-size: 12px;
+}
+.scene-material-card img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+.scene-material-missing {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  color: var(--muted, #9ca3af);
+  background: #111315;
+}

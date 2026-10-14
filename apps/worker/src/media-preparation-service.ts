@@ -46,6 +46,7 @@ export interface MediaPrepareArguments {
   inputAssetIds: string[];
   parameters: AdapterParameters;
   shotId?: string;
+  sceneId?: string;
   assetKind?: ImageAssetKind | VideoAssetKind;
 }
 
@@ -248,10 +249,12 @@ export class MediaPreparationService {
       } else {
         job = this.videos.prepare({
           ...common,
+          sceneId: context.arguments.sceneId,
           providerRegion: candidate.providerRegion,
           assetKind:
             context.arguments.assetKind === 'generated-video' ||
-            context.arguments.assetKind === 'shot-video'
+            context.arguments.assetKind === 'shot-video' ||
+            context.arguments.assetKind === 'scene-video'
               ? context.arguments.assetKind
               : 'generated-video',
         });
@@ -620,7 +623,7 @@ function parseMediaPrepareArguments(
     );
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set(['prompt', 'inputAssetIds', 'parameters', 'shotId', 'assetKind']);
+  const allowed = new Set(['prompt', 'inputAssetIds', 'parameters', 'shotId', 'sceneId', 'assetKind']);
   const unknown = Object.keys(record).find((key) => !allowed.has(key));
   if (unknown) {
     throw new AgentToolPolicyError(
@@ -644,8 +647,10 @@ function parseMediaPrepareArguments(
   validateParameterRecord(parameters, false, []);
   const shotId =
     record.shotId === undefined ? undefined : requireText(record.shotId, 'shotId', 200);
+  const sceneId =
+    record.sceneId === undefined ? undefined : requireText(record.sceneId, 'sceneId', 200);
   const assetKind = parseAssetKind(kind, record.assetKind);
-  return { prompt, inputAssetIds, parameters, shotId, assetKind };
+  return { prompt, inputAssetIds, parameters, shotId, sceneId, assetKind };
 }
 
 function parseAssetKind(
@@ -660,7 +665,7 @@ function parseAssetKind(
     'last-frame',
     'generated-image',
   ]);
-  const videoKinds = new Set<VideoAssetKind>(['generated-video', 'shot-video']);
+  const videoKinds = new Set<VideoAssetKind>(['generated-video', 'shot-video', 'scene-video']);
   if (
     typeof value !== 'string' ||
     (kind === 'image'

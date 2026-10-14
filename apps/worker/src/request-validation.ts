@@ -931,10 +931,33 @@ export function validateSessionRequestParams(
       requireId(params, 'messageId');
       break;
     case 'scene.save':
-      rejectUnknown(params, ['sceneId', 'title', 'sceneDocumentId', 'expectedRowVersion']);
+      rejectUnknown(params, [
+        'sceneId',
+        'title',
+        'sceneDocumentId',
+        'videoPrompt',
+        'materialBindings',
+        'expectedRowVersion',
+      ]);
       optionalId(params, 'sceneId');
       requireString(params, 'title', MAX_TITLE_LENGTH);
       if (params.sceneDocumentId !== null) optionalId(params, 'sceneDocumentId');
+      if (params.videoPrompt !== undefined) requireString(params, 'videoPrompt', 20_000, true);
+      if (params.materialBindings !== undefined) {
+        if (!Array.isArray(params.materialBindings) || params.materialBindings.length > 30) {
+          throw new RequestValidationError('materialBindings must contain at most 30 items.');
+        }
+        params.materialBindings.forEach((raw, index) => {
+          const binding = requireObject(raw, `materialBindings[${index}]`);
+          rejectUnknown(binding, ['id', 'role', 'label', 'assetId', 'sourceDocumentId', 'source']);
+          requireId(binding, 'id');
+          requireEnum(binding, 'role', new Set(['character', 'scene', 'prop', 'other']));
+          requireString(binding, 'label', MAX_TITLE_LENGTH);
+          requireId(binding, 'assetId');
+          optionalId(binding, 'sourceDocumentId');
+          requireEnum(binding, 'source', new Set(['auto', 'manual']));
+        });
+      }
       optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
       break;
     case 'shot.storyboard.save':
@@ -1029,6 +1052,7 @@ export function validateSessionRequestParams(
     case 'video.generate.prepare':
       rejectUnknown(params, [
         'shotId',
+        'sceneId',
         'adapterKey',
         'parameters',
         'providerRegion',
@@ -1040,12 +1064,13 @@ export function validateSessionRequestParams(
         'costNoticeAcknowledged',
       ]);
       optionalId(params, 'shotId');
+      optionalId(params, 'sceneId');
       requireString(params, 'adapterKey', 200);
       requireObject(params.parameters, 'parameters');
       requireEnum(params, 'providerRegion', new Set(['global', 'cn', 'unicompapi']));
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
-      optionalEnum(params, 'assetKind', new Set(['generated-video', 'shot-video']));
+      optionalEnum(params, 'assetKind', new Set(['generated-video', 'shot-video', 'scene-video']));
       optionalId(params, 'conversationId');
       optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
       optionalBoolean(params, 'costNoticeAcknowledged');
@@ -1254,6 +1279,7 @@ export function validateSessionRequestParams(
           'generated-image',
           'generated-video',
           'shot-video',
+          'scene-video',
         ]),
       );
       if (params.parameters !== undefined) requireObject(params.parameters, 'parameters');
@@ -1441,6 +1467,7 @@ function validateMediaSelection(input: unknown): void {
       'generated-image',
       'generated-video',
       'shot-video',
+      'scene-video',
     ]),
   );
   const parameters = requireObject(selection.parameters, 'selection.parameters');

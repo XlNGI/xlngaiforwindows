@@ -437,6 +437,8 @@ export class ImageGenerationService {
       const tagsById = new Map(repo.listTags(project.id).map((tag) => [tag.id, tag]));
       const records = params.sourceDocumentId
         ? listAssetsForSourceDocument(database, project.id, params.sourceDocumentId, params.limit)
+        : params.sceneId
+          ? listAssetsForScene(database, project.id, params.sceneId, params.limit)
         : params.shotId
           ? listAssetsForShot(database, project.id, params.shotId, params.limit)
           : repo.queryByProject(project.id, params);
@@ -1579,6 +1581,55 @@ function listAssetsForShot(
        LIMIT ?`,
     )
     .all(projectId, shotId, bounded) as Array<{
+    id: string;
+    project_id: string;
+    kind: string;
+    relative_path: string;
+    content_hash: string;
+    size_bytes: number;
+    source_url: string | null;
+    alias: string | null;
+    updated_at: string | null;
+    deleted_at: string | null;
+    trash_relative_path: string | null;
+    created_at: string;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    projectId: row.project_id,
+    kind: row.kind,
+    relativePath: row.relative_path,
+    contentHash: row.content_hash,
+    sizeBytes: row.size_bytes,
+    sourceUrl: row.source_url ?? undefined,
+    alias: row.alias ?? undefined,
+    updatedAt: row.updated_at ?? undefined,
+    deletedAt: row.deleted_at ?? undefined,
+    trashRelativePath: row.trash_relative_path ?? undefined,
+    createdAt: row.created_at,
+  }));
+}
+
+function listAssetsForScene(
+  database: Database.Database,
+  projectId: string,
+  sceneId: string,
+  limit?: number,
+) {
+  const bounded = Math.min(Math.max(limit ?? 60, 1), 200);
+  const rows = database
+    .prepare(
+      `SELECT assets.*
+       FROM assets
+       INNER JOIN generation_results ON generation_results.asset_id = assets.id
+       INNER JOIN generation_jobs ON generation_jobs.id = generation_results.job_id
+       WHERE assets.project_id = ?
+         AND assets.deleted_at IS NULL
+         AND json_extract(generation_jobs.task_snapshot_json, '$.sceneId') = ?
+       ORDER BY assets.created_at DESC, assets.id DESC
+       LIMIT ?`,
+    )
+    .all(projectId, sceneId, bounded) as Array<{
     id: string;
     project_id: string;
     kind: string;

@@ -1684,10 +1684,23 @@ export interface SceneInfo {
   title: string;
   /** Reusable production scene document (kind=scene). */
   sceneDocumentId?: string;
+  videoPrompt?: string;
+  materialBindings?: SceneMaterialBindingInfo[];
   position: number;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type SceneMaterialRole = 'character' | 'scene' | 'prop' | 'other';
+
+export interface SceneMaterialBindingInfo {
+  id: string;
+  role: SceneMaterialRole;
+  label: string;
+  assetId: string;
+  sourceDocumentId?: string;
+  source: 'auto' | 'manual';
 }
 
 export interface SceneSaveParams {
@@ -1695,6 +1708,8 @@ export interface SceneSaveParams {
   title: string;
   /** Omitted preserves the binding; null clears it. */
   sceneDocumentId?: string | null;
+  videoPrompt?: string;
+  materialBindings?: SceneMaterialBindingInfo[];
   expectedRowVersion?: number;
 }
 
@@ -3418,7 +3433,7 @@ export type VideoGenerationJobStatus =
   | 'cancelled';
 export type VideoGenerationFailureKind =
   'transport' | 'provider' | 'download' | 'interrupted' | 'timeout';
-export type VideoAssetKind = 'generated-video' | 'shot-video';
+export type VideoAssetKind = 'generated-video' | 'shot-video' | 'scene-video';
 export type VideoProviderRegion = 'global' | 'cn' | 'unicompapi';
 
 export interface VideoGenerationCostInfo {
@@ -3452,6 +3467,7 @@ export interface VideoGenerationJobInfo {
   id: string;
   projectId: string;
   shotId?: string;
+  sceneId?: string;
   adapterKey: string;
   assetKind: VideoAssetKind;
   providerTaskId?: string;
@@ -3481,6 +3497,7 @@ export interface ProjectTaskSnapshot {
 
 export interface VideoGenerationPrepareParams {
   shotId?: string;
+  sceneId?: string;
   adapterKey: string;
   parameters: AdapterParameters;
   providerRegion: VideoProviderRegion;
@@ -3528,6 +3545,7 @@ export interface AssetListParams {
   kind?: string;
   sourceDocumentId?: string;
   shotId?: string;
+  sceneId?: string;
   keyword?: string;
   deleted?: 'active' | 'trash';
   createdFrom?: string;

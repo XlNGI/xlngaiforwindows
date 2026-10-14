@@ -78,6 +78,7 @@ import { MediaSubmissionConfirmationDialog } from './media-confirmation';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
+import { SceneWorkspace } from './SceneWorkspace';
 import { ScriptWorkspace } from './ScriptWorkspace';
 import { ShotWorkspace, type ShotReferenceAssets } from './ShotWorkspace';
 import { MaintenanceDialog } from './MaintenanceDialog';
@@ -699,6 +700,7 @@ export function App() {
   const [focusChangeSetId, setFocusChangeSetId] = useState<string>();
   const [sceneBindingBusy, setSceneBindingBusy] = useState(false);
   const [sceneBindingMessage, setSceneBindingMessage] = useState('');
+  const [sceneVideoPrompt, setSceneVideoPrompt] = useState('');
   const [shots, setShots] = useState<ShotInfo[]>([]);
   const [shot, setShot] = useState<ShotInfo>();
   const [shotPrompt, setShotPrompt] = useState('');
@@ -1128,6 +1130,7 @@ export function App() {
   const [productionSeed, setProductionSeed] = useState<{
     documentId?: string;
     shotId?: string;
+    sceneId?: string;
     prompt: string;
     assetKind?: 'character' | 'scene' | 'first-frame';
     images?: string[];
@@ -1609,6 +1612,17 @@ export function App() {
       setConstraints(constraintList);
       setScenes(sceneList);
       setScene(firstScene);
+      setSceneVideoPrompt(
+        firstScene?.videoPrompt?.trim()
+          ? firstScene.videoPrompt
+          : firstScene && shotList.length > 0
+            ? [
+                `# 场次：${firstScene.title}`,
+                '请生成一段完整、连续的视频，保持人物外观、服装、场景和光线一致。',
+                ...shotList.map((item, index) => `${index + 1}. ${item.title}\n${item.prompt?.trim() || '补充该镜头的动作和画面。'}`),
+              ].join('\n\n')
+            : '',
+      );
       setShots(shotList);
       setShot(undefined);
       setAssets(assetList);
@@ -1978,6 +1992,7 @@ export function App() {
     const list = await callWorker('scene.list', {});
     setScenes(list);
     setScene(created);
+    setSceneVideoPrompt(created.videoPrompt ?? '');
     setShots([]);
     setShot(undefined);
     openProjectView('shots');
@@ -1999,6 +2014,7 @@ export function App() {
       if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
         return;
       setScene(updated);
+      setSceneVideoPrompt(updated.videoPrompt ?? '');
       setScenes((rows) => rows.map((item) => (item.id === updated.id ? updated : item)));
       setSceneBindingMessage(
         sceneDocumentId ? '场次已绑定场景，下属镜头可沿用场景参考图。' : '场次的场景绑定已解除。',
@@ -2048,12 +2064,21 @@ export function App() {
     const requestId = ++sceneRequest.current;
     conversationRequest.current += 1;
     setScene(selected);
+    setSceneVideoPrompt(selected.videoPrompt ?? '');
     setSceneBindingMessage('');
     setShot(undefined);
     try {
       const items = await callWorker('shot.list', { sceneId: selected.id });
       if (requestId !== sceneRequest.current) return;
       setShots(items);
+      if (!selected.videoPrompt?.trim() && items.length > 0) {
+        const composed = [
+          `# 场次：${selected.title}`,
+          '请生成一段完整、连续的视频，保持人物外观、服装、场景和光线一致。',
+          ...items.map((item, index) => `${index + 1}. ${item.title}\n${item.prompt?.trim() || '补充该镜头的动作和画面。'}`),
+        ].join('\n\n');
+        setSceneVideoPrompt(composed);
+      }
       setShot(items[0]);
       openProjectView('shots');
     } catch (reason) {
@@ -2066,6 +2091,47 @@ export function App() {
   useEffect(() => {
     setShotPrompt(shot?.prompt ?? '');
   }, [shot?.id]);
+
+  const saveSceneVideoPrompt = async (
+    nextPrompt: string,
+    materialBindings: import('@ai-video/contracts').SceneMaterialBindingInfo[],
+  ) => {
+    if (!scene) return;
+    try {
+      const updated = await callWorker('scene.save', {
+        sceneId: scene.id,
+        title: scene.title,
+        sceneDocumentId: scene.sceneDocumentId ?? null,
+        videoPrompt: nextPrompt,
+        materialBindings,
+        expectedRowVersion: scene.rowVersion,
+      });
+      setScene(updated);
+      setScenes((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
+      setSceneVideoPrompt(updated.videoPrompt ?? '');
+      setChatMessage('场次视频提示词和素材绑定已保存。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '场次提示词保存失败');
+    }
+  };
+
+  const openSceneProduction = async (
+    materialBindings: import('@ai-video/contracts').SceneMaterialBindingInfo[],
+  ) => {
+    if (!scene) return;
+    if (
+      sceneVideoPrompt !== (scene.videoPrompt ?? '') ||
+      JSON.stringify(materialBindings) !== JSON.stringify(scene.materialBindings ?? [])
+    ) {
+      await saveSceneVideoPrompt(sceneVideoPrompt, materialBindings);
+    }
+    setProductionSeed({
+      sceneId: scene.id,
+      prompt: sceneVideoPrompt.trim(),
+      images: materialBindings.map((item) => `asset://${item.assetId}`),
+    });
+    setProductionCapability(materialBindings.length > 0 ? 'REFERENCE_TO_VIDEO' : 'TEXT_TO_VIDEO');
+  };
 
   useEffect(() => {
     const requestId = ++shotStoryboardRequest.current;
@@ -3214,6 +3280,7 @@ export function App() {
       projectId={project?.id}
       projectRootPath={project?.rootPath}
       shotId={productionSeed?.documentId ? undefined : (productionSeed?.shotId ?? shot?.id)}
+      sceneId={productionSeed?.sceneId}
       sourceDocumentId={productionSeed?.documentId}
       seedPrompt={productionSeed?.prompt}
       seedImages={productionSeed?.images}
@@ -4220,6 +4287,19 @@ export function App() {
                       {scenes.length === 0 && <small className="tree-empty">暂无场次</small>}
                     </aside>
                     <div className="directory-pane">
+                      {scene ? (
+                        <SceneWorkspace
+                          scene={scene}
+                          prompt={sceneVideoPrompt}
+                          bindings={scene.materialBindings ?? []}
+                          documents={documents}
+                          assets={assets}
+                          writable={writable}
+                          onPromptChange={setSceneVideoPrompt}
+                          onSave={(nextPrompt, bindings) => void saveSceneVideoPrompt(nextPrompt, bindings)}
+                          onGenerateVideo={(bindings) => void openSceneProduction(bindings)}
+                        />
+                      ) : null}
                       {shot ? (
                         <ShotWorkspace
                           projectId={project.id}

@@ -453,7 +453,29 @@ export function migrateDatabase(
         .run(42, now);
     })();
   }
+  if (getSchemaVersion(database) === 42) {
+    database.transaction(() => {
+      applyMigrationV43(database);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(43, now);
+    })();
+  }
   return getSchemaVersion(database);
+}
+
+function applyMigrationV43(database: Database.Database): void {
+  const columns = new Set(
+    (database.prepare('PRAGMA table_info(scenes)').all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    ),
+  );
+  if (!columns.has('video_prompt')) database.exec('ALTER TABLE scenes ADD COLUMN video_prompt TEXT');
+  if (!columns.has('material_bindings_json')) {
+    database.exec(
+      "ALTER TABLE scenes ADD COLUMN material_bindings_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(material_bindings_json))",
+    );
+  }
 }
 
 function applyMigrationV39(database: Database.Database, now: string): void {

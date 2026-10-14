@@ -106,8 +106,12 @@ export class VideoGenerationService {
     }
     const validation = validateAdapterParameters(params.adapterKey, params.parameters);
     if (!validation.valid) throw new Error('Video generation parameters are invalid.');
-    const assetKind = params.assetKind ?? 'shot-video';
-    if (assetKind !== 'generated-video' && assetKind !== 'shot-video') {
+    const assetKind = params.assetKind ?? (params.sceneId ? 'scene-video' : 'shot-video');
+    if (
+      assetKind !== 'generated-video' &&
+      assetKind !== 'shot-video' &&
+      assetKind !== 'scene-video'
+    ) {
       throw new Error('Video asset kind is invalid.');
     }
     const providerRegion = requireProviderRegion(params.providerRegion);
@@ -131,6 +135,13 @@ export class VideoGenerationService {
         if (!shot || !scene || scene.projectId !== project.id) {
           throw new Error('Shot was not found.');
         }
+      }
+      if (params.sceneId) {
+        const scene = repositories.scenes.get(params.sceneId);
+        if (!scene || scene.projectId !== project.id) throw new Error('Scene was not found.');
+      }
+      if (params.sceneId && params.shotId) {
+        throw new Error('Video generation may target either a scene or a shot, not both.');
       }
       const now = new Date().toISOString();
       const record: JobRecord = {
@@ -166,6 +177,7 @@ export class VideoGenerationService {
           providerProfileId,
           providerRegion,
           modelId,
+          sceneId: params.sceneId,
           conversationId: params.conversationId,
           originalPrompt: params.originalPrompt,
           costNoticeAcknowledged: params.costNoticeAcknowledged === true,
@@ -872,7 +884,9 @@ export class VideoGenerationService {
       : {};
     return {
       assetKind:
-        parsed.assetKind === 'generated-video' || parsed.assetKind === 'shot-video'
+        parsed.assetKind === 'generated-video' ||
+        parsed.assetKind === 'shot-video' ||
+        parsed.assetKind === 'scene-video'
           ? parsed.assetKind
           : 'shot-video',
       providerRegion: requireProviderRegion(parsed.providerRegion ?? 'global'),
@@ -912,6 +926,15 @@ export class VideoGenerationService {
     results: GenerationResultRecord[],
   ): VideoGenerationJobInfo {
     const metadata = this.metadata(job);
+    let sceneId: string | undefined;
+    if (job.taskSnapshotJson) {
+      try {
+        const snapshot = JSON.parse(job.taskSnapshotJson) as { sceneId?: unknown };
+        if (typeof snapshot.sceneId === 'string' && snapshot.sceneId.trim()) sceneId = snapshot.sceneId;
+      } catch {
+        // Legacy or malformed snapshots are still rendered without a scene target.
+      }
+    }
     const assetById = new Map(assets.map((asset) => [asset.id, asset]));
     const terminal = TERMINAL_STATUSES.has(job.status);
     const elapsedEnd = terminal ? Date.parse(job.updatedAt) : Date.now();
@@ -920,6 +943,7 @@ export class VideoGenerationService {
       id: job.id,
       projectId: job.projectId,
       shotId: job.shotId,
+      sceneId,
       adapterKey: job.adapterKey,
       assetKind: metadata.assetKind,
       providerTaskId: job.providerTaskId,

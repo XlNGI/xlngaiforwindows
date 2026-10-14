@@ -1063,10 +1063,12 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
   save(record: SceneRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
            scene_document_id = excluded.scene_document_id,
+           video_prompt = excluded.video_prompt,
+           material_bindings_json = excluded.material_bindings_json,
            row_version = scenes.row_version + 1
          WHERE scenes.row_version = excluded.row_version`,
       )
@@ -1079,6 +1081,8 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.updatedAt,
         record.rowVersion,
         record.sceneDocumentId ?? null,
+        record.videoPrompt ?? null,
+        record.materialBindingsJson ?? '[]',
       );
     if (result.changes !== 1) throw new Error('SCENE_ROW_VERSION_CONFLICT');
     rebuildLibraryChunksForRecord(
@@ -1143,6 +1147,8 @@ interface SceneRow {
   project_id: string;
   title: string;
   scene_document_id: string | null;
+  video_prompt: string | null;
+  material_bindings_json: string;
   position: number;
   created_at: string;
   updated_at: string;
@@ -1155,6 +1161,8 @@ function mapScene(row: SceneRow): SceneRecord {
     projectId: row.project_id,
     title: row.title,
     sceneDocumentId: row.scene_document_id ?? undefined,
+    videoPrompt: row.video_prompt ?? undefined,
+    materialBindingsJson: row.material_bindings_json || '[]',
     position: row.position,
     rowVersion: row.row_version,
     createdAt: row.created_at,
