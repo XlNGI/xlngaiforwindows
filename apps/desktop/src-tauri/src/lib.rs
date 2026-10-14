@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::mpsc::Receiver;
 use std::{
     borrow::Cow,
     fs::{create_dir_all, read_dir, remove_file, write, File},
@@ -12,14 +14,13 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-#[cfg(test)]
-use std::sync::mpsc::Receiver;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
 use tauri::Manager;
 
 mod credential_store;
+mod dubbing_provider;
 mod llm_stream;
 mod model_contract;
 mod novel_import;
@@ -175,7 +176,11 @@ fn parse_unicompapi_adapter_key(adapter_key: &str) -> Result<UniCompAdapterParts
     let parts = adapter_key.split(':').collect::<Vec<_>>();
     if parts.len() == 4 && parts[1] == "unicompapi" && parts[3] == "contract-1" {
         model_contract::contract(adapter_key)?;
-        return Ok(UniCompAdapterParts { capability: parts[0], token: parts[2], template: None });
+        return Ok(UniCompAdapterParts {
+            capability: parts[0],
+            token: parts[2],
+            template: None,
+        });
     }
     if parts.len() != 4 || parts[1] != "unicompapi" || parts[3] != "v1" {
         return Err("UniCompAPI adapter key is invalid".to_string());
@@ -444,9 +449,14 @@ fn resolve_media_selection(
                 == Some(true)
             && if let Some(parts) = unicomp_parts.as_ref() {
                 if adapter_key.ends_with(":contract-1") {
-                    model.get("contractStatus").and_then(serde_json::Value::as_str) == Some("enabled") &&
-                    model.get("remoteModelId").and_then(serde_json::Value::as_str)
-                        .is_some_and(|id| model_contract::matches_model(adapter_key, id))
+                    model
+                        .get("contractStatus")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("enabled")
+                        && model
+                            .get("remoteModelId")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| model_contract::matches_model(adapter_key, id))
                 } else if let Some(template) = parts.template {
                     model
                         .get("parameterTemplateKey")
@@ -825,7 +835,8 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
         | "IMAGE_TO_VIDEO:vidu:vidu2.0:v2" => Ok(()),
         _ => match unicompapi_adapter_parts(adapter_key) {
             Ok((
-                "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" | "REFERENCE_TO_VIDEO" | "START_END_TO_VIDEO" | "VIDEO_TO_VIDEO",
+                "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO" | "REFERENCE_TO_VIDEO" | "START_END_TO_VIDEO"
+                | "VIDEO_TO_VIDEO",
                 _,
             )) => Ok(()),
             _ => Err("Native video task commands require a registered video adapter".to_string()),
@@ -834,25 +845,33 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
 }
 
 fn provider_task_id(body: &serde_json::Value) -> Option<&str> {
-    body.pointer("/output/task_id").and_then(serde_json::Value::as_str).or_else(|| body.get("task_id")
+    body.pointer("/output/task_id")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| body.get("id").and_then(serde_json::Value::as_str))
         .or_else(|| {
-            body.get("data")
-                .and_then(|data| data.get("task_id").or_else(|| data.get("id")))
+            body.get("task_id")
                 .and_then(serde_json::Value::as_str)
-        }))
+                .or_else(|| body.get("id").and_then(serde_json::Value::as_str))
+                .or_else(|| {
+                    body.get("data")
+                        .and_then(|data| data.get("task_id").or_else(|| data.get("id")))
+                        .and_then(serde_json::Value::as_str)
+                })
+        })
 }
 
 fn provider_state(body: &serde_json::Value) -> Option<&str> {
-    body.pointer("/output/task_status").and_then(serde_json::Value::as_str).or_else(|| body.get("state")
-        .or_else(|| body.get("status"))
+    body.pointer("/output/task_status")
         .and_then(serde_json::Value::as_str)
         .or_else(|| {
-            body.get("data")
-                .and_then(|data| data.get("state").or_else(|| data.get("status")))
+            body.get("state")
+                .or_else(|| body.get("status"))
                 .and_then(serde_json::Value::as_str)
-        }))
+                .or_else(|| {
+                    body.get("data")
+                        .and_then(|data| data.get("state").or_else(|| data.get("status")))
+                        .and_then(serde_json::Value::as_str)
+                })
+        })
 }
 
 fn provider_video_source(value: &serde_json::Value) -> Option<&str> {
@@ -1867,12 +1886,8 @@ fn provider_submit_blocking(
         if adapter_key.ends_with(":contract-1") {
             let body = unicompapi_payload(adapter_key, payload, remote_model_id)?;
             let secret = credential_read(credential_subject)?;
-            let mut response = request_unicompapi_json(
-                &secret,
-                "POST",
-                "/v1/images/generations",
-                Some(&body),
-            )?;
+            let mut response =
+                request_unicompapi_json(&secret, "POST", "/v1/images/generations", Some(&body))?;
             externalize_provider_images(&mut response)?;
             return Ok(response);
         }
@@ -2114,7 +2129,14 @@ fn route_worker_reply(
 
 fn worker_request_timeout(request: &serde_json::Value) -> Duration {
     match request.get("method").and_then(serde_json::Value::as_str) {
-        Some("media.generation.confirmSubmission" | "agent.generation.confirmMediaSubmission" | "image.generate.complete") => MEDIA_WORKER_REQUEST_TIMEOUT,
+        Some(
+            "media.generation.confirmSubmission"
+            | "agent.generation.confirmMediaSubmission"
+            | "image.generate.complete"
+            | "audio.import"
+            | "dubbing.job.submit"
+            | "project.integrity",
+        ) => MEDIA_WORKER_REQUEST_TIMEOUT,
         _ => WORKER_REQUEST_TIMEOUT,
     }
 }
@@ -2172,14 +2194,20 @@ impl WorkerProcess {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
                     Ok(0) => {
-                        fail_worker_replies(&stdout_replies, "Worker exited before returning a response");
+                        fail_worker_replies(
+                            &stdout_replies,
+                            "Worker exited before returning a response",
+                        );
                         let _ = response_tx
                             .send(Err("Worker exited before returning a response".to_string()));
                         break;
                     }
                     Ok(_) => {
                         if line.len() > SIDECAR_ENVELOPE_MAX_BYTES {
-                            fail_worker_replies(&stdout_replies, "Worker message exceeds the 2 MiB sidecar limit");
+                            fail_worker_replies(
+                                &stdout_replies,
+                                "Worker message exceeds the 2 MiB sidecar limit",
+                            );
                             let _ =
                                 response_tx
                                     .send(Err("Worker message exceeds the 2 MiB sidecar limit"
@@ -2203,7 +2231,10 @@ impl WorkerProcess {
                         route_worker_reply(&stdout_replies, line, &response_tx);
                     }
                     Err(error) => {
-                        fail_worker_replies(&stdout_replies, &format!("Failed to read worker response: {error}"));
+                        fail_worker_replies(
+                            &stdout_replies,
+                            &format!("Failed to read worker response: {error}"),
+                        );
                         let _ = response_tx
                             .send(Err(format!("Failed to read worker response: {error}")));
                         break;
@@ -2258,7 +2289,10 @@ impl WorkerProcess {
             .ok_or("Worker request is missing its correlation ID")?;
         let (sender, response) = mpsc::channel();
         {
-            let mut replies = self.replies.lock().map_err(|_| "Worker reply lock is poisoned")?;
+            let mut replies = self
+                .replies
+                .lock()
+                .map_err(|_| "Worker reply lock is poisoned")?;
             if replies.pending.contains_key(request_id) {
                 return Err("Worker request correlation ID is already pending".to_string());
             }
@@ -2358,6 +2392,9 @@ fn dispatch_host_request(
         "provider.media.submit"
             | "provider.media.poll"
             | "provider.media.cancel"
+            | "provider.dubbing.speech"
+            | "provider.dubbing.submit"
+            | "provider.dubbing.poll"
             | "provider.stream.start"
     ) {
         match request_guard::try_dispatch() {
@@ -2375,6 +2412,18 @@ fn dispatch_host_request(
         None
     };
     match method {
+        "provider.dubbing.speech" | "provider.dubbing.submit" | "provider.dubbing.poll" => {
+            let method = method.to_string();
+            thread::spawn(move || {
+                let _dispatch = dispatch;
+                let result = dubbing_provider::handle(&method, &params, &request_id);
+                let _ = send_host_response(&writer, &request_id, result);
+            });
+        }
+        "provider.dubbing.cancel" => {
+            let result = dubbing_provider::handle(method, &params, &request_id);
+            let _ = send_host_response(&writer, &request_id, result);
+        }
         "provider.media.submit" => {
             if let Err(error) = validate_provider_media_submit_params(&params) {
                 let _ = send_host_response(
@@ -2815,9 +2864,16 @@ fn provider_media_poll_blocking(
     } else {
         None
     };
-    normalize_provider_media_poll(&response,
-        if adapter_key.ends_with(":contract-1") { "official-contract" } else { provider_region }, output.as_ref())
-        .map_err(|error| host_error("INTERNAL_ERROR", error, false))
+    normalize_provider_media_poll(
+        &response,
+        if adapter_key.ends_with(":contract-1") {
+            "official-contract"
+        } else {
+            provider_region
+        },
+        output.as_ref(),
+    )
+    .map_err(|error| host_error("INTERNAL_ERROR", error, false))
 }
 
 fn normalize_provider_media_poll(
@@ -3255,6 +3311,7 @@ fn send_host_response(
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
+        dubbing_provider::cancel_all();
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
@@ -3407,7 +3464,10 @@ impl WorkerState {
         let result = worker.request(request);
         if result.is_err() {
             let mut guard = self.process.lock().map_err(|_| "Worker lock is poisoned")?;
-            if guard.as_ref().is_some_and(|current| Arc::ptr_eq(current, &worker)) {
+            if guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &worker))
+            {
                 *guard = None;
             }
         }
@@ -3420,12 +3480,55 @@ async fn worker_request(
     request: serde_json::Value,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<WorkerState>().request(&request))
-        .await
-        .map_err(|error| format!("Worker request task failed: {error}"))?
+    let media_source = matches!(
+        request.get("method").and_then(serde_json::Value::as_str),
+        Some("asset.mediaSource" | "audio.mediaSource")
+    );
+    let worker_app = app.clone();
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        worker_app.state::<WorkerState>().request(&request)
+    })
+    .await
+    .map_err(|error| format!("Worker request task failed: {error}"))??;
+    if media_source && response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        if let Some(path) = response
+            .pointer("/result/path")
+            .and_then(serde_json::Value::as_str)
+        {
+            let content_type = response
+                .pointer("/result/contentType")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !matches!(
+                content_type,
+                "image/png"
+                    | "image/jpeg"
+                    | "image/webp"
+                    | "image/gif"
+                    | "video/mp4"
+                    | "video/webm"
+                    | "audio/mpeg"
+                    | "audio/wav"
+                    | "audio/x-wav"
+            ) {
+                return Err("Project media has an unsupported playback type".into());
+            }
+            let path = Path::new(path)
+                .canonicalize()
+                .map_err(|_| "Project media playback file is unavailable".to_string())?;
+            if !path.is_file() {
+                return Err("Project media playback file is invalid".into());
+            }
+            app.asset_protocol_scope().allow_file(path).map_err(|_| {
+                "Project media could not be added to the playback scope".to_string()
+            })?;
+        }
+    }
+    Ok(response)
 }
 
 fn interrupt_native_agent_runtimes(app: tauri::AppHandle, exit_state: NativeRuntimeExitState) {
+    dubbing_provider::cancel_all();
     let identities = app.state::<LlmStreamState>().interrupt_agent_runtimes();
     if identities.is_empty() {
         exit_state.completed.store(true, Ordering::Release);
@@ -3683,15 +3786,15 @@ mod tests {
         ensure_video_adapter, externalize_provider_images, is_profile_id,
         normalize_provider_media_poll, provider_cancel_path, provider_payload, provider_state,
         provider_submit_error, provider_target, provider_task_error, provider_task_id,
-        provider_task_path, provider_video_extension, resolve_controlled_media_inputs_at_root,
-        resolve_controlled_media_inputs,
-        resolve_media_selection, unicompapi_adapter_model, unicompapi_payload,
-        unicompapi_video_content_path, unicompapi_video_task_path, validate_credential_provider,
-        validate_host_request_envelope, validate_provider_media_cancel_params,
-        validate_provider_stream_params, ProviderBinaryDownloadResponse, ProviderHttpResponse,
-        WorkerProcess, WorkerState, BASE64_STANDARD, BUNDLED_WORKER_FILENAME,
-        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES,
-        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
+        provider_task_path, provider_video_extension, resolve_controlled_media_inputs,
+        resolve_controlled_media_inputs_at_root, resolve_media_selection, unicompapi_adapter_model,
+        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
+        validate_credential_provider, validate_host_request_envelope,
+        validate_provider_media_cancel_params, validate_provider_stream_params,
+        ProviderBinaryDownloadResponse, ProviderHttpResponse, WorkerProcess, WorkerState,
+        BASE64_STANDARD, BUNDLED_WORKER_FILENAME, MARKDOWN_IMPORT_LIMIT,
+        PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES, UNICOMPAPI_AUTHORIZATION_SCHEME,
+        UNICOMPAPI_HOST,
     };
     use base64::Engine as _;
     use serde_json::json;
@@ -3704,12 +3807,18 @@ mod tests {
 
     #[test]
     fn official_video_contract_round_trip_uses_the_existing_protocol_bridge() {
-        use std::{io::{Read, Write}, net::TcpListener, thread};
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut bytes = Vec::new();
             let body_start;
             loop {
@@ -3725,14 +3834,22 @@ mod tests {
             let headers = String::from_utf8_lossy(&bytes[..body_start]);
             assert!(headers.starts_with("POST /v1/videos HTTP/1.1"));
             assert!(headers.contains("Authorization: Bearer local-contract-key"));
-            let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|length| length.trim().parse().ok())).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|length| length.trim().parse().ok())
+                })
+                .unwrap();
             while bytes.len() < body_start + length {
                 let mut chunk = [0u8; 4096];
                 let read = stream.read(&mut chunk).unwrap();
                 assert!(read > 0);
                 bytes.extend_from_slice(&chunk[..read]);
             }
-            let body: serde_json::Value = serde_json::from_slice(&bytes[body_start..body_start+length]).unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
             assert_eq!(body["model"], "happyhorse-1.1-r2v");
             assert_eq!(body["images"].as_array().unwrap().len(), 9);
             assert_eq!(body["seed"], 2147483647);
@@ -3741,11 +3858,27 @@ mod tests {
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
         });
         let body = unicompapi_payload("REFERENCE_TO_VIDEO:unicompapi:cn.happyhorse.1.1.r2v:contract-1",json!({"prompt":"A horse running", "images":vec!["https://example.com/reference.png";9],"seed":2147483647}),"happyhorse-1.1-r2v").unwrap();
-        let response = super::request_json(super::JsonHttpRequest{host:"127.0.0.1",port,secure:false,method:"POST",path:"/v1/videos",authorization_scheme:"Bearer",accept:"application/json",secret:"local-contract-key",body:Some(&body),request_body_limit:1024*1024,response_body_limit:1024*1024}).unwrap();
+        let response = super::request_json(super::JsonHttpRequest {
+            host: "127.0.0.1",
+            port,
+            secure: false,
+            method: "POST",
+            path: "/v1/videos",
+            authorization_scheme: "Bearer",
+            accept: "application/json",
+            secret: "local-contract-key",
+            body: Some(&body),
+            request_body_limit: 1024 * 1024,
+            response_body_limit: 1024 * 1024,
+        })
+        .unwrap();
         server.join().unwrap();
         assert_eq!(provider_task_id(&response.body), Some("mock-task"));
         assert_eq!(provider_state(&response.body), Some("SUCCEEDED"));
-        assert_eq!(super::provider_video_source(&response.body), Some("https://example.com/output.mp4"));
+        assert_eq!(
+            super::provider_video_source(&response.body),
+            Some("https://example.com/output.mp4")
+        );
     }
 
     #[test]

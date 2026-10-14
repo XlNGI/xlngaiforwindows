@@ -40,10 +40,16 @@ try {
   if (-not (Test-Path -LiteralPath $workerExecutable)) {
     throw "Installed Worker executable is missing: $workerExecutable"
   }
+  $dubbingSmoke = Join-Path $PSScriptRoot '../apps/worker/scripts/validate-dubbing-sidecar.mjs'
+  & node $dubbingSmoke --worker $workerExecutable --ffmpeg (Join-Path $installDirectory 'media/ffmpeg')
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Installed fixed-voice dubbing smoke failed'
+  }
 
   $desktopProcess = Start-Process `
     -FilePath $desktopExecutable `
     -WorkingDirectory $installDirectory `
+    -WindowStyle Hidden `
     -PassThru
 
   $worker = $null

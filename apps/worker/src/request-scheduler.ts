@@ -5,6 +5,15 @@ export interface RequestSchedulerOptions {
 }
 
 const concurrentReadMethods = new Set<WorkerMethod>([
+  'characterVoice.list',
+  'audio.list',
+  'audio.get',
+  'audio.mediaSource',
+  'dubbing.runtime.get',
+  'dubbing.scene.get',
+  'dubbing.job.get',
+  'dubbing.job.list',
+  'dubbing.job.cancel',
   'health',
   'sqlite.probe',
   'project.current',
@@ -66,6 +75,8 @@ const concurrentReadMethods = new Set<WorkerMethod>([
 ]);
 
 const backgroundMethods = new Set<WorkerMethod>([
+  'audio.import',
+  'dubbing.job.submit',
   'project.backup',
   'project.export',
   'provider.connection.begin',

@@ -20,6 +20,7 @@ import type {
   ImageGenerationJobInfo,
   TaskLogItem,
   VideoGenerationJobInfo,
+  DubbingJobInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import {
@@ -42,6 +43,7 @@ const kindLabel: Record<TaskLogItem['kind'], string> = {
   'agent-document': 'Agent 文档',
   image: '图片',
   video: '视频',
+  dubbing: '配音制作',
 };
 
 const statusLabel: Record<string, string> = {
@@ -53,6 +55,8 @@ const statusLabel: Record<string, string> = {
   running: '执行中',
   waiting_review: '等待审核',
   completed: '已完成',
+  complete: '已完成',
+  interrupted: '已中断',
   succeeded: '已完成',
   failed: '失败',
   cancelled: '已取消',
@@ -743,6 +747,7 @@ export function TaskLogView({
     ImageGenerationJobInfo | VideoGenerationJobInfo | null
   >(null);
   const [mediaEvents, setMediaEvents] = useState<GenerationJobEventInfo[]>([]);
+  const [dubbingDetail, setDubbingDetail] = useState<DubbingJobInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [detailBusy, setDetailBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -786,6 +791,7 @@ export function TaskLogView({
     setDetail(null);
     setMediaDetail(null);
     setMediaEvents([]);
+    setDubbingDetail(null);
     setDetailMessage('');
     setDetailBusy(false);
     void refresh();
@@ -812,7 +818,21 @@ export function TaskLogView({
     setDetail(null);
     setMediaDetail(null);
     setMediaEvents([]);
+    setDubbingDetail(null);
     setDetailMessage('');
+    if (item.kind === 'dubbing') {
+      setDetailBusy(true);
+      try {
+        const next = await callWorker('dubbing.job.get', { jobId: item.sourceId });
+        if (requestId === detailRequestRef.current) setDubbingDetail(next);
+      } catch (reason) {
+        if (requestId === detailRequestRef.current)
+          setDetailMessage(reason instanceof Error ? reason.message : '配音任务读取失败');
+      } finally {
+        if (requestId === detailRequestRef.current) setDetailBusy(false);
+      }
+      return;
+    }
     if (item.kind !== 'agent-document') {
       setDetailBusy(true);
       try {
@@ -903,6 +923,7 @@ export function TaskLogView({
           <option value="agent-document">Agent 文档</option>
           <option value="image">图片</option>
           <option value="video">视频</option>
+          <option value="dubbing">配音制作</option>
         </select>
         <select
           aria-label="任务状态筛选"
@@ -1005,6 +1026,54 @@ export function TaskLogView({
                 <div className="task-log-detail-error task-log-detail-error-block" role="alert">
                   <AlertCircle size={15} />
                   <span>{detailMessage}</span>
+                </div>
+              ) : selectedItem.kind === 'dubbing' && dubbingDetail ? (
+                <div className="task-log-detail-body">
+                  <TaskLogStatus status={dubbingDetail.status} />
+                  {dubbingDetail.error && <p role="alert">{dubbingDetail.error}</p>}
+                  <dl className="task-log-detail-meta">
+                    <div>
+                      <dt>场次</dt>
+                      <dd>{dubbingDetail.sceneId}</dd>
+                    </div>
+                    <div>
+                      <dt>费用</dt>
+                      <dd>
+                        {dubbingDetail.budget.state === 'estimated'
+                          ? `${dubbingDetail.budget.currency} ${dubbingDetail.budget.estimatedTotal ?? '未知'}（估算）`
+                          : '单价未知，按单次确认执行'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>结果</dt>
+                      <dd>
+                        {dubbingDetail.outputAssetId
+                          ? '成片已保存，可在场次配音面板试听采用'
+                          : dubbingDetail.outputAudioId
+                            ? '配音已保存，可在台词中试听采用'
+                            : '尚未完成'}
+                      </dd>
+                    </div>
+                  </dl>
+                  <ol className="task-log-event-list">
+                    {(dubbingDetail.steps ?? []).map((step) => (
+                      <li key={step.id}>
+                        <strong>
+                          {step.kind === 'speech'
+                            ? '生成配音'
+                            : step.kind === 'lipsync'
+                              ? '口型处理'
+                              : step.kind === 'compose'
+                                ? '成片合成'
+                                : '制作步骤'}
+                        </strong>
+                        <span>
+                          第 {step.attempt} 次 · {statusLabel[step.status] ?? step.status}
+                        </span>
+                        {step.error && <p>{step.error}</p>}
+                      </li>
+                    ))}
+                  </ol>
                 </div>
               ) : selectedItem.kind !== 'agent-document' && mediaDetail ? (
                 <MediaTaskDetailPanel

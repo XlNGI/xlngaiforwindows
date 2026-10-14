@@ -33,6 +33,7 @@ function run(script, args, cwd = workerDirectory) {
 }
 
 mkdirSync(sidecarDirectory, { recursive: true });
+run(join(workerDirectory, '..', '..', 'scripts', 'prepare-ffmpeg.mjs'), []);
 mkdirSync(sidecarNodeModules, { recursive: true });
 rmSync(sidecarSqliteDirectory, { recursive: true, force: true });
 cpSync(sqliteDirectory, sidecarSqliteDirectory, { recursive: true, dereference: true });

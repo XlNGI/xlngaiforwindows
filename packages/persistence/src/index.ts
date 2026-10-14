@@ -6,6 +6,8 @@ export * from './migration-v16.js';
 export * from './migration-v18.js';
 export * from './migration-v35.js';
 export * from './migration-v37.js';
+export * from './migration-v44.js';
+export * from './dubbing-repository.js';
 export * from './novel-rag-chunks.js';
 export * from './project-library-chunks.js';
 export * from './project-structure.js';

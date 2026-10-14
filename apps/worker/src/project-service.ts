@@ -185,7 +185,11 @@ export class ProjectService {
     this.nativeBinding = options.nativeBinding;
     this.recentProjectsPath =
       options.recentProjectsPath ??
-      join(homedir(), 'AppData', 'Local', 'AI Video Workspace', 'recent-projects.json');
+      join(
+        process.env.AI_VIDEO_APP_DATA_DIR ??
+          join(homedir(), 'AppData', 'Local', 'AI Video Workspace'),
+        'recent-projects.json',
+      );
   }
 
   create(rootPath: string, name: string): OpenProject {
@@ -261,6 +265,16 @@ export class ProjectService {
         openReadonly = true;
         schemaVersion = getSchemaVersion(database);
       } else if (!readonly) {
+        if (schemaVersion > 0 && schemaVersion < CURRENT_SCHEMA_VERSION) {
+          checkpoint(database);
+          const backupDirectory = join(root, 'backups');
+          mkdirSync(backupDirectory, { recursive: true });
+          const migrationBackup = join(
+            backupDirectory,
+            `pre-migration-v${schemaVersion}-${randomUUID()}.sqlite`,
+          );
+          database.exec(`VACUUM INTO '${migrationBackup.replaceAll("'", "''")}'`);
+        }
         schemaVersion = migrateDatabase(database);
       }
       const metadata = createRepositories(database).projects.get();

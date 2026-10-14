@@ -13,6 +13,8 @@ coverage/
 *.sqlite-wal
 .ai-video.lock
 apps/desktop/src-tauri/binaries/*.exe
+apps/desktop/src-tauri/resources/ffmpeg/*.exe
+apps/desktop/src-tauri/resources/ffmpeg/*.dll
 apps/worker/dist-sidecar/
 apps/desktop/src-tauri/gen/
 .dev-server*.log

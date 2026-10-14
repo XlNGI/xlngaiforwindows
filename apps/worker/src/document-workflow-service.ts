@@ -42,6 +42,7 @@ import type {
 } from '@ai-video/domain';
 import {
   createRepositories,
+  DubbingRepository,
   rebuildLibraryChunksForDocument,
   rebuildNovelRagChunks,
 } from '@ai-video/persistence';
@@ -1714,6 +1715,31 @@ export class DocumentWorkflowService {
           }>)
         : [];
       const items: TaskLogItem[] = [
+        ...(params.kind === undefined || params.kind === 'dubbing'
+          ? new DubbingRepository(database, project.id)
+              .listJobs()
+              .filter((job) => !params.status || job.status === params.status)
+              .slice(0, maxFetch)
+              .map((job): TaskLogItem => ({
+                id: `dubbing:${job.id}`,
+                kind: 'dubbing',
+                title:
+                  job.kind === 'speech'
+                    ? '固定音色配音'
+                    : job.kind === 'lipsync'
+                      ? '口型同步与场次成片'
+                      : '本地配音成片',
+                status: job.status,
+                createdAt: job.createdAt,
+                updatedAt: job.updatedAt,
+                sourceId: job.id,
+                sceneId: job.sceneId,
+                estimatedCost:
+                  job.budget.state === 'estimated'
+                    ? String(job.budget.estimatedTotal ?? '')
+                    : undefined,
+              }))
+          : []),
         ...tasks.map((task): TaskLogItem => ({
           id: `agent:${task.id}`,
           kind: 'agent-document',

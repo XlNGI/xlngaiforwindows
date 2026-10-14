@@ -19,6 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-video/contracts": "workspace:*",
     "@ai-video/domain": "workspace:*",
     "better-sqlite3": "^12.2.0"
   },

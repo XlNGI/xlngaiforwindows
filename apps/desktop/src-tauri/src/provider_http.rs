@@ -1,8 +1,9 @@
 use std::{
     fmt,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, ToSocketAddrs},
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use super::request_guard::{self, Outcome};
@@ -10,11 +11,11 @@ use windows_sys::Win32::Foundation::{GetLastError, SYSTEMTIME};
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-    WinHttpSetTimeouts, WinHttpTimeToSystemTime, ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED,
-    ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
-    WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION,
-    WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpSetTimeouts, WinHttpTimeToSystemTime, WinHttpWriteData,
+    ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_TIMEOUT,
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE,
+    WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 pub(crate) const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,6 +36,8 @@ pub(crate) struct JsonHttpError {
     kind: JsonHttpErrorKind,
     message: String,
     guard_outcome: Outcome,
+    request_may_have_been_sent: bool,
+    rejected_http_status: Option<u32>,
 }
 
 impl JsonHttpError {
@@ -43,11 +46,41 @@ impl JsonHttpError {
             kind,
             message: message.into(),
             guard_outcome: Outcome::Neutral,
+            request_may_have_been_sent: false,
+            rejected_http_status: None,
         }
     }
 
     pub(crate) fn kind(&self) -> JsonHttpErrorKind {
         self.kind
+    }
+
+    pub(crate) fn request_may_have_been_sent(&self) -> bool {
+        self.request_may_have_been_sent
+    }
+
+    pub(crate) fn rejected_http_status(&self) -> Option<u32> {
+        self.rejected_http_status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dubbing_test_error(
+        kind: JsonHttpErrorKind,
+        sent: bool,
+        status: Option<u32>,
+    ) -> Self {
+        Self {
+            kind,
+            message: "Native fixture transport failure".into(),
+            guard_outcome: Outcome::Neutral,
+            request_may_have_been_sent: sent,
+            rejected_http_status: status,
+        }
+    }
+
+    fn with_request_sent(mut self) -> Self {
+        self.request_may_have_been_sent = true;
+        self
     }
 
     fn with_outcome(mut self, outcome: Outcome) -> Self {
@@ -681,6 +714,431 @@ fn request_public_bytes_admitted(
     })
 }
 
+/// Dedicated file transport. Its target enum cannot be supplied by IPC callers.
+/// It intentionally does not add arbitrary headers/hosts to the JSON bridge.
+#[derive(Clone, Copy)]
+pub(crate) enum DubbingHttpTarget<'a> {
+    Speech,
+    SyncSubmit,
+    SyncModels,
+    SyncPoll(&'a str),
+    Output(&'a PublicHttpsUrl),
+}
+
+#[derive(Default)]
+pub(crate) struct DubbingCancellation {
+    cancelled: AtomicBool,
+    request_handle: AtomicUsize,
+}
+
+impl DubbingCancellation {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.close_request();
+    }
+
+    fn close_request(&self) {
+        let handle = self.request_handle.swap(0, Ordering::AcqRel);
+        if handle != 0 {
+            unsafe { WinHttpCloseHandle(handle as *mut core::ffi::c_void) };
+        }
+    }
+}
+
+struct DubbingRequestHandle<'a>(&'a DubbingCancellation);
+
+impl Drop for DubbingRequestHandle<'_> {
+    fn drop(&mut self) {
+        self.0.close_request();
+    }
+}
+
+pub(crate) struct DubbingHttpBody<'a> {
+    pub reader: &'a mut dyn Read,
+    pub size: u32,
+    pub content_type: &'a str,
+}
+
+pub(crate) struct DubbingHttpRequest<'a> {
+    pub target: DubbingHttpTarget<'a>,
+    pub secret: Option<&'a str>,
+    pub idempotency_key: Option<&'a str>,
+    pub body: Option<DubbingHttpBody<'a>>,
+    pub output: Option<&'a mut dyn Write>,
+    pub response_limit: usize,
+    pub cancellation: &'a DubbingCancellation,
+}
+
+pub(crate) fn request_dubbing_file(
+    request: DubbingHttpRequest<'_>,
+) -> Result<RawHttpResponse, JsonHttpError> {
+    let (host, path, method, auth) = match request.target {
+        DubbingHttpTarget::Speech => ("api.minimax.cn", "/v1/t2a_v2".into(), "POST", "Bearer"),
+        DubbingHttpTarget::SyncSubmit => {
+            ("api.sync.so", "/v2/generate".into(), "POST", "x-api-key")
+        }
+        DubbingHttpTarget::SyncModels => ("api.sync.so", "/v2/models".into(), "GET", "x-api-key"),
+        DubbingHttpTarget::SyncPoll(id) => {
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            {
+                return Err(JsonHttpError::new(
+                    JsonHttpErrorKind::InvalidRequest,
+                    "Invalid Sync task ID",
+                ));
+            }
+            (
+                "api.sync.so",
+                format!("/v2/generate/{id}"),
+                "GET",
+                "x-api-key",
+            )
+        }
+        DubbingHttpTarget::Output(url) => {
+            assert_provider_output_host(&url.host).map_err(|_| {
+                JsonHttpError::new(
+                    JsonHttpErrorKind::InvalidRequest,
+                    "Provider output host is outside the network boundary",
+                )
+            })?;
+            (url.host.as_str(), url.path.clone(), "GET", "")
+        }
+    };
+    validate_dubbing_request(&request, method, auth)?;
+    let origin = request_guard::origin_key(true, host, 443);
+    let cancellation = request.cancellation;
+    let permit = request_guard::acquire(&origin, || cancellation.is_cancelled())
+        .map_err(|error| JsonHttpError::new(JsonHttpErrorKind::Admission, error.to_string()))?;
+    let result = request_dubbing_admitted(request, host, 443, true, &path, method, auth);
+    permit.finish(if cancellation.is_cancelled() {
+        Outcome::Neutral
+    } else {
+        request_outcome(&result)
+    });
+    result
+}
+
+fn validate_dubbing_request(
+    request: &DubbingHttpRequest<'_>,
+    method: &str,
+    auth: &str,
+) -> Result<(), JsonHttpError> {
+    let invalid = || {
+        JsonHttpError::new(
+            JsonHttpErrorKind::InvalidRequest,
+            "Invalid dedicated dubbing transport request",
+        )
+    };
+    if request.response_limit == 0 || request.response_limit > 512 * 1024 * 1024 {
+        return Err(invalid());
+    }
+    if auth.is_empty() {
+        if request.secret.is_some()
+            || request.idempotency_key.is_some()
+            || request.body.is_some()
+            || request.output.is_none()
+        {
+            return Err(invalid());
+        }
+    } else if request.secret.is_none_or(|secret| {
+        secret.is_empty() || !secret.is_ascii() || secret.bytes().any(|c| c.is_ascii_control())
+    }) {
+        return Err(invalid());
+    }
+    if let Some(key) = request.idempotency_key {
+        if !matches!(request.target, DubbingHttpTarget::SyncSubmit)
+            || key.is_empty()
+            || key.len() > 128
+            || !key
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'~' | b'-'))
+        {
+            return Err(invalid());
+        }
+    }
+    if (method == "POST") != request.body.is_some() {
+        return Err(invalid());
+    }
+    if let Some(body) = &request.body {
+        let content_type_valid = match request.target {
+            DubbingHttpTarget::Speech => {
+                body.content_type == "application/json" && body.size <= 64 * 1024
+            }
+            DubbingHttpTarget::SyncSubmit => {
+                body.size <= 560 * 1024 * 1024
+                    && body
+                        .content_type
+                        .strip_prefix("multipart/form-data; boundary=")
+                        .is_some_and(|b| {
+                            !b.is_empty()
+                                && b.len() <= 80
+                                && b.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                        })
+            }
+            _ => false,
+        };
+        if body.size == 0 || !content_type_valid {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn request_dubbing_admitted(
+    mut request: DubbingHttpRequest<'_>,
+    host: &str,
+    port: u16,
+    secure: bool,
+    path: &str,
+    method: &str,
+    auth: &str,
+) -> Result<RawHttpResponse, JsonHttpError> {
+    let started = Instant::now();
+    let check_cancelled = || {
+        if request.cancellation.is_cancelled() {
+            Err(JsonHttpError::new(
+                JsonHttpErrorKind::Transport,
+                "Dubbing request interrupted",
+            ))
+        } else if started.elapsed() >= Duration::from_secs(10 * 60) {
+            Err(JsonHttpError::new(
+                JsonHttpErrorKind::Timeout,
+                "Dubbing transfer exceeded its 10 minute deadline",
+            )
+            .with_outcome(Outcome::Failure))
+        } else {
+            Ok(())
+        }
+    };
+    check_cancelled()?;
+    let session = WinHttpHandle::new(
+        unsafe {
+            WinHttpOpen(
+                wide("XLNGAI/1.0").as_ptr(),
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
+        },
+        "Unable to initialize dubbing transport",
+    )?;
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 120_000) } == 0 {
+        return Err(winhttp_error("Unable to configure dubbing timeouts"));
+    }
+    let connection = WinHttpHandle::new(
+        unsafe { WinHttpConnect(session.0, wide(host).as_ptr(), port, 0) },
+        "Unable to connect dubbing transport",
+    )?;
+    let native_request = unsafe {
+        WinHttpOpenRequest(
+            connection.0,
+            wide(method).as_ptr(),
+            wide(path).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            if secure { WINHTTP_FLAG_SECURE } else { 0 },
+        )
+    };
+    if native_request.is_null() {
+        return Err(winhttp_error("Unable to create dubbing request"));
+    }
+    request
+        .cancellation
+        .request_handle
+        .store(native_request as usize, Ordering::Release);
+    let _request_handle = DubbingRequestHandle(request.cancellation);
+    check_cancelled()?;
+    let disabled_features = WINHTTP_DISABLE_REDIRECTS;
+    if unsafe {
+        WinHttpSetOption(
+            native_request,
+            WINHTTP_OPTION_DISABLE_FEATURE,
+            (&disabled_features as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    } == 0
+    {
+        return Err(winhttp_error("Unable to disable dubbing redirects"));
+    }
+    let mut headers = if auth.is_empty() {
+        "Accept: video/mp4\r\n".encode_utf16().collect::<Vec<_>>()
+    } else {
+        "Accept: application/json\r\n"
+            .encode_utf16()
+            .collect::<Vec<_>>()
+    };
+    if let Some(secret) = request.secret {
+        headers.extend(
+            if auth == "Bearer" {
+                "Authorization: Bearer "
+            } else {
+                "x-api-key: "
+            }
+            .encode_utf16(),
+        );
+        headers.extend(secret.encode_utf16());
+        headers.extend("\r\n".encode_utf16());
+    }
+    if let Some(key) = request.idempotency_key {
+        headers.extend(format!("Idempotency-Key: {key}\r\n").encode_utf16());
+    }
+    if let Some(body) = &request.body {
+        headers.extend(format!("Content-Type: {}\r\n", body.content_type).encode_utf16());
+    }
+    if let Err(error) = check_cancelled() {
+        headers.fill(0);
+        return Err(error);
+    }
+    // Once WinHttpSendRequest is invoked, a transport failure can no longer
+    // prove that the remote service did not accept the paid request.
+    let result = (|| {
+        let sent = unsafe {
+            WinHttpSendRequest(
+                native_request,
+                headers.as_ptr(),
+                headers.len() as u32,
+                std::ptr::null(),
+                0,
+                request.body.as_ref().map_or(0, |body| body.size),
+                0,
+            )
+        };
+        headers.fill(0);
+        if sent == 0 {
+            return Err(winhttp_error("Dubbing request could not be sent"));
+        }
+        if let Some(body) = &mut request.body {
+            let mut remaining = u64::from(body.size);
+            let mut buffer = [0_u8; 64 * 1024];
+            while remaining > 0 {
+                check_cancelled()?;
+                let max_read = remaining.min(buffer.len() as u64) as usize;
+                let size = body.reader.read(&mut buffer[..max_read]).map_err(|_| {
+                    JsonHttpError::new(
+                        JsonHttpErrorKind::Transport,
+                        "Dubbing input file could not be read",
+                    )
+                })?;
+                if size == 0 {
+                    return Err(JsonHttpError::new(
+                        JsonHttpErrorKind::Transport,
+                        "Dubbing input file was truncated",
+                    ));
+                }
+                let mut written = 0;
+                while written < size {
+                    check_cancelled()?;
+                    let mut bytes_written = 0;
+                    if unsafe {
+                        WinHttpWriteData(
+                            native_request,
+                            buffer[written..size].as_ptr().cast(),
+                            (size - written) as u32,
+                            &mut bytes_written,
+                        )
+                    } == 0
+                        || bytes_written == 0
+                    {
+                        return Err(winhttp_error("Dubbing upload could not be written"));
+                    }
+                    written += bytes_written as usize;
+                }
+                remaining -= size as u64;
+            }
+        }
+        check_cancelled()?;
+        if unsafe { WinHttpReceiveResponse(native_request, std::ptr::null_mut()) } == 0 {
+            return Err(winhttp_error("Dubbing response could not be received"));
+        }
+        check_cancelled()?;
+        let mut status = 0_u32;
+        let mut status_size = std::mem::size_of::<u32>() as u32;
+        let mut index = 0_u32;
+        if unsafe {
+            WinHttpQueryHeaders(
+                native_request,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut status as *mut u32).cast(),
+                &mut status_size,
+                &mut index,
+            )
+        } == 0
+        {
+            return Err(winhttp_error("Dubbing response status could not be read"));
+        }
+        let retry_after = query_optional_header(native_request, WINHTTP_QUERY_RETRY_AFTER);
+        let mut response = Vec::new();
+        let mut total = 0_usize;
+        loop {
+            check_cancelled()?;
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut read = 0_u32;
+            if unsafe {
+                WinHttpReadData(
+                    native_request,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len() as u32,
+                    &mut read,
+                )
+            } == 0
+            {
+                return Err(response_error(
+                    winhttp_error("Dubbing response could not be read"),
+                    status,
+                    retry_after.as_deref(),
+                ));
+            }
+            if read == 0 {
+                break;
+            }
+            total += read as usize;
+            if total > request.response_limit
+                || (!(200..=299).contains(&status) && total > 2 * 1024 * 1024)
+            {
+                return Err(response_error(
+                    JsonHttpError::new(
+                        JsonHttpErrorKind::ResponseTooLarge,
+                        "Dubbing result exceeds the file limit",
+                    ),
+                    status,
+                    retry_after.as_deref(),
+                ));
+            }
+            check_cancelled()?;
+            if (200..=299).contains(&status) {
+                if let Some(output) = &mut request.output {
+                    output.write_all(&buffer[..read as usize]).map_err(|_| {
+                        JsonHttpError::new(
+                            JsonHttpErrorKind::Transport,
+                            "Dubbing result could not be saved",
+                        )
+                    })?;
+                    continue;
+                }
+            }
+            response.extend_from_slice(&buffer[..read as usize]);
+        }
+        Ok(RawHttpResponse {
+            status,
+            body: response,
+            content_type: query_optional_header(native_request, WINHTTP_QUERY_CONTENT_TYPE),
+            location: query_optional_header(native_request, WINHTTP_QUERY_LOCATION),
+            retry_after,
+        })
+    })();
+    result.map_err(JsonHttpError::with_request_sent)
+}
+
 pub(crate) fn query_optional_header(
     request: *mut core::ffi::c_void,
     header: u32,
@@ -828,9 +1286,14 @@ fn request_outcome(result: &Result<RawHttpResponse, JsonHttpError>) -> Outcome {
     }
 }
 
-fn response_error(error: JsonHttpError, status: u32, retry_after: Option<&str>) -> JsonHttpError {
+fn response_error(
+    mut error: JsonHttpError,
+    status: u32,
+    retry_after: Option<&str>,
+) -> JsonHttpError {
     // Preserve an observed rejection even if its body is truncated or unreadable.
     if status >= 400 {
+        error.rejected_http_status = Some(status);
         error.with_outcome(http_outcome(status, retry_after))
     } else {
         error
@@ -925,6 +1388,203 @@ fn winhttp_error(operation: &str) -> JsonHttpError {
         format!("{operation} (Windows error {code})")
     };
     JsonHttpError::new(kind, message).with_outcome(Outcome::Failure)
+}
+
+#[cfg(test)]
+mod dubbing_transport_tests {
+    use super::*;
+    use std::{
+        io::Cursor,
+        net::{TcpListener, TcpStream},
+        sync::{mpsc, Arc},
+        thread,
+    };
+
+    fn read_http_request(socket: &mut TcpStream) -> (String, Vec<u8>) {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0_u8];
+            socket.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        let size: usize = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse().unwrap())
+            })
+            .unwrap_or(0);
+        let mut body = vec![0_u8; size];
+        socket.read_exact(&mut body).unwrap();
+        (headers, body)
+    }
+
+    #[test]
+    fn dedicated_transport_streams_x_api_key_body_and_idempotency_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let payload = vec![b'v'; 200_000];
+        let expected = payload.clone();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (headers, body) = read_http_request(&mut socket);
+            assert!(headers.contains("x-api-key: fixture-secret"));
+            assert!(headers.contains("Idempotency-Key: fixed-key"));
+            assert!(!headers.contains("Authorization:"));
+            assert_eq!(body, expected);
+            socket.write_all(b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"id\":\"task123\"}").unwrap();
+        });
+        let cancellation = DubbingCancellation::default();
+        let mut reader = Cursor::new(&payload);
+        let request = DubbingHttpRequest {
+            target: DubbingHttpTarget::SyncSubmit,
+            secret: Some("fixture-secret"),
+            idempotency_key: Some("fixed-key"),
+            body: Some(DubbingHttpBody {
+                reader: &mut reader,
+                size: payload.len() as u32,
+                content_type: "multipart/form-data; boundary=fixture",
+            }),
+            output: None,
+            response_limit: 1024,
+            cancellation: &cancellation,
+        };
+        validate_dubbing_request(&request, "POST", "x-api-key").unwrap();
+        let response = request_dubbing_admitted(
+            request,
+            "127.0.0.1",
+            port,
+            false,
+            "/fixture",
+            "POST",
+            "x-api-key",
+        )
+        .unwrap();
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, b"{\"id\":\"task123\"}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn output_stream_omits_credentials_and_enforces_download_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (headers, body) = read_http_request(&mut socket);
+            assert!(
+                !headers.to_ascii_lowercase().contains("api-key")
+                    && !headers.contains("Authorization")
+                    && body.is_empty()
+            );
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 20\r\nConnection: close\r\n\r\n01234567890123456789").unwrap();
+        });
+        let cancellation = DubbingCancellation::default();
+        let url = PublicHttpsUrl {
+            host: "fixture.example".into(),
+            path: "/output?sig=native-only".into(),
+        };
+        let mut output = Vec::new();
+        let request = DubbingHttpRequest {
+            target: DubbingHttpTarget::Output(&url),
+            secret: None,
+            idempotency_key: None,
+            body: None,
+            output: Some(&mut output),
+            response_limit: 12,
+            cancellation: &cancellation,
+        };
+        validate_dubbing_request(&request, "GET", "").unwrap();
+        let error =
+            request_dubbing_admitted(request, "127.0.0.1", port, false, "/fixture", "GET", "")
+                .err()
+                .unwrap();
+        assert_eq!(error.kind(), JsonHttpErrorKind::ResponseTooLarge);
+        assert!(output.len() <= 12);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn local_cancel_closes_blocked_winhttp_without_waiting_for_provider() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_http_request(&mut socket);
+            started_tx.send(()).unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        let cancellation = Arc::new(DubbingCancellation::default());
+        let flag = Arc::clone(&cancellation);
+        let worker = thread::spawn(move || {
+            request_dubbing_admitted(
+                DubbingHttpRequest {
+                    target: DubbingHttpTarget::SyncModels,
+                    secret: Some("fixture-secret"),
+                    idempotency_key: None,
+                    body: None,
+                    output: None,
+                    response_limit: 1024,
+                    cancellation: &flag,
+                },
+                "127.0.0.1",
+                port,
+                false,
+                "/fixture",
+                "GET",
+                "x-api-key",
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancellation.cancel();
+        assert!(worker.join().unwrap().is_err());
+        finish_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn dedicated_contract_never_attaches_api_key_to_output_or_unknown_headers() {
+        let cancellation = DubbingCancellation::default();
+        let url = PublicHttpsUrl {
+            host: "fixture.example".into(),
+            path: "/output".into(),
+        };
+        let mut output = Vec::new();
+        let request = DubbingHttpRequest {
+            target: DubbingHttpTarget::Output(&url),
+            secret: Some("blocked"),
+            idempotency_key: None,
+            body: None,
+            output: Some(&mut output),
+            response_limit: 1024,
+            cancellation: &cancellation,
+        };
+        assert!(validate_dubbing_request(&request, "GET", "").is_err());
+        for key in ["injected\r\nx-api-key: secret", "", "key/invalid"] {
+            let mut reader = Cursor::new(b"{}");
+            let request = DubbingHttpRequest {
+                target: DubbingHttpTarget::SyncSubmit,
+                secret: Some("fixture"),
+                idempotency_key: Some(key),
+                body: Some(DubbingHttpBody {
+                    reader: &mut reader,
+                    size: 2,
+                    content_type: "multipart/form-data; boundary=fixture",
+                }),
+                output: None,
+                response_limit: 1024,
+                cancellation: &cancellation,
+            };
+            assert!(validate_dubbing_request(&request, "POST", "x-api-key").is_err());
+        }
+    }
 }
 
 #[cfg(test)]

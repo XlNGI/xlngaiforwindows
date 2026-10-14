@@ -451,6 +451,7 @@ describe('App', () => {
           'tag.list',
           'assetGroup.list',
           'provider.profile.list',
+          'characterVoice.list',
           'video.generate.list',
           'novel.chapter.list',
           'novel.volume.list',
@@ -850,6 +851,7 @@ describe('App', () => {
           'asset.list',
           'constraint.list',
           'provider.profile.list',
+          'characterVoice.list',
           'novel.volume.list',
           'agent.partial.list',
         ].includes(method)
@@ -1023,6 +1025,7 @@ describe('App', () => {
       if (method === 'adapter.catalog') {
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
       }
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'conversation.list') {
@@ -1165,6 +1168,7 @@ describe('App', () => {
       if (method === 'adapter.catalog') {
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
       }
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'llm.status') {
         return Promise.resolve({
@@ -1675,6 +1679,7 @@ describe('App', () => {
           configured: true,
           configurationSource: 'managed' as const,
         });
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([profile]);
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'conversation.list') return Promise.resolve({ items: [conversation] });
@@ -2048,6 +2053,7 @@ describe('App', () => {
         });
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
@@ -2274,6 +2280,7 @@ describe('App', () => {
         });
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
@@ -2388,6 +2395,7 @@ describe('App', () => {
         });
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
@@ -2548,6 +2556,7 @@ describe('App', () => {
           adapters: [imageAdapter],
         });
       if (method === 'adapter.resolve') return Promise.resolve(imageAdapter);
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([profile]);
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'video.generate.list') return Promise.resolve([]);
@@ -2693,6 +2702,7 @@ describe('App', () => {
         });
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
@@ -2868,6 +2878,7 @@ describe('App', () => {
         });
       if (method === 'adapter.resolve') return Promise.resolve(imageAdapter);
       if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([profile]);
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'video.generate.list' || method === 'agent.changeSet.list')
@@ -3102,6 +3113,7 @@ describe('App', () => {
         );
       }
       if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([profile]);
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'video.generate.list' || method === 'agent.changeSet.list')
@@ -3235,6 +3247,7 @@ describe('App', () => {
         });
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'characterVoice.list') return Promise.resolve([]);
       if (method === 'provider.profile.list') return Promise.resolve([profile]);
       if (method === 'provider.model.list') return Promise.resolve([model]);
       if (method === 'conversation.list') return Promise.resolve({ items: [conversation] });

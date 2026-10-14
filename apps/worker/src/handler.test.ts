@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   IPC_PROTOCOL_VERSION,
   type SceneInfo,
@@ -18,6 +18,17 @@ import {
   parseRequest,
   resolveMediaProviderRegion,
 } from './handler.js';
+
+// Handler owns a process-lived settings connection. Give this isolated test worker
+// its own temporary store before module initialization, never the user's settings.
+await vi.hoisted(async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  process.env.AI_VIDEO_APP_DATA_DIR = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'ai-video-handler-settings-'),
+  );
+});
 
 const temporaryDirectories: string[] = [];
 

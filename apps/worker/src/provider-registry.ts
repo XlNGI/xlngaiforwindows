@@ -34,6 +34,24 @@ const RETIRED_UNICOMPAPI_AGENT_MODELS = new Set(['gpt-5.6-sol']);
 
 const OFFICIAL_PROVIDER_DEFINITIONS: readonly ProviderDefinitionInfo[] = [
   {
+    id: 'minimax-speech',
+    name: 'MiniMax 配音',
+    category: 'multi',
+    providerType: 'minimax-speech',
+    protocol: 'minimax-speech',
+    baseUrl: 'https://api.minimax.cn',
+    accessType: 'official',
+  },
+  {
+    id: 'sync',
+    name: 'Sync 口型同步',
+    category: 'multi',
+    providerType: 'sync',
+    protocol: 'sync-lipsync',
+    baseUrl: 'https://api.sync.so',
+    accessType: 'official',
+  },
+  {
     id: 'openai',
     name: 'OpenAI',
     category: 'llm',
@@ -133,6 +151,23 @@ export function listProviderDefinitions(): ProviderDefinitionInfo[] {
 }
 
 export function listBuiltInProviderModels(providerType: string): BuiltInProviderModelDefinition[] {
+  if (providerType === 'minimax-speech') {
+    return ['speech-2.8-hd', 'speech-2.8-turbo'].map((remoteModelId) => ({
+      remoteModelId,
+      displayName:
+        remoteModelId === 'speech-2.8-hd' ? 'MiniMax Speech 2.8 HD' : 'MiniMax Speech 2.8 Turbo',
+      capabilities: { ...emptyModelCapabilities(), speechSynthesis: true },
+    }));
+  }
+  if (providerType === 'sync') {
+    return [
+      {
+        remoteModelId: 'sync-3',
+        displayName: 'Sync-3',
+        capabilities: { ...emptyModelCapabilities(), lipSync: true },
+      },
+    ];
+  }
   if (providerType !== 'vidu') return [];
   return VIDU_BUILT_IN_MODELS.map((model) => ({
     ...model,
@@ -195,6 +230,17 @@ export function inferKnownModelCapabilities(
 ): ProviderModelCapabilities {
   const capabilities = emptyModelCapabilities();
   const normalized = modelId.toLowerCase();
+  if (
+    providerType === 'minimax-speech' &&
+    ['speech-2.8-hd', 'speech-2.8-turbo'].includes(normalized)
+  ) {
+    capabilities.speechSynthesis = true;
+    return capabilities;
+  }
+  if (providerType === 'sync' && normalized === 'sync-3') {
+    capabilities.lipSync = true;
+    return capabilities;
+  }
   if (providerType === 'unicompapi') return inferUniCompApiCapabilities(normalized);
   if (providerType !== 'openai') return capabilities;
 

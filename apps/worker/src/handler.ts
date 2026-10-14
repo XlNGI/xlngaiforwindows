@@ -153,6 +153,8 @@ import { NativeProviderBridge } from './native-provider-bridge.js';
 import { MediaOrchestrationService } from './media-orchestration-service.js';
 import { ProjectStructureCompiler } from './structure-compiler.js';
 import { ProjectTaskRuntime } from './project-task-runtime.js';
+import { DubbingService, DubbingValidationError } from './dubbing-service.js';
+import type { DubbingWorkerMethodMap } from '@ai-video/contracts';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { prepareAgentGeneration } from './agent-generation-preparation.js';
@@ -514,6 +516,27 @@ function toModelSchemaInfo(
   };
 }
 const methods = new Set<WorkerMethod>([
+  'characterVoice.list',
+  'characterVoice.save',
+  'audio.import',
+  'audio.list',
+  'audio.get',
+  'audio.mediaSource',
+  'audio.trash',
+  'audio.restore',
+  'audio.purge',
+  'dubbing.runtime.get',
+  'dubbing.scene.get',
+  'dubbing.cue.save',
+  'dubbing.cue.delete',
+  'dubbing.take.generate',
+  'dubbing.take.adopt',
+  'dubbing.job.submit',
+  'dubbing.job.cancel',
+  'dubbing.job.retry',
+  'dubbing.job.get',
+  'dubbing.job.list',
+  'dubbing.output.adopt',
   'health',
   'sqlite.probe',
   'project.create',
@@ -720,6 +743,7 @@ let piConversationRuntime: PiConversationRuntime | undefined;
 export function configurePiConversationRuntime(bridge: NativeProviderBridge): void {
   nativeProviderBridge = bridge;
   projectTaskRuntime.start();
+  dubbingService.recover();
   piConversationRuntime = new PiConversationRuntime({
     generation: generationService,
     plans: taskPlanService,
@@ -793,6 +817,15 @@ const projectTaskRuntime = new ProjectTaskRuntime(projectService, videoGeneratio
     return nativeProviderBridge.request(...args);
   },
 } as Pick<NativeProviderBridge, 'request'>);
+const dubbingService = new DubbingService(projectService, appSettingsService, {
+  nativeAvailable: () => Boolean(nativeProviderBridge),
+  native: {
+    request: async (...args: Parameters<NativeProviderBridge['request']>) => {
+      if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
+      return nativeProviderBridge.request(...args);
+    },
+  },
+});
 const agentSystemToolService = new AgentSystemToolService(
   projectService,
   contentService,
@@ -1092,6 +1125,16 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
     }
 
     const params = validateSessionRequestParams(request.method, request.params);
+    if (
+      request.method === 'maintenance.cache.clear' &&
+      dubbingService
+        .listJobs()
+        .some((job) => ['pending', 'running', 'cancelling'].includes(job.status))
+    )
+      throw new DubbingValidationError(
+        'MEDIA_BUSY',
+        '配音制作进行中，请完成或停止任务后清理缓存。',
+      );
     let result: unknown;
     const infrastructure = await executeInfrastructureCommand(request.method, params, {
       projectService,
@@ -1108,11 +1151,102 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       imageGenerationService,
       videoGenerationService,
       projectTaskRuntime,
+      dubbingService,
     });
     if (infrastructure.handled) {
       result = infrastructure.result;
     } else {
       switch (request.method) {
+        case 'characterVoice.list':
+          result = dubbingService.listVoices(params.includeArchived === true);
+          break;
+        case 'characterVoice.save':
+          result = dubbingService.saveVoice(
+            params as unknown as DubbingWorkerMethodMap['characterVoice.save']['params'],
+          );
+          break;
+        case 'audio.import':
+          result = await dubbingService.importAudio(
+            params as unknown as DubbingWorkerMethodMap['audio.import']['params'],
+          );
+          break;
+        case 'audio.list':
+          result = dubbingService.listAudio(params);
+          break;
+        case 'audio.get':
+          result = dubbingService.audio(requireString(params, 'audioId'));
+          break;
+        case 'audio.mediaSource':
+          result = dubbingService.audioSource(requireString(params, 'audioId'));
+          break;
+        case 'audio.trash':
+          result = dubbingService.trashAudio(requireString(params, 'audioId'));
+          break;
+        case 'audio.restore':
+          result = dubbingService.restoreAudio(requireString(params, 'audioId'));
+          break;
+        case 'audio.purge':
+          result = dubbingService.purgeAudio(
+            requireString(params, 'audioId'),
+            params.confirm === true,
+          );
+          break;
+        case 'dubbing.runtime.get':
+          result = await dubbingService.runtimeInfo();
+          break;
+        case 'dubbing.scene.get':
+          result = dubbingService.scene(requireString(params, 'sceneId'));
+          break;
+        case 'dubbing.cue.save':
+          result = dubbingService.saveCue(
+            params as unknown as DubbingWorkerMethodMap['dubbing.cue.save']['params'],
+          );
+          break;
+        case 'dubbing.cue.delete':
+          result = dubbingService.deleteCue(
+            requireString(params, 'cueId'),
+            requireNumber(params, 'expectedRowVersion'),
+          );
+          break;
+        case 'dubbing.take.generate':
+          result = dubbingService.generateTake(
+            params as unknown as DubbingWorkerMethodMap['dubbing.take.generate']['params'],
+          );
+          break;
+        case 'dubbing.take.adopt':
+          result = dubbingService.adoptTake(
+            requireString(params, 'cueId'),
+            requireString(params, 'takeId'),
+            requireNumber(params, 'expectedRowVersion'),
+          );
+          break;
+        case 'dubbing.job.submit':
+          result = await dubbingService.submit(
+            params as unknown as DubbingWorkerMethodMap['dubbing.job.submit']['params'],
+          );
+          break;
+        case 'dubbing.job.cancel':
+          result = dubbingService.cancel(requireString(params, 'jobId'));
+          break;
+        case 'dubbing.job.retry':
+          result = dubbingService.retry(
+            params as unknown as DubbingWorkerMethodMap['dubbing.job.retry']['params'],
+          );
+          break;
+        case 'dubbing.job.get':
+          result = dubbingService.getJob(requireString(params, 'jobId'));
+          break;
+        case 'dubbing.job.list':
+          result = dubbingService.listJobSummaries(
+            typeof params.sceneId === 'string' ? params.sceneId : undefined,
+          );
+          break;
+        case 'dubbing.output.adopt':
+          result = dubbingService.adoptOutput(
+            requireString(params, 'jobId'),
+            requireNumber(params, 'expectedRowVersion'),
+          );
+          break;
         case 'document.list':
           result = documentWorkflowService.listDocuments();
           break;
@@ -2023,6 +2157,22 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = projectTaskRuntime.snapshot(
             typeof params.afterRevision === 'number' ? params.afterRevision : -1,
           );
+          {
+            const snapshot = result as import('@ai-video/contracts').ProjectTaskSnapshot;
+            const dubbingJobs = dubbingService.listJobSummaries();
+            const revision = snapshot.revision + dubbingService.getRevision();
+            result = {
+              ...snapshot,
+              revision,
+              changed: revision !== params.afterRevision,
+              dubbingJobs,
+              activeCount:
+                snapshot.activeCount +
+                dubbingJobs.filter((job) =>
+                  ['pending', 'running', 'interrupted'].includes(job.status),
+                ).length,
+            };
+          }
           break;
         case 'asset.list':
           result = imageGenerationService.listAssets({
@@ -2072,6 +2222,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           );
           break;
         case 'asset.delete':
+          dubbingService.assertVideoDeletable(requireString(params, 'assetId'), false);
           result = imageGenerationService.deleteAsset(
             requireString(params, 'assetId'),
             params.confirm === true,
@@ -2081,6 +2232,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = imageGenerationService.restoreAsset(requireString(params, 'assetId'));
           break;
         case 'asset.purge':
+          dubbingService.assertVideoDeletable(requireString(params, 'assetId'), true);
           result = imageGenerationService.purgeAsset(
             requireString(params, 'assetId'),
             params.confirm === true,
@@ -2294,6 +2446,15 @@ function mapWorkerError(operation: string, error: unknown): WorkerError {
   if (error instanceof RequestValidationError) {
     return { code: 'INVALID_REQUEST', message, retryable: false, operation };
   }
+  if (error instanceof DubbingValidationError) {
+    return {
+      code: 'INVALID_PARAMETERS',
+      message,
+      retryable: false,
+      operation,
+      details: { dubbingCode: error.code },
+    };
+  }
   if (error instanceof DocumentWorkflowError) {
     return {
       code: error.code,
@@ -2367,7 +2528,8 @@ function optionalVideoAssetKind(
 ): VideoAssetKind | undefined {
   const value = params[key];
   if (value === undefined) return undefined;
-  if (value === 'generated-video' || value === 'shot-video' || value === 'scene-video') return value;
+  if (value === 'generated-video' || value === 'shot-video' || value === 'scene-video')
+    return value;
   throw new Error(`${key} must be a supported video asset kind.`);
 }
 

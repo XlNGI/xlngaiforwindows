@@ -1,3 +1,13 @@
+import type {
+  DubbingJobInfo,
+  DubbingWorkerMethodMap,
+  NativeDubbingSpeechParams,
+  NativeDubbingSubmitParams,
+  NativeDubbingPollParams,
+  NativeDubbingCancelParams,
+} from './dubbing.js';
+export * from './dubbing.js';
+
 export const IPC_PROTOCOL_VERSION = 1 as const;
 
 export {
@@ -232,6 +242,9 @@ export interface ProviderDefinitionInfo {
 }
 
 export interface ProviderModelCapabilities {
+  /** Explicit dubbing capabilities; absent in historical model metadata. */
+  speechSynthesis?: boolean;
+  lipSync?: boolean;
   text: boolean;
   vision: boolean;
   streaming: boolean;
@@ -1614,7 +1627,7 @@ export interface AgentTaskCreateDocumentDraftResult {
 
 export interface TaskLogItem {
   id: string;
-  kind: 'agent-document' | 'image' | 'video';
+  kind: 'agent-document' | 'image' | 'video' | 'dubbing';
   title: string;
   status: string;
   createdAt: string;
@@ -1622,6 +1635,7 @@ export interface TaskLogItem {
   sourceId: string;
   conversationId?: string;
   shotId?: string;
+  sceneId?: string;
   documentId?: string;
   documentVersionId?: string;
   providerName?: string;
@@ -2295,6 +2309,10 @@ export type LlmToolContinuation = LlmResponsesToolContinuation | LlmChatCompleti
 export const SIDECAR_ENVELOPE_MAX_BYTES = 2 * 1024 * 1024;
 
 export type HostMethod =
+  | 'provider.dubbing.speech'
+  | 'provider.dubbing.submit'
+  | 'provider.dubbing.poll'
+  | 'provider.dubbing.cancel'
   | 'provider.stream.start'
   | 'provider.stream.cancel'
   | 'provider.media.submit'
@@ -2383,6 +2401,10 @@ export interface NativeProviderConfirmationResolveParams extends NativeProviderC
 }
 
 export type HostMethodParams = {
+  'provider.dubbing.speech': NativeDubbingSpeechParams;
+  'provider.dubbing.submit': NativeDubbingSubmitParams;
+  'provider.dubbing.poll': NativeDubbingPollParams;
+  'provider.dubbing.cancel': NativeDubbingCancelParams;
   'provider.stream.start': NativeProviderStreamStartParams;
   'provider.stream.cancel': NativeProviderStreamCancelParams;
   'provider.media.submit': NativeProviderMediaSubmitParams;
@@ -2399,6 +2421,9 @@ export interface HostError {
     | 'METHOD_NOT_FOUND'
     | 'INVALID_PARAMETERS'
     | 'PROVIDER_UNAVAILABLE'
+    | 'SUBMISSION_UNKNOWN'
+    | 'AUTHENTICATION_FAILED'
+    | 'RATE_LIMITED'
     | 'PROVIDER_FAILED'
     | 'REQUEST_NOT_SENT'
     | 'INTERRUPTED'
@@ -2408,6 +2433,9 @@ export interface HostError {
     | 'INTERNAL_ERROR';
   message: string;
   retryable: boolean;
+  providerErrorCode?: string;
+  providerTaskId?: string;
+  providerStatus?: number;
 }
 
 export type NativeProviderHostEvent =
@@ -3493,6 +3521,7 @@ export interface ProjectTaskSnapshot {
   changed: boolean;
   activeCount: number;
   videoJobs: VideoGenerationJobInfo[];
+  dubbingJobs?: DubbingJobInfo[];
 }
 
 export interface VideoGenerationPrepareParams {
@@ -3673,9 +3702,11 @@ export interface AssetSourceInfo {
   assetId: string;
   jobId: string;
   shotId?: string;
+  sceneId?: string;
+  sourceKind?: 'generation' | 'dubbing';
 }
 
-export interface WorkerMethodMap {
+export interface WorkerMethodMap extends DubbingWorkerMethodMap {
   health: { params: Record<string, never>; result: HealthResult };
   'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
   'project.create': { params: ProjectCreateParams; result: ProjectInfo };

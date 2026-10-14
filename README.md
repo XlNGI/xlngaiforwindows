@@ -26,6 +26,8 @@ M0–M7 的代码和自动化门禁已完成。当前包含 Tauri 桌面端、No
 - [项目启动文档](docs/PROJECT-STARTUP.md)
 - [实施计划](docs/IMPLEMENTATION-PLAN.md)
 - [工程质量门禁](docs/QUALITY-GATES.md)
+- [角色固定音色、配音与口型同步实施计划](docs/CHARACTER-VOICE-DUBBING-IMPLEMENTATION-PLAN.md)
+- [固定角色声音与场次配音使用说明](docs/CHARACTER-VOICE-DUBBING-USER-GUIDE.md)
 - [M4 适配器与动态参数](docs/M4-ADAPTERS-PARAMETERS.md)
 - [UniCompAPI 集成与验收](docs/UNICOMPAPI-INTEGRATION.md)
 

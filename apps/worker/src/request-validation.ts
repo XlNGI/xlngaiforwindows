@@ -135,7 +135,7 @@ const roles = new Set<ChatMessageRole>(['system', 'user', 'assistant', 'tool']);
 const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'failed']);
 const documentKinds = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
 const documentAuthors = new Set(['user', 'import']);
-const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video']);
+const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video', 'dubbing']);
 const videoFailureKinds = new Set(['transport', 'provider', 'download', 'interrupted', 'timeout']);
 const agentDocumentOperations = new Set([
   'adapter.schema.get',
@@ -518,6 +518,7 @@ export function validateSessionRequestParams(
   method: WorkerMethod,
   input: unknown,
 ): Record<string, unknown> {
+  if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
   if (!sessionMethods.has(method)) return requireObject(input, 'params');
   const params = requireObject(input, 'params');
 
@@ -1425,6 +1426,268 @@ export function validateSessionRequestParams(
       break;
   }
 
+  return params;
+}
+
+const dubbingMethods = new Set<WorkerMethod>([
+  'characterVoice.list',
+  'characterVoice.save',
+  'audio.import',
+  'audio.list',
+  'audio.get',
+  'audio.mediaSource',
+  'audio.trash',
+  'audio.restore',
+  'audio.purge',
+  'dubbing.runtime.get',
+  'dubbing.scene.get',
+  'dubbing.cue.save',
+  'dubbing.cue.delete',
+  'dubbing.take.generate',
+  'dubbing.take.adopt',
+  'dubbing.job.submit',
+  'dubbing.job.cancel',
+  'dubbing.job.retry',
+  'dubbing.job.get',
+  'dubbing.job.list',
+  'dubbing.output.adopt',
+]);
+
+function dubbingNumber(
+  params: Record<string, unknown>,
+  key: string,
+  minimum: number,
+  maximum: number,
+  required = false,
+): number | undefined {
+  const value = params[key];
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum)
+    throw new RequestValidationError(
+      `${key} must be a finite number between ${minimum} and ${maximum}.`,
+    );
+  return value;
+}
+function validateDubbingBudget(input: unknown): void {
+  if (input === undefined) return;
+  const budget = requireObject(input, 'budget');
+  rejectUnknown(budget, ['currency', 'unitPrice', 'maxAmount', 'maxAttempts']);
+  const currency = requireString(budget, 'currency', 3);
+  if (!/^[A-Z]{3}$/.test(currency))
+    throw new RequestValidationError('currency must be an uppercase three-letter code.');
+  dubbingNumber(budget, 'unitPrice', 0, 1_000_000);
+  dubbingNumber(budget, 'maxAmount', Number.MIN_VALUE, 1_000_000_000);
+  optionalInteger(budget, 'maxAttempts', 1, 3);
+}
+function validateDubbingRequest(method: WorkerMethod, input: unknown): Record<string, unknown> {
+  const params = requireObject(input, 'params');
+  switch (method) {
+    case 'characterVoice.list':
+      rejectUnknown(params, ['includeArchived']);
+      optionalBoolean(params, 'includeArchived');
+      break;
+    case 'characterVoice.save':
+      rejectUnknown(params, [
+        'id',
+        'characterDocumentId',
+        'providerProfileId',
+        'model',
+        'voiceId',
+        'speed',
+        'pitch',
+        'languageBoost',
+        'region',
+        'referenceAudioId',
+        'expectedRowVersion',
+      ]);
+      optionalId(params, 'id');
+      optionalId(params, 'characterDocumentId');
+      requireId(params, 'providerProfileId');
+      requireEnum(params, 'model', new Set(['speech-2.8-hd', 'speech-2.8-turbo']));
+      requireString(params, 'voiceId', 256);
+      dubbingNumber(params, 'speed', 0.5, 2, true);
+      requireInteger(params, 'pitch', -12, 12);
+      optionalString(params, 'languageBoost', 80);
+      optionalString(params, 'region', 80);
+      optionalId(params, 'referenceAudioId');
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'audio.import':
+      rejectUnknown(params, [
+        'sourcePath',
+        'name',
+        'kind',
+        'sceneId',
+        'cueId',
+        'expectedRowVersion',
+      ]);
+      if (requireString(params, 'sourcePath', 32767).includes('\0'))
+        throw new RequestValidationError('sourcePath cannot contain a null character.');
+      optionalString(params, 'name', 120);
+      optionalEnum(params, 'kind', new Set(['reference', 'imported-dialogue']));
+      optionalId(params, 'sceneId');
+      optionalId(params, 'cueId');
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      if (params.cueId !== undefined)
+        requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'audio.list':
+      rejectUnknown(params, ['deleted', 'kind']);
+      optionalEnum(params, 'deleted', new Set(['active', 'trash']));
+      optionalEnum(
+        params,
+        'kind',
+        new Set(['reference', 'imported-dialogue', 'generated-dialogue', 'scene-master']),
+      );
+      break;
+    case 'audio.get':
+    case 'audio.mediaSource':
+    case 'audio.trash':
+    case 'audio.restore':
+      rejectUnknown(params, ['audioId']);
+      requireId(params, 'audioId');
+      break;
+    case 'audio.purge':
+      rejectUnknown(params, ['audioId', 'confirm']);
+      requireId(params, 'audioId');
+      requireBoolean(params, 'confirm');
+      break;
+    case 'dubbing.runtime.get':
+      rejectUnknown(params, []);
+      break;
+    case 'dubbing.scene.get':
+      rejectUnknown(params, ['sceneId']);
+      requireId(params, 'sceneId');
+      break;
+    case 'dubbing.cue.save': {
+      rejectUnknown(params, [
+        'id',
+        'sceneId',
+        'shotId',
+        'speakerKind',
+        'characterDocumentId',
+        'voiceProfileId',
+        'text',
+        'position',
+        'startMs',
+        'emotion',
+        'visibleSpeaker',
+        'lipSync',
+        'speakerCoordinates',
+        'trailingPauseMs',
+        'expectedRowVersion',
+      ]);
+      optionalId(params, 'id');
+      requireId(params, 'sceneId');
+      optionalId(params, 'shotId');
+      const speaker = requireEnum(params, 'speakerKind', new Set(['character', 'narration']));
+      optionalId(params, 'characterDocumentId');
+      optionalId(params, 'voiceProfileId');
+      if (speaker === 'character') requireId(params, 'characterDocumentId');
+      if (speaker === 'narration') {
+        requireId(params, 'voiceProfileId');
+        if (params.characterDocumentId !== undefined || params.lipSync === true)
+          throw new RequestValidationError(
+            'Narration cannot select a visible character or lip sync.',
+          );
+      }
+      requireString(params, 'text', 4000);
+      requireInteger(params, 'position', 0, 1_000_000);
+      requireInteger(params, 'startMs', 0, 600_000);
+      optionalInteger(params, 'trailingPauseMs', 0, 60_000);
+      optionalEnum(
+        params,
+        'emotion',
+        new Set(['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm']),
+      );
+      optionalString(params, 'visibleSpeaker', 200);
+      optionalBoolean(params, 'lipSync');
+      if (params.speakerCoordinates !== undefined) {
+        if (
+          !Array.isArray(params.speakerCoordinates) ||
+          params.speakerCoordinates.length !== 2 ||
+          params.speakerCoordinates.some(
+            (value) =>
+              typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1,
+          )
+        )
+          throw new RequestValidationError(
+            'speakerCoordinates must contain two normalized coordinates between zero and one.',
+          );
+      }
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      if (params.id !== undefined)
+        requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      break;
+    }
+    case 'dubbing.cue.delete':
+      rejectUnknown(params, ['cueId', 'expectedRowVersion']);
+      requireId(params, 'cueId');
+      requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'dubbing.take.generate':
+      rejectUnknown(params, [
+        'cueId',
+        'expectedRowVersion',
+        'providerProfileId',
+        'costAcknowledged',
+        'forceNewTake',
+        'budget',
+      ]);
+      requireId(params, 'cueId');
+      requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      optionalId(params, 'providerProfileId');
+      requireBoolean(params, 'costAcknowledged');
+      optionalBoolean(params, 'forceNewTake');
+      validateDubbingBudget(params.budget);
+      break;
+    case 'dubbing.take.adopt':
+      rejectUnknown(params, ['cueId', 'takeId', 'expectedRowVersion']);
+      requireId(params, 'cueId');
+      requireId(params, 'takeId');
+      requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'dubbing.job.submit':
+      rejectUnknown(params, [
+        'sceneId',
+        'sourceVideoAssetId',
+        'mode',
+        'providerProfileId',
+        'model',
+        'budget',
+        'costAcknowledged',
+        'removeSourceAudioAcknowledged',
+      ]);
+      requireId(params, 'sceneId');
+      requireId(params, 'sourceVideoAssetId');
+      requireEnum(params, 'mode', new Set(['compose', 'lipsync']));
+      optionalId(params, 'providerProfileId');
+      optionalEnum(params, 'model', new Set(['sync-3']));
+      validateDubbingBudget(params.budget);
+      requireBoolean(params, 'costAcknowledged');
+      requireBoolean(params, 'removeSourceAudioAcknowledged');
+      break;
+    case 'dubbing.job.cancel':
+    case 'dubbing.job.get':
+      rejectUnknown(params, ['jobId']);
+      requireId(params, 'jobId');
+      break;
+    case 'dubbing.job.retry':
+      rejectUnknown(params, ['jobId', 'stepKey', 'costAcknowledged']);
+      requireId(params, 'jobId');
+      optionalString(params, 'stepKey', 256);
+      optionalBoolean(params, 'costAcknowledged');
+      break;
+    case 'dubbing.job.list':
+      rejectUnknown(params, ['sceneId']);
+      optionalId(params, 'sceneId');
+      break;
+    case 'dubbing.output.adopt':
+      rejectUnknown(params, ['jobId', 'expectedRowVersion']);
+      requireId(params, 'jobId');
+      requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      break;
+  }
   return params;
 }
 

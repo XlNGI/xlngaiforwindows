@@ -78,6 +78,109 @@ describe('JsonLineWriter', () => {
 });
 
 describe('NativeProviderBridge', () => {
+  it('preserves an observed numeric HTTP status for safe query retries', async () => {
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value, () => 'dubbing-poll');
+    const request = bridge.request('provider.dubbing.poll', { providerTaskId: 'generation_123' });
+    const error = {
+      code: 'PROVIDER_FAILED',
+      message: 'Service temporarily unavailable.',
+      retryable: false,
+      providerStatus: 503,
+      providerTaskId: 'generation_123',
+    };
+    bridge.handleEnvelope({ kind: 'host.response', requestId: 'dubbing-poll', ok: false, error });
+    await expect(request).rejects.toMatchObject({ hostError: error });
+    expect(io.sent).toHaveLength(1);
+  });
+
+  it.each(['500', 99, 600, 500.5, null])(
+    'rejects malformed providerStatus %j without leaving the request pending',
+    async (providerStatus) => {
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value, () => 'dubbing-poll');
+      const request = bridge.request('provider.dubbing.poll', {});
+      expect(
+        bridge.handleEnvelope({
+          kind: 'host.response',
+          requestId: 'dubbing-poll',
+          ok: false,
+          error: {
+            code: 'PROVIDER_FAILED',
+            message: 'Unavailable.',
+            retryable: false,
+            providerStatus,
+          },
+        }),
+      ).toBe(true);
+      await expect(request).rejects.toMatchObject({ hostError: { code: 'INVALID_ENVELOPE' } });
+    },
+  );
+
+  it.each([
+    'SUBMISSION_UNKNOWN',
+    'AUTHENTICATION_FAILED',
+    'RATE_LIMITED',
+    'TIMEOUT',
+    'INTERRUPTED',
+  ] as const)(
+    'preserves official dubbing %s classifications and a safe recovery task ID',
+    async (code) => {
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value, () => 'dubbing-submit');
+      const request = bridge.request('provider.dubbing.submit', {
+        operationId: '123e4567-e89b-42d3-a456-426614174000',
+        idempotencyKey: 'persisted-key',
+      });
+      const error = {
+        code,
+        message: 'Official dubbing request could not be completed.',
+        retryable: false,
+        providerErrorCode: 'IDEMPOTENCY_OUTCOME_UNKNOWN',
+        providerTaskId: 'generation_123',
+      };
+      expect(
+        bridge.handleEnvelope({
+          kind: 'host.response',
+          requestId: 'dubbing-submit',
+          ok: false,
+          error,
+        }),
+      ).toBe(true);
+      await expect(request).rejects.toMatchObject({ hostError: error });
+      expect(io.sent).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { providerTaskId: 'https://output.example/video?sig=secret' },
+    { providerTaskId: '../other-project' },
+    { providerTaskId: 'x'.repeat(129) },
+    { providerErrorCode: 'code\r\nx-api-key: secret' },
+    { signedUrl: 'https://output.example/video?sig=secret' },
+    { audioBase64: 'not-an-error-field' },
+  ])(
+    'rejects credential or arbitrary media data disguised as a dubbing recovery identity: %j',
+    async (extra) => {
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value, () => 'dubbing-submit');
+      const request = bridge.request('provider.dubbing.submit', {});
+      bridge.handleEnvelope({
+        kind: 'host.response',
+        requestId: 'dubbing-submit',
+        ok: false,
+        error: {
+          code: 'SUBMISSION_UNKNOWN',
+          message: 'Submission result is unknown.',
+          retryable: false,
+          ...extra,
+        },
+      });
+      await expect(request).rejects.toMatchObject({ hostError: { code: 'INVALID_ENVELOPE' } });
+      expect(io.sent).toHaveLength(1);
+    },
+  );
+
   it('preserves an unsent admission refusal for both request and stream callers', async () => {
     const io = transport();
     const bridge = new NativeProviderBridge(io.value);

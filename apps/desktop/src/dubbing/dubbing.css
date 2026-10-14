@@ -1,0 +1,203 @@
+.dubbing-panel {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--border-default, #d6dbe1);
+  border-radius: 12px;
+  background: var(--surface-bg, #fff);
+  color: var(--text-primary, #263445);
+}
+.voice-profile-panel {
+  grid-column: 1 / -1;
+  flex: 0 0 auto;
+}
+/* Scene and shot sections share one scroll owner; neither may collapse into the other. */
+.directory-pane:has(> .scene-workspace) {
+  overflow-y: auto;
+}
+.directory-pane:has(> .scene-workspace) > .scene-workspace,
+.directory-pane:has(> .scene-workspace) > .shot-workspace,
+.directory-pane:has(> .scene-workspace) > .empty-stage {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.directory-pane:has(> .scene-workspace) > .shot-workspace {
+  overflow: visible;
+}
+.scene-workspace:has(.dubbing-panel) {
+  padding-bottom: 14px;
+}
+.scene-workspace:has(.dubbing-panel) .scene-prompt-heading {
+  flex-wrap: wrap;
+}
+.scene-workspace:has(.dubbing-panel) .scene-prompt-heading .toolbar-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.character-scene-workspace.has-voice-profile {
+  overflow-y: auto;
+}
+.character-scene-workspace.has-voice-profile .character-scene-prompt {
+  flex: 0 0 auto;
+}
+.character-scene-workspace.has-voice-profile .character-scene-prompt-editor {
+  min-height: 150px;
+}
+.dubbing-heading,
+.dubbing-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.dubbing-heading h2,
+.dubbing-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.dubbing-heading p,
+.dubbing-note {
+  margin: 8px 0;
+  color: var(--text-muted, #637080);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.dubbing-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  border: 0;
+  margin: 12px 0;
+  padding: 0;
+  min-width: 0;
+}
+.dubbing-fields label,
+.dubbing-cue-editor > label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+.dubbing-panel input:not([type='checkbox']),
+.dubbing-panel select,
+.dubbing-panel textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 9px;
+  border: 1px solid var(--border-default, #d6dbe1);
+  border-radius: 6px;
+  background: var(--surface-bg, #fff);
+  color: inherit;
+  font: inherit;
+}
+.dubbing-panel textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+.dubbing-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 10px 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.dubbing-check input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.dubbing-badge {
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: var(--input-bg, #eef2f6);
+  font-size: 11px;
+}
+.dubbing-cue-list,
+.dubbing-job-list {
+  list-style: none;
+  margin: 14px 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.dubbing-cue,
+.dubbing-job {
+  border: 1px solid var(--border-default, #d6dbe1);
+  padding: 12px;
+  border-radius: 8px;
+  min-width: 0;
+}
+.dubbing-cue-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 10px 0;
+  font-size: 13px;
+}
+.dubbing-takes {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+.dubbing-take {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+.dubbing-take audio {
+  width: min(290px, 100%);
+  height: 34px;
+}
+.dubbing-video {
+  width: min(480px, 100%);
+  max-height: 300px;
+  display: block;
+  margin: 10px 0;
+  border-radius: 8px;
+  background: #121820;
+}
+.dubbing-cue-editor,
+.dubbing-output-editor {
+  border-top: 1px solid var(--border-default, #d6dbe1);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+.dubbing-error {
+  color: var(--danger, #a72b37);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.dubbing-job-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 11px;
+  color: var(--text-muted, #637080);
+}
+.dubbing-panel button:focus-visible,
+.dubbing-panel input:focus-visible,
+.dubbing-panel select:focus-visible,
+.dubbing-panel textarea:focus-visible {
+  outline: 2px solid var(--accent, #4579d0);
+  outline-offset: 2px;
+}
+.dubbing-panel .button.secondary {
+  display: inline-flex;
+}
+@media (max-width: 600px) {
+  .dubbing-panel {
+    padding: 12px;
+  }
+  .dubbing-fields {
+    grid-template-columns: 1fr;
+  }
+  .dubbing-actions {
+    justify-content: flex-start;
+  }
+  .dubbing-actions .button {
+    flex: 1 1 auto;
+  }
+}

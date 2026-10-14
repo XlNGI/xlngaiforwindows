@@ -1619,7 +1619,10 @@ export function App() {
             ? [
                 `# 场次：${firstScene.title}`,
                 '请生成一段完整、连续的视频，保持人物外观、服装、场景和光线一致。',
-                ...shotList.map((item, index) => `${index + 1}. ${item.title}\n${item.prompt?.trim() || '补充该镜头的动作和画面。'}`),
+                ...shotList.map(
+                  (item, index) =>
+                    `${index + 1}. ${item.title}\n${item.prompt?.trim() || '补充该镜头的动作和画面。'}`,
+                ),
               ].join('\n\n')
             : '',
       );
@@ -2075,7 +2078,10 @@ export function App() {
         const composed = [
           `# 场次：${selected.title}`,
           '请生成一段完整、连续的视频，保持人物外观、服装、场景和光线一致。',
-          ...items.map((item, index) => `${index + 1}. ${item.title}\n${item.prompt?.trim() || '补充该镜头的动作和画面。'}`),
+          ...items.map(
+            (item, index) =>
+              `${index + 1}. ${item.title}\n${item.prompt?.trim() || '补充该镜头的动作和画面。'}`,
+          ),
         ].join('\n\n');
         setSceneVideoPrompt(composed);
       }
@@ -3488,6 +3494,8 @@ export function App() {
       <EmptyWorkspace title="请选择文档" />
     ) : view === 'characters' ? (
       <CharacterSceneWorkspace
+        projectId={project?.id}
+        documentId={document?.id}
         title={documentTitle}
         kind={documentKind === 'scene' ? 'scene' : 'character'}
         content={documentContent}
@@ -4015,7 +4023,16 @@ export function App() {
                   selectedAssetRevision={assetLibraryFocusRevision}
                   openTrashRequest={assetTrashRequest}
                   taskCompletionRevision={taskCompletionRevision}
-                  onOpenSource={(source) => void openAssetSource(source)}
+                  onOpenSource={(source) => {
+                    if (source.sourceKind === 'dubbing' && source.sceneId) {
+                      const target = scenes.find((item) => item.id === source.sceneId);
+                      if (target) {
+                        setScene(target);
+                        setShot(undefined);
+                        openProjectView('shots');
+                      } else openProjectView('tasks');
+                    } else void openAssetSource(source);
+                  }}
                 />
               ) : (
                 <EmptyWorkspace title="请打开一个项目" />
@@ -4289,6 +4306,7 @@ export function App() {
                     <div className="directory-pane">
                       {scene ? (
                         <SceneWorkspace
+                          projectId={project.id}
                           scene={scene}
                           prompt={sceneVideoPrompt}
                           bindings={scene.materialBindings ?? []}
@@ -4296,8 +4314,14 @@ export function App() {
                           assets={assets}
                           writable={writable}
                           onPromptChange={setSceneVideoPrompt}
-                          onSave={(nextPrompt, bindings) => void saveSceneVideoPrompt(nextPrompt, bindings)}
+                          onSave={(nextPrompt, bindings) =>
+                            void saveSceneVideoPrompt(nextPrompt, bindings)
+                          }
                           onGenerateVideo={(bindings) => void openSceneProduction(bindings)}
+                          onOpenAsset={(assetId) => {
+                            updateAssets(assets, assetId);
+                            openProjectView('assets', assetId);
+                          }}
                         />
                       ) : null}
                       {shot ? (

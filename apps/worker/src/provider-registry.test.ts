@@ -46,6 +46,8 @@ function profile(overrides: Partial<Parameters<typeof assertAgentToolLoopSelecti
 describe('provider registry', () => {
   it('locks official provider configuration to a built-in definition', () => {
     expect(listProviderDefinitions().map((definition) => definition.id)).toEqual([
+      'minimax-speech',
+      'sync',
       'openai',
       'deepseek',
       'zhipu',
@@ -88,6 +90,31 @@ describe('provider registry', () => {
       imageGeneration: false,
       videoGeneration: true,
     });
+  });
+
+  it('exposes fixed speech and lip-sync models as explicit capabilities without granting image or video generation', () => {
+    const speech = listBuiltInProviderModels('minimax-speech');
+    expect(speech.map((item) => item.remoteModelId)).toEqual(['speech-2.8-hd', 'speech-2.8-turbo']);
+    for (const item of speech)
+      expect(item.capabilities).toMatchObject({
+        speechSynthesis: true,
+        imageGeneration: false,
+        videoGeneration: false,
+        text: false,
+      });
+    const sync = listBuiltInProviderModels('sync');
+    expect(sync.map((item) => item.remoteModelId)).toEqual(['sync-3']);
+    expect(sync[0]?.capabilities).toMatchObject({
+      lipSync: true,
+      imageGeneration: false,
+      videoGeneration: false,
+      text: false,
+    });
+    expect(hasAnyModelCapability(speech[0]!.capabilities)).toBe(true);
+    expect(hasAnyModelCapability(sync[0]!.capabilities)).toBe(true);
+    expect(inferKnownModelCapabilities('unknown-clone', 'minimax-speech').speechSynthesis).not.toBe(
+      true,
+    );
   });
 
   it('restricts custom providers to an explicit supported protocol', () => {

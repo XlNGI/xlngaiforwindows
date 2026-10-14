@@ -95,6 +95,9 @@ const HOST_ERROR_CODES = new Set<HostError['code']>([
   'METHOD_NOT_FOUND',
   'INVALID_PARAMETERS',
   'PROVIDER_UNAVAILABLE',
+  'SUBMISSION_UNKNOWN',
+  'AUTHENTICATION_FAILED',
+  'RATE_LIMITED',
   'PROVIDER_FAILED',
   'REQUEST_NOT_SENT',
   'INTERRUPTED',
@@ -242,12 +245,13 @@ export class NativeProviderBridge {
     const requestId = requireString(value.requestId, 'host.response.requestId');
     const oneShot = this.pendingRequests.get(requestId);
     if (oneShot) {
+      const parsedError = value.ok === false ? parseHostError(value.error) : undefined;
+      if (value.ok !== true && value.ok !== false)
+        throw new Error('host.response.ok must be boolean.');
       clearTimeout(oneShot.timer);
       this.pendingRequests.delete(requestId);
-      if (value.ok === false)
-        oneShot.reject(new NativeProviderRequestError(parseHostError(value.error)));
-      else if (value.ok === true) oneShot.resolve(value.result);
-      else oneShot.reject(new Error('host.response.ok must be boolean.'));
+      if (parsedError) oneShot.reject(new NativeProviderRequestError(parsedError));
+      else oneShot.resolve(value.result);
       return;
     }
     const pending = this.pending.get(requestId);
@@ -689,13 +693,42 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
 
 function parseHostError(value: unknown): HostError {
   if (!isRecord(value)) throw new Error('Host error must be an object.');
-  assertExactKeys(value, ['code', 'message', 'retryable']);
+  assertExactKeys(value, [
+    'code',
+    'message',
+    'retryable',
+    'providerErrorCode',
+    'providerTaskId',
+    'providerStatus',
+  ]);
   const code = requireString(value.code, 'host.error.code') as HostError['code'];
   if (!HOST_ERROR_CODES.has(code)) throw new Error('host.error.code is invalid.');
   const message = requireString(value.message, 'host.error.message');
   if (typeof value.retryable !== 'boolean')
     throw new Error('host.error.retryable must be boolean.');
-  return { code, message, retryable: value.retryable };
+  for (const key of ['providerErrorCode', 'providerTaskId'] as const) {
+    if (
+      value[key] !== undefined &&
+      (typeof value[key] !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value[key]))
+    )
+      throw new Error('Host error provider identity is invalid.');
+  }
+  if (
+    value.providerStatus !== undefined &&
+    (typeof value.providerStatus !== 'number' ||
+      !Number.isInteger(value.providerStatus) ||
+      value.providerStatus < 100 ||
+      value.providerStatus > 599)
+  )
+    throw new Error('Host provider status is invalid.');
+  return {
+    code,
+    message,
+    retryable: value.retryable,
+    ...(value.providerStatus !== undefined ? { providerStatus: value.providerStatus } : {}),
+    ...(value.providerErrorCode ? { providerErrorCode: value.providerErrorCode as string } : {}),
+    ...(value.providerTaskId ? { providerTaskId: value.providerTaskId as string } : {}),
+  };
 }
 
 function hostError(code: HostError['code'], error: unknown, retryable: boolean): HostError {

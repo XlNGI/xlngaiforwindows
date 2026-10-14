@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 43;
+export const CURRENT_SCHEMA_VERSION = 44;
 
 export const MIGRATION_V43 = `
 ALTER TABLE scenes ADD COLUMN video_prompt TEXT;

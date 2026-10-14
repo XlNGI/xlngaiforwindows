@@ -623,7 +623,14 @@ function parseMediaPrepareArguments(
     );
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set(['prompt', 'inputAssetIds', 'parameters', 'shotId', 'sceneId', 'assetKind']);
+  const allowed = new Set([
+    'prompt',
+    'inputAssetIds',
+    'parameters',
+    'shotId',
+    'sceneId',
+    'assetKind',
+  ]);
   const unknown = Object.keys(record).find((key) => !allowed.has(key));
   if (unknown) {
     throw new AgentToolPolicyError(

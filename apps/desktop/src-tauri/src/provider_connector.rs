@@ -2,7 +2,10 @@ use serde::Deserialize;
 
 use super::{
     credential_store::{credential_read, ensure_credential_subject, CredentialSecret},
-    provider_http::{request_json, JsonHttpErrorKind, JsonHttpRequest, JsonHttpResponse},
+    provider_http::{
+        request_dubbing_file, request_json, DubbingCancellation, DubbingHttpRequest,
+        DubbingHttpTarget, JsonHttpErrorKind, JsonHttpRequest, JsonHttpResponse,
+    },
     request_guard, WorkerState,
 };
 
@@ -131,6 +134,9 @@ fn test_connection(
     profile: RuntimeProviderProfile,
     secret: CredentialSecret,
 ) -> ProviderTestOutcome {
+    if matches!(profile.protocol.as_str(), "minimax-speech" | "sync-lipsync") {
+        return test_dubbing_connection(&profile, &secret);
+    }
     if !matches!(
         profile.protocol.as_str(),
         "openai-responses" | "openai-chat-completions" | "vidu-v2"
@@ -176,6 +182,143 @@ fn test_connection(
         Err(error) => return classify_request_error(error.kind(), error.to_string()),
     };
     classify_models_response(response, &profile.provider_type)
+}
+
+fn test_dubbing_connection(
+    profile: &RuntimeProviderProfile,
+    credential: &CredentialSecret,
+) -> ProviderTestOutcome {
+    let expected = match (profile.provider_type.as_str(), profile.protocol.as_str()) {
+        ("minimax-speech", "minimax-speech") => "https://api.minimax.cn",
+        ("sync", "sync-lipsync") => "https://api.sync.so",
+        _ => {
+            return ProviderTestOutcome::failed(
+                "protocol-failed",
+                "invalid-dubbing-connection",
+                "Dubbing connection must use its official provider protocol.".into(),
+            )
+        }
+    };
+    if profile.base_url.trim_end_matches('/') != expected {
+        return ProviderTestOutcome::failed(
+            "protocol-failed",
+            "invalid-base-url",
+            "Dubbing connection tests only support the official fixed host.".into(),
+        );
+    }
+    let secret = match credential.as_str() {
+        Ok(secret) => secret,
+        Err(_) => {
+            return ProviderTestOutcome::failed(
+                "auth-failed",
+                "credential-invalid",
+                "Provider credential is invalid.".into(),
+            )
+        }
+    };
+    if profile.protocol == "minimax-speech" {
+        let payload = br#"{"voice_type":"system"}"#;
+        let response = match request_json(JsonHttpRequest {
+            host: "api.minimax.cn",
+            port: 443,
+            secure: true,
+            method: "POST",
+            path: "/v1/get_voice",
+            authorization_scheme: "Bearer",
+            accept: "application/json",
+            secret,
+            body: Some(payload),
+            request_body_limit: 1024,
+            response_body_limit: MODEL_RESPONSE_BODY_LIMIT,
+        }) {
+            Ok(response) => response,
+            Err(error) => return classify_request_error(error.kind(), error.to_string()),
+        };
+        return classify_dubbing_response(response, "minimax-speech");
+    }
+    let cancellation = DubbingCancellation::default();
+    let response = match request_dubbing_file(DubbingHttpRequest {
+        target: DubbingHttpTarget::SyncModels,
+        secret: Some(secret),
+        idempotency_key: None,
+        body: None,
+        output: None,
+        response_limit: MODEL_RESPONSE_BODY_LIMIT,
+        cancellation: &cancellation,
+    }) {
+        Ok(response) => response,
+        Err(error) => return classify_request_error(error.kind(), error.to_string()),
+    };
+    let body = serde_json::from_slice(&response.body).unwrap_or(serde_json::Value::Null);
+    classify_dubbing_response(
+        JsonHttpResponse {
+            status: response.status,
+            body,
+            retry_after_ms: None,
+        },
+        "sync",
+    )
+}
+
+fn classify_dubbing_response(
+    response: JsonHttpResponse,
+    provider_type: &str,
+) -> ProviderTestOutcome {
+    if !(200..=299).contains(&response.status) {
+        // Unlike generic model discovery, an unknown endpoint is not proof of authentication.
+        if matches!(response.status, 404 | 405) {
+            return ProviderTestOutcome::failed(
+                "protocol-failed",
+                "official-endpoint-unavailable",
+                "Official dubbing discovery endpoint is unavailable.".into(),
+            );
+        }
+        return classify_models_response(response, provider_type);
+    }
+    if provider_type == "minimax-speech" {
+        return match response
+            .body
+            .pointer("/base_resp/status_code")
+            .and_then(serde_json::Value::as_i64)
+        {
+            Some(0)
+                if response
+                    .body
+                    .get("system_voice")
+                    .is_some_and(serde_json::Value::is_array) =>
+            {
+                ProviderTestOutcome::ready(None)
+            }
+            Some(1004) => ProviderTestOutcome::failed(
+                "auth-failed",
+                "authentication-rejected",
+                "MiniMax rejected the credential.".into(),
+            ),
+            _ => ProviderTestOutcome::failed(
+                "protocol-failed",
+                "voice-discovery-failed",
+                "MiniMax did not return a valid system voice catalog.".into(),
+            ),
+        };
+    }
+    let has_sync3 = response.body.as_array().is_some_and(|models| {
+        models.len() <= MODEL_LIST_LIMIT
+            && models.iter().any(|model| {
+                model.get("name").and_then(serde_json::Value::as_str) == Some("sync-3")
+                    || model.get("id").and_then(serde_json::Value::as_str) == Some("sync-3")
+            })
+    });
+    if !has_sync3 {
+        return ProviderTestOutcome::failed(
+            "protocol-failed",
+            "sync3-unavailable",
+            "This Sync account did not advertise sync-3 access.".into(),
+        );
+    }
+    ProviderTestOutcome::ready(Some(vec![RemoteModel {
+        id: "sync-3".into(),
+        display_name: Some("Sync 3".into()),
+    }]))
 }
 
 fn classify_request_error(kind: JsonHttpErrorKind, message: String) -> ProviderTestOutcome {
@@ -450,5 +593,42 @@ mod tests {
         );
         assert_eq!(tls.status, "network-failed");
         assert_eq!(tls.error_code, Some("tls-error"));
+    }
+
+    #[test]
+    fn official_dubbing_discovery_requires_real_catalog_and_sync3_access() {
+        let response = |status, body| JsonHttpResponse {
+            status,
+            body,
+            retry_after_ms: None,
+        };
+        let speech = super::classify_dubbing_response(
+            response(
+                200,
+                json!({"base_resp":{"status_code":0},"system_voice":[]}),
+            ),
+            "minimax-speech",
+        );
+        assert_eq!(speech.status, "ready");
+        assert!(speech.models.is_none());
+        let rejected = super::classify_dubbing_response(
+            response(
+                200,
+                json!({"base_resp":{"status_code":1004},"system_voice":[]}),
+            ),
+            "minimax-speech",
+        );
+        assert_eq!(rejected.status, "auth-failed");
+        let sync = super::classify_dubbing_response(
+            response(200, json!([{"id":"model-uuid","name":"sync-3"}])),
+            "sync",
+        );
+        assert_eq!(sync.status, "ready");
+        assert_eq!(sync.models.unwrap()[0].id, "sync-3");
+        let missing =
+            super::classify_dubbing_response(response(200, json!([{"name":"lipsync-2"}])), "sync");
+        assert_eq!(missing.error_code, Some("sync3-unavailable"));
+        let missing_endpoint = super::classify_dubbing_response(response(404, json!({})), "sync");
+        assert_eq!(missing_endpoint.status, "protocol-failed");
     }
 }

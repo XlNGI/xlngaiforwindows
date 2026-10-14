@@ -26,6 +26,8 @@ const capabilityOptions: Array<{ key: keyof ProviderModelCapabilities; label: st
   { key: 'imageGeneration', label: '图片生成' },
   { key: 'videoGeneration', label: '视频生成' },
   { key: 'imageEditing', label: '图片编辑' },
+  { key: 'speechSynthesis', label: '配音' },
+  { key: 'lipSync', label: '口型同步' },
 ];
 
 const defaultRoleOptions: Array<{ role: ProviderDefaultRole; label: string }> = [

@@ -9,6 +9,7 @@ import type {
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { AssetImagePreview } from './AssetImagePreview';
+import { DubbingScenePanel } from './dubbing/DubbingScenePanel';
 
 const REFERENCE_PATTERN = /\[(角色|场景|道具|人物|地点|物件):([^\]]+)\]/gu;
 
@@ -28,6 +29,7 @@ function isImage(asset: AssetInfo): boolean {
 }
 
 export function SceneWorkspace({
+  projectId,
   scene,
   prompt,
   bindings,
@@ -37,7 +39,9 @@ export function SceneWorkspace({
   onPromptChange,
   onSave,
   onGenerateVideo,
+  onOpenAsset,
 }: {
+  projectId?: string;
   scene: SceneInfo;
   prompt: string;
   bindings: SceneMaterialBindingInfo[];
@@ -47,6 +51,7 @@ export function SceneWorkspace({
   onPromptChange: (value: string) => void;
   onSave: (prompt: string, bindings: SceneMaterialBindingInfo[]) => void;
   onGenerateVideo: (bindings: SceneMaterialBindingInfo[]) => void;
+  onOpenAsset?: (assetId: string) => void;
 }) {
   const [localBindings, setLocalBindings] = useState(bindings);
   const [message, setMessage] = useState('');
@@ -63,7 +68,13 @@ export function SceneWorkspace({
     };
     for (const asset of assets.filter(isImage)) {
       const kind = asset.kind.toLowerCase();
-      const role = kind.includes('character') ? 'character' : kind.includes('scene') ? 'scene' : kind.includes('prop') ? 'prop' : 'other';
+      const role = kind.includes('character')
+        ? 'character'
+        : kind.includes('scene')
+          ? 'scene'
+          : kind.includes('prop')
+            ? 'prop'
+            : 'other';
       map[role].push(asset);
     }
     return map;
@@ -83,14 +94,15 @@ export function SceneWorkspace({
             limit: 1,
           });
           const asset = sourceAssets.find(isImage);
-          if (asset) next.set(bindingKey('scene', bound.title), {
-            id: bindingKey('scene', bound.title),
-            role: 'scene',
-            label: bound.title,
-            assetId: asset.id,
-            sourceDocumentId: bound.id,
-            source: 'auto',
-          });
+          if (asset)
+            next.set(bindingKey('scene', bound.title), {
+              id: bindingKey('scene', bound.title),
+              role: 'scene',
+              label: bound.title,
+              assetId: asset.id,
+              sourceDocumentId: bound.id,
+              source: 'auto',
+            });
         }
       }
       for (const match of mentions) {
@@ -109,18 +121,23 @@ export function SceneWorkspace({
           limit: 1,
         });
         const asset = sourceAssets.find(isImage);
-        if (asset) next.set(bindingKey(role, label), {
-          id: bindingKey(role, label),
-          role,
-          label,
-          assetId: asset.id,
-          sourceDocumentId: document.id,
-          source: 'auto',
-        });
+        if (asset)
+          next.set(bindingKey(role, label), {
+            id: bindingKey(role, label),
+            role,
+            label,
+            assetId: asset.id,
+            sourceDocumentId: document.id,
+            source: 'auto',
+          });
       }
       const merged = [...next.values(), ...localBindings.filter((item) => !next.has(item.id))];
       setLocalBindings(merged);
-      setMessage(merged.length ? `已识别 ${merged.length} 个素材，可继续手动调整。` : '没有找到可用的参考图片。');
+      setMessage(
+        merged.length
+          ? `已识别 ${merged.length} 个素材，可继续手动调整。`
+          : '没有找到可用的参考图片。',
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '素材识别失败。');
     }
@@ -134,9 +151,11 @@ export function SceneWorkspace({
   }, [scene.id, scene.sceneDocumentId, prompt]);
 
   const setAsset = (binding: SceneMaterialBindingInfo, assetId: string) => {
-    setLocalBindings((current) => current.map((item) => item.id === binding.id
-      ? { ...item, assetId, source: 'manual' }
-      : item));
+    setLocalBindings((current) =>
+      current.map((item) =>
+        item.id === binding.id ? { ...item, assetId, source: 'manual' } : item,
+      ),
+    );
   };
   const tooManyReferences = localBindings.length > 7;
 
@@ -149,13 +168,28 @@ export function SceneWorkspace({
             <h1>完整视频提示词</h1>
           </div>
           <div className="toolbar-actions">
-            <button className="button secondary" type="button" disabled={!writable} onClick={() => void autoBind()}>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={!writable}
+              onClick={() => void autoBind()}
+            >
               自动识别素材
             </button>
-            <button className="button secondary" type="button" disabled={!writable} onClick={() => onSave(prompt, localBindings)}>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={!writable}
+              onClick={() => onSave(prompt, localBindings)}
+            >
               <Save size={14} /> 保存提示词
             </button>
-            <button className="button primary" type="button" disabled={!writable || !prompt.trim() || tooManyReferences} onClick={() => onGenerateVideo(localBindings)}>
+            <button
+              className="button primary"
+              type="button"
+              disabled={!writable || !prompt.trim() || tooManyReferences}
+              onClick={() => onGenerateVideo(localBindings)}
+            >
               <Video size={14} /> 生成场次视频
             </button>
           </div>
@@ -169,7 +203,9 @@ export function SceneWorkspace({
           placeholder="输入这一场完整的视频提示词…"
         />
         {message ? <div className="inline-status">{message}</div> : null}
-        {tooManyReferences ? <div className="inline-status">参考图片超过当前模型支持的 7 张，请先减少绑定。</div> : null}
+        {tooManyReferences ? (
+          <div className="inline-status">参考图片超过当前模型支持的 7 张，请先减少绑定。</div>
+        ) : null}
       </section>
       <section className="scene-material-panel" aria-label="场次参考素材">
         <div className="scene-prompt-heading">
@@ -177,9 +213,13 @@ export function SceneWorkspace({
             <h2>场次参考素材</h2>
             <p>提示词中的角色、场景和道具会自动匹配参考图，也可以手动替换。</p>
           </div>
-          <button className="text-button" type="button" onClick={() => void autoBind()}>重新识别</button>
+          <button className="text-button" type="button" onClick={() => void autoBind()}>
+            重新识别
+          </button>
         </div>
-        {localBindings.length === 0 ? <p className="tree-empty">暂无绑定素材</p> : (
+        {localBindings.length === 0 ? (
+          <p className="tree-empty">暂无绑定素材</p>
+        ) : (
           <div className="scene-material-grid">
             {localBindings.map((binding) => {
               const candidates =
@@ -190,10 +230,31 @@ export function SceneWorkspace({
               return (
                 <article className="scene-material-card" key={binding.id}>
                   <strong>{binding.label}</strong>
-                  <span>{binding.role === 'character' ? '角色' : binding.role === 'scene' ? '场景' : binding.role === 'prop' ? '道具' : '素材'}</span>
-                  {asset ? <AssetImagePreview asset={asset} /> : <div className="scene-material-missing">未选择图片</div>}
-                  <select aria-label={`${binding.label}参考图`} value={binding.assetId} disabled={!writable} onChange={(event) => setAsset(binding, event.target.value)}>
-                    {candidates.map((item) => <option key={item.id} value={item.id}>{item.alias || item.relativePath.split(/[\\/]/).pop() || item.id}</option>)}
+                  <span>
+                    {binding.role === 'character'
+                      ? '角色'
+                      : binding.role === 'scene'
+                        ? '场景'
+                        : binding.role === 'prop'
+                          ? '道具'
+                          : '素材'}
+                  </span>
+                  {asset ? (
+                    <AssetImagePreview asset={asset} />
+                  ) : (
+                    <div className="scene-material-missing">未选择图片</div>
+                  )}
+                  <select
+                    aria-label={`${binding.label}参考图`}
+                    value={binding.assetId}
+                    disabled={!writable}
+                    onChange={(event) => setAsset(binding, event.target.value)}
+                  >
+                    {candidates.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.alias || item.relativePath.split(/[\\/]/).pop() || item.id}
+                      </option>
+                    ))}
                   </select>
                 </article>
               );
@@ -201,6 +262,15 @@ export function SceneWorkspace({
           </div>
         )}
       </section>
+      {projectId ? (
+        <DubbingScenePanel
+          projectId={projectId}
+          sceneId={scene.id}
+          documents={documents}
+          writable={writable}
+          onOpenAsset={onOpenAsset}
+        />
+      ) : null}
     </div>
   );
 }

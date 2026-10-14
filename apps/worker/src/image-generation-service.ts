@@ -33,7 +33,7 @@ import type {
   AssetMediaSourceParams,
 } from '@ai-video/contracts';
 import type { AssetRecord, JobRecord } from '@ai-video/domain';
-import { createRepositories } from '@ai-video/persistence';
+import { createRepositories, DubbingRepository } from '@ai-video/persistence';
 import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
 import { NetworkAdmissionError } from '@ai-video/llm';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
@@ -439,9 +439,9 @@ export class ImageGenerationService {
         ? listAssetsForSourceDocument(database, project.id, params.sourceDocumentId, params.limit)
         : params.sceneId
           ? listAssetsForScene(database, project.id, params.sceneId, params.limit)
-        : params.shotId
-          ? listAssetsForShot(database, project.id, params.shotId, params.limit)
-          : repo.queryByProject(project.id, params);
+          : params.shotId
+            ? listAssetsForShot(database, project.id, params.shotId, params.limit)
+            : repo.queryByProject(project.id, params);
       return records.map((record) => ({
         ...toAssetInfo(record),
         tags: repo
@@ -702,7 +702,19 @@ export class ImageGenerationService {
       const asset = repositories.assets.get(assetId);
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       const jobId = repositories.generationResults.findJobIdByAsset(assetId);
-      if (!jobId) throw new Error('Asset source job was not found.');
+      if (!jobId) {
+        const dubbing = database
+          .prepare('SELECT id,scene_id FROM dubbing_jobs WHERE project_id=? AND output_asset_id=?')
+          .get(project.id, assetId) as { id: string; scene_id: string } | undefined;
+        if (dubbing)
+          return {
+            assetId,
+            jobId: dubbing.id,
+            sceneId: dubbing.scene_id,
+            sourceKind: 'dubbing' as const,
+          };
+        throw new Error('Asset source job was not found.');
+      }
       const job = repositories.jobs.get(jobId);
       return { assetId, jobId, shotId: job?.shotId };
     });
@@ -793,7 +805,9 @@ export class ImageGenerationService {
       const asset = repositories.assets.get(assetId);
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       if (asset.deletedAt) return { deleted: true as const, referenceCount: 0 };
-      const referenceCount = repositories.assets.countDraftReferences(assetId);
+      const referenceCount =
+        repositories.assets.countDraftReferences(assetId) +
+        new DubbingRepository(database, project.id).countVideoReferences(assetId);
       if (referenceCount > 0 && !confirm) {
         throw new Error(`Asset is referenced by ${referenceCount} production draft(s).`);
       }
@@ -1572,8 +1586,8 @@ function listAssetsForShot(
     .prepare(
       `SELECT assets.*
        FROM assets
-       INNER JOIN generation_results ON generation_results.asset_id = assets.id
-       INNER JOIN generation_jobs ON generation_jobs.id = generation_results.job_id
+       LEFT JOIN generation_results ON generation_results.asset_id = assets.id
+       LEFT JOIN generation_jobs ON generation_jobs.id = generation_results.job_id
        WHERE assets.project_id = ?
          AND assets.deleted_at IS NULL
          AND generation_jobs.shot_id = ?
@@ -1621,15 +1635,16 @@ function listAssetsForScene(
     .prepare(
       `SELECT assets.*
        FROM assets
-       INNER JOIN generation_results ON generation_results.asset_id = assets.id
-       INNER JOIN generation_jobs ON generation_jobs.id = generation_results.job_id
+       LEFT JOIN generation_results ON generation_results.asset_id = assets.id
+       LEFT JOIN generation_jobs ON generation_jobs.id = generation_results.job_id
        WHERE assets.project_id = ?
          AND assets.deleted_at IS NULL
-         AND json_extract(generation_jobs.task_snapshot_json, '$.sceneId') = ?
+         AND (json_extract(generation_jobs.task_snapshot_json, '$.sceneId') = ?
+           OR EXISTS (SELECT 1 FROM dubbing_jobs WHERE dubbing_jobs.project_id=assets.project_id AND dubbing_jobs.output_asset_id=assets.id AND dubbing_jobs.scene_id=?))
        ORDER BY assets.created_at DESC, assets.id DESC
        LIMIT ?`,
     )
-    .all(projectId, sceneId, bounded) as Array<{
+    .all(projectId, sceneId, sceneId, bounded) as Array<{
     id: string;
     project_id: string;
     kind: string;

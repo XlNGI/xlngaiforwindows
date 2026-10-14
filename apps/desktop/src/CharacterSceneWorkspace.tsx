@@ -4,8 +4,11 @@ import { useEffect, useState } from 'react';
 import type { AssetInfo, AssetMediaSourceInfo, DocumentKind } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { ImagePreview } from './ImagePreview';
+import { VoiceProfilePanel } from './dubbing/VoiceProfilePanel';
 
 export function CharacterSceneWorkspace({
+  projectId,
+  documentId,
   title,
   kind,
   content,
@@ -23,6 +26,8 @@ export function CharacterSceneWorkspace({
   onGenerate,
   onOpenAsset,
 }: {
+  projectId?: string;
+  documentId?: string;
   title: string;
   kind: DocumentKind;
   content: string;
@@ -69,7 +74,9 @@ export function CharacterSceneWorkspace({
     kind === 'scene' ? '\u751f\u6210\u573a\u666f\u56fe' : '\u751f\u6210\u89d2\u8272\u56fe';
 
   return (
-    <div className="character-scene-workspace">
+    <div
+      className={`character-scene-workspace${kind === 'character' && projectId && documentId ? ' has-voice-profile' : ''}`}
+    >
       <section className="character-scene-prompt" aria-labelledby="character-scene-prompt-heading">
         <div className="character-scene-prompt-heading">
           <h2 id="character-scene-prompt-heading">{'\u63d0\u793a\u8bcd'}</h2>
@@ -139,6 +146,13 @@ export function CharacterSceneWorkspace({
           </div>
         ) : null}
       </section>
+      {kind === 'character' && projectId && documentId ? (
+        <VoiceProfilePanel
+          projectId={projectId}
+          characterDocumentId={documentId}
+          writable={writable}
+        />
+      ) : null}
       <section
         className={`character-scene-gallery${assets.length === 0 ? ' is-empty' : ''}`}
         aria-labelledby="character-scene-gallery-heading"

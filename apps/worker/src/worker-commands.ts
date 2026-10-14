@@ -16,6 +16,7 @@ import type { MarkdownExportService } from './markdown-export-service.js';
 import type { MediaOrchestrationService } from './media-orchestration-service.js';
 import type { ProjectService } from './project-service.js';
 import type { ProjectTaskRuntime } from './project-task-runtime.js';
+import type { DubbingService } from './dubbing-service.js';
 import type { PartialArtifactService } from './partial-artifact-service.js';
 import type { SampleProjectService } from './sample-project-service.js';
 import type { UsageService } from './usage-service.js';
@@ -43,6 +44,7 @@ export interface InfrastructureCommandServices {
   markdownExportService: MarkdownExportService;
   mediaOrchestrationService: MediaOrchestrationService;
   projectTaskRuntime: ProjectTaskRuntime;
+  dubbingService?: DubbingService;
 }
 
 export interface InfrastructureCommandResult {
@@ -58,6 +60,7 @@ function requireString(params: Record<string, unknown>, key: string): string {
 
 async function resetRuntime(services: InfrastructureCommandServices): Promise<void> {
   services.projectTaskRuntime.stop();
+  await services.dubbingService?.cancelAll();
   await services.generationService.cancelAll();
   services.imageGenerationService.cancelAll();
   services.videoGenerationService.cancelAll();
@@ -65,6 +68,7 @@ async function resetRuntime(services: InfrastructureCommandServices): Promise<vo
 }
 
 function recoverRuntime(services: InfrastructureCommandServices): void {
+  if (services.projectService.current()?.mode !== 'read-write') return;
   services.partialArtifactService.recoverInterrupted();
   services.generationService.recoverInterrupted();
   services.agentProviderLoopService.recoverInterrupted();
@@ -73,6 +77,7 @@ function recoverRuntime(services: InfrastructureCommandServices): void {
   services.imageGenerationService.recoverInterrupted();
   services.videoGenerationService.recoverInterrupted();
   services.projectTaskRuntime.start();
+  services.dubbingService?.recover();
   services.partialArtifactService.expire();
   services.markdownExportService.reconcile();
   services.maintenanceService.cleanupResearchCache();
@@ -115,8 +120,18 @@ export async function executeInfrastructureCommand(
       return { handled: true, result: services.projectService.current() ?? null };
     case 'project.recent':
       return { handled: true, result: services.projectService.listRecent() };
-    case 'project.integrity':
-      return { handled: true, result: services.projectService.integrity() };
+    case 'project.integrity': {
+      const report = services.projectService.integrity();
+      const mediaErrors = (await services.dubbingService?.inspectIntegrity()) ?? [];
+      return {
+        handled: true,
+        result: {
+          ...report,
+          ok: report.ok && mediaErrors.length === 0,
+          messages: [...report.messages, ...mediaErrors],
+        },
+      };
+    }
     case 'project.backup':
       return {
         handled: true,

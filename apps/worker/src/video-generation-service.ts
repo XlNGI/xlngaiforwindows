@@ -930,7 +930,8 @@ export class VideoGenerationService {
     if (job.taskSnapshotJson) {
       try {
         const snapshot = JSON.parse(job.taskSnapshotJson) as { sceneId?: unknown };
-        if (typeof snapshot.sceneId === 'string' && snapshot.sceneId.trim()) sceneId = snapshot.sceneId;
+        if (typeof snapshot.sceneId === 'string' && snapshot.sceneId.trim())
+          sceneId = snapshot.sceneId;
       } catch {
         // Legacy or malformed snapshots are still rendered without a scene target.
       }

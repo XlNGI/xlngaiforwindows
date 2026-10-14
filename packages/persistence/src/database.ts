@@ -44,6 +44,7 @@ import {
   MIGRATION_V42,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
+import { MIGRATION_V44 } from './migration-v44.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -461,6 +462,15 @@ export function migrateDatabase(
         .run(43, now);
     })();
   }
+  if (getSchemaVersion(database) === 43) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V44);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(44, now);
+    })();
+  }
   return getSchemaVersion(database);
 }
 
@@ -470,7 +480,8 @@ function applyMigrationV43(database: Database.Database): void {
       (column) => column.name,
     ),
   );
-  if (!columns.has('video_prompt')) database.exec('ALTER TABLE scenes ADD COLUMN video_prompt TEXT');
+  if (!columns.has('video_prompt'))
+    database.exec('ALTER TABLE scenes ADD COLUMN video_prompt TEXT');
   if (!columns.has('material_bindings_json')) {
     database.exec(
       "ALTER TABLE scenes ADD COLUMN material_bindings_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(material_bindings_json))",

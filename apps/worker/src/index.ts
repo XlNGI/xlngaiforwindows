@@ -119,7 +119,7 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
   const developmentToken = secureDevelopmentMode ? createDevHttpToken() : undefined;
   let developmentTokenPath: string | undefined;
   const server = createServer((request, response) => {
-    const mediaMatch = request.url?.match(/^\/media\/([^/?#]+)$/);
+    const mediaMatch = request.url?.match(/^\/media\/(audio\/)?([^/?#]+)$/);
     if (request.method === 'GET' && mediaMatch && developmentToken) {
       const authorization = authorizeDevHttpMediaRequest(
         {
@@ -134,18 +134,18 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
       }
       let assetId: string;
       try {
-        assetId = decodeURIComponent(mediaMatch[1]!);
+        assetId = decodeURIComponent(mediaMatch[2]!);
       } catch {
         response.writeHead(400).end();
         return;
       }
       void requestScheduler
-        .run('asset.mediaSource', async () => {
+        .run(mediaMatch[1] ? 'audio.mediaSource' : 'asset.mediaSource', async () => {
           const result = await handleRequest({
             id: `dev-media:${assetId}`,
             protocolVersion: IPC_PROTOCOL_VERSION,
-            method: 'asset.mediaSource',
-            params: { assetId },
+            method: mediaMatch[1] ? 'audio.mediaSource' : 'asset.mediaSource',
+            params: mediaMatch[1] ? { audioId: assetId } : { assetId },
           });
           if (!result.ok) {
             response.writeHead(404).end();

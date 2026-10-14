@@ -148,6 +148,19 @@ created -> streaming -> complete
 
 后续里程碑必须在本表中追加不变量，不得删除历史条目来规避门禁。
 
+2026-10-14 固定角色配音新增追踪：
+
+| 不变量 | 负责模块 | 验证证据 |
+| --- | --- | --- |
+| 音色、台词和已采用配音保持不可变来源 | Dubbing Repository / Service | v43→v44、角色改名、声音新版本、CAS、台词变化与历史 take 测试 |
+| 音频独立于图片／视频素材库且完整项目可迁移 | Audio Files / Project Export | WAV／MP3 导入、Range 播放、专用回收站、引用保护、完整性哈希及导出再打开 |
+| 付费提交未知不能自动重交 | Native Dubbing / Pipeline | 未发送／确定拒绝／未知状态区分、Sync 幂等键、恢复任务 ID、原任务只查询、取消晚回包 |
+| 制作输入和输出仅限当前项目受控文件 | Native File Bridge / Worker | 2 MiB JSONL、联接逃逸、签名 URL 不落库、流式 multipart、磁盘余量、失败清理 |
+| 成片使用确认配音且场次时间点不漂移 | FFmpeg Runtime | 实际 H.264／WAV 分段、绝对起点、尾部对白、零源音轨、不覆盖源、成功区间复用 |
+| 阶段状态、错误和 UI 不跨项目 | Dubbing Runtime / Desktop | 并行请求、后台运行、只读项目、界面关闭、项目切换、期限、取消及恢复 |
+
+详细状态见 [配音实施记录](./code-traces/2026-10-14-character-voice-dubbing.md)。真实付费样片由用户明确延期，声音与口型质量、真实账号可用性、正式签名和旧版本升级继续为待验收项。
+
 ## 6. 本轮复验状态
 
 2026-09-22 请求风暴与网络故障防护：`pnpm.cmd test` 820 项、Rust 113 项通过；TypeScript 类型、Lint、格式、生产构建及 Rust fmt/check 通过。覆盖熔断、限流、有界排队、跨出口共享、整流许可、取消、媒体提交状态保护和本地错误分类，详见 [网络韧性实现记录](./NETWORK-RESILIENCE-IMPLEMENTATION.md)。未验证真实 Provider、断网/休眠、安装包及跨进程共享限额；本记录不改变既有发布 `HOLD`。

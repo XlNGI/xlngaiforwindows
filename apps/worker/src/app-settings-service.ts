@@ -1176,6 +1176,10 @@ function normalizeModelCapabilities(
     imageGeneration: capabilities.imageGeneration,
     imageEditing: capabilities.imageEditing ?? false,
     videoGeneration: capabilities.videoGeneration,
+    ...(capabilities.speechSynthesis !== undefined
+      ? { speechSynthesis: capabilities.speechSynthesis }
+      : {}),
+    ...(capabilities.lipSync !== undefined ? { lipSync: capabilities.lipSync } : {}),
   };
   if (Object.values(normalized).some((value) => typeof value !== 'boolean')) {
     throw new ProviderProfileValidationError('Every model capability must be a boolean.');
