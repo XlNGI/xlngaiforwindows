@@ -1,9 +1,15 @@
 import type { ErrorObject, ValidateFunction } from 'ajv';
+export {
+  getOfficialVideoAudioContract,
+  validateOfficialVideoAudioParameters,
+  buildOfficialVideoAudioRequest,
+} from './official-video-audio.js';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
 import {
   UNICOMPAPI_MEDIA_TEMPLATES,
   officialVideoContracts,
+  officialVideoAudioContracts,
   officialImageContracts,
   mediaModelBindings,
   isUniCompApiMediaTemplateKey,
@@ -51,6 +57,7 @@ export function adapterDescriptorFromModelContract(
     ? schema.required.filter((key): key is string => typeof key === 'string')
     : [];
   const parameterSchema: AdapterParameterSchema = {
+    ...structuredClone(schema),
     $schema: schemaUri,
     type: 'object',
     additionalProperties: false,
@@ -94,10 +101,15 @@ function contractProperty(key: string, value: unknown): AdapterParameterProperty
   const source = isRecord(value) ? value : {};
   const rawType = source.type;
   const type: AdapterParameterProperty['type'] =
-    rawType === 'integer' || rawType === 'number' || rawType === 'boolean' || rawType === 'array'
+    rawType === 'integer' ||
+    rawType === 'number' ||
+    rawType === 'boolean' ||
+    rawType === 'array' ||
+    rawType === 'object'
       ? rawType
       : 'string';
   const property: AdapterParameterProperty = {
+    ...structuredClone(source),
     type,
     title: typeof source.title === 'string' ? source.title : key,
   };
@@ -129,6 +141,11 @@ function contractProperty(key: string, value: unknown): AdapterParameterProperty
 }
 
 function contractControl(key: string, property: AdapterParameterProperty): AdapterControl {
+  if (
+    property.type === 'object' ||
+    (property.type === 'array' && property.items?.type !== 'string')
+  )
+    return 'structured';
   if (property.type === 'boolean') return 'toggle';
   if (property.type === 'integer' || property.type === 'number') return 'number';
   if (property.enum?.length) return 'select';
@@ -1127,6 +1144,7 @@ const legacyAdapters: AdapterDescriptor[] = [
 const unicompAdapters = unicompApiTemplateAdapters();
 const contractAdapters: AdapterDescriptor[] = [
   ...officialVideoContracts,
+  ...officialVideoAudioContracts.filter((contract) => contract.status === 'enabled'),
   ...officialImageContracts,
 ].flatMap((contract) => {
   const capability = contract.taskCapability;
@@ -1134,7 +1152,12 @@ const contractAdapters: AdapterDescriptor[] = [
   return [
     ...new Set(
       mediaModelBindings
-        .filter((binding) => binding.contractId === contract.contractId)
+        .filter(
+          (binding) =>
+            binding.contractId === contract.contractId &&
+            binding.contractRevision === contract.contractRevision &&
+            binding.status === 'enabled',
+        )
         .map((binding) => binding.providerType),
     ),
   ].map((provider) =>
@@ -1142,10 +1165,18 @@ const contractAdapters: AdapterDescriptor[] = [
       contract,
       capability,
       provider,
-      providerLabel: provider === 'unicompapi' ? 'UniCompAPI' : provider,
+      providerLabel:
+        (
+          {
+            unicompapi: 'UniCompAPI',
+            'wan-video': '万相',
+            'seedance-video': 'Seedance',
+            'minimax-video': 'MiniMax 视频',
+          } as Record<string, string>
+        )[provider] ?? provider,
       model: contract.contractId,
       modelLabel: contract.officialModelName,
-      apiVersion: 'contract-1',
+      apiVersion: `contract-${contract.contractRevision}`,
       endpoint:
         provider === 'unicompapi'
           ? capability === 'TEXT_TO_IMAGE' || capability === 'REFERENCE_TO_IMAGE'
@@ -1157,12 +1188,39 @@ const contractAdapters: AdapterDescriptor[] = [
     }),
   );
 });
-const catalogAdapters = [...adapters, ...unicompAdapters, ...contractAdapters];
+const officialModeAdapters = contractAdapters
+  .filter((adapter) => ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider))
+  .flatMap((adapter) => {
+    const contract = officialVideoAudioContracts.find(
+      (contract) =>
+        contract.contractId === adapter.contractId &&
+        contract.contractRevision === adapter.contractRevision,
+    )!;
+    return (contract.taskCapabilities ?? [])
+      .filter((capability) => capability !== adapter.capability)
+      .map((capability) => ({
+        ...adapter,
+        capability,
+        capabilityLabel: capabilityLabel(capability),
+        key: `${capability}:${adapter.provider}:${adapter.model}:${adapter.apiVersion}`,
+      }));
+  });
+const catalogAdapters = [
+  ...adapters,
+  ...unicompAdapters,
+  ...contractAdapters,
+  ...officialModeAdapters,
+];
 const lookupAdapters = [...catalogAdapters, ...legacyAdapters];
 const keySet = new Set(lookupAdapters.map((adapter) => adapter.key));
 if (keySet.size !== lookupAdapters.length) throw new Error('Adapter keys must be unique.');
 
-const ajv = new Ajv2020({ allErrors: true, strict: true });
+const ajv = new Ajv2020({
+  allErrors: true,
+  strict: true,
+  strictTypes: false,
+  strictRequired: false,
+});
 const addFormats = addFormatsModule as unknown as (instance: Ajv2020) => Ajv2020;
 addFormats(ajv);
 const validators = new Map<string, ValidateFunction>();
@@ -1172,7 +1230,7 @@ let runtimeOverrides = new Map<string, AdapterDescriptor>();
 export function setAdapterOverrides(overrides: AdapterDescriptor[]): void {
   runtimeOverrides = new Map(
     overrides
-      .filter((adapter) => !adapter.key.endsWith(':contract-1'))
+      .filter((adapter) => !/:contract-\d+$/u.test(adapter.key))
       .map((adapter) => [adapter.key, adapter]),
   );
   validators.clear();
@@ -1256,12 +1314,26 @@ export function validateAdapterParameters(
     validator = compiled;
   }
   // Project/temporary image handles are domain references, resolved by Native before transport.
-  const validationParameters =
-    adapter.apiVersion === 'contract-1' && Array.isArray(parameters.images)
+  const normalizeReferences = (value: unknown): unknown =>
+    typeof value === 'string' &&
+    /^(?:asset|project-asset|controlled-file|character-voice|project-audio):\/\//u.test(value)
+      ? 'https://controlled-input.invalid/media'
+      : Array.isArray(value)
+        ? value.map(normalizeReferences)
+        : value && typeof value === 'object'
+          ? Object.fromEntries(
+              Object.entries(value).map(([key, item]) => [key, normalizeReferences(item)]),
+            )
+          : value;
+  const validationParameters = ['wan-video', 'seedance-video', 'minimax-video'].includes(
+    adapter.provider,
+  )
+    ? normalizeReferences(parameters)
+    : /^contract-\d+$/u.test(adapter.apiVersion) && Array.isArray(parameters.images)
       ? {
           ...parameters,
           images: parameters.images.map((image) =>
-            /^(?:asset|controlled-file):\/\//u.test(image)
+            typeof image === 'string' && /^(?:asset|controlled-file):\/\//u.test(image)
               ? 'https://controlled-input.invalid/image'
               : image,
           ),

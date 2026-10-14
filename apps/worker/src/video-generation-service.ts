@@ -27,7 +27,11 @@ import type {
   VideoGenerationPrepareParams,
   VideoProviderRegion,
 } from '@ai-video/contracts';
-import { officialVideoContracts, mediaModelBindings } from '@ai-video/contracts';
+import {
+  officialVideoContracts,
+  officialVideoAudioContracts,
+  mediaModelBindings,
+} from '@ai-video/contracts';
 import type { AssetRecord, GenerationResultRecord, JobRecord } from '@ai-video/domain';
 import {
   extractVideoCost,
@@ -159,20 +163,22 @@ export class VideoGenerationService {
           schemaVersion: adapter.schemaVersion,
           contractId: adapter.contractId,
           contractRevision: adapter.contractRevision,
-          contractSnapshot:
-            adapter.apiVersion === 'contract-1'
-              ? {
-                  ...adapter,
-                  contract: officialVideoContracts.find(
-                    (contract) => contract.contractId === adapter.contractId,
-                  ),
-                  bindings: mediaModelBindings.filter(
-                    (binding) =>
-                      binding.contractId === adapter.contractId &&
-                      binding.providerType === adapter.provider,
-                  ),
-                }
-              : undefined,
+          contractSnapshot: /^contract-\d+$/u.test(adapter.apiVersion)
+            ? {
+                ...adapter,
+                contract: [...officialVideoContracts, ...officialVideoAudioContracts].find(
+                  (contract) =>
+                    contract.contractId === adapter.contractId &&
+                    contract.contractRevision === adapter.contractRevision,
+                ),
+                bindings: mediaModelBindings.filter(
+                  (binding) =>
+                    binding.contractId === adapter.contractId &&
+                    binding.contractRevision === adapter.contractRevision &&
+                    binding.providerType === adapter.provider,
+                ),
+              }
+            : undefined,
           schemaSource: 'official-adapter',
           providerProfileId,
           providerRegion,
@@ -187,6 +193,7 @@ export class VideoGenerationService {
           createdAt: now,
         }),
         metadataJson: JSON.stringify({
+          providerBaseUrl: params.mediaModelSelection?.providerBaseUrl,
           assetKind,
           providerRegion,
           providerProfileId,
@@ -197,17 +204,26 @@ export class VideoGenerationService {
         createdAt: now,
         updatedAt: now,
       };
-      repositories.jobs.save(record);
-      repositories.generationJobEvents.append({
-        id: randomUUID(),
-        jobId: record.id,
-        projectId: project.id,
-        phase: 'prepare',
-        status: record.status,
-        summary: 'Video generation job prepared.',
-        createdAt: now,
-      });
-      repositories.projects.touch(now);
+      database.transaction(() => {
+        repositories.jobs.save(record);
+        for (const input of params.mediaInputReferences ?? [])
+          if (input.type === 'controlled_temporary_file' && input.audioId)
+            database
+              .prepare(
+                'INSERT OR IGNORE INTO video_input_audio_references(job_id,audio_id,project_id) VALUES(?,?,?)',
+              )
+              .run(record.id, input.audioId, project.id);
+        repositories.generationJobEvents.append({
+          id: randomUUID(),
+          jobId: record.id,
+          projectId: project.id,
+          phase: 'prepare',
+          status: record.status,
+          summary: 'Video generation job prepared.',
+          createdAt: now,
+        });
+        repositories.projects.touch(now);
+      })();
       project.updatedAt = now;
       return this.toInfo(record, [], []);
     });
@@ -220,7 +236,25 @@ export class VideoGenerationService {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(params.jobId);
       this.requireVideoJob(job, project.id);
-      if (TERMINAL_STATUSES.has(job.status)) return this.infoFromRepositories(job);
+      if (TERMINAL_STATUSES.has(job.status)) {
+        if (!job.providerTaskId) {
+          const saved = { ...job, providerTaskId, updatedAt: new Date().toISOString() };
+          repositories.jobs.save(saved);
+          repositories.generationJobEvents.append({
+            id: randomUUID(),
+            jobId: job.id,
+            projectId: project.id,
+            phase: 'submit',
+            status: job.status,
+            summary:
+              'Late provider task identity retained without restarting the cancelled or failed job.',
+            detailsJson: JSON.stringify({ providerTaskId, late: true }),
+            createdAt: saved.updatedAt,
+          });
+          return this.infoFromRepositories(saved);
+        }
+        return this.infoFromRepositories(job);
+      }
       if (job.providerTaskId) {
         if (job.providerTaskId !== providerTaskId) {
           throw new Error('Generation job is already bound to another provider task.');
@@ -235,7 +269,11 @@ export class VideoGenerationService {
       const now = new Date().toISOString();
       const request = JSON.parse(job.requestJson) as AdapterParameters;
       const timeoutMs =
-        request.off_peak === true ? OFF_PEAK_POLL_TIMEOUT_MS : DEFAULT_POLL_TIMEOUT_MS;
+        request.service_tier === 'flex'
+          ? Number(request.execution_expires_after ?? 172800) * 1000
+          : request.off_peak === true
+            ? OFF_PEAK_POLL_TIMEOUT_MS
+            : DEFAULT_POLL_TIMEOUT_MS;
       const metadata = this.metadata(job);
       const attached: JobRecord = {
         ...job,
@@ -889,6 +927,7 @@ export class VideoGenerationService {
         parsed.assetKind === 'scene-video'
           ? parsed.assetKind
           : 'shot-video',
+      providerBaseUrl: parsed.providerBaseUrl,
       providerRegion: requireProviderRegion(parsed.providerRegion ?? 'global'),
       providerProfileId: parsed.providerProfileId
         ? requireProviderProfileId(parsed.providerProfileId)
@@ -952,6 +991,7 @@ export class VideoGenerationService {
       mediaState: job.mediaState ?? inferLegacyMediaState(job.status),
       request: JSON.parse(job.requestJson) as AdapterParameters,
       metadata: {
+        providerBaseUrl: metadata.providerBaseUrl,
         providerRegion: metadata.providerRegion,
         providerProfileId: metadata.providerProfileId,
         modelId: metadata.modelId,
@@ -1058,18 +1098,19 @@ function requireModelId(value: string): string {
 }
 
 function cloneParameters(parameters: AdapterParameters): AdapterParameters {
-  return Object.fromEntries(
-    Object.entries(parameters).map(([key, value]) => [
-      key,
-      Array.isArray(value)
-        ? value.map((item) =>
-            item.toLowerCase().startsWith('data:image/') ? 'local-image://omitted' : item,
-          )
-        : typeof value === 'string' && value.toLowerCase().startsWith('data:image/')
-          ? 'local-image://omitted'
-          : value,
-    ]),
-  );
+  const redact = (value: AdapterParameters[string]): AdapterParameters[string] => {
+    if (typeof value === 'string')
+      return /^data:image\//iu.test(value)
+        ? 'local-image://omitted'
+        : /^data:(audio|video)\//iu.test(value)
+          ? 'local-media://omitted'
+          : value;
+    if (Array.isArray(value)) return value.map(redact);
+    if (value && typeof value === 'object')
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)]));
+    return value;
+  };
+  return Object.fromEntries(Object.entries(parameters).map(([key, value]) => [key, redact(value)]));
 }
 
 function observedMetadata(

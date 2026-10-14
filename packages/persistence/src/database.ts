@@ -45,6 +45,7 @@ import {
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { MIGRATION_V44 } from './migration-v44.js';
+import { MIGRATION_V45 } from './migration-v45.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -469,6 +470,15 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(44, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 44) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V45);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(45, now);
     })();
   }
   return getSchemaVersion(database);

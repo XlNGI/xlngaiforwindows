@@ -201,6 +201,7 @@ export class ProjectTaskRuntime {
         return;
       }
       const params: NativeProviderMediaPollParams = {
+        ...(current.metadata.providerBaseUrl ? { baseUrl: current.metadata.providerBaseUrl } : {}),
         projectSessionId: this.runningSessionId!,
         providerProfileId,
         adapterKey: current.adapterKey,

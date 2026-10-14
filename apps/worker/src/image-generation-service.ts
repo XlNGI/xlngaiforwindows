@@ -1144,7 +1144,11 @@ function redactParameters(parameters: AdapterParameters): AdapterParameters {
     Object.entries(parameters).map(([key, value]) => [
       key,
       Array.isArray(value)
-        ? value.map((item) => (isEmbeddedImageSource(item) ? 'local-image://omitted' : item))
+        ? value.map((item) =>
+            typeof item === 'string' && isEmbeddedImageSource(item)
+              ? 'local-image://omitted'
+              : item,
+          )
         : typeof value === 'string' && isEmbeddedImageSource(value)
           ? 'local-image://omitted'
           : value,

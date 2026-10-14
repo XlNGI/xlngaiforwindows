@@ -6,6 +6,8 @@ import type {
   ProviderProfileCreateParams,
 } from '@ai-video/contracts';
 
+import { isWanVideoBaseUrl } from '@ai-video/contracts';
+
 export class ProviderRegistryValidationError extends Error {}
 
 export type AgentProviderCapabilityErrorCode =
@@ -33,6 +35,33 @@ export type ProviderToolLoopRoute = {
 const RETIRED_UNICOMPAPI_AGENT_MODELS = new Set(['gpt-5.6-sol']);
 
 const OFFICIAL_PROVIDER_DEFINITIONS: readonly ProviderDefinitionInfo[] = [
+  {
+    id: 'wan-video',
+    name: '万相视频（百炼官方）',
+    category: 'multi',
+    providerType: 'wan-video',
+    protocol: 'dashscope-video',
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    accessType: 'official',
+  },
+  {
+    id: 'seedance-video',
+    name: 'Seedance 视频（火山方舟官方）',
+    category: 'multi',
+    providerType: 'seedance-video',
+    protocol: 'seedance-video',
+    baseUrl: 'https://ark.cn-beijing.volces.com',
+    accessType: 'official',
+  },
+  {
+    id: 'minimax-video',
+    name: 'MiniMax 视频（官方）',
+    category: 'multi',
+    providerType: 'minimax-video',
+    protocol: 'minimax-video-v2',
+    baseUrl: 'https://api.minimax.cn',
+    accessType: 'official',
+  },
   {
     id: 'minimax-speech',
     name: 'MiniMax 配音',
@@ -151,6 +180,17 @@ export function listProviderDefinitions(): ProviderDefinitionInfo[] {
 }
 
 export function listBuiltInProviderModels(providerType: string): BuiltInProviderModelDefinition[] {
+  const videoModels: Record<string, string[]> = {
+    'wan-video': ['wan3.0-video', 'wan3.0-video-prime', 'wan2.7-i2v-2026-04-25'],
+    'seedance-video': ['doubao-seedance-2-0-260128', 'doubao-seedance-2-5-260628'],
+    'minimax-video': ['MiniMax-H3', 'MiniMax-H3-Max'],
+  };
+  if (videoModels[providerType])
+    return videoModels[providerType].map((remoteModelId) => ({
+      remoteModelId,
+      displayName: remoteModelId,
+      capabilities: { ...emptyModelCapabilities(), videoGeneration: true },
+    }));
   if (providerType === 'minimax-speech') {
     return ['speech-2.8-hd', 'speech-2.8-turbo'].map((remoteModelId) => ({
       remoteModelId,
@@ -187,7 +227,8 @@ export function validateProviderConfiguration(
         definition.category === profile.category &&
         definition.providerType === profile.providerType &&
         definition.protocol === profile.protocol &&
-        definition.baseUrl === profile.baseUrl,
+        (definition.baseUrl === profile.baseUrl ||
+          (definition.providerType === 'wan-video' && isWanVideoBaseUrl(profile.baseUrl))),
     );
     if (!matched) {
       throw new ProviderRegistryValidationError(

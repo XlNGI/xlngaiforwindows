@@ -354,11 +354,17 @@ export class DubbingRepository {
   countAudioReferences(id: string): number {
     const row = this.row(
       `SELECT
+      (SELECT count(*) FROM character_voice_reference_versions WHERE project_id=? AND audio_id=?) +
+      (SELECT count(*) FROM video_input_audio_references WHERE project_id=? AND audio_id=?) +
       (SELECT count(*) FROM dubbing_takes WHERE project_id=? AND audio_id=?) +
       (SELECT count(*) FROM character_voice_profile_versions WHERE project_id=? AND reference_audio_id=?) +
       (SELECT count(*) FROM dubbing_jobs WHERE project_id=? AND output_audio_id=?) +
       (SELECT count(*) FROM dubbing_job_audio_references r JOIN dubbing_jobs j ON j.id=r.job_id WHERE j.project_id=? AND r.audio_id=?) +
       (SELECT count(*) FROM dubbing_job_steps s JOIN dubbing_jobs j ON j.id=s.job_id WHERE j.project_id=? AND s.result_audio_id=?) AS count`,
+      this.projectId,
+      id,
+      this.projectId,
+      id,
       this.projectId,
       id,
       this.projectId,

@@ -1,3 +1,4 @@
+import { CURRENT_SCHEMA_VERSION } from '@ai-video/persistence';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, copyFile, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
@@ -199,14 +200,17 @@ describe('dubbing Worker RPC integration', () => {
     const originalAudio = await readFile(importedPath);
     await appendFile(importedPath, Buffer.from('changed-file'));
     const alteredIntegrity = await rpc('project.integrity', {});
-    expect(alteredIntegrity).toMatchObject({ ok: false, schemaVersion: 44 });
+    expect(alteredIntegrity).toMatchObject({ ok: false, schemaVersion: CURRENT_SCHEMA_VERSION });
     expect(alteredIntegrity.messages.some((message) => message.includes(imported.audio.id))).toBe(
       true,
     );
     await import('node:fs/promises').then(({ writeFile }) =>
       writeFile(importedPath, originalAudio),
     );
-    expect(await rpc('project.integrity', {})).toMatchObject({ ok: true, schemaVersion: 44 });
+    expect(await rpc('project.integrity', {})).toMatchObject({
+      ok: true,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+    });
     const jobId = randomUUID();
     const assetId = randomUUID();
     const videoRelative = `assets/videos/${assetId}.mp4`;

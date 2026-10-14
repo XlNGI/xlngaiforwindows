@@ -1,3 +1,4 @@
+import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
 import {
   AlertTriangle,
   Archive,
@@ -1584,6 +1585,22 @@ function AgentParameterField({
       {property.description ?? ''}
     </small>
   );
+  if (
+    property.type === 'object' ||
+    (property.type === 'array' && property.items?.type !== 'string')
+  )
+    return (
+      <>
+        <StructuredParameterField
+          schema={property}
+          value={value}
+          onChange={onChange}
+          label={label}
+          path={id}
+        />
+        {metadata}
+      </>
+    );
   if (property.type === 'boolean') {
     return (
       <label className="agent-parameter-toggle">
@@ -1604,13 +1621,13 @@ function AgentParameterField({
         <span>{label}</span>
         <select
           id={id}
-          value={value === undefined ? '' : String(value)}
+          value={parameterScalarText(value)}
           onChange={(e) => onChange(e.target.value || undefined)}
         >
           <option value="">请选择</option>
           {property.enum.map((item) => (
-            <option key={String(item)} value={String(item)}>
-              {String(item)}
+            <option key={parameterScalarText(item)} value={parameterScalarText(item)}>
+              {parameterScalarText(item)}
             </option>
           ))}
         </select>
@@ -1619,7 +1636,9 @@ function AgentParameterField({
     );
   }
   if (property.type === 'array') {
-    const list = Array.isArray(value) ? value.join('\n') : '';
+    const list = Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string').join('\n')
+      : '';
     return (
       <label className="parameter-field" htmlFor={id}>
         <span>{label}</span>
@@ -1647,7 +1666,7 @@ function AgentParameterField({
       <input
         id={id}
         type={numeric ? 'number' : 'text'}
-        value={value === undefined ? '' : String(value)}
+        value={parameterScalarText(value)}
         min={property.minimum}
         max={property.maximum}
         onChange={(e) =>

@@ -134,6 +134,61 @@ fn test_connection(
     profile: RuntimeProviderProfile,
     secret: CredentialSecret,
 ) -> ProviderTestOutcome {
+    if matches!(
+        profile.provider_type.as_str(),
+        "wan-video" | "seedance-video" | "minimax-video"
+    ) {
+        let expected = match profile.provider_type.as_str() {
+            "wan-video" => ("dashscope-video", "https://dashscope.aliyuncs.com"),
+            "seedance-video" => ("seedance-video", "https://ark.cn-beijing.volces.com"),
+            _ => ("minimax-video-v2", "https://api.minimax.cn"),
+        };
+        if profile.protocol != expected.0
+            || if profile.provider_type == "wan-video" {
+                crate::provider_http::wan_video_host(&profile.base_url).is_none()
+            } else {
+                profile.base_url != expected.1
+            }
+        {
+            return ProviderTestOutcome::failed(
+                "protocol-failed",
+                "invalid-official-video-endpoint",
+                "官方视频连接必须使用匹配的协议和固定地址。".into(),
+            );
+        }
+        let key = match secret.as_str() {
+            Ok(value) => value,
+            Err(_) => {
+                return ProviderTestOutcome::failed(
+                    "auth-failed",
+                    "credential-invalid",
+                    "密钥无效。".into(),
+                )
+            }
+        };
+        return match crate::official_video::test_connection(
+            &profile.provider_type,
+            &profile.base_url,
+            key,
+        ) {
+            Ok(200..=299) => ProviderTestOutcome::ready(None),
+            Ok(401 | 403) => ProviderTestOutcome::failed(
+                "auth-failed",
+                "authentication-rejected",
+                "供应商拒绝密钥或访问权限。".into(),
+            ),
+            Ok(status) => ProviderTestOutcome::failed(
+                "network-failed",
+                "official-video-test-failed",
+                format!("官方视频连接测试返回 HTTP {status}。"),
+            ),
+            Err(_) => ProviderTestOutcome::failed(
+                "network-failed",
+                "official-video-transport-failed",
+                "官方视频连接测试传输失败。".into(),
+            ),
+        };
+    }
     if matches!(profile.protocol.as_str(), "minimax-speech" | "sync-lipsync") {
         return test_dubbing_connection(&profile, &secret);
     }

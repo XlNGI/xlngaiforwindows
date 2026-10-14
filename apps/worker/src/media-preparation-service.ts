@@ -25,8 +25,9 @@ import type {
   VideoProviderRegion,
 } from '@ai-video/contracts';
 import { createHash, randomUUID } from 'node:crypto';
+import { isWanVideoBaseUrl } from '@ai-video/contracts';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { adapterBindsCatalogModel } from '@ai-video/generation-adapters';
+import { adapterBindsCatalogModel, getAdapter } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
 import type { AdapterService } from './adapter-service.js';
 import type { AppSettingsService } from './app-settings-service.js';
@@ -35,6 +36,7 @@ import type { ImageGenerationService } from './image-generation-service.js';
 import { resolveProjectRelativePath, type ProjectService } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
 import type { VideoGenerationService } from './video-generation-service.js';
+import { isOfficialVideoAdapter, materializeOfficialVideoInputs } from './official-video-inputs.js';
 
 const MAX_MEDIA_CANDIDATES = 50;
 const MAX_MEDIA_PARAMETERS = 40;
@@ -99,7 +101,53 @@ export class MediaPreparationService {
   }
 
   prepareVideo(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
-    const materialized = this.materializeInputs([], params.parameters);
+    if (isOfficialVideoAdapter(params.adapterKey)) {
+      const profile = params.providerProfileId
+        ? this.settings.getProfile(params.providerProfileId)
+        : undefined;
+      const route = profile ? resolveMediaProviderRoute(profile) : undefined;
+      const model = profile
+        ? this.settings
+            .listModels(profile.id)
+            .find((item) => item.id === params.modelId || item.remoteModelId === params.modelId)
+        : undefined;
+      const adapter = getAdapter(params.adapterKey);
+      if (
+        !profile ||
+        !route ||
+        !profile.enabled ||
+        profile.connectionStatus !== 'ready' ||
+        !model ||
+        !model.enabled ||
+        model.unavailableAt ||
+        !adapter ||
+        model.contractRevision !== adapter.contractRevision ||
+        route.providerRegion !== params.providerRegion ||
+        !adapterBindsCatalogModel(adapter, {
+          providerType: profile.providerType,
+          remoteModelId: model.remoteModelId,
+          contractStatus: model.contractStatus,
+        })
+      )
+        throw new Error('所选官方视频连接、模型或合同当前不可用。');
+      params = {
+        ...params,
+        mediaModelSelection: this.snapshot(
+          {
+            providerProfileId: profile.id,
+            modelId: model.id,
+            remoteModelId: model.remoteModelId,
+            contractId: model.contractId,
+            contractRevision: model.contractRevision,
+            contractStatus: model.contractStatus,
+          },
+          adapter,
+        ),
+      };
+    }
+    const materialized = isOfficialVideoAdapter(params.adapterKey)
+      ? materializeOfficialVideoInputs(this.projects, params)
+      : this.materializeInputs([], params.parameters);
     try {
       return this.videos.prepare({
         ...params,
@@ -228,7 +276,15 @@ export class MediaPreparationService {
     }
 
     const snapshot = this.snapshot(candidate, adapter);
-    const materialized = this.materializeInputs(context.arguments.inputAssetIds, parameters);
+    const materialized =
+      context.kind === 'video' && isOfficialVideoAdapter(adapter.key)
+        ? materializeOfficialVideoInputs(this.projects, {
+            adapterKey: adapter.key,
+            parameters,
+            providerRegion: candidate.providerRegion,
+            modelId: candidate.remoteModelId,
+          })
+        : this.materializeInputs(context.arguments.inputAssetIds, parameters);
     const common = {
       shotId: context.arguments.shotId,
       adapterKey: adapter.key,
@@ -361,7 +417,15 @@ export class MediaPreparationService {
   }
 
   private snapshot(
-    candidate: MediaModelCandidate,
+    candidate: Pick<
+      MediaModelCandidate,
+      | 'providerProfileId'
+      | 'modelId'
+      | 'remoteModelId'
+      | 'contractId'
+      | 'contractRevision'
+      | 'contractStatus'
+    >,
     adapter: AdapterDescriptor,
   ): MediaModelSelectionSnapshot {
     const profile = this.settings.getProfile(candidate.providerProfileId);
@@ -378,6 +442,7 @@ export class MediaPreparationService {
       providerProfileId: candidate.providerProfileId,
       providerType: route.providerType,
       providerBaseUrlCategory: route.baseUrlCategory,
+      ...(route.providerType === 'wan-video' ? { providerBaseUrl: profile.baseUrl } : {}),
       providerRegion: route.providerRegion,
       modelId: candidate.modelId,
       remoteModelId: candidate.remoteModelId,
@@ -418,6 +483,30 @@ export class MediaPreparationService {
       const selectedImages = Array.isArray(parameters.images) ? parameters.images : [];
       parameters.images = [...new Set([...assetReferences, ...selectedImages])];
     }
+    if (isOfficialVideoAdapter(adapter.key)) {
+      const assets = context.arguments.inputAssetIds.map((id) => `asset://${id}`);
+      if (adapter.provider === 'wan-video') {
+        if (assets.length && !parameters.media)
+          parameters.media = assets.map((url, index) => ({
+            type: adapter.contractId?.includes('wan2-7')
+              ? index === 0
+                ? 'first_frame'
+                : 'last_frame'
+              : 'reference_image',
+            url,
+          }));
+      } else if (!parameters.content) {
+        parameters.content = [
+          { type: 'text', text: context.arguments.prompt },
+          ...assets.map((url) => ({
+            type: 'image_url',
+            image_url: { url },
+            role: 'reference_image',
+          })),
+        ];
+        delete parameters.prompt;
+      }
+    }
     return parameters;
   }
 
@@ -429,7 +518,9 @@ export class MediaPreparationService {
     if (!project) throw new Error('No project is open.');
     const images = Array.isArray(parameters.images) ? parameters.images : [];
     const inlineImages = images.flatMap((value) =>
-      value.toLowerCase().startsWith('data:image/') ? [parseCanonicalImageDataUrl(value)] : [],
+      typeof value === 'string' && value.toLowerCase().startsWith('data:image/')
+        ? [parseCanonicalImageDataUrl(value)]
+        : [],
     );
     const sharedInputRoot = process.env.AI_VIDEO_MEDIA_INPUT_ROOT;
     const inputRoot = sharedInputRoot?.trim() || project.rootPath;
@@ -593,6 +684,35 @@ export function resolveMediaProviderRoute(profile: ProviderProfileInfo):
       baseUrlCategory: 'official-unicompapi',
     };
   }
+  const officialVideoRoutes = {
+    'wan-video': {
+      protocol: 'dashscope-video',
+      baseUrl: 'https://dashscope.aliyuncs.com',
+      category: 'official-wan',
+    },
+    'seedance-video': {
+      protocol: 'seedance-video',
+      baseUrl: 'https://ark.cn-beijing.volces.com',
+      category: 'official-seedance',
+    },
+    'minimax-video': {
+      protocol: 'minimax-video-v2',
+      baseUrl: 'https://api.minimax.cn',
+      category: 'official-minimax-video',
+    },
+  } as const;
+  const official = officialVideoRoutes[profile.providerType as keyof typeof officialVideoRoutes];
+  if (
+    official &&
+    profile.protocol === official.protocol &&
+    (profile.baseUrl === official.baseUrl ||
+      (profile.providerType === 'wan-video' && isWanVideoBaseUrl(profile.baseUrl)))
+  )
+    return {
+      providerType: profile.providerType as MediaProviderType,
+      providerRegion: 'cn',
+      baseUrlCategory: official.category,
+    };
   if (profile.providerType !== 'vidu' || profile.protocol !== 'vidu-v2') return undefined;
   if (profile.baseUrl === 'https://api.vidu.cn') {
     return {
@@ -788,6 +908,48 @@ function validateParameterRecord(
     remainingAttachments.set(key, (remainingAttachments.get(key) ?? 0) + 1);
   }
   for (const [key, value] of Object.entries(parameters)) {
+    if (
+      (value && typeof value === 'object' && !Array.isArray(value)) ||
+      (Array.isArray(value) && value.some((item) => item && typeof item === 'object'))
+    ) {
+      let nodes = 0;
+      const inspect = (item: unknown, depth: number): void => {
+        if (++nodes > 2000 || depth > 10) throw invalidParameter(key);
+        if (typeof item === 'string') {
+          if (
+            item.length > 20000 ||
+            looksLikeAbsolutePath(item) ||
+            /^data:/iu.test(item) ||
+            looksLikeLongBase64(item)
+          )
+            throw invalidParameter(key);
+          return;
+        }
+        if (typeof item === 'number' || typeof item === 'boolean') return;
+        if (Array.isArray(item)) {
+          if (item.length > 64) throw invalidParameter(key);
+          item.forEach((child) => inspect(child, depth + 1));
+          return;
+        }
+        if (item && typeof item === 'object') {
+          for (const [name, child] of Object.entries(item)) {
+            if (
+              !name ||
+              name.length > 100 ||
+              /secret|authorization|api.?key|headers|signed.?url|__proto__|constructor|prototype/iu.test(
+                name,
+              )
+            )
+              throw invalidParameter(key);
+            inspect(child, depth + 1);
+          }
+          return;
+        }
+        throw invalidParameter(key);
+      };
+      inspect(value, 0);
+      continue;
+    }
     if (!key || key.length > 100) throw invalidParameter(key);
     const values = Array.isArray(value) ? value : [value];
     if (Array.isArray(value) && value.length > 20) throw invalidParameter(key);
@@ -912,7 +1074,9 @@ function redactInlineMedia(parameters: AdapterParameters): AdapterParameters {
       key,
       Array.isArray(value)
         ? value.map((item) =>
-            item.toLowerCase().startsWith('data:image/') ? 'attachment://omitted' : item,
+            typeof item === 'string' && item.toLowerCase().startsWith('data:image/')
+              ? 'attachment://omitted'
+              : item,
           )
         : typeof value === 'string' && value.toLowerCase().startsWith('data:image/')
           ? 'attachment://omitted'

@@ -155,5 +155,75 @@
     "protocol": "openai-compatible-image",
     "compatibility": "partial",
     "status": "enabled"
+  },
+  {
+    "bindingId": "wan-video:wan3.0-video",
+    "providerType": "wan-video",
+    "remoteModelId": "wan3.0-video",
+    "contractId": "cn.qwen.wan3-0-video",
+    "contractRevision": 3,
+    "protocol": "dashscope-video",
+    "compatibility": "exact",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "wan-video:wan3.0-video-prime",
+    "providerType": "wan-video",
+    "remoteModelId": "wan3.0-video-prime",
+    "contractId": "cn.qwen.wan3-0-video-prime",
+    "contractRevision": 3,
+    "protocol": "dashscope-video",
+    "compatibility": "exact",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "wan-video:wan2.7-i2v-2026-04-25",
+    "providerType": "wan-video",
+    "remoteModelId": "wan2.7-i2v-2026-04-25",
+    "contractId": "cn.qwen.wan2-7-i2v",
+    "contractRevision": 2,
+    "protocol": "dashscope-video",
+    "compatibility": "exact",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "minimax-video:MiniMax-H3",
+    "providerType": "minimax-video",
+    "remoteModelId": "MiniMax-H3",
+    "contractId": "cn.minimax.h3.video",
+    "contractRevision": 2,
+    "protocol": "minimax-video-v2",
+    "compatibility": "exact",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "minimax-video:MiniMax-H3-Max",
+    "providerType": "minimax-video",
+    "remoteModelId": "MiniMax-H3-Max",
+    "contractId": "cn.minimax.h3-max.video",
+    "contractRevision": 2,
+    "protocol": "minimax-video-v2",
+    "compatibility": "exact",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "seedance-video:doubao-seedance-2-0-260128",
+    "providerType": "seedance-video",
+    "remoteModelId": "doubao-seedance-2-0-260128",
+    "contractId": "cn.bytedance.seedance2-0.video",
+    "contractRevision": 2,
+    "protocol": "seedance-video",
+    "compatibility": "exact",
+    "status": "enabled"
+  },
+  {
+    "bindingId": "seedance-video:doubao-seedance-2-5-260628",
+    "providerType": "seedance-video",
+    "remoteModelId": "doubao-seedance-2-5-260628",
+    "contractId": "cn.bytedance.seedance2-5.video",
+    "contractRevision": 2,
+    "protocol": "seedance-video",
+    "compatibility": "exact",
+    "status": "enabled"
   }
 ]

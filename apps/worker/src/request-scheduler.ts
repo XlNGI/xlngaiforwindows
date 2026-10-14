@@ -6,6 +6,7 @@ export interface RequestSchedulerOptions {
 
 const concurrentReadMethods = new Set<WorkerMethod>([
   'characterVoice.list',
+  'characterVoiceReference.list',
   'audio.list',
   'audio.get',
   'audio.mediaSource',

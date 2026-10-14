@@ -718,6 +718,13 @@ fn request_public_bytes_admitted(
 /// It intentionally does not add arbitrary headers/hosts to the JSON bridge.
 #[derive(Clone, Copy)]
 pub(crate) enum DubbingHttpTarget<'a> {
+    OfficialVideo {
+        family: &'a str,
+        operation: &'a str,
+        id: &'a str,
+        base_url: Option<&'a str>,
+    },
+    OfficialStorage(&'a PublicHttpsUrl),
     Speech,
     SyncSubmit,
     SyncModels,
@@ -777,6 +784,28 @@ pub(crate) fn request_dubbing_file(
     request: DubbingHttpRequest<'_>,
 ) -> Result<RawHttpResponse, JsonHttpError> {
     let (host, path, method, auth) = match request.target {
+        DubbingHttpTarget::OfficialVideo {
+            family,
+            operation,
+            id,
+            base_url,
+        } => official_video_target(family, operation, id, base_url)?,
+        DubbingHttpTarget::OfficialStorage(url) => {
+            if ![
+                ".oss-cn-beijing.aliyuncs.com",
+                ".oss-cn-shanghai.aliyuncs.com",
+            ]
+            .iter()
+            .any(|suffix| url.host.ends_with(suffix))
+                || !url.path.starts_with('/')
+            {
+                return Err(JsonHttpError::new(
+                    JsonHttpErrorKind::InvalidRequest,
+                    "Official storage host is invalid",
+                ));
+            }
+            (url.host.as_str(), url.path.clone(), "POST", "storage")
+        }
         DubbingHttpTarget::Speech => ("api.minimax.cn", "/v1/t2a_v2".into(), "POST", "Bearer"),
         DubbingHttpTarget::SyncSubmit => {
             ("api.sync.so", "/v2/generate".into(), "POST", "x-api-key")
@@ -825,6 +854,131 @@ pub(crate) fn request_dubbing_file(
     result
 }
 
+pub(crate) fn wan_video_host(base_url: &str) -> Option<&str> {
+    let host = base_url.strip_prefix("https://")?;
+    if host == "dashscope.aliyuncs.com" {
+        return Some(host);
+    }
+    let workspace = host.strip_suffix(".cn-beijing.maas.aliyuncs.com")?;
+    if workspace.is_empty()
+        || workspace.len() > 63
+        || workspace.starts_with('-')
+        || workspace.ends_with('-')
+        || !workspace
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return None;
+    }
+    Some(host)
+}
+
+fn official_video_target<'a>(
+    family: &str,
+    operation: &str,
+    id: &str,
+    base_url: Option<&'a str>,
+) -> Result<(&'a str, String, &'a str, &'a str), JsonHttpError> {
+    if id.len() > 160
+        || id.contains("..")
+        || matches!(operation, "poll" | "cancel" | "policy") && id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(JsonHttpError::new(
+            JsonHttpErrorKind::InvalidRequest,
+            "Official model or task identity is invalid",
+        ));
+    }
+    let wan_host = if family == "wan" {
+        wan_video_host(base_url.unwrap_or("https://dashscope.aliyuncs.com")).ok_or_else(|| {
+            JsonHttpError::new(
+                JsonHttpErrorKind::InvalidRequest,
+                "Invalid official Wan workspace endpoint",
+            )
+        })?
+    } else {
+        "dashscope.aliyuncs.com"
+    };
+    let target = match (family, operation) {
+        ("wan", "submit") => (
+            wan_host,
+            "/api/v1/services/aigc/video-generation/video-synthesis".to_string(),
+            "POST",
+            "Bearer",
+        ),
+        ("wan", "policy") => (
+            wan_host,
+            format!("/api/v1/uploads?action=getPolicy&model={id}"),
+            "GET",
+            "Bearer",
+        ),
+        ("wan", "poll") => (wan_host, format!("/api/v1/tasks/{id}"), "GET", "Bearer"),
+        ("wan", "cancel") => (
+            wan_host,
+            format!("/api/v1/tasks/{id}/cancel"),
+            "POST",
+            "Bearer",
+        ),
+        ("seedance", "submit") => (
+            "ark.cn-beijing.volces.com",
+            "/api/v3/contents/generations/tasks".to_string(),
+            "POST",
+            "Bearer",
+        ),
+        ("seedance", "poll") => (
+            "ark.cn-beijing.volces.com",
+            format!("/api/v3/contents/generations/tasks/{id}"),
+            "GET",
+            "Bearer",
+        ),
+        ("seedance", "cancel") => (
+            "ark.cn-beijing.volces.com",
+            format!("/api/v3/contents/generations/tasks/{id}"),
+            "DELETE",
+            "Bearer",
+        ),
+        ("seedance", "test") => (
+            "ark.cn-beijing.volces.com",
+            "/api/v3/contents/generations/tasks?page_size=1".to_string(),
+            "GET",
+            "Bearer",
+        ),
+        ("minimax", "submit") => (
+            "api.minimax.cn",
+            "/v2/video_generation".to_string(),
+            "POST",
+            "Bearer",
+        ),
+        ("minimax", "poll") => (
+            "api.minimax.cn",
+            format!("/v2/query/video_generation/{id}"),
+            "GET",
+            "Bearer",
+        ),
+        ("minimax", "upload") => (
+            "api.minimax.cn",
+            "/v1/files/upload".to_string(),
+            "POST",
+            "Bearer",
+        ),
+        ("minimax", "test") => (
+            "api.minimax.cn",
+            "/v1/files/list?purpose=video_generation_input".to_string(),
+            "GET",
+            "Bearer",
+        ),
+        _ => {
+            return Err(JsonHttpError::new(
+                JsonHttpErrorKind::InvalidRequest,
+                "Official video operation is unsupported",
+            ))
+        }
+    };
+    Ok(target)
+}
+
 fn validate_dubbing_request(
     request: &DubbingHttpRequest<'_>,
     method: &str,
@@ -845,6 +999,10 @@ fn validate_dubbing_request(
             || request.body.is_some()
             || request.output.is_none()
         {
+            return Err(invalid());
+        }
+    } else if auth == "storage" {
+        if request.secret.is_some() || request.output.is_some() {
             return Err(invalid());
         }
     } else if request.secret.is_none_or(|secret| {
@@ -868,6 +1026,21 @@ fn validate_dubbing_request(
     }
     if let Some(body) = &request.body {
         let content_type_valid = match request.target {
+            DubbingHttpTarget::OfficialVideo { operation, .. } => {
+                (matches!(operation, "submit" | "cancel")
+                    && body.content_type == "application/json"
+                    && body.size <= 64 * 1024 * 1024)
+                    || (operation == "upload"
+                        && body
+                            .content_type
+                            .starts_with("multipart/form-data; boundary=")
+                        && body.size <= 150 * 1024 * 1024)
+            }
+            DubbingHttpTarget::OfficialStorage(_) => {
+                body.content_type
+                    .starts_with("multipart/form-data; boundary=")
+                    && body.size <= 150 * 1024 * 1024
+            }
             DubbingHttpTarget::Speech => {
                 body.content_type == "application/json" && body.size <= 64 * 1024
             }
@@ -976,6 +1149,17 @@ fn request_dubbing_admitted(
             .encode_utf16()
             .collect::<Vec<_>>()
     };
+    if let DubbingHttpTarget::OfficialVideo {
+        family: "wan",
+        operation: "submit",
+        ..
+    } = request.target
+    {
+        headers.extend(
+            "X-DashScope-Async: enable\r\nX-DashScope-OssResourceResolve: enable\r\n"
+                .encode_utf16(),
+        );
+    }
     if let Some(secret) = request.secret {
         headers.extend(
             if auth == "Bearer" {
@@ -1589,6 +1773,30 @@ mod dubbing_transport_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn official_video_endpoints_preserve_workspace_and_use_documented_read_only_checks() {
+        let endpoint = "https://workspace-123.cn-beijing.maas.aliyuncs.com";
+        for (operation, id) in [
+            ("policy", "wan3.0-video"),
+            ("submit", ""),
+            ("poll", "task-123"),
+        ] {
+            let target =
+                super::official_video_target("wan", operation, id, Some(endpoint)).unwrap();
+            assert_eq!(target.0, "workspace-123.cn-beijing.maas.aliyuncs.com");
+        }
+        for endpoint in [
+            "https://workspace.cn-beijing.maas.aliyuncs.com.evil.example",
+            "https://workspace.ap-southeast-1.maas.aliyuncs.com",
+            "https://workspace.cn-beijing.maas.aliyuncs.com/path",
+            "https://-workspace.cn-beijing.maas.aliyuncs.com",
+        ] {
+            assert!(super::official_video_target("wan", "submit", "", Some(endpoint)).is_err());
+        }
+        let minimax = super::official_video_target("minimax", "test", "", None).unwrap();
+        assert_eq!(minimax.1, "/v1/files/list?purpose=video_generation_input");
+        assert_eq!(minimax.2, "GET");
+    }
     use super::{
         is_public_address, parse_retry_after_ms, request_bytes, request_json, JsonHttpErrorKind,
         JsonHttpRequest,

@@ -102,13 +102,13 @@ pub(crate) fn cancel_all() {
     }
 }
 
-struct Operation {
+pub(crate) struct Operation {
     id: String,
-    cancellation: Arc<DubbingCancellation>,
+    pub(crate) cancellation: Arc<DubbingCancellation>,
 }
 
 impl Operation {
-    fn register(id: &str) -> Result<Self, Value> {
+    pub(crate) fn register(id: &str) -> Result<Self, Value> {
         Self::register_with_policy(id, true)
     }
 
@@ -297,33 +297,45 @@ fn cancel(params: &Value) -> Result<Value, Value> {
         return Err(invalid("Dubbing operation ID must be a UUID"));
     }
     let cancelled = if let Some(id) = &params.operation_id {
-        let mut registry = operations()
-            .lock()
-            .map_err(|_| invalid("Dubbing operation registry is unavailable"))?;
-        let cancelled = registry.active.get(id).is_some_and(|cancellation| {
-            cancellation.cancel();
-            true
-        });
-        registry
-            .cancelled
-            .retain(|_, time| time.elapsed() < Duration::from_secs(3600));
-        if registry.cancelled.len() >= 128 {
-            if let Some(oldest) = registry
-                .cancelled
-                .iter()
-                .min_by_key(|(_, time)| **time)
-                .map(|(id, _)| id.clone())
-            {
-                registry.cancelled.remove(&oldest);
-            }
-        }
-        registry.cancelled.insert(id.clone(), Instant::now());
-        cancelled
+        cancel_operation(id)?
     } else {
         false
     };
     // Sync deletion is not cancellation of a running generation. Never pretend it is.
     Ok(json!({ "cancelled": cancelled, "remoteSupported": false }))
+}
+
+pub(crate) fn cancel_operation(id: &str) -> Result<bool, Value> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(invalid("Native media operation ID is invalid"));
+    }
+    let mut registry = operations()
+        .lock()
+        .map_err(|_| invalid("Dubbing operation registry is unavailable"))?;
+    let cancelled = registry.active.get(id).is_some_and(|cancellation| {
+        cancellation.cancel();
+        true
+    });
+    registry
+        .cancelled
+        .retain(|_, time| time.elapsed() < Duration::from_secs(3600));
+    if registry.cancelled.len() >= 128 {
+        if let Some(oldest) = registry
+            .cancelled
+            .iter()
+            .min_by_key(|(_, time)| **time)
+            .map(|(id, _)| id.clone())
+        {
+            registry.cancelled.remove(&oldest);
+        }
+    }
+    registry.cancelled.insert(id.to_string(), Instant::now());
+    Ok(cancelled)
 }
 
 fn transport_error(
@@ -1407,6 +1419,27 @@ impl ProjectFiles {
             committed: false,
         })
     }
+}
+
+/// Open an input by controlled cache handle and retain an exclusive-to-writers file lease.
+pub(crate) fn open_model_input(root: &Path, relative: &str) -> Result<File, String> {
+    if !root.is_absolute()
+        || !relative.starts_with("cache/media-inputs/")
+        || relative.contains("..")
+        || relative.contains(['\\', ':', '\0'])
+    {
+        return Err("Invalid model input handle".into());
+    }
+    let directory = open_directory(root).map_err(|_| "Model input directory unavailable")?;
+    let root = final_handle_path(&directory).map_err(|_| "Model input directory unavailable")?;
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(SHARE_READ)
+        .custom_flags(OPEN_REPARSE_POINT)
+        .open(root.join(relative))
+        .map_err(|_| "Model input file unavailable")?;
+    verify_file(&file, &root).map_err(|_| "Model input escapes its controlled directory")?;
+    Ok(file)
 }
 
 fn open_directory(path: &Path) -> Result<File, Value> {

@@ -44,8 +44,27 @@ function profile(overrides: Partial<Parameters<typeof assertAgentToolLoopSelecti
 }
 
 describe('provider registry', () => {
+  it('accepts Beijing Wan workspace endpoints and rejects unrelated or malformed hosts', () => {
+    const wan = listProviderDefinitions().find((value) => value.id === 'wan-video')!;
+    expect(() =>
+      validateProviderConfiguration({
+        ...wan,
+        baseUrl: 'https://workspace-123.cn-beijing.maas.aliyuncs.com',
+      }),
+    ).not.toThrow();
+    for (const baseUrl of [
+      'https://workspace.cn-beijing.maas.aliyuncs.com.evil.example',
+      'https://workspace.ap-southeast-1.maas.aliyuncs.com',
+      'https://workspace.cn-beijing.maas.aliyuncs.com/path',
+      'https://-workspace.cn-beijing.maas.aliyuncs.com',
+    ])
+      expect(() => validateProviderConfiguration({ ...wan, baseUrl })).toThrow();
+  });
   it('locks official provider configuration to a built-in definition', () => {
     expect(listProviderDefinitions().map((definition) => definition.id)).toEqual([
+      'wan-video',
+      'seedance-video',
+      'minimax-video',
       'minimax-speech',
       'sync',
       'openai',

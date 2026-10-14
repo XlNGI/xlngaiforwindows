@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { ImagePreview } from './ImagePreview';
+import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
+import {
+  addOfficialRoleVoices,
+  isOfficialVoiceVideo,
+  seedOfficialVideoParameters,
+} from './official-video-parameters';
+import type { CharacterVoiceReferenceInfo, AudioFileInfo } from '@ai-video/contracts';
+import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
 import { AssetImagePreview } from './AssetImagePreview';
 import {
   CircleAlert,
@@ -156,17 +164,20 @@ function schemaDerivedFields(adapter: AdapterDescriptor): AdapterUiField[] {
   if (explicit.length > 0) return [...explicit].sort((a, b) => a.order - b.order);
   return Object.entries(adapter.parameterSchema.properties).map(([key, property], index) => {
     const control: AdapterUiField['control'] =
-      property.type === 'boolean'
-        ? 'toggle'
-        : property.type === 'integer'
-          ? 'number'
-          : property.enum?.length
-            ? 'select'
-            : property.type === 'array' && property.items?.format === 'uri'
-              ? 'url-list'
-              : property.title.length > 40 || /prompt|message|description|content|text/iu.test(key)
-                ? 'textarea'
-                : 'text';
+      property.type === 'object' || (property.type === 'array' && property.items?.type !== 'string')
+        ? 'structured'
+        : property.type === 'boolean'
+          ? 'toggle'
+          : property.type === 'integer'
+            ? 'number'
+            : property.enum?.length
+              ? 'select'
+              : property.type === 'array' && property.items?.format === 'uri'
+                ? 'url-list'
+                : property.title.length > 40 ||
+                    /prompt|message|description|content|text/iu.test(key)
+                  ? 'textarea'
+                  : 'text';
     return { key, control, group: 'basic', order: index * 10 };
   });
 }
@@ -330,6 +341,51 @@ export function ProductionPanel({
 
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
+  const [voiceReferences, setVoiceReferences] = useState<CharacterVoiceReferenceInfo[]>([]);
+  const [selectedVoiceIds, setSelectedVoiceIds] = useState<string[]>([]);
+  const [dialogueAudio, setDialogueAudio] = useState<AudioFileInfo>();
+  useEffect(() => {
+    let active = true;
+    setVoiceReferences([]);
+    setSelectedVoiceIds([]);
+    setDialogueAudio(undefined);
+    if (!isOfficialVoiceVideo(adapter))
+      return () => {
+        active = false;
+      };
+    let defaultsApplied = false;
+    const refresh = () => {
+      if (projectId)
+        void callWorker('characterVoiceReference.list', {})
+          .then(async (values) => {
+            if (!active) return;
+            setVoiceReferences(values);
+            if (sceneId && !defaultsApplied) {
+              defaultsApplied = true;
+              const scenes = await callWorker('scene.list', {});
+              if (active) {
+                const roleIds =
+                  scenes
+                    .find((scene) => scene.id === sceneId)
+                    ?.materialBindings?.filter((binding) => binding.role === 'character')
+                    .map((binding) => binding.sourceDocumentId) ?? [];
+                setSelectedVoiceIds(
+                  values
+                    .filter((value) => roleIds.includes(value.characterDocumentId))
+                    .map((value) => value.characterDocumentId),
+                );
+              }
+            }
+          })
+          .catch(() => undefined);
+    };
+    refresh();
+    window.addEventListener('character-voice-reference-updated', refresh);
+    return () => {
+      active = false;
+      window.removeEventListener('character-voice-reference-updated', refresh);
+    };
+  }, [projectId, sceneId, adapter?.provider]);
   const [assetKind, setAssetKind] = useState<ImageAssetKind>(
     preferredAssetKind ?? 'generated-image',
   );
@@ -406,6 +462,7 @@ export function ProductionPanel({
       profiles.filter(
         (profile) =>
           ((profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
+            ['wan-video', 'seedance-video', 'minimax-video'].includes(profile.providerType) ||
             (profile.providerType === 'unicompapi' &&
               profile.protocol === 'openai-chat-completions')) &&
           profile.enabled &&
@@ -421,7 +478,10 @@ export function ProductionPanel({
   const providerRegion =
     selectedProfile?.providerType === 'unicompapi'
       ? 'unicompapi'
-      : selectedProfile?.baseUrl === 'https://api.vidu.cn'
+      : selectedProfile?.baseUrl === 'https://api.vidu.cn' ||
+          ['wan-video', 'seedance-video', 'minimax-video'].includes(
+            selectedProfile?.providerType ?? '',
+          )
         ? 'cn'
         : 'global';
 
@@ -486,6 +546,13 @@ export function ProductionPanel({
         setMessage('');
         const defaults = defaultParameters(resolved);
         const withSeed = (params: AdapterParameters): AdapterParameters => {
+          if (isOfficialVoiceVideo(resolved))
+            return seedOfficialVideoParameters(
+              resolved,
+              params,
+              seedPromptRef.current,
+              seedImagesRef.current ?? [],
+            );
           const next = { ...params };
           if (seedPromptRef.current) next.prompt = seedPromptRef.current;
           if (seedImagesRef.current?.length) next.images = seedImagesRef.current;
@@ -885,7 +952,12 @@ export function ProductionPanel({
     setBusy(true);
     setGenerationStatus('');
     try {
-      const submissionParameters = await resolveAssetReferences(parameters);
+      const selectedVoices = voiceReferences.filter((voice) =>
+        selectedVoiceIds.includes(voice.characterDocumentId),
+      );
+      const submissionParameters = isOfficialVoiceVideo(adapter)
+        ? addOfficialRoleVoices(adapter, parameters, selectedVoices, dialogueAudio?.id)
+        : await resolveAssetReferences(parameters);
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
         parameters: submissionParameters,
@@ -946,6 +1018,32 @@ export function ProductionPanel({
       }
     } finally {
       setBusy(false);
+    }
+  };
+
+  const importDrivingAudio = async () => {
+    if (!writable || busy || !('__TAURI_INTERNALS__' in window)) {
+      setGenerationStatus('请在 Windows 桌面应用中导入完整对白音频。');
+      return;
+    }
+    const capturedProjectId = projectId;
+    setBusy(true);
+    try {
+      const path = await openAudioDialog({
+        multiple: false,
+        filters: [{ name: '完整对白音频', extensions: ['wav', 'mp3'] }],
+      });
+      if (typeof path !== 'string' || currentProjectIdRef.current !== capturedProjectId) return;
+      const result = await callWorker('audio.import', {
+        sourcePath: path,
+        kind: 'imported-dialogue',
+      });
+      if (currentProjectIdRef.current === capturedProjectId) setDialogueAudio(result.audio);
+    } catch (error) {
+      if (currentProjectIdRef.current === capturedProjectId)
+        setGenerationStatus(errorMessage(error, '对白音频导入失败。'));
+    } finally {
+      if (currentProjectIdRef.current === capturedProjectId) setBusy(false);
     }
   };
 
@@ -1086,7 +1184,7 @@ export function ProductionPanel({
               <div className="provider-required-state">
                 <Settings2 size={20} />
                 <strong>还没有可用于制作的供应商连接</strong>
-                <span>请在设置中心添加并测试 Vidu 或 UniCompAPI 连接。</span>
+                <span>请在设置中心添加并测试官方视频供应商或 UniCompAPI 连接。</span>
                 <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
                   前往供应商与模型
                 </button>
@@ -1148,6 +1246,63 @@ export function ProductionPanel({
                       ))}
                     </div>
                   </details>
+                )}
+
+                {isOfficialVoiceVideo(adapter) && (
+                  <section className="parameter-fields">
+                    <h3>
+                      {adapter.contractId?.includes('wan2-7') ? '完整对白驱动' : '角色声音参考'}
+                    </h3>
+                    {adapter.contractId?.includes('wan2-7') ? (
+                      <>
+                        <p>
+                          万相 2.7
+                          使用完整对白录音驱动画面。音频中的台词会保留，请勿把它当作生成新台词的声音样本。
+                        </p>
+                        <button
+                          type="button"
+                          className="button secondary"
+                          disabled={!writable || busy}
+                          onClick={() => void importDrivingAudio()}
+                        >
+                          {dialogueAudio ? '更换完整对白' : '导入完整对白'}
+                        </button>
+                        {dialogueAudio && (
+                          <p>
+                            {dialogueAudio.name} · {(dialogueAudio.durationMs / 1000).toFixed(1)} 秒
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <p>
+                          选择已绑定样本的角色。场次绑定的角色会预先选中，生成时按当前确认的样本版本与台词提交。参考音色效果仍需试听验收。
+                        </p>
+                        {voiceReferences.length === 0 ? (
+                          <p>请先在“角色与场景”的角色资料中导入声音样本。</p>
+                        ) : (
+                          voiceReferences.map((voice) => (
+                            <label key={voice.id}>
+                              <input
+                                type="checkbox"
+                                disabled={!writable || busy}
+                                checked={selectedVoiceIds.includes(voice.characterDocumentId)}
+                                onChange={(event) =>
+                                  setSelectedVoiceIds((current) =>
+                                    event.target.checked
+                                      ? [...current, voice.characterDocumentId]
+                                      : current.filter((id) => id !== voice.characterDocumentId),
+                                  )
+                                }
+                              />
+                              {voice.characterName} · 声音版本 {voice.revision} ·{' '}
+                              {(voice.durationMs / 1000).toFixed(1)} 秒
+                            </label>
+                          ))
+                        )}
+                      </>
+                    )}
+                  </section>
                 )}
 
                 <div className="draft-actions">
@@ -1549,6 +1704,21 @@ function ParameterField({
   );
   const description = property.description ? <small>{property.description}</small> : null;
 
+  if (field.control === 'structured')
+    return (
+      <div className={`parameter-field ${error ? 'invalid' : ''}`}>
+        <StructuredParameterField
+          schema={property}
+          value={value}
+          onChange={onChange}
+          label={property.title}
+          path={inputId}
+        />
+        {description}
+        {error && <small>{error}</small>}
+      </div>
+    );
+
   if (field.control === 'toggle') {
     return (
       <div className={`parameter-field toggle-field ${error ? 'invalid' : ''}`}>
@@ -1569,7 +1739,9 @@ function ParameterField({
 
   if (field.control === 'url-list') {
     const minimumRows = Math.max(1, property.minItems ?? 1);
-    const currentItems = Array.isArray(value) ? value : [];
+    const currentItems = Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : [];
     const items = Array.from(
       { length: Math.max(minimumRows, currentItems.length) },
       (_, index) => currentItems[index] ?? '',
@@ -1779,7 +1951,7 @@ function ParameterField({
       {field.control === 'select' ? (
         <select
           id={inputId}
-          value={value === undefined ? '' : String(value)}
+          value={parameterScalarText(value)}
           onChange={(event) =>
             onChange(
               property.type === 'integer' || property.type === 'number'
@@ -1789,8 +1961,8 @@ function ParameterField({
           }
         >
           {enumValues.map((item) => (
-            <option key={String(item)} value={String(item)}>
-              {String(item)}
+            <option key={parameterScalarText(item)} value={parameterScalarText(item)}>
+              {parameterScalarText(item)}
             </option>
           ))}
         </select>

@@ -519,6 +519,25 @@ export function validateSessionRequestParams(
   input: unknown,
 ): Record<string, unknown> {
   if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
+  if (method === 'characterVoiceReference.list' || method === 'characterVoiceReference.save') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(
+      params,
+      method === 'characterVoiceReference.list'
+        ? []
+        : ['characterDocumentId', 'audioId', 'expectedRowVersion'],
+    );
+    if (method === 'characterVoiceReference.save') {
+      requireId(params, 'characterDocumentId');
+      requireId(params, 'audioId');
+      if (
+        params.expectedRowVersion !== undefined &&
+        (!Number.isInteger(params.expectedRowVersion) || Number(params.expectedRowVersion) < 0)
+      )
+        throw new RequestValidationError('声音样本版本无效。');
+    }
+    return params;
+  }
   if (!sessionMethods.has(method)) return requireObject(input, 'params');
   const params = requireObject(input, 'params');
 

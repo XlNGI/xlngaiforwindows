@@ -1,3 +1,4 @@
+import { CURRENT_SCHEMA_VERSION } from './schema.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -143,6 +144,9 @@ describe('dedicated project dubbing store', () => {
       .all() as { name: string }[];
     for (const { name } of triggers) database.exec(`DROP TRIGGER "${name}"`);
     for (const table of [
+      'video_input_audio_references',
+      'character_voice_reference_versions',
+      'character_voice_references',
       'dubbing_job_audio_references',
       'dubbing_job_steps',
       'dubbing_takes',
@@ -153,10 +157,10 @@ describe('dedicated project dubbing store', () => {
       'dubbing_jobs',
     ])
       database.exec(`DROP TABLE "${table}"`);
-    database.prepare('DELETE FROM schema_migrations WHERE version=44').run();
+    database.prepare('DELETE FROM schema_migrations WHERE version>=44').run();
     database.pragma('foreign_keys=ON');
-    expect(migrateDatabase(database)).toBe(44);
-    expect(migrateDatabase(database)).toBe(44);
+    expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
       database.prepare('SELECT title FROM documents WHERE id=?').get('project-character'),
     ).toEqual({ title: '角色' });

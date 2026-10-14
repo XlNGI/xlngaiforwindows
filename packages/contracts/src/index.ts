@@ -7,11 +7,15 @@ import type {
   NativeDubbingCancelParams,
 } from './dubbing.js';
 export * from './dubbing.js';
+export * from './voice-reference.js';
+export * from './official-video-endpoint.js';
+import type { VoiceReferenceWorkerMethodMap } from './voice-reference.js';
 
 export const IPC_PROTOCOL_VERSION = 1 as const;
 
 export {
   officialVideoContracts,
+  officialVideoAudioContracts,
   officialImageContracts,
   mediaModelBindings,
   adapterBindsCatalogModel,
@@ -382,6 +386,7 @@ export interface ModelContract {
   officialModelName: string;
   /** Explicit production mode for contracts that expose a media task. */
   taskCapability?: GenerationCapability;
+  taskCapabilities?: GenerationCapability[];
   capabilities: ModelContractCapabilities;
   parameterSchema: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
@@ -389,6 +394,20 @@ export interface ModelContract {
   lifecycle: ModelContractLifecycle;
   source: ModelContractSource;
   status: ModelCatalogStatus;
+  /** Official file constraints checked when the selected channel imports media. */
+  inputMediaLimits?: OfficialInputMediaLimit[];
+  inputSemantics?: string;
+}
+
+export interface OfficialInputMediaLimit {
+  field: string;
+  kind: string;
+  formats: string[];
+  maxItems: number;
+  minDurationMs: number;
+  maxDurationMs: number;
+  maxTotalDurationMs: number;
+  maxBytes?: number;
 }
 
 export interface ModelBinding {
@@ -1379,7 +1398,17 @@ export const MEDIA_GENERATION_ALLOWED_TRANSITIONS = {
 
 export type MediaInputReferenceV1 =
   | { type: 'asset'; assetId: string }
-  | { type: 'controlled_temporary_file'; handle: string; contentType: string };
+  | {
+      type: 'controlled_temporary_file';
+      handle: string;
+      contentType: string;
+      sha256?: string;
+      sizeBytes?: number;
+      durationMs?: number;
+      characterDocumentId?: string;
+      voiceRevision?: number;
+      audioId?: string;
+    };
 
 export interface MediaProviderSelectionSnapshotV1 {
   providerProfileId: string;
@@ -2346,6 +2375,8 @@ export interface NativeProviderStreamCancelParams {
 }
 
 export interface NativeProviderMediaSubmitParams {
+  baseUrl?: string;
+  operationId?: string;
   projectSessionId: string;
   providerProfileId: string;
   adapterKey: string;
@@ -2358,6 +2389,8 @@ export interface NativeProviderMediaSubmitParams {
 }
 
 export interface NativeProviderMediaCancelParams {
+  baseUrl?: string;
+  operationId?: string;
   projectSessionId: string;
   providerProfileId: string;
   adapterKey: string;
@@ -2932,11 +2965,18 @@ export interface AgentGenerationExecuteToolsResult {
 }
 
 export type MediaGenerationKind = 'image' | 'video';
-export type MediaProviderType = 'unicompapi' | 'vidu';
+export type MediaProviderType =
+  'unicompapi' | 'vidu' | 'wan-video' | 'seedance-video' | 'minimax-video';
 export type MediaProviderBaseUrlCategory =
-  'official-unicompapi' | 'official-vidu-global' | 'official-vidu-cn';
+  | 'official-unicompapi'
+  | 'official-vidu-global'
+  | 'official-vidu-cn'
+  | 'official-wan'
+  | 'official-seedance'
+  | 'official-minimax-video';
 
 export interface MediaModelSelectionSnapshot {
+  providerBaseUrl?: string;
   providerProfileId: string;
   providerType: MediaProviderType;
   providerBaseUrlCategory: MediaProviderBaseUrlCategory;
@@ -3230,11 +3270,17 @@ export type GenerationCapability =
   | 'VIDEO_TO_VIDEO'
   | 'START_END_TO_VIDEO';
 
-export type AdapterParameterValue = string | number | boolean | string[];
+export type AdapterParameterValue =
+  | string
+  | number
+  | boolean
+  | null
+  | AdapterParameterValue[]
+  | { [key: string]: AdapterParameterValue };
 export type AdapterParameters = Record<string, AdapterParameterValue>;
 
 export interface AdapterParameterProperty {
-  type: 'string' | 'integer' | 'number' | 'boolean' | 'array';
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object';
   title: string;
   description?: string;
   default?: AdapterParameterValue;
@@ -3254,10 +3300,13 @@ export interface AdapterParameterProperty {
   mutuallyExclusiveWith?: string[];
   requires?: string[];
   items?: {
-    type: 'string';
+    type?: string;
     format?: 'uri';
     pattern?: string;
+    [keyword: string]: unknown;
   };
+  /** Retain nested official JSON Schema, including oneOf/contains/if constraints. */
+  [keyword: string]: unknown;
 }
 
 export interface AdapterParameterSchema {
@@ -3267,9 +3316,12 @@ export interface AdapterParameterSchema {
   required: string[];
   properties: Record<string, AdapterParameterProperty>;
   allOf?: Record<string, unknown>[];
+  anyOf?: Record<string, unknown>[];
+  oneOf?: Record<string, unknown>[];
 }
 
-export type AdapterControl = 'text' | 'textarea' | 'select' | 'number' | 'toggle' | 'url-list';
+export type AdapterControl =
+  'text' | 'textarea' | 'select' | 'number' | 'toggle' | 'url-list' | 'structured';
 
 export interface AdapterUiField {
   key: string;
@@ -3473,6 +3525,7 @@ export interface VideoGenerationCostInfo {
 }
 
 export interface VideoGenerationMetadataInfo {
+  providerBaseUrl?: string;
   providerRegion: VideoProviderRegion;
   providerProfileId?: string;
   modelId?: string;
@@ -3706,7 +3759,7 @@ export interface AssetSourceInfo {
   sourceKind?: 'generation' | 'dubbing';
 }
 
-export interface WorkerMethodMap extends DubbingWorkerMethodMap {
+export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceWorkerMethodMap {
   health: { params: Record<string, never>; result: HealthResult };
   'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
   'project.create': { params: ProjectCreateParams; result: ProjectInfo };

@@ -301,6 +301,10 @@ legacy adapterKey → legacy resolver → contractId + contractRevision + bindin
 
 ## 12. 实施记录
 
+- [x] 三家官方声音参考视频运行时（2026-10-14）：用户明确授权万相、Seedance、MiniMax 完整接入后，新增 7 个运行修订和官方 Binding，接通北京业务空间域名、角色本地样本版本、官方上传／Base64、费用确认、Native 提交、后台恢复／下载和成功入库；Schema v45 音频历史引用保护独立于图片／视频素材库。合同目录现共 21 个声音相关定义，原 14 个修订和 UniComp 旧绑定保留。真实付费样片不在本轮验证范围。详见 [官方声音参考视频链路](./OFFICIAL-VOICE-VIDEO-RUNTIME-IMPLEMENTATION.md)。
+
+- [x] 视频声音样本合同补齐（2026-10-14）：新增 14 个官方来源核验定义，包括 Wan 3.0／Prime 修订 2、Wan 2.7、Seedance 2.0／2.5、Vidu Q4 Preview、MiniMax H3／H3 Max、可灵最新视频／音色／角色元素及 Vidu 克隆接口；完成嵌套 Schema、媒体限制、纯请求映射、表单和 Rust 校验。原渠道 Binding 保留历史修订；新定义为 verified，未推断中转渠道支持或发起计费请求。全仓测试、类型、Lint、格式、构建与 Rust 回归通过。详见 [视频声音样本合同补齐](VIDEO-AUDIO-CONTRACTS-IMPLEMENTATION.md)。本条不表示全部视频供应商执行适配阶段已完成。
+
 - [x] HappyHorse 垂直切片（2026-10-11）：以阿里云百炼官方文生、首帧、参考生及编辑 API 核验七个合同；完成共享 Schema、UniComp ModelBinding、目录迁移、动态表单、原生协议校验、任务快照和模拟提交/轮询验证。仅扩展已建立的合同架构，不将本计划其余模型迁移阶段标记完成。实现与验证详见 [HappyHorse 官方合同接入](HAPPYHORSE-CONTRACT-IMPLEMENTATION.md)。真实付费渠道验收未执行。
 
 - [~] P0 合同领域模型与目录基础：已完成 `ModelContract`、`ModelBinding`、`ProtocolAdapter` 所需合同数据类型、合同修订字段、目录状态、兼容级别和受限映射类型；Worker 已加入 `deepseek-v4-pro`、`deepseek-flash`、`glm-5.3`、`glm-5.3-flash`、`glm-5`、`kimi-k3`、MiniMax M3/H3、Qwen Image、通用图像/视频、Vidu Q3 的候选合同/Binding 注册表。运行时启用门禁要求合同和 Binding 均为 `enabled`，当前候选保持 `discovered`，不会自动进入生产目录。

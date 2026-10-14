@@ -223,7 +223,7 @@ export class AppSettingsService {
     params: UnifiedAgentAdapterSchemaProposeParams,
     diff: string[],
   ): UnifiedAgentAdapterSchemaProposeResult {
-    if (params.adapterKey.endsWith(':contract-1')) {
+    if (/:contract-\d+$/u.test(params.adapterKey)) {
       throw new AdapterSchemaValidationError(
         'Official contract parameters can only change through a verified contract revision.',
       );

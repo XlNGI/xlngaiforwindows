@@ -35,6 +35,7 @@ const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const IMAGE_SUBMISSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface ResolvedMediaSubmission {
+  baseUrl?: string;
   draftVersion: number;
   providerProfileId: string;
   providerRegion: NativeProviderMediaSubmitParams['providerRegion'];
@@ -247,6 +248,8 @@ export class MediaOrchestrationService {
     const snapshot = prepared.snapshot;
     const resolved = prepared.resolved;
     const request: NativeProviderMediaSubmitParams = {
+      ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
+      operationId: job.id,
       projectSessionId: prepared.projectSessionId,
       providerProfileId: resolved.providerProfileId,
       adapterKey: resolved.adapterKey,
@@ -260,7 +263,10 @@ export class MediaOrchestrationService {
     let response: unknown;
     try {
       response =
-        kind === 'image'
+        kind === 'image' ||
+        ['wan-video', 'seedance-video', 'minimax-video'].includes(
+          resolved.adapterKey.split(':')[1] ?? '',
+        )
           ? await this.native.request('provider.media.submit', request, IMAGE_SUBMISSION_TIMEOUT_MS)
           : await this.native.request('provider.media.submit', request);
     } catch (error) {
@@ -354,15 +360,22 @@ export class MediaOrchestrationService {
           ? 'unknown'
           : 'not_submitted',
     };
-    if (kind === 'video' && current.providerTaskId) {
+    if (
+      kind === 'video' &&
+      (current.providerTaskId ||
+        ['wan-video', 'seedance-video', 'minimax-video'].includes(
+          current.adapterKey.split(':')[1] ?? '',
+        ))
+    ) {
       try {
         const resolved = this.resolveSubmission(current, snapshot, kind);
         const request: NativeProviderMediaCancelParams = {
+          operationId: current.id,
           projectSessionId,
           providerProfileId: resolved.providerProfileId,
           adapterKey: current.adapterKey,
           providerRegion: resolved.providerRegion,
-          providerTaskId: current.providerTaskId,
+          providerTaskId: current.providerTaskId ?? 'pending',
         };
         const body = asRecord(await this.native.request('provider.media.cancel', request));
         const providerStatus =
@@ -518,6 +531,19 @@ export class MediaOrchestrationService {
     snapshot: Record<string, unknown>,
     kind: 'image' | 'video',
   ): ResolvedMediaSubmission {
+    for (const input of Array.isArray(snapshot.inputs) ? snapshot.inputs : []) {
+      const reference = asRecord(input);
+      if (typeof reference.characterDocumentId === 'string') {
+        const character = this.projects.access(false, (database, project) =>
+          database
+            .prepare(
+              "SELECT 1 FROM documents WHERE id=? AND project_id=? AND kind='character' AND lifecycle_status='active'",
+            )
+            .get(reference.characterDocumentId, project.id),
+        );
+        if (!character) throw new Error('所选声音样本的角色已归档或不属于当前项目。');
+      }
+    }
     if (snapshot.version !== 1) throw new Error('Media draft version is not supported.');
     const frozen = asRecord(snapshot.mediaModelSelection);
     const providerProfileId = requiredSnapshotString(
@@ -531,6 +557,7 @@ export class MediaOrchestrationService {
     }
     assertFrozenValue(frozen.providerType, route.providerType, 'Provider type');
     assertFrozenValue(frozen.providerBaseUrlCategory, route.baseUrlCategory, 'Provider URL');
+    assertFrozenValue(frozen.providerBaseUrl, profile.baseUrl, 'Provider workspace URL');
     assertFrozenValue(
       frozen.providerRegion ?? snapshot.providerRegion,
       route.providerRegion,
@@ -591,6 +618,7 @@ export class MediaOrchestrationService {
       .find((item) => item.modelId === model.id);
     return {
       draftVersion: 1,
+      ...(route.providerType === 'wan-video' ? { baseUrl: profile.baseUrl } : {}),
       providerProfileId: profile.id,
       providerRegion: route.providerRegion,
       modelId: model.id,
@@ -671,6 +699,14 @@ function parseMediaInputs(value: unknown): MediaInputReferenceV1[] | undefined {
         type: 'controlled_temporary_file',
         handle: input.handle,
         contentType: input.contentType,
+        ...(typeof input.sha256 === 'string' ? { sha256: input.sha256 } : {}),
+        ...(typeof input.sizeBytes === 'number' ? { sizeBytes: input.sizeBytes } : {}),
+        ...(typeof input.durationMs === 'number' ? { durationMs: input.durationMs } : {}),
+        ...(typeof input.characterDocumentId === 'string'
+          ? { characterDocumentId: input.characterDocumentId }
+          : {}),
+        ...(typeof input.voiceRevision === 'number' ? { voiceRevision: input.voiceRevision } : {}),
+        ...(typeof input.audioId === 'string' ? { audioId: input.audioId } : {}),
       };
     }
     throw new Error('The frozen media input reference is invalid.');
@@ -724,6 +760,19 @@ function cleanupControlledInputs(snapshot: Record<string, unknown>, fallbackRoot
     if (typeof handle !== 'string' || !handle.startsWith('cache/media-inputs/')) continue;
     if (handle.includes('..') || handle.includes('\\')) continue;
     const path = resolve(root, handle);
-    if (path.startsWith(`${root}${sep}`)) rmSync(path, { force: true });
+    if (path.startsWith(`${root}${sep}`)) {
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        const timer = setTimeout(() => {
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            /* Native input leases release after bounded cancellation. */
+          }
+        }, 2000);
+        timer.unref();
+      }
+    }
   }
 }

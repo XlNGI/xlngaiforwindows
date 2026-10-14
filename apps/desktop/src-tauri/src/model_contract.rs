@@ -6,10 +6,12 @@ const CONTRACTS: &str =
 const IMAGE_CONTRACTS: &str =
     include_str!("../../../../packages/contracts/src/official-image-contracts.json");
 const BINDINGS: &str = include_str!("../../../../packages/contracts/src/media-model-bindings.json");
+const AUDIO_CONTRACTS: &str =
+    include_str!("../../../../packages/contracts/src/official-video-audio-contracts.json");
 
 pub(crate) fn contract(adapter_key: &str) -> Result<Value, String> {
     let parts: Vec<_> = adapter_key.split(':').collect();
-    if parts.len() != 4 || parts[3] != "contract-1" {
+    if parts.len() != 4 || !parts[3].starts_with("contract-") {
         return Err("Invalid contract adapter key".into());
     }
     let mut contracts: Vec<Value> =
@@ -18,16 +20,30 @@ pub(crate) fn contract(adapter_key: &str) -> Result<Value, String> {
         serde_json::from_str::<Vec<Value>>(IMAGE_CONTRACTS)
             .map_err(|_| "Invalid official image contract catalog")?,
     );
+    contracts.extend(
+        serde_json::from_str::<Vec<Value>>(AUDIO_CONTRACTS)
+            .map_err(|_| "Invalid audio video contract catalog")?,
+    );
+    let revision: u64 = parts[3]
+        .trim_start_matches("contract-")
+        .parse()
+        .map_err(|_| "Invalid contract revision")?;
     let contract = contracts
         .into_iter()
         .find(|contract| {
-            contract["contractId"].as_str() == Some(parts[2]) && contract["status"] == "enabled"
+            contract["contractId"].as_str() == Some(parts[2])
+                && contract["contractRevision"].as_u64() == Some(revision)
+                && contract["status"] == "enabled"
         })
         .ok_or("Official video contract is not enabled")?;
     let capability = contract["taskCapability"]
         .as_str()
         .ok_or("Missing contract task capability")?;
-    if parts[0] != capability {
+    if parts[0] != capability
+        && !contract["taskCapabilities"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == parts[0]))
+    {
         return Err("Capability does not match the official contract".into());
     }
     let bindings: Vec<Value> =
@@ -35,6 +51,7 @@ pub(crate) fn contract(adapter_key: &str) -> Result<Value, String> {
     if !bindings.iter().any(|binding| {
         binding["contractId"] == contract["contractId"]
             && binding["providerType"] == parts[1]
+            && binding["contractRevision"] == contract["contractRevision"]
             && binding["status"] == "enabled"
     }) {
         return Err("Provider has no enabled binding for the official contract".into());
@@ -62,101 +79,7 @@ pub(crate) fn matches_model(adapter_key: &str, remote_model_id: &str) -> bool {
 /// Validate using the same official Schema as Worker and Desktop.
 pub(crate) fn validate_parameters(adapter_key: &str, parameters: &Value) -> Result<(), String> {
     let contract = contract(adapter_key)?;
-    let schema = &contract["parameterSchema"];
-    let object = parameters
-        .as_object()
-        .ok_or("Contract parameters must be an object")?;
-    let properties = schema["properties"]
-        .as_object()
-        .ok_or("Contract properties are invalid")?;
-    for key in schema["required"]
-        .as_array()
-        .ok_or("Contract required fields are invalid")?
-    {
-        let key = key.as_str().ok_or("Invalid required field")?;
-        if !object.contains_key(key) {
-            return Err(format!("Missing required contract parameter: {key}"));
-        }
-    }
-    for (key, value) in object {
-        let property = properties
-            .get(key)
-            .ok_or_else(|| format!("Unknown contract parameter: {key}"))?;
-        let valid = match property["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.as_i64().is_some(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value
-                .as_array()
-                .is_some_and(|items| items.iter().all(Value::is_string)),
-            _ => false,
-        };
-        if !valid {
-            return Err(format!("Invalid contract parameter type: {key}"));
-        }
-        if let Some(choices) = property["enum"].as_array() {
-            if !choices.contains(value) {
-                return Err(format!("Invalid contract parameter choice: {key}"));
-            }
-        }
-        if let Some(text) = value.as_str() {
-            if let Some(pattern) = property["pattern"].as_str() {
-                if !regex::Regex::new(pattern)
-                    .map_err(|_| "Invalid contract pattern")?
-                    .is_match(text)
-                {
-                    return Err(format!(
-                        "Contract parameter does not match its official constraint: {key}"
-                    ));
-                }
-            }
-            let length = text.chars().count() as u64;
-            if property["minLength"]
-                .as_u64()
-                .is_some_and(|min| length < min)
-                || property["maxLength"]
-                    .as_u64()
-                    .is_some_and(|max| length > max)
-            {
-                return Err(format!("Contract parameter length is out of range: {key}"));
-            }
-        }
-        if let Some(number) = value.as_f64() {
-            if property["minimum"].as_f64().is_some_and(|min| number < min)
-                || property["maximum"].as_f64().is_some_and(|max| number > max)
-            {
-                return Err(format!("Contract parameter value is out of range: {key}"));
-            }
-        }
-        if let Some(items) = value.as_array() {
-            if property["minItems"]
-                .as_u64()
-                .is_some_and(|min| (items.len() as u64) < min)
-                || property["maxItems"]
-                    .as_u64()
-                    .is_some_and(|max| (items.len() as u64) > max)
-                || items
-                    .iter()
-                    .any(|item| item.as_str().is_none_or(str::is_empty))
-            {
-                return Err(format!("Contract input count is out of range: {key}"));
-            }
-            if let Some(pattern) = property["items"]["pattern"].as_str() {
-                let pattern =
-                    regex::Regex::new(pattern).map_err(|_| "Invalid contract image pattern")?;
-                if items
-                    .iter()
-                    .any(|item| item.as_str().is_none_or(|url| !pattern.is_match(url)))
-                {
-                    return Err(format!(
-                        "Contract image does not match its official constraint: {key}"
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
+    crate::schema_validation::validate(&contract["parameterSchema"], parameters)
 }
 
 /// Existing OpenAI video protocol projection, independent of the model family.

@@ -11,6 +11,19 @@ import {
 } from './model-contract-registry.js';
 
 describe('model contract registry', () => {
+  it('registers verified audio contracts without granting unverified channels their capabilities', () => {
+    const contract = getModelContract('cn.qwen.wan3-0-video', 2)!;
+    expect(contract).toMatchObject({ status: 'verified', capabilities: { audioInput: true } });
+    expect(contract.parameterSchema.properties).toHaveProperty('media');
+    expect(getModelContract('cn.qwen.wan3-0-video', 1)?.capabilities.audioInput).toBe(false);
+    expect(resolveModelBinding('unicompapi', 'wan3.0-video')?.contract.contractRevision).toBe(1);
+    expect(
+      getModelContract('cn.kling.character-element')?.parameterSchema.properties,
+    ).toHaveProperty('element_voice_id');
+    expect(
+      getModelContract('cn.vidu.q4-preview.reference-video')?.parameterSchema.properties,
+    ).toHaveProperty('sounds');
+  });
   it('keeps canonical contracts separate from provider model IDs', () => {
     const contracts = listModelContracts();
     expect(contracts.map((contract) => contract.contractId)).toEqual(
@@ -49,13 +62,17 @@ describe('model contract registry', () => {
   });
 
   it('keeps protocol transport separate from model contracts', () => {
-    expect(listProtocolAdapters().map((adapter) => adapter.protocol)).toEqual([
-      'openai-compatible-video',
-      'dashscope-video',
-      'openai-chat-completions',
-      'openai-responses',
-      'vidu-v2',
-    ]);
+    expect(listProtocolAdapters().map((adapter) => adapter.protocol)).toEqual(
+      expect.arrayContaining([
+        'openai-compatible-video',
+        'dashscope-video',
+        'openai-chat-completions',
+        'openai-responses',
+        'vidu-v2',
+        'seedance-video',
+        'minimax-video-v2',
+      ]),
+    );
   });
 
   it('exposes task adapters with explicit lifecycle contracts', () => {

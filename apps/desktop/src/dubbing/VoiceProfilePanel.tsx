@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ProviderProfileInfo, VoiceProfileInfo } from '@ai-video/contracts';
 import { callWorker } from '../worker-client';
 import './dubbing.css';
+import { VoiceReferencePanel } from './VoiceReferencePanel';
 
 export function VoiceProfilePanel(props: {
   projectId: string;
@@ -10,10 +11,20 @@ export function VoiceProfilePanel(props: {
   onSaved?: () => void;
 }) {
   return (
-    <VoiceProfileEditor
-      key={`${props.projectId}:${props.characterDocumentId ?? 'narration'}`}
-      {...props}
-    />
+    <>
+      {props.characterDocumentId && (
+        <VoiceReferencePanel
+          key={`${props.projectId}:${props.characterDocumentId}`}
+          projectId={props.projectId}
+          characterDocumentId={props.characterDocumentId}
+          writable={props.writable}
+        />
+      )}
+      <VoiceProfileEditor
+        key={`${props.projectId}:${props.characterDocumentId ?? 'narration'}`}
+        {...props}
+      />
+    </>
   );
 }
 

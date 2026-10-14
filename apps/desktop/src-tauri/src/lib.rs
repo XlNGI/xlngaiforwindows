@@ -24,10 +24,12 @@ mod dubbing_provider;
 mod llm_stream;
 mod model_contract;
 mod novel_import;
+mod official_video;
 mod provider_connector;
 mod provider_http;
 mod request_guard;
 mod research_bridge;
+mod schema_validation;
 
 use credential_store::{
     credential_copy, credential_delete, credential_exists, credential_read, credential_set,
@@ -50,6 +52,14 @@ use provider_http::{
 use research_bridge::NativeResearchBridge;
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+static MODEL_INPUT_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub(crate) fn model_input_root() -> Option<PathBuf> {
+    MODEL_INPUT_ROOT.get().cloned().or_else(|| {
+        std::env::var("AI_VIDEO_MEDIA_INPUT_ROOT")
+            .ok()
+            .map(PathBuf::from)
+    })
+}
 const MEDIA_WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(12 * 60);
 const SIDECAR_ENVELOPE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
@@ -380,7 +390,14 @@ fn resolve_media_selection(
         .get("protocol")
         .and_then(serde_json::Value::as_str)
         .ok_or("Provider profile is missing a protocol")?;
+    let official_video_profile = matches!(
+        (provider_type, protocol),
+        ("wan-video", "dashscope-video")
+            | ("seedance-video", "seedance-video")
+            | ("minimax-video", "minimax-video-v2")
+    );
     if !((provider_type == "vidu" && protocol == "vidu-v2")
+        || official_video_profile
         || (provider_type == "unicompapi" && protocol == "openai-chat-completions"))
     {
         return Err("Provider profile is not a supported media connection".to_string());
@@ -400,6 +417,10 @@ fn resolve_media_selection(
         ("vidu", Some("https://api.vidu.com")) => "global",
         ("vidu", Some("https://api.vidu.cn")) => "cn",
         ("unicompapi", Some("https://unicompapi.com/v1")) => "unicompapi",
+        ("wan-video", Some("https://dashscope.aliyuncs.com"))
+        | ("seedance-video", Some("https://ark.cn-beijing.volces.com"))
+        | ("minimax-video", Some("https://api.minimax.cn")) => "cn",
+        ("wan-video", Some(url)) if provider_http::wan_video_host(url).is_some() => "cn",
         _ => return Err("Provider profile uses an unsupported media Base URL".to_string()),
     };
     if let Some(requested_region) = provider_region.filter(|value| !value.is_empty()) {
@@ -414,7 +435,19 @@ fn resolve_media_selection(
     } else {
         None
     };
-    let adapter_model = if provider_type == "unicompapi" {
+    let official_contract = if official_video_profile {
+        if adapter_key.split(':').nth(1) != Some(provider_type) {
+            return Err("Official provider and adapter do not match".into());
+        }
+        Some(model_contract::contract(adapter_key)?)
+    } else {
+        None
+    };
+    let adapter_model = if let Some(contract) = official_contract.as_ref() {
+        contract["officialModelName"]
+            .as_str()
+            .ok_or("Official model name is missing")?
+    } else if provider_type == "unicompapi" {
         unicomp_parts
             .as_ref()
             .map(|parts| parts.token)
@@ -821,6 +854,10 @@ fn unicompapi_video_content_path(task_id: &str) -> Result<String, String> {
 }
 
 fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
+    if official_video::family(adapter_key).is_some() {
+        model_contract::contract(adapter_key)?;
+        return Ok(());
+    }
     match adapter_key {
         "TEXT_TO_VIDEO:vidu:viduq3-pro:v2"
         | "REFERENCE_TO_VIDEO:vidu:viduq3:v2"
@@ -2158,6 +2195,7 @@ impl WorkerProcess {
     ) -> Result<Self, String> {
         let mut command = worker_command()?;
         command.env("AI_VIDEO_APP_DATA_DIR", app_data_dir);
+        let _ = MODEL_INPUT_ROOT.set(app_data_dir.to_path_buf());
         command.env("AI_VIDEO_MEDIA_INPUT_ROOT", app_data_dir);
         command.env("AI_VIDEO_RESEARCH_BRIDGE_URL", research_bridge.url());
         command.env("AI_VIDEO_RESEARCH_BRIDGE_TOKEN", research_bridge.token());
@@ -2559,6 +2597,8 @@ fn validate_provider_media_submit_params(value: &serde_json::Value) -> Result<()
         .ok_or("Media submit params must be an object")?;
     let allowed = [
         "projectSessionId",
+        "operationId",
+        "baseUrl",
         "providerProfileId",
         "adapterKey",
         "providerRegion",
@@ -2614,7 +2654,11 @@ fn validate_provider_media_cancel_params(value: &serde_json::Value) -> Result<()
         "providerRegion",
         "providerTaskId",
     ];
-    if !has_exact_keys(object, &allowed) {
+    if object
+        .keys()
+        .any(|key| !allowed.contains(&key.as_str()) && key != "operationId" && key != "baseUrl")
+        || allowed.iter().any(|key| !object.contains_key(*key))
+    {
         return Err("Media cancel params contain unknown or missing fields".to_string());
     }
     for key in allowed {
@@ -2644,6 +2688,9 @@ fn provider_media_submit_blocking(
     let adapter_key = params["adapterKey"].as_str().unwrap_or_default();
     let provider_region = params["providerRegion"].as_str().unwrap_or_default();
     let mut parameters = params["parameters"].clone();
+    if official_video::family(adapter_key).is_some() {
+        return official_video::submit(params);
+    }
     resolve_controlled_media_inputs(&mut parameters, params.get("inputs"))?;
     let kind = params["kind"].as_str().unwrap_or_default();
     let remote_model_id = params["remoteModelId"].as_str().unwrap_or_default();
@@ -2680,15 +2727,13 @@ fn resolve_controlled_media_inputs(
     if !contains_controlled_file_reference(value) {
         return Ok(());
     }
-    let root = std::env::var("AI_VIDEO_MEDIA_INPUT_ROOT")
-        .map(PathBuf::from)
-        .map_err(|_| {
-            host_error(
-                "INVALID_PARAMETERS",
-                "Controlled media input root is unavailable",
-                true,
-            )
-        })?;
+    let root = model_input_root().ok_or_else(|| {
+        host_error(
+            "INVALID_PARAMETERS",
+            "Controlled media input root is unavailable",
+            true,
+        )
+    })?;
     resolve_controlled_media_inputs_at_root(value, inputs, &root)
 }
 
@@ -2809,6 +2854,9 @@ fn provider_media_cancel_blocking(
     params: &serde_json::Value,
     _streams: &Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
 ) -> Result<serde_json::Value, serde_json::Value> {
+    if official_video::family(params["adapterKey"].as_str().unwrap_or_default()).is_some() {
+        return official_video::cancel(params);
+    }
     let result = provider_cancel_task_blocking(
         params["adapterKey"].as_str().unwrap_or_default(),
         params["providerRegion"].as_str().unwrap_or_default(),
@@ -2824,6 +2872,9 @@ fn provider_media_poll_blocking(
     params: &serde_json::Value,
     _streams: &Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
 ) -> Result<serde_json::Value, serde_json::Value> {
+    if official_video::family(params["adapterKey"].as_str().unwrap_or_default()).is_some() {
+        return official_video::poll(params);
+    }
     let adapter_key = params["adapterKey"].as_str().unwrap_or_default();
     let provider_region = params["providerRegion"].as_str().unwrap_or_default();
     let provider_profile_id = params["providerProfileId"].as_str().unwrap_or_default();

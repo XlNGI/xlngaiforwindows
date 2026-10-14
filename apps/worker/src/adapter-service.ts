@@ -143,9 +143,11 @@ function draftStorageKey(params: GenerationDraftGetParams): string {
 }
 
 function containsLocalImageData(parameters: GenerationDraftSaveParams['parameters']): boolean {
-  return Object.values(parameters).some((value) =>
-    Array.isArray(value)
-      ? value.some((item) => item.toLowerCase().startsWith('data:image/'))
-      : typeof value === 'string' && value.toLowerCase().startsWith('data:image/'),
-  );
+  const contains = (value: unknown): boolean =>
+    typeof value === 'string'
+      ? /^data:(image|audio|video)\//iu.test(value)
+      : Array.isArray(value)
+        ? value.some(contains)
+        : Boolean(value && typeof value === 'object' && Object.values(value).some(contains));
+  return contains(parameters);
 }

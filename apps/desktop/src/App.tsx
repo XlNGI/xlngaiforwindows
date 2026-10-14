@@ -2249,7 +2249,7 @@ export function App() {
       providerProfileId: string;
       modelId: string;
       adapterKey?: string;
-      parameters?: Record<string, string | number | boolean | string[]>;
+      parameters?: import('@ai-video/contracts').AdapterParameters;
     },
   ) => {
     if ((!composerValue.trim() && chatAttachments.length === 0) || !conversation) return;

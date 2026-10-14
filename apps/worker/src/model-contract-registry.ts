@@ -11,6 +11,7 @@ import type {
 import {
   officialImageContracts,
   officialVideoContracts,
+  officialVideoAudioContracts,
   mediaModelBindings,
 } from '@ai-video/contracts';
 
@@ -21,6 +22,7 @@ import {
  */
 const CONTRACTS: readonly ModelContract[] = [
   ...officialVideoContracts.map((contract) => structuredClone(contract)),
+  ...officialVideoAudioContracts.map((contract) => structuredClone(contract)),
   ...officialImageContracts.map((contract) => structuredClone(contract)),
   textContract(
     'cn.deepseek.v4-pro',
@@ -165,6 +167,22 @@ for (const binding of BINDINGS) {
 
 const PROTOCOL_ADAPTERS: readonly ProtocolAdapter[] = [
   {
+    id: 'seedance-video-v1',
+    protocol: 'seedance-video',
+    providerTypes: ['seedance-video'],
+    transport: { protocolFamily: 'seedance-video', request: [], response: [] },
+    supportsStreaming: false,
+    supportsToolCalls: false,
+  },
+  {
+    id: 'minimax-video-v2',
+    protocol: 'minimax-video-v2',
+    providerTypes: ['minimax-video'],
+    transport: { protocolFamily: 'minimax-video-v2', request: [], response: [] },
+    supportsStreaming: false,
+    supportsToolCalls: false,
+  },
+  {
     id: 'openai-compatible-video-v1',
     protocol: 'openai-compatible-video',
     providerTypes: ['unicompapi'],
@@ -175,7 +193,7 @@ const PROTOCOL_ADAPTERS: readonly ProtocolAdapter[] = [
   {
     id: 'dashscope-video-v1',
     protocol: 'dashscope-video',
-    providerTypes: ['qwen'],
+    providerTypes: ['qwen', 'wan-video'],
     transport: { protocolFamily: 'dashscope-video', request: [], response: [] },
     supportsStreaming: false,
     supportsToolCalls: false,
@@ -218,6 +236,24 @@ const PROTOCOL_ADAPTERS: readonly ProtocolAdapter[] = [
 ];
 
 const TASK_ADAPTERS: readonly TaskAdapter[] = [
+  ...officialVideoAudioContracts
+    .filter((contract) => contract.status === 'enabled')
+    .flatMap((contract) =>
+      (contract.taskCapabilities ?? [contract.taskCapability!]).map((capability) => ({
+        id: `${contract.contractId}-v${contract.contractRevision}-${capability}`,
+        capability,
+        contractId: contract.contractId,
+        contractRevision: contract.contractRevision,
+        protocolAdapterId:
+          contract.providerFamily === 'qwen'
+            ? 'dashscope-video-v1'
+            : contract.providerFamily === 'bytedance'
+              ? 'seedance-video-v1'
+              : 'minimax-video-v2',
+        lifecycle: structuredClone(contract.lifecycle),
+        parameterSchema: structuredClone(contract.parameterSchema),
+      })),
+    ),
   ...officialVideoContracts.map((contract): TaskAdapter => ({
     id: `${contract.contractId}-v${contract.contractRevision}`,
     capability: contract.taskCapability!,

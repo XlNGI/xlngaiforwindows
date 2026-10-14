@@ -1,4 +1,6 @@
 import { tmpdir } from 'node:os';
+import { VoiceReferenceRepository } from '@ai-video/persistence';
+import type { CharacterVoiceReferenceSaveParams } from '@ai-video/contracts';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import {
@@ -1159,6 +1161,18 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       switch (request.method) {
         case 'characterVoice.list':
           result = dubbingService.listVoices(params.includeArchived === true);
+          break;
+        case 'characterVoiceReference.list':
+          result = projectService.access(false, (database, project) =>
+            new VoiceReferenceRepository(database, project.id).list(),
+          );
+          break;
+        case 'characterVoiceReference.save':
+          result = projectService.access(true, (database, project) =>
+            new VoiceReferenceRepository(database, project.id).save(
+              params as unknown as CharacterVoiceReferenceSaveParams,
+            ),
+          );
           break;
         case 'characterVoice.save':
           result = dubbingService.saveVoice(

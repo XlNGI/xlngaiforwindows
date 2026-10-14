@@ -170,7 +170,9 @@ export function ProviderConnectionsView({
       if (tested.profile.connectionStatus === 'ready') {
         setMessage(
           tested.modelSyncStatus === 'unsupported'
-            ? tested.profile.protocol === 'vidu-v2'
+            ? ['vidu-v2', 'dashscope-video', 'seedance-video', 'minimax-video-v2'].includes(
+                tested.profile.protocol,
+              )
               ? `连接测试成功，已载入 ${tested.models.length} 个内置媒体模型。`
               : '连接测试成功；供应商不支持模型列表，请手动添加模型 ID。'
             : `连接测试成功，已同步 ${tested.models.length} 个模型。`,
@@ -199,7 +201,9 @@ export function ProviderConnectionsView({
       setMessage(
         result.profile.connectionStatus === 'ready'
           ? result.modelSyncStatus === 'unsupported'
-            ? result.profile.protocol === 'vidu-v2'
+            ? ['vidu-v2', 'dashscope-video', 'seedance-video', 'minimax-video-v2'].includes(
+                result.profile.protocol,
+              )
               ? `连接可用，保留 ${result.models.length} 个内置媒体模型。`
               : '连接可用，但该供应商不提供模型列表。'
             : `模型同步完成：${result.models.length} 个。`

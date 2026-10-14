@@ -358,4 +358,10 @@ git diff --check
 
 当前精确实现和检查结果见 [本轮实施记录](./code-traces/2026-10-14-character-voice-dubbing.md)，使用方法见 [用户说明](./CHARACTER-VOICE-DUBBING-USER-GUIDE.md)。Sync 首版使用官方直接 multipart 上传；预签名 PUT 路径尚未实现，也未扩展通用网络代理。
 
+## 15. 用户追加授权：三家官方视频声音参考
+
+2026-10-14 用户要求万相、Seedance、MiniMax 均完成可执行适配。按 [官方声音参考视频链路](./OFFICIAL-VOICE-VIDEO-RUNTIME-IMPLEMENTATION.md) 实施，项目 Schema 升至 v45，角色可绑定独立本地声音样本并生成不可变版本；制作视频时显式选择角色，官方连接分别按 getPolicy／OSS、Base64 和 `video_generation_input`／`mm_file://` 提交。现有 MiniMax TTS 音色 ID、Sync 口型及本地成片流程继续独立工作。
+
+本扩展沿用一次性费用确认与既有视频后台运行时，支持同一任务 ID 恢复、下载验证及成功自动入库；取消仅保证本地停止及提交前拦截，不能保证供应商撤销或退款。工程及安装包验证不替代真实声音一致性验收，不把 D3 真实付费质量门禁或 D7 全部发布条件标记完成。
+
 产品规则变化时更新本计划；若未来修改既有素材库确认规则，必须同步其 Markdown 与 DOCX。当前计划采用独立音频仓储，未修改这些规则，因此本次不改既有 DOCX。

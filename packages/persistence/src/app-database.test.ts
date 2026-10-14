@@ -1,3 +1,4 @@
+import { CURRENT_SCHEMA_VERSION } from './schema.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,7 +37,7 @@ describe('app settings database', () => {
     expect(migrateAppDatabase(appDatabase)).toBe(7);
     expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 7 });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
-    expect(migrateDatabase(projectDatabase)).toBe(44);
+    expect(migrateDatabase(projectDatabase)).toBe(CURRENT_SCHEMA_VERSION);
     expect(getAppSchemaVersion(appDatabase)).toBe(7);
 
     const providerColumns = appDatabase

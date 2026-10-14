@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { KeyRound, Server, Sparkles, X } from 'lucide-react';
+import { wanVideoWorkspaceId } from '@ai-video/contracts';
 import type {
   ProviderDefinitionInfo,
   ProviderProfileCreateParams,
@@ -29,7 +30,9 @@ export function ProviderEditor({
       (definition) =>
         definition.providerType === profile?.providerType &&
         definition.protocol === profile.protocol &&
-        definition.baseUrl === profile.baseUrl,
+        (definition.baseUrl === profile.baseUrl ||
+          (definition.providerType === 'wan-video' &&
+            Boolean(wanVideoWorkspaceId(profile.baseUrl)))),
     ) ?? definitions[0];
   const [accessType, setAccessType] = useState<'official' | 'custom'>(
     profile?.accessType ?? 'official',
@@ -41,6 +44,7 @@ export function ProviderEditor({
   );
   const [baseUrl, setBaseUrl] = useState(profile?.accessType === 'custom' ? profile.baseUrl : '');
   const [secret, setSecret] = useState('');
+  const [workspaceId, setWorkspaceId] = useState(wanVideoWorkspaceId(profile?.baseUrl ?? '') ?? '');
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -49,7 +53,9 @@ export function ProviderEditor({
         (candidate) =>
           candidate.providerType === profile?.providerType &&
           candidate.protocol === profile?.protocol &&
-          candidate.baseUrl === profile?.baseUrl,
+          (candidate.baseUrl === profile?.baseUrl ||
+            (candidate.providerType === 'wan-video' &&
+              Boolean(wanVideoWorkspaceId(profile?.baseUrl ?? '')))),
       ) ?? definitions[0];
     setAccessType(profile?.accessType ?? 'official');
     setDefinitionId(definition?.id ?? '');
@@ -57,16 +63,22 @@ export function ProviderEditor({
     setProtocol(profile?.accessType === 'custom' ? profile.protocol : 'openai-responses');
     setBaseUrl(profile?.accessType === 'custom' ? profile.baseUrl : '');
     setSecret('');
+    setWorkspaceId(wanVideoWorkspaceId(profile?.baseUrl ?? '') ?? '');
   }, [profile?.id, definitions]);
 
   const selectedDefinition =
     definitions.find((definition) => definition.id === definitionId) ?? definitions[0];
+  const wanOfficial = accessType === 'official' && selectedDefinition?.providerType === 'wan-video';
+  const officialBaseUrl = wanOfficial
+    ? `https://${workspaceId.trim()}.cn-beijing.maas.aliyuncs.com`
+    : (selectedDefinition?.baseUrl ?? '');
   const canSubmit =
     name.trim() &&
     (accessType === 'official'
       ? Boolean(selectedDefinition)
       : Boolean(protocol && baseUrl.trim())) &&
-    (credentialConfigured || Boolean(secret.trim()));
+    (credentialConfigured || Boolean(secret.trim())) &&
+    (!wanOfficial || Boolean(wanVideoWorkspaceId(officialBaseUrl)));
 
   const submit = async () => {
     if (!canSubmit || submitting) return;
@@ -78,7 +90,7 @@ export function ProviderEditor({
             providerType: selectedDefinition.providerType,
             accessType: 'official',
             protocol: selectedDefinition.protocol,
-            baseUrl: selectedDefinition.baseUrl,
+            baseUrl: officialBaseUrl,
           }
         : {
             name: name.trim(),
@@ -162,10 +174,23 @@ export function ProviderEditor({
         <input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} />
       </label>
 
+      {wanOfficial && (
+        <label>
+          百炼业务空间 ID（北京地域）
+          <input
+            aria-label="百炼业务空间 ID（北京地域）"
+            value={workspaceId}
+            maxLength={63}
+            onChange={(event) => setWorkspaceId(event.target.value)}
+          />
+          <small>填写百炼控制台中的业务空间 ID，API Key 和模型权限须属于同一地域及业务空间。</small>
+        </label>
+      )}
+
       <label>
         Base URL
         <input
-          value={accessType === 'official' ? (selectedDefinition?.baseUrl ?? '') : baseUrl}
+          value={accessType === 'official' ? officialBaseUrl : baseUrl}
           readOnly={accessType === 'official'}
           placeholder="https://relay.example/v1"
           onChange={(event) => setBaseUrl(event.target.value)}
