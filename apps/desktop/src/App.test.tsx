@@ -907,6 +907,8 @@ describe('App', () => {
       if (method === 'document.draft.save') return Promise.resolve(saved);
       if (method === 'document.versions') return Promise.resolve([saved.currentVersion]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -1337,6 +1339,8 @@ describe('App', () => {
         });
       }
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
     render(<App />);
@@ -1488,6 +1492,8 @@ describe('App', () => {
       if (method === 'llm.generation.get') return stalePoll;
       if (method === 'llm.generation.cancel') return Promise.resolve(cancelled);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -2031,6 +2037,8 @@ describe('App', () => {
           ...prepared,
         });
       }
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
 
@@ -2335,6 +2343,8 @@ describe('App', () => {
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
       if (method === 'tag.list' || method === 'assetGroup.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
@@ -2561,6 +2571,8 @@ describe('App', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method + ' ' + JSON.stringify(params));
     });
     render(<App />);
@@ -2676,6 +2688,8 @@ describe('App', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
@@ -2838,6 +2852,8 @@ describe('App', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     const { container } = render(<App />);
@@ -2983,6 +2999,8 @@ describe('App', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'agent.changeSet.list') return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
@@ -3160,6 +3178,8 @@ describe('App', () => {
       if (method === 'video.generate.list' || method === 'agent.changeSet.list')
         return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     const { container } = render(<App />);
@@ -3395,6 +3415,8 @@ describe('App', () => {
       if (method === 'video.generate.list' || method === 'agent.changeSet.list')
         return Promise.resolve([]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     const { container } = render(<App />);
@@ -3566,6 +3588,8 @@ describe('App', () => {
           updatedAt: 'now',
         });
       if (method === 'novel.chapter.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'audio.list')
+        return Promise.resolve([]);
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);

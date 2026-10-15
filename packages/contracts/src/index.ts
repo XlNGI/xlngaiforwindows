@@ -1729,6 +1729,10 @@ export interface SceneInfo {
   sceneDocumentId?: string;
   videoPrompt?: string;
   materialBindings?: SceneMaterialBindingInfo[];
+  /** Explicit cast, independent of whether reference images exist. */
+  characterBindings?: SceneCharacterBindingInfo[];
+  /** Complete dialogue recording, distinct from character voice samples. */
+  dialogueAudioId?: string;
   position: number;
   rowVersion: number;
   createdAt: string;
@@ -1736,6 +1740,12 @@ export interface SceneInfo {
 }
 
 export type SceneMaterialRole = 'character' | 'scene' | 'prop' | 'other';
+
+export interface SceneCharacterBindingInfo {
+  characterDocumentId: string;
+  imageAssetId?: string;
+  voiceReferenceVersionId?: string;
+}
 
 export interface SceneMaterialBindingInfo {
   id: string;
@@ -1753,6 +1763,9 @@ export interface SceneSaveParams {
   sceneDocumentId?: string | null;
   videoPrompt?: string;
   materialBindings?: SceneMaterialBindingInfo[];
+  characterBindings?: SceneCharacterBindingInfo[];
+  /** Omitted preserves the recording; null clears it. */
+  dialogueAudioId?: string | null;
   expectedRowVersion?: number;
 }
 

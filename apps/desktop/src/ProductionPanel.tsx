@@ -46,6 +46,8 @@ import type {
   VideoAssetKind,
   VideoGenerationJobInfo,
   VideoGenerationMetadataInfo,
+  SceneInfo,
+  SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { adapterBindsCatalogModel } from '@ai-video/contracts';
@@ -74,6 +76,7 @@ interface ProductionPanelProps {
   sourceDocumentId?: string;
   seedPrompt?: string;
   seedImages?: string[];
+  seedReferenceBindings?: SceneMaterialBindingInfo[];
   preferredAssetKind?: ImageAssetKind;
   writable: boolean;
   assets?: AssetInfo[];
@@ -301,6 +304,7 @@ export function ProductionPanel({
   sourceDocumentId,
   seedPrompt,
   seedImages,
+  seedReferenceBindings,
   preferredAssetKind,
   writable,
   assets: controlledAssets,
@@ -344,40 +348,65 @@ export function ProductionPanel({
   const [voiceReferences, setVoiceReferences] = useState<CharacterVoiceReferenceInfo[]>([]);
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<string[]>([]);
   const [dialogueAudio, setDialogueAudio] = useState<AudioFileInfo>();
+  const [boundScene, setBoundScene] = useState<SceneInfo>();
+  const [sceneInputsLoading, setSceneInputsLoading] = useState(false);
+  const [sceneInputsError, setSceneInputsError] = useState('');
   useEffect(() => {
     let active = true;
     setVoiceReferences([]);
     setSelectedVoiceIds([]);
     setDialogueAudio(undefined);
-    if (!isOfficialVoiceVideo(adapter))
+    setBoundScene(undefined);
+    setSceneInputsError('');
+    setSceneInputsLoading(Boolean(projectId && sceneId));
+    if (!projectId || (!isOfficialVoiceVideo(adapter) && !sceneId))
       return () => {
         active = false;
       };
     let defaultsApplied = false;
+    let sequence = 0;
     const refresh = () => {
+      const token = ++sequence;
       if (projectId)
-        void callWorker('characterVoiceReference.list', {})
-          .then(async (values) => {
-            if (!active) return;
-            setVoiceReferences(values);
+        void Promise.all([
+          isOfficialVoiceVideo(adapter)
+            ? callWorker('characterVoiceReference.list', {})
+            : Promise.resolve([]),
+          sceneId ? callWorker('scene.list', {}) : Promise.resolve([]),
+        ])
+          .then(async ([values, scenes]) => {
+            if (!active || token !== sequence) return;
+            setVoiceReferences(values ?? []);
             if (sceneId && !defaultsApplied) {
-              defaultsApplied = true;
-              const scenes = await callWorker('scene.list', {});
-              if (active) {
-                const roleIds =
-                  scenes
-                    .find((scene) => scene.id === sceneId)
-                    ?.materialBindings?.filter((binding) => binding.role === 'character')
-                    .map((binding) => binding.sourceDocumentId) ?? [];
+              const currentScene = scenes.find((item) => item.id === sceneId);
+              if (!currentScene) throw new Error('当前场次不存在，请重新打开。');
+              const audio = currentScene.dialogueAudioId
+                ? await callWorker('audio.get', { audioId: currentScene.dialogueAudioId })
+                : undefined;
+              if (active && token === sequence) {
+                defaultsApplied = true;
+                setBoundScene(currentScene);
+                setDialogueAudio(audio ?? undefined);
                 setSelectedVoiceIds(
-                  values
-                    .filter((value) => roleIds.includes(value.characterDocumentId))
-                    .map((value) => value.characterDocumentId),
+                  adapter?.contractId?.includes('wan2-7')
+                    ? []
+                    : (currentScene.characterBindings ?? [])
+                        .filter((binding) => binding.voiceReferenceVersionId)
+                        .map((binding) => binding.characterDocumentId),
                 );
               }
             }
+            if (active && token === sequence) {
+              setSceneInputsLoading(false);
+              setSceneInputsError('');
+            }
           })
-          .catch(() => undefined);
+          .catch((error) => {
+            if (active && token === sequence) {
+              setSceneInputsLoading(false);
+              setSceneInputsError(errorMessage(error, '场次声音读取失败，请重新打开制作页。'));
+            }
+          });
     };
     refresh();
     window.addEventListener('character-voice-reference-updated', refresh);
@@ -385,7 +414,7 @@ export function ProductionPanel({
       active = false;
       window.removeEventListener('character-voice-reference-updated', refresh);
     };
-  }, [projectId, sceneId, adapter?.provider]);
+  }, [projectId, sceneId, adapter?.provider, adapter?.contractId, seedReferenceBindings]);
   const [assetKind, setAssetKind] = useState<ImageAssetKind>(
     preferredAssetKind ?? 'generated-image',
   );
@@ -400,6 +429,7 @@ export function ProductionPanel({
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
   const [savingPreview, setSavingPreview] = useState(false);
   const currentProjectIdRef = useRef(projectId);
+  const currentSceneIdRef = useRef(sceneId);
   const seedPromptRef = useRef(seedPrompt);
   seedPromptRef.current = seedPrompt;
   const seedImagesRef = useRef(seedImages);
@@ -416,6 +446,7 @@ export function ProductionPanel({
       : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
   currentProjectIdRef.current = projectId;
+  currentSceneIdRef.current = sceneId;
 
   useEffect(() => {
     setGeneratedImages(undefined);
@@ -427,12 +458,24 @@ export function ProductionPanel({
 
   useEffect(() => {
     if (!seedPrompt && !seedImages?.length) return;
+    if (isOfficialVoiceVideo(adapter)) {
+      setParameters((current) =>
+        seedOfficialVideoParameters(
+          adapter!,
+          current,
+          seedPrompt,
+          seedImages ?? [],
+          seedImages !== undefined,
+        ),
+      );
+      return;
+    }
     setParameters((current) => ({
       ...current,
       ...(seedPrompt ? { prompt: seedPrompt } : {}),
       ...(seedImages?.length ? { images: seedImages } : {}),
     }));
-  }, [seedPrompt, seedImages, sourceDocumentId]);
+  }, [seedPrompt, seedImages, sourceDocumentId, adapter]);
 
   useEffect(() => {
     if (focusedAssetId && assets.some((item) => item.id === focusedAssetId)) {
@@ -552,6 +595,7 @@ export function ProductionPanel({
               params,
               seedPromptRef.current,
               seedImagesRef.current ?? [],
+              seedImagesRef.current !== undefined,
             );
           const next = { ...params };
           if (seedPromptRef.current) next.prompt = seedPromptRef.current;
@@ -952,11 +996,52 @@ export function ProductionPanel({
     setBusy(true);
     setGenerationStatus('');
     try {
-      const selectedVoices = voiceReferences.filter((voice) =>
-        selectedVoiceIds.includes(voice.characterDocumentId),
-      );
+      if (sceneInputsLoading || sceneInputsError)
+        throw new Error(sceneInputsError || '正在读取场次绑定，请稍后提交。');
+      const driving = adapter.contractId?.includes('wan2-7');
+      if (
+        boundScene &&
+        !isOfficialVoiceVideo(adapter) &&
+        (boundScene.dialogueAudioId ||
+          boundScene.characterBindings?.some((item) => item.voiceReferenceVersionId))
+      )
+        throw new Error(
+          '当前连接不支持本场绑定的声音输入，请选择支持声音的视频模型，或先调整场次声音绑定。',
+        );
+      if (isOfficialVoiceVideo(adapter) && !driving && boundScene?.dialogueAudioId)
+        throw new Error(
+          '本场绑定了完整对白，请选择支持完整对白驱动的模型，或先解除完整对白绑定后使用音色参考。',
+        );
+      if (driving && boundScene?.dialogueAudioId && !dialogueAudio)
+        throw new Error('本场完整对白不可用，请重新绑定。');
+      if (
+        driving &&
+        !dialogueAudio &&
+        boundScene?.characterBindings?.some((item) => item.voiceReferenceVersionId)
+      )
+        throw new Error(
+          '当前模型使用完整对白驱动，不能使用本场的角色音色样本；请绑定完整对白或选择支持音色参考的模型。',
+        );
+      const selectedVoices = selectedVoiceIds.map((id) => {
+        const voice = voiceReferences.find((item) => item.characterDocumentId === id);
+        const binding = boundScene?.characterBindings?.find(
+          (item) => item.characterDocumentId === id,
+        );
+        if (
+          !voice ||
+          (binding?.voiceReferenceVersionId && voice.versionId !== binding.voiceReferenceVersionId)
+        )
+          throw new Error('场次绑定的声音样本已变化或不可用，请回场次重新选择并保存。');
+        return voice;
+      });
       const submissionParameters = isOfficialVoiceVideo(adapter)
-        ? addOfficialRoleVoices(adapter, parameters, selectedVoices, dialogueAudio?.id)
+        ? addOfficialRoleVoices(
+            adapter,
+            parameters,
+            selectedVoices,
+            dialogueAudio?.id,
+            seedReferenceBindings,
+          )
         : await resolveAssetReferences(parameters);
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
@@ -1026,22 +1111,42 @@ export function ProductionPanel({
       setGenerationStatus('请在 Windows 桌面应用中导入完整对白音频。');
       return;
     }
+    if (sceneId && (sceneInputsLoading || sceneInputsError || !boundScene)) {
+      setGenerationStatus(sceneInputsError || '正在读取场次绑定，请稍后导入。');
+      return;
+    }
     const capturedProjectId = projectId;
+    const capturedSceneId = sceneId;
+    const isCurrentScene = () =>
+      currentProjectIdRef.current === capturedProjectId &&
+      currentSceneIdRef.current === capturedSceneId;
     setBusy(true);
     try {
       const path = await openAudioDialog({
         multiple: false,
         filters: [{ name: '完整对白音频', extensions: ['wav', 'mp3'] }],
       });
-      if (typeof path !== 'string' || currentProjectIdRef.current !== capturedProjectId) return;
+      if (typeof path !== 'string' || !isCurrentScene()) return;
       const result = await callWorker('audio.import', {
         sourcePath: path,
         kind: 'imported-dialogue',
       });
-      if (currentProjectIdRef.current === capturedProjectId) setDialogueAudio(result.audio);
+      if (isCurrentScene()) {
+        if (boundScene) {
+          const updated = await callWorker('scene.save', {
+            sceneId: boundScene.id,
+            title: boundScene.title,
+            dialogueAudioId: result.audio.id,
+            expectedRowVersion: boundScene.rowVersion,
+          });
+          if (!isCurrentScene()) return;
+          setBoundScene(updated);
+          window.dispatchEvent(new Event('scene-cast-updated'));
+        }
+        setDialogueAudio(result.audio);
+      }
     } catch (error) {
-      if (currentProjectIdRef.current === capturedProjectId)
-        setGenerationStatus(errorMessage(error, '对白音频导入失败。'));
+      if (isCurrentScene()) setGenerationStatus(errorMessage(error, '对白音频导入失败。'));
     } finally {
       if (currentProjectIdRef.current === capturedProjectId) setBusy(false);
     }
@@ -1262,7 +1367,9 @@ export function ProductionPanel({
                         <button
                           type="button"
                           className="button secondary"
-                          disabled={!writable || busy}
+                          disabled={
+                            !writable || busy || sceneInputsLoading || Boolean(sceneInputsError)
+                          }
                           onClick={() => void importDrivingAudio()}
                         >
                           {dialogueAudio ? '更换完整对白' : '导入完整对白'}
@@ -1276,7 +1383,7 @@ export function ProductionPanel({
                     ) : (
                       <>
                         <p>
-                          选择已绑定样本的角色。场次绑定的角色会预先选中，生成时按当前确认的样本版本与台词提交。参考音色效果仍需试听验收。
+                          场次选用的声音版本会预先选中，图片与声音按实际提交顺序编号。声音版本变化后需回场次重新选择。
                         </p>
                         {voiceReferences.length === 0 ? (
                           <p>请先在“角色与场景”的角色资料中导入声音样本。</p>

@@ -46,6 +46,7 @@ import {
 import { runV14Rebuild } from './migration-v14.js';
 import { MIGRATION_V44 } from './migration-v44.js';
 import { MIGRATION_V45 } from './migration-v45.js';
+import { MIGRATION_V46 } from './migration-v46.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -479,6 +480,22 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(45, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 45) {
+    checkpoint(database);
+    database.transaction(() => {
+      const columns = database.prepare('PRAGMA table_info(scenes)').all() as Array<{
+        name: string;
+      }>;
+      if (!columns.some((column) => column.name === 'dialogue_audio_id'))
+        database.exec(
+          'ALTER TABLE scenes ADD COLUMN dialogue_audio_id TEXT REFERENCES audio_files(id) ON DELETE RESTRICT',
+        );
+      database.exec(MIGRATION_V46);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(46, now);
     })();
   }
   return getSchemaVersion(database);

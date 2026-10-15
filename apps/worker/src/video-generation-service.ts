@@ -38,7 +38,7 @@ import {
   getAdapter,
   validateAdapterParameters,
 } from '@ai-video/generation-adapters';
-import { createRepositories } from '@ai-video/persistence';
+import { createRepositories, SceneCharacterRepository } from '@ai-video/persistence';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
 import { multiplyDecimalStrings } from './usage-cost.js';
@@ -184,6 +184,13 @@ export class VideoGenerationService {
           providerRegion,
           modelId,
           sceneId: params.sceneId,
+          sceneBindings: params.sceneId
+            ? {
+                sceneDocumentId: repositories.scenes.get(params.sceneId)?.sceneDocumentId,
+                characters: new SceneCharacterRepository(database).list(params.sceneId),
+                dialogueAudioId: repositories.scenes.get(params.sceneId)?.dialogueAudioId,
+              }
+            : undefined,
           conversationId: params.conversationId,
           originalPrompt: params.originalPrompt,
           costNoticeAcknowledged: params.costNoticeAcknowledged === true,

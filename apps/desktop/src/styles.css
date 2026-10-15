@@ -8983,6 +8983,13 @@ button {
   gap: 12px;
   min-width: 0;
 }
+.scene-workspace .button.secondary {
+  display: inline-flex;
+}
+.scene-workspace .scene-prompt-heading,
+.scene-workspace .toolbar-actions {
+  flex-wrap: wrap;
+}
 .scene-prompt-panel,
 .scene-material-panel {
   padding: 16px;
@@ -9027,7 +9034,7 @@ button {
 .scene-material-card img {
   width: 100%;
   aspect-ratio: 16 / 9;
-  object-fit: cover;
+  object-fit: contain;
 }
 .scene-material-missing {
   display: grid;
@@ -9035,4 +9042,32 @@ button {
   aspect-ratio: 16 / 9;
   color: var(--muted, #9ca3af);
   background: #111315;
+}
+.scene-cast-add {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.scene-cast-add select {
+  flex: 1;
+  min-width: 0;
+}
+.scene-material-card {
+  min-width: 0;
+}
+.scene-material-card select,
+.scene-material-card audio,
+.scene-dialogue-picker select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+.scene-material-card label,
+.scene-dialogue-picker {
+  display: grid;
+  gap: 6px;
+}
+.scene-dialogue-picker {
+  margin-top: 16px;
 }

@@ -480,6 +480,7 @@ export interface SceneRecord {
   sceneDocumentId?: string;
   videoPrompt?: string;
   materialBindingsJson?: string;
+  dialogueAudioId?: string;
   position: number;
   rowVersion: number;
   createdAt: string;

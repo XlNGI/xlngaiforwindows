@@ -1,0 +1,379 @@
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  AdapterDescriptor,
+  SceneInfo,
+  VideoGenerationPrepareParams,
+} from '@ai-video/contracts';
+import { ProductionPanel } from './ProductionPanel';
+import { callWorker } from './worker-client';
+import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
+vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
+afterEach(() => {
+  cleanup();
+  vi.resetAllMocks();
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+});
+const adapter: AdapterDescriptor = {
+  key: 'REFERENCE_TO_VIDEO:wan-video:cn.qwen.wan3-0-video:contract-3',
+  capability: 'REFERENCE_TO_VIDEO',
+  capabilityLabel: '参考生视频',
+  provider: 'wan-video',
+  providerLabel: '万相',
+  model: 'cn.qwen.wan3-0-video',
+  modelLabel: 'Wan 3.0',
+  apiVersion: 'contract-3',
+  schemaVersion: 3,
+  contractId: 'cn.qwen.wan3-0-video',
+  contractRevision: 3,
+  endpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis',
+  documentationUrl: 'https://help.aliyun.com',
+  credentialProvider: 'wan-video',
+  parameterSchema: {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object',
+    additionalProperties: false,
+    required: [],
+    properties: {
+      prompt: { type: 'string', title: '提示词' },
+      media: { type: 'array', title: '素材', items: { type: 'object' } },
+      duration: { type: 'integer', title: '时长', default: 5 },
+    },
+  },
+  uiSchema: { fields: [] },
+};
+const drivingAdapter: AdapterDescriptor = {
+  ...adapter,
+  key: 'REFERENCE_TO_VIDEO:wan-video:cn.qwen.wan2-7-i2v:contract-2',
+  model: 'cn.qwen.wan2-7-i2v',
+  apiVersion: 'contract-2',
+  contractId: 'cn.qwen.wan2-7-i2v',
+  contractRevision: 2,
+};
+const voice = {
+  id: 'voice',
+  projectId: 'project',
+  characterDocumentId: 'actor',
+  characterName: '林澈',
+  versionId: 'voice-v1',
+  revision: 1,
+  rowVersion: 1,
+  audioId: 'sample',
+  audioName: '声音样本',
+  durationMs: 3000,
+  sizeBytes: 100,
+  mime: 'audio/wav',
+};
+const scene: SceneInfo = {
+  id: 'scene',
+  projectId: 'project',
+  title: '第一场',
+  position: 0,
+  rowVersion: 1,
+  createdAt: 'now',
+  updatedAt: 'now',
+  characterBindings: [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'voice-v1' }],
+};
+const dialogue = {
+  id: 'dialogue',
+  projectId: 'project',
+  kind: 'imported-dialogue',
+  name: '完整对白',
+  relativePath: 'assets/audio/dialogue.wav',
+  mime: 'audio/wav',
+  sizeBytes: 100,
+  contentHash: 'a'.repeat(64),
+  durationMs: 3000,
+  sampleRate: 48000,
+  channels: 1,
+  createdAt: 'now',
+};
+function mock(
+  sceneValue: SceneInfo,
+  descriptor = adapter,
+  audioImport: Promise<unknown> = Promise.resolve({ audio: dialogue }),
+) {
+  vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+    if (method === 'adapter.catalog')
+      return Promise.resolve({
+        capabilities: [{ key: 'REFERENCE_TO_VIDEO', label: '参考生视频' }],
+        providers: [{ key: descriptor.provider, label: '万相' }],
+        adapters: [descriptor],
+      });
+    if (method === 'provider.profile.list')
+      return Promise.resolve([
+        {
+          id: 'profile',
+          name: '万相',
+          category: 'video',
+          providerType: descriptor.provider,
+          accessType: 'official',
+          protocol: 'wan-video',
+          baseUrl: 'https://dashscope.aliyuncs.com',
+          enabled: true,
+          connectionStatus: 'ready',
+          createdAt: 'now',
+          updatedAt: 'now',
+        },
+      ]);
+    if (method === 'provider.model.list')
+      return Promise.resolve([
+        {
+          id: 'model',
+          providerProfileId: 'profile',
+          remoteModelId: descriptor.contractId?.includes('wan2-7')
+            ? 'wan2.7-i2v-2026-04-25'
+            : 'wan3.0-video',
+          displayName: 'Wan 3.0',
+          contractId: descriptor.contractId,
+          contractStatus: 'enabled',
+          enabled: true,
+          source: 'built-in',
+          capabilities: { videoGeneration: true },
+          createdAt: 'now',
+          updatedAt: 'now',
+        },
+      ]);
+    if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+    if (method === 'scene.list')
+      return Promise.resolve([sceneValue, { ...sceneValue, id: 'next-scene' }]);
+    if (method === 'scene.save')
+      return Promise.resolve({
+        ...sceneValue,
+        dialogueAudioId: params.dialogueAudioId,
+        rowVersion: 2,
+      });
+    if (method === 'audio.import') return audioImport;
+    if (method === 'characterVoiceReference.list') return Promise.resolve([voice]);
+    if (method === 'audio.get')
+      return Promise.resolve({
+        id: 'dialogue',
+        projectId: 'project',
+        kind: 'imported-dialogue',
+        name: '完整对白',
+        relativePath: 'assets/audio/dialogue.wav',
+        mime: 'audio/wav',
+        sizeBytes: 100,
+        contentHash: 'a'.repeat(64),
+        durationMs: 3000,
+        sampleRate: 48000,
+        channels: 1,
+        createdAt: 'now',
+      });
+    if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+    if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+    if (method === 'video.generate.prepare')
+      return Promise.resolve({ id: 'pending', status: 'pending' });
+    if (method === 'media.generation.requestSubmission')
+      return Promise.resolve({
+        job: { id: 'pending' },
+        confirmation: {
+          confirmationToken: 'token',
+          jobId: 'pending',
+          kind: 'video',
+          draftVersion: 1,
+          providerName: '万相',
+          modelName: 'Wan 3.0',
+          adapterKey: descriptor.key,
+          parameterSummary: [],
+          costNotice: { required: true, summary: '可能产生费用' },
+          expiresAt: '2099-01-01',
+        },
+      });
+    throw new Error(`Unexpected method ${method}`);
+  }) as typeof callWorker);
+}
+
+describe('scene production bindings', () => {
+  it('rejects voice samples on a dialogue driving model when no complete dialogue is bound', async () => {
+    mock(scene, drivingAdapter);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        seedPrompt="对白"
+        writable
+      />,
+    );
+    await screen.findByRole('button', { name: '导入完整对白' });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    expect(await screen.findByText(/不能使用本场的角色音色样本/)).toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+    ).toBe(false);
+  });
+
+  it('refreshes official media when reopening the same scene with changed image bindings', async () => {
+    mock(scene);
+    const props = {
+      expanded: true,
+      capability: 'REFERENCE_TO_VIDEO' as const,
+      projectId: 'project',
+      sceneId: 'scene',
+      seedPrompt: '两人对白',
+      writable: true,
+    };
+    const view = render(<ProductionPanel {...props} seedImages={['asset://old-image']} />);
+    await screen.findByRole('checkbox', { name: /林澈/ });
+    view.rerender(<ProductionPanel {...props} seedImages={['asset://new-image']} />);
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      ).toBe(true),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(
+        ([method]) => method === 'video.generate.prepare',
+      )?.[1] as VideoGenerationPrepareParams;
+    expect(prepared.parameters.media).toContainEqual({
+      type: 'reference_image',
+      url: 'project-asset://new-image',
+    });
+    expect(JSON.stringify(prepared.parameters)).not.toContain('old-image');
+    expect(prepared.parameters).not.toHaveProperty('images');
+  });
+
+  it('persists imported complete dialogue to the bound scene before using it', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
+    vi.mocked(openAudioDialog).mockResolvedValue('E:\\dialogue.wav');
+    mock(scene, drivingAdapter);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        seedPrompt="对白"
+        writable
+      />,
+    );
+    const button = await screen.findByRole('button', { name: '导入完整对白' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('scene.save', {
+        sceneId: 'scene',
+        title: scene.title,
+        dialogueAudioId: 'dialogue',
+        expectedRowVersion: 1,
+      }),
+    );
+    expect(await screen.findByRole('button', { name: '更换完整对白' })).toBeInTheDocument();
+  });
+
+  it('does not apply a delayed dialogue import after switching scenes within one project', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
+    vi.mocked(openAudioDialog).mockResolvedValue('E:\\dialogue.wav');
+    let finishImport!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      finishImport = resolve;
+    });
+    mock(scene, drivingAdapter, pending);
+    const props = {
+      expanded: true,
+      capability: 'REFERENCE_TO_VIDEO' as const,
+      projectId: 'project',
+      seedPrompt: '对白',
+      writable: true,
+    };
+    const view = render(<ProductionPanel {...props} sceneId="scene" />);
+    const button = await screen.findByRole('button', { name: '导入完整对白' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('audio.import', {
+        sourcePath: 'E:\\dialogue.wav',
+        kind: 'imported-dialogue',
+      }),
+    );
+    view.rerender(<ProductionPanel {...props} sceneId="next-scene" />);
+    finishImport({ audio: dialogue });
+    await waitFor(() => expect(screen.getByRole('button', { name: '导入完整对白' })).toBeEnabled());
+    expect(vi.mocked(callWorker).mock.calls.some(([method]) => method === 'scene.save')).toBe(
+      false,
+    );
+    expect(screen.queryByRole('button', { name: '更换完整对白' })).not.toBeInTheDocument();
+  });
+
+  it('rejects complete dialogue on a voice reference model instead of omitting it', async () => {
+    mock({ ...scene, dialogueAudioId: 'dialogue' });
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        seedPrompt="台词"
+        writable
+      />,
+    );
+    await screen.findByRole('checkbox', { name: /林澈/ });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    expect(await screen.findByText(/本场绑定了完整对白/)).toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+    ).toBe(false);
+  });
+  it('preselects a bound voice without any character image and includes the pinned version before payment', async () => {
+    mock(scene);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        seedPrompt="林澈说你好"
+        writable
+      />,
+    );
+    expect(await screen.findByRole('checkbox', { name: /林澈/ })).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      ).toBe(true),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(
+        ([method]) => method === 'video.generate.prepare',
+      )?.[1] as VideoGenerationPrepareParams;
+    expect(prepared.sceneId).toBe('scene');
+    expect(prepared.parameters.media).toEqual([
+      { type: 'reference_audio', url: 'character-voice://actor/voice-v1' },
+    ]);
+    expect(await screen.findByRole('button', { name: '批准' })).toBeInTheDocument();
+    expect(
+      vi
+        .mocked(callWorker)
+        .mock.calls.some(([method]) => method === 'media.generation.confirmSubmission'),
+    ).toBe(false);
+  });
+  it('blocks stale voices without silently switching to the newest sample', async () => {
+    mock({
+      ...scene,
+      characterBindings: [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'old' }],
+    });
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        seedPrompt="台词"
+        writable
+      />,
+    );
+    await screen.findByRole('checkbox', { name: /林澈/ });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    expect(await screen.findByText(/场次绑定的声音样本已变化或不可用/)).toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+    ).toBe(false);
+  });
+});

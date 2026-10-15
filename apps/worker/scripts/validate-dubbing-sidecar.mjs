@@ -202,6 +202,17 @@ try {
       hash(await readFile(audioSource.path)) === imported.audio.contentHash,
     'Imported audio source/hash failed.',
   );
+  const currentScene = (await request('scene.list')).find((item) => item.id === scene.id);
+  requireCondition(
+    currentScene?.characterBindings?.some((item) => item.characterDocumentId === character.id),
+    'Dialogue speaker was not bound to the scene cast.',
+  );
+  await request('scene.save', {
+    sceneId: scene.id,
+    title: scene.title,
+    dialogueAudioId: imported.audio.id,
+    expectedRowVersion: currentScene.rowVersion,
+  });
   await request('project.close');
   const sourceId = randomUUID();
   const sourceRelative = `assets/videos/${sourceId}.mp4`;
@@ -294,6 +305,12 @@ try {
   await request('project.open', { rootPath: exportRoot });
   const integrity = await request('project.integrity');
   requireCondition(integrity.ok, 'Exported project integrity failed.');
+  const exportedScene = (await request('scene.list')).find((item) => item.id === scene.id);
+  requireCondition(
+    exportedScene?.dialogueAudioId === imported.audio.id &&
+      exportedScene.characterBindings?.some((item) => item.characterDocumentId === character.id),
+    'Exported scene lost its cast or dialogue binding.',
+  );
   const exportedAudio = await request('audio.mediaSource', { audioId: imported.audio.id });
   requireCondition(
     hash(await readFile(exportedAudio.path)) === imported.audio.contentHash,
@@ -316,6 +333,7 @@ try {
         sourcePreserved: true,
         taskLog: true,
         projectExportAndIntegrity: true,
+        sceneCastAndDialoguePreserved: true,
         paidRequests: 0,
       },
       null,

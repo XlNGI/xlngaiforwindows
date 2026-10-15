@@ -807,6 +807,15 @@ export class ImageGenerationService {
       if (asset.deletedAt) return { deleted: true as const, referenceCount: 0 };
       const referenceCount =
         repositories.assets.countDraftReferences(assetId) +
+        Number(
+          (
+            database
+              .prepare(
+                'SELECT count(*) AS count FROM scene_character_bindings WHERE image_asset_id=?',
+              )
+              .get(assetId) as { count: number }
+          ).count,
+        ) +
         new DubbingRepository(database, project.id).countVideoReferences(assetId);
       if (referenceCount > 0 && !confirm) {
         throw new Error(`Asset is referenced by ${referenceCount} production draft(s).`);
@@ -867,6 +876,12 @@ export class ImageGenerationService {
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       if (!asset.deletedAt || !asset.trashRelativePath)
         throw new Error('Only trashed assets can be permanently deleted.');
+      if (
+        database
+          .prepare('SELECT 1 FROM scene_character_bindings WHERE image_asset_id=? LIMIT 1')
+          .get(assetId)
+      )
+        throw new Error('素材仍被场次角色引用，请先解除绑定。');
       const path = resolveProjectRelativePath(project.rootPath, asset.trashRelativePath);
       rmSync(path, { force: true });
       const now = new Date().toISOString();

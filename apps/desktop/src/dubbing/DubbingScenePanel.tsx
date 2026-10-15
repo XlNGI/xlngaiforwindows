@@ -21,6 +21,7 @@ type Props = {
   documents: DocumentSummary[];
   writable: boolean;
   onOpenAsset?: (assetId: string) => void;
+  characterDocumentIds?: string[];
 };
 type Editor = {
   id?: string;
@@ -81,7 +82,14 @@ function jobCueId(job: DubbingJobInfo): string | undefined {
 export function DubbingScenePanel(props: Props) {
   return <DubbingSceneContent key={`${props.projectId}:${props.sceneId}`} {...props} />;
 }
-function DubbingSceneContent({ projectId, sceneId, documents, writable, onOpenAsset }: Props) {
+function DubbingSceneContent({
+  projectId,
+  sceneId,
+  documents,
+  writable,
+  onOpenAsset,
+  characterDocumentIds,
+}: Props) {
   const active = useRef(true);
   const loadSequence = useRef(0);
   const [expanded, setExpanded] = useState(false);
@@ -105,6 +113,9 @@ function DubbingSceneContent({ projectId, sceneId, documents, writable, onOpenAs
     (item) =>
       item.projectId === projectId &&
       item.kind === 'character' &&
+      (!characterDocumentIds ||
+        characterDocumentIds.includes(item.id) ||
+        snapshot?.cues.some((cue) => cue.characterDocumentId === item.id)) &&
       item.lifecycleStatus !== 'archived',
   );
   const voices = snapshot?.voices ?? [];
@@ -200,6 +211,7 @@ function DubbingSceneContent({ projectId, sceneId, documents, writable, onOpenAs
       await operation();
       if (!active.current) return;
       await refresh();
+      window.dispatchEvent(new Event('scene-audio-updated'));
       if (active.current && success) setMessage(success);
     } catch (error) {
       if (active.current)
@@ -254,6 +266,7 @@ function DubbingSceneContent({ projectId, sceneId, documents, writable, onOpenAs
         expectedRowVersion: editor.rowVersion,
       });
       if (active.current) setEditor(newEditor());
+      window.dispatchEvent(new Event('scene-cast-updated'));
     }, '台词已保存，可生成或导入配音。');
   };
   const editCue = (cue: DubbingCueInfo) => {

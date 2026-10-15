@@ -30,6 +30,7 @@ import type {
   MessageConstraintParams,
   MessageDocumentParams,
   SceneInfo,
+  SceneCharacterBindingInfo,
   SceneMaterialBindingInfo,
   SceneSaveParams,
   ShotInfo,
@@ -43,6 +44,7 @@ import type {
 } from '@ai-video/domain';
 import {
   createRepositories,
+  SceneCharacterRepository,
   rebuildLibraryChunksForRecord,
   syncLibraryChunksForChatMessage,
 } from '@ai-video/persistence';
@@ -130,7 +132,9 @@ export class ContentService {
     return this.projects.access(false, (database, project) =>
       createRepositories(database)
         .scenes.listByProject(project.id)
-        .map((scene) => this.toSceneInfo(scene)),
+        .map((scene) =>
+          this.toSceneInfo(scene, new SceneCharacterRepository(database).list(scene.id)),
+        ),
     );
   }
 
@@ -162,6 +166,49 @@ export class ContentService {
           params.materialBindings === undefined
             ? this.parseSceneMaterialBindings(existing?.materialBindingsJson)
             : this.validateSceneMaterialBindings(database, project.id, params.materialBindings);
+        const castRepository = new SceneCharacterRepository(database);
+        const characterBindings =
+          params.characterBindings === undefined
+            ? existing
+              ? castRepository.list(existing.id)
+              : []
+            : params.characterBindings;
+        if (
+          params.characterBindings !== undefined &&
+          (characterBindings.length > 30 ||
+            new Set(characterBindings.map((item) => item.characterDocumentId)).size !==
+              characterBindings.length)
+        )
+          throw new Error('场次最多绑定 30 位不重复的角色。');
+        if (params.characterBindings !== undefined) {
+          for (const binding of characterBindings) {
+            const character = database
+              .prepare(
+                `SELECT id FROM documents d WHERE id=? AND project_id=? AND kind='character' AND lifecycle_status='active'
+              AND NOT EXISTS(SELECT 1 FROM document_bindings WHERE document_id=d.id AND domain_scope='novel' AND status<>'archived')`,
+              )
+              .get(binding.characterDocumentId, project.id);
+            if (!character) throw new Error('场次只能绑定当前项目中有效的制作角色资料。');
+          }
+          if (existing) {
+            const speakers = database
+              .prepare(
+                "SELECT DISTINCT character_document_id AS id FROM dubbing_cues WHERE scene_id=? AND deleted_at IS NULL AND speaker_kind='character'",
+              )
+              .all(existing.id) as Array<{ id: string }>;
+            if (
+              speakers.some(
+                (speaker) =>
+                  !characterBindings.some((binding) => binding.characterDocumentId === speaker.id),
+              )
+            )
+              throw new Error('角色仍有本场台词，请先移除或更改对应台词。');
+          }
+        }
+        const dialogueAudioId =
+          params.dialogueAudioId === undefined
+            ? existing?.dialogueAudioId
+            : (params.dialogueAudioId ?? undefined);
         const now = new Date().toISOString();
         const record = {
           id: existing?.id ?? randomUUID(),
@@ -170,6 +217,7 @@ export class ContentService {
           sceneDocumentId,
           videoPrompt,
           materialBindingsJson: JSON.stringify(materialBindings),
+          dialogueAudioId,
           position:
             existing?.position ??
             (repositories.scenes.listByProject(project.id).at(-1)?.position ?? -1) + 1,
@@ -178,6 +226,8 @@ export class ContentService {
           updatedAt: now,
         };
         repositories.scenes.save(record);
+        if (params.characterBindings !== undefined)
+          castRepository.replace(record.id, characterBindings);
         rebuildLibraryChunksForRecord(
           database,
           project.id,
@@ -194,23 +244,30 @@ export class ContentService {
         );
         repositories.projects.touch(now);
         project.updatedAt = now;
-        return this.toSceneInfo(repositories.scenes.get(record.id)!);
+        return this.toSceneInfo(
+          repositories.scenes.get(record.id)!,
+          castRepository.list(record.id),
+        );
       })(),
     );
   }
 
-  private toSceneInfo(record: {
-    id: string;
-    projectId: string;
-    title: string;
-    sceneDocumentId?: string;
-    videoPrompt?: string;
-    materialBindingsJson?: string;
-    position: number;
-    rowVersion: number;
-    createdAt: string;
-    updatedAt: string;
-  }): SceneInfo {
+  private toSceneInfo(
+    record: {
+      id: string;
+      projectId: string;
+      title: string;
+      sceneDocumentId?: string;
+      videoPrompt?: string;
+      materialBindingsJson?: string;
+      dialogueAudioId?: string;
+      position: number;
+      rowVersion: number;
+      createdAt: string;
+      updatedAt: string;
+    },
+    characterBindings: SceneCharacterBindingInfo[] = [],
+  ): SceneInfo {
     return {
       id: record.id,
       projectId: record.projectId,
@@ -218,6 +275,8 @@ export class ContentService {
       sceneDocumentId: record.sceneDocumentId,
       videoPrompt: record.videoPrompt,
       materialBindings: this.parseSceneMaterialBindings(record.materialBindingsJson),
+      characterBindings,
+      dialogueAudioId: record.dialogueAudioId,
       position: record.position,
       rowVersion: record.rowVersion,
       createdAt: record.createdAt,

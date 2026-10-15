@@ -79,6 +79,7 @@ import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
 import { SceneWorkspace } from './SceneWorkspace';
+import { sceneReferenceBindings } from './scene-reference-bindings';
 import { ScriptWorkspace } from './ScriptWorkspace';
 import { ShotWorkspace, type ShotReferenceAssets } from './ShotWorkspace';
 import { MaintenanceDialog } from './MaintenanceDialog';
@@ -1136,6 +1137,7 @@ export function App() {
     prompt: string;
     assetKind?: 'character' | 'scene' | 'first-frame';
     images?: string[];
+    referenceBindings?: import('@ai-video/contracts').SceneMaterialBindingInfo[];
   }>();
   const [linkedAssets, setLinkedAssets] = useState<AssetInfo[]>([]);
 
@@ -2003,6 +2005,26 @@ export function App() {
     openProjectView('shots');
   };
 
+  useEffect(() => {
+    let active = true;
+    const expectedProjectId = project?.id;
+    const refresh = () => {
+      if (expectedProjectId)
+        void callWorker('scene.list', {})
+          .then((rows) => {
+            if (!active || activeProjectIdRef.current !== expectedProjectId) return;
+            setScenes(rows);
+            setScene((current) => rows.find((row) => row.id === current?.id) ?? current);
+          })
+          .catch(() => undefined);
+    };
+    window.addEventListener('scene-cast-updated', refresh);
+    return () => {
+      active = false;
+      window.removeEventListener('scene-cast-updated', refresh);
+    };
+  }, [project?.id]);
+
   const bindSceneDocument = async (sceneDocumentId: string) => {
     if (!scene || !writable || sceneBindingBusy) return;
     const expectedProjectId = project?.id;
@@ -2103,8 +2125,12 @@ export function App() {
   const saveSceneVideoPrompt = async (
     nextPrompt: string,
     materialBindings: import('@ai-video/contracts').SceneMaterialBindingInfo[],
+    characterBindings: import('@ai-video/contracts').SceneCharacterBindingInfo[],
+    dialogueAudioId?: string,
   ) => {
     if (!scene) return;
+    const expectedProjectId = project?.id;
+    const requestId = sceneRequest.current;
     try {
       const updated = await callWorker('scene.save', {
         sceneId: scene.id,
@@ -2112,33 +2138,53 @@ export function App() {
         sceneDocumentId: scene.sceneDocumentId ?? null,
         videoPrompt: nextPrompt,
         materialBindings,
+        characterBindings,
+        dialogueAudioId: dialogueAudioId ?? null,
         expectedRowVersion: scene.rowVersion,
       });
+      if (activeProjectIdRef.current !== expectedProjectId || sceneRequest.current !== requestId)
+        return;
       setScene(updated);
       setScenes((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
       setSceneVideoPrompt(updated.videoPrompt ?? '');
       setChatMessage('场次视频提示词和素材绑定已保存。');
+      return updated;
     } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '场次提示词保存失败');
+      if (activeProjectIdRef.current === expectedProjectId && sceneRequest.current === requestId)
+        setChatMessage(reason instanceof Error ? reason.message : '场次提示词保存失败');
     }
   };
 
   const openSceneProduction = async (
     materialBindings: import('@ai-video/contracts').SceneMaterialBindingInfo[],
+    characterBindings: import('@ai-video/contracts').SceneCharacterBindingInfo[],
+    dialogueAudioId?: string,
   ) => {
     if (!scene) return;
     if (
       sceneVideoPrompt !== (scene.videoPrompt ?? '') ||
-      JSON.stringify(materialBindings) !== JSON.stringify(scene.materialBindings ?? [])
+      JSON.stringify(materialBindings) !== JSON.stringify(scene.materialBindings ?? []) ||
+      JSON.stringify(characterBindings) !== JSON.stringify(scene.characterBindings ?? []) ||
+      dialogueAudioId !== scene.dialogueAudioId
     ) {
-      await saveSceneVideoPrompt(sceneVideoPrompt, materialBindings);
+      if (
+        !(await saveSceneVideoPrompt(
+          sceneVideoPrompt,
+          materialBindings,
+          characterBindings,
+          dialogueAudioId,
+        ))
+      )
+        return;
     }
+    const references = sceneReferenceBindings(materialBindings, characterBindings, documents);
     setProductionSeed({
       sceneId: scene.id,
       prompt: sceneVideoPrompt.trim(),
-      images: materialBindings.map((item) => `asset://${item.assetId}`),
+      images: references.map((item) => `asset://${item.assetId}`),
+      referenceBindings: references,
     });
-    setProductionCapability(materialBindings.length > 0 ? 'REFERENCE_TO_VIDEO' : 'TEXT_TO_VIDEO');
+    setProductionCapability(references.length > 0 ? 'REFERENCE_TO_VIDEO' : 'TEXT_TO_VIDEO');
   };
 
   useEffect(() => {
@@ -3318,11 +3364,16 @@ export function App() {
       capability={productionCapability}
       projectId={project?.id}
       projectRootPath={project?.rootPath}
-      shotId={productionSeed?.documentId ? undefined : (productionSeed?.shotId ?? shot?.id)}
+      shotId={
+        productionSeed?.documentId || productionSeed?.sceneId
+          ? undefined
+          : (productionSeed?.shotId ?? shot?.id)
+      }
       sceneId={productionSeed?.sceneId}
       sourceDocumentId={productionSeed?.documentId}
       seedPrompt={productionSeed?.prompt}
       seedImages={productionSeed?.images}
+      seedReferenceBindings={productionSeed?.referenceBindings}
       preferredAssetKind={productionSeed?.assetKind}
       writable={writable}
       assets={assets}
@@ -4347,10 +4398,17 @@ export function App() {
                           assets={assets}
                           writable={writable}
                           onPromptChange={setSceneVideoPrompt}
-                          onSave={(nextPrompt, bindings) =>
-                            void saveSceneVideoPrompt(nextPrompt, bindings)
+                          onSave={(nextPrompt, bindings, characters, dialogueAudioId) =>
+                            void saveSceneVideoPrompt(
+                              nextPrompt,
+                              bindings,
+                              characters,
+                              dialogueAudioId,
+                            )
                           }
-                          onGenerateVideo={(bindings) => void openSceneProduction(bindings)}
+                          onGenerateVideo={(bindings, characters, dialogueAudioId) =>
+                            void openSceneProduction(bindings, characters, dialogueAudioId)
+                          }
                           onOpenAsset={(assetId) => {
                             updateAssets(assets, assetId);
                             openProjectView('assets', assetId);

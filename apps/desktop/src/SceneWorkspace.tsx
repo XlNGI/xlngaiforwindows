@@ -6,10 +6,14 @@ import type {
   SceneInfo,
   SceneMaterialBindingInfo,
   SceneMaterialRole,
+  SceneCharacterBindingInfo,
+  CharacterVoiceReferenceInfo,
+  AudioFileInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { AssetImagePreview } from './AssetImagePreview';
 import { DubbingScenePanel } from './dubbing/DubbingScenePanel';
+import { SceneCastEditor } from './SceneCastEditor';
 
 const REFERENCE_PATTERN = /\[(角色|场景|道具|人物|地点|物件):([^\]]+)\]/gu;
 
@@ -28,7 +32,11 @@ function isImage(asset: AssetInfo): boolean {
   return !asset.deletedAt && !asset.kind.toLowerCase().includes('video');
 }
 
-export function SceneWorkspace({
+export function SceneWorkspace(props: Parameters<typeof SceneWorkspaceContent>[0]) {
+  return <SceneWorkspaceContent key={`${props.projectId}:${props.scene.id}`} {...props} />;
+}
+
+function SceneWorkspaceContent({
   projectId,
   scene,
   prompt,
@@ -49,15 +57,80 @@ export function SceneWorkspace({
   assets: AssetInfo[];
   writable: boolean;
   onPromptChange: (value: string) => void;
-  onSave: (prompt: string, bindings: SceneMaterialBindingInfo[]) => void;
-  onGenerateVideo: (bindings: SceneMaterialBindingInfo[]) => void;
+  onSave: (
+    prompt: string,
+    bindings: SceneMaterialBindingInfo[],
+    characters: SceneCharacterBindingInfo[],
+    dialogueAudioId?: string,
+  ) => void;
+  onGenerateVideo: (
+    bindings: SceneMaterialBindingInfo[],
+    characters: SceneCharacterBindingInfo[],
+    dialogueAudioId?: string,
+  ) => void;
   onOpenAsset?: (assetId: string) => void;
 }) {
-  const [localBindings, setLocalBindings] = useState(bindings);
+  const [localBindings, setLocalBindings] = useState(
+    bindings.filter((item) => item.role !== 'character'),
+  );
+  const [characters, setCharacters] = useState(scene.characterBindings ?? []);
+  const [dialogueAudioId, setDialogueAudioId] = useState(scene.dialogueAudioId);
+  const [voices, setVoices] = useState<CharacterVoiceReferenceInfo[]>([]);
+  const [audios, setAudios] = useState<AudioFileInfo[]>([]);
+  const [audioLoaded, setAudioLoaded] = useState(false);
+  const requestSequence = useRef(0);
   const [message, setMessage] = useState('');
-  const autoBoundScene = useRef<string | undefined>(undefined);
 
-  useEffect(() => setLocalBindings(bindings), [bindings]);
+  useEffect(() => {
+    requestSequence.current++;
+    setLocalBindings(
+      bindings.filter(
+        (item) =>
+          item.role !== 'character' &&
+          !(
+            item.role === 'scene' &&
+            item.source === 'auto' &&
+            item.sourceDocumentId !== scene.sceneDocumentId
+          ),
+      ),
+    );
+    setCharacters(scene.characterBindings ?? []);
+    setDialogueAudioId(scene.dialogueAudioId);
+  }, [scene.rowVersion, scene.sceneDocumentId]);
+  useEffect(() => {
+    let active = true;
+    let sequence = 0;
+    const refresh = () => {
+      const token = ++sequence;
+      if (projectId)
+        void Promise.all([
+          callWorker('characterVoiceReference.list', {}),
+          callWorker('audio.list', {}),
+        ])
+          .then(([nextVoices, nextAudios]) => {
+            if (active && token === sequence) {
+              setVoices(nextVoices ?? []);
+              setAudios(nextAudios ?? []);
+              setAudioLoaded(true);
+            }
+          })
+          .catch(() => {
+            if (active && token === sequence) {
+              setAudioLoaded(true);
+              setMessage('声音资料读取失败，可重新打开场次后重试。');
+            }
+          });
+    };
+    refresh();
+    window.addEventListener('character-voice-reference-updated', refresh);
+    window.addEventListener('scene-audio-updated', refresh);
+    return () => {
+      active = false;
+      requestSequence.current++;
+      window.removeEventListener('character-voice-reference-updated', refresh);
+      window.removeEventListener('scene-audio-updated', refresh);
+    };
+  }, [projectId]);
 
   const candidatesByRole = useMemo(() => {
     const map: Record<SceneMaterialRole, AssetInfo[]> = {
@@ -81,9 +154,12 @@ export function SceneWorkspace({
   }, [assets]);
 
   const autoBind = async () => {
+    if (!writable) return;
+    const sequence = ++requestSequence.current;
     setMessage('正在识别场次素材…');
     try {
       const next = new Map<string, SceneMaterialBindingInfo>();
+      const nextCharacters: SceneCharacterBindingInfo[] = [];
       const mentions = [...prompt.matchAll(REFERENCE_PATTERN)];
       if (scene.sceneDocumentId) {
         const bound = documents.find((document) => document.id === scene.sceneDocumentId);
@@ -109,11 +185,15 @@ export function SceneWorkspace({
         const role = normalizeRole(match[1] ?? '');
         const label = (match[2] ?? '').trim();
         if (!label || next.has(bindingKey(role, label))) continue;
-        const document = documents.find(
+        const matches = documents.filter(
           (item) =>
-            item.title.includes(label) &&
+            item.title.trim() === label &&
+            item.domainScope !== 'novel' &&
+            item.lifecycleStatus !== 'archived' &&
+            item.projectId === projectId &&
             (item.kind === role || role === 'prop' || role === 'other'),
         );
+        const document = matches.length === 1 ? matches[0] : undefined;
         if (!document) continue;
         const sourceAssets = await callWorker('asset.list', {
           sourceDocumentId: document.id,
@@ -121,7 +201,15 @@ export function SceneWorkspace({
           limit: 1,
         });
         const asset = sourceAssets.find(isImage);
-        if (asset)
+        if (role === 'character') {
+          const voice = voices.find((item) => item.characterDocumentId === document.id);
+          if (!nextCharacters.some((item) => item.characterDocumentId === document.id))
+            nextCharacters.push({
+              characterDocumentId: document.id,
+              ...(asset ? { imageAssetId: asset.id } : {}),
+              ...(voice ? { voiceReferenceVersionId: voice.versionId } : {}),
+            });
+        } else if (asset)
           next.set(bindingKey(role, label), {
             id: bindingKey(role, label),
             role,
@@ -131,33 +219,42 @@ export function SceneWorkspace({
             source: 'auto',
           });
       }
-      const merged = [...next.values(), ...localBindings.filter((item) => !next.has(item.id))];
+      if (sequence !== requestSequence.current) return;
+      const merged = [
+        ...localBindings,
+        ...[...next.values()].filter(
+          (item) => !localBindings.some((existing) => existing.id === item.id),
+        ),
+      ];
       setLocalBindings(merged);
+      setCharacters((current) => [
+        ...current,
+        ...nextCharacters.filter(
+          (item) =>
+            !current.some((existing) => existing.characterDocumentId === item.characterDocumentId),
+        ),
+      ]);
       setMessage(
-        merged.length
-          ? `已识别 ${merged.length} 个素材，可继续手动调整。`
+        merged.length || nextCharacters.length
+          ? '已识别场次角色与素材，可继续手动调整并保存。'
           : '没有找到可用的参考图片。',
       );
     } catch (error) {
+      if (sequence !== requestSequence.current) return;
       setMessage(error instanceof Error ? error.message : '素材识别失败。');
     }
   };
 
-  useEffect(() => {
-    const sceneKey = `${scene.id}:${scene.sceneDocumentId ?? ''}`;
-    if (!prompt.trim() || autoBoundScene.current === sceneKey) return;
-    autoBoundScene.current = sceneKey;
-    void autoBind();
-  }, [scene.id, scene.sceneDocumentId, prompt]);
-
   const setAsset = (binding: SceneMaterialBindingInfo, assetId: string) => {
+    requestSequence.current++;
     setLocalBindings((current) =>
       current.map((item) =>
         item.id === binding.id ? { ...item, assetId, source: 'manual' } : item,
       ),
     );
   };
-  const tooManyReferences = localBindings.length > 7;
+  const tooManyReferences =
+    localBindings.length + characters.filter((item) => item.imageAssetId).length > 30;
 
   return (
     <div className="scene-workspace">
@@ -171,7 +268,7 @@ export function SceneWorkspace({
             <button
               className="button secondary"
               type="button"
-              disabled={!writable}
+              disabled={!writable || !audioLoaded}
               onClick={() => void autoBind()}
             >
               自动识别素材
@@ -180,7 +277,7 @@ export function SceneWorkspace({
               className="button secondary"
               type="button"
               disabled={!writable}
-              onClick={() => onSave(prompt, localBindings)}
+              onClick={() => onSave(prompt, localBindings, characters, dialogueAudioId)}
             >
               <Save size={14} /> 保存提示词
             </button>
@@ -188,7 +285,7 @@ export function SceneWorkspace({
               className="button primary"
               type="button"
               disabled={!writable || !prompt.trim() || tooManyReferences}
-              onClick={() => onGenerateVideo(localBindings)}
+              onClick={() => onGenerateVideo(localBindings, characters, dialogueAudioId)}
             >
               <Video size={14} /> 生成场次视频
             </button>
@@ -198,22 +295,55 @@ export function SceneWorkspace({
           className="markdown-editor scene-video-prompt-editor"
           aria-label="场次完整视频提示词"
           value={prompt}
-          onChange={(event) => onPromptChange(event.target.value)}
+          onChange={(event) => {
+            requestSequence.current++;
+            onPromptChange(event.target.value);
+          }}
           readOnly={!writable}
           placeholder="输入这一场完整的视频提示词…"
         />
         {message ? <div className="inline-status">{message}</div> : null}
         {tooManyReferences ? (
-          <div className="inline-status">参考图片超过当前模型支持的 7 张，请先减少绑定。</div>
+          <div className="inline-status">
+            场次参考图片过多，请减少绑定；实际模型限制将在制作页检查。
+          </div>
         ) : null}
       </section>
+      {projectId && (
+        <SceneCastEditor
+          projectId={projectId}
+          characters={characters}
+          documents={documents}
+          assets={assets}
+          voices={voices}
+          audios={audios}
+          dialogueAudioId={dialogueAudioId}
+          writable={writable}
+          onChange={(value) => {
+            requestSequence.current++;
+            setCharacters(value);
+          }}
+          onDialogueChange={(value) => {
+            requestSequence.current++;
+            setDialogueAudioId(value);
+          }}
+          onAudioImported={(audio) =>
+            setAudios((current) => [audio, ...current.filter((item) => item.id !== audio.id)])
+          }
+        />
+      )}
       <section className="scene-material-panel" aria-label="场次参考素材">
         <div className="scene-prompt-heading">
           <div>
             <h2>场次参考素材</h2>
-            <p>提示词中的角色、场景和道具会自动匹配参考图，也可以手动替换。</p>
+            <p>场景和道具参考图可手动替换；角色参考图在上方出场角色中维护。</p>
           </div>
-          <button className="text-button" type="button" onClick={() => void autoBind()}>
+          <button
+            className="text-button"
+            type="button"
+            disabled={!writable}
+            onClick={() => void autoBind()}
+          >
             重新识别
           </button>
         </div>
@@ -256,6 +386,19 @@ export function SceneWorkspace({
                       </option>
                     ))}
                   </select>
+                  <button
+                    className="text-button"
+                    type="button"
+                    disabled={!writable}
+                    onClick={() => {
+                      requestSequence.current++;
+                      setLocalBindings((current) =>
+                        current.filter((item) => item.id !== binding.id),
+                      );
+                    }}
+                  >
+                    移除{binding.label}
+                  </button>
                 </article>
               );
             })}
@@ -267,6 +410,9 @@ export function SceneWorkspace({
           projectId={projectId}
           sceneId={scene.id}
           documents={documents}
+          characterDocumentIds={(scene.characterBindings ?? []).map(
+            (item) => item.characterDocumentId,
+          )}
           writable={writable}
           onOpenAsset={onOpenAsset}
         />

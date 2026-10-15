@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CharacterVoiceReferenceInfo } from '@ai-video/contracts';
+import type { AdapterParameterValue, CharacterVoiceReferenceInfo } from '@ai-video/contracts';
 import { addOfficialRoleVoices, seedOfficialVideoParameters } from './official-video-parameters';
 
 const voices = [
@@ -19,6 +19,62 @@ const voices = [
   },
 ] satisfies CharacterVoiceReferenceInfo[];
 describe('official production input assembly', () => {
+  it('clears removed scene images while retaining a manually entered audio input', () => {
+    for (const provider of ['wan-video', 'seedance-video', 'minimax-video']) {
+      const adapter = {
+        provider,
+        contractId: 'reference',
+        capability: 'REFERENCE_TO_VIDEO' as const,
+      };
+      const initial = seedOfficialVideoParameters(adapter, {}, '对白', ['asset://old']);
+      const audio: AdapterParameterValue =
+        provider === 'wan-video'
+          ? { type: 'reference_audio', url: 'https://example.com/audio.wav' }
+          : {
+              type: 'audio_url',
+              audio_url: { url: 'https://example.com/audio.wav' },
+              role: 'reference_audio',
+            };
+      const field = provider === 'wan-video' ? 'media' : 'content';
+      initial[field] = [...(Array.isArray(initial[field]) ? initial[field] : []), audio];
+      const result = seedOfficialVideoParameters(adapter, initial, '新版对白', [], true);
+      expect(JSON.stringify(result)).not.toContain('project-asset://old');
+      expect(result[field]).toContainEqual(audio);
+    }
+  });
+
+  it('numbers images from the actual reordered request and voices from the selected cast order', () => {
+    const second = {
+      ...voices[0]!,
+      characterDocumentId: 'second',
+      characterName: '配角',
+      versionId: 'version-2',
+    };
+    const adapter = {
+      provider: 'wan-video',
+      contractId: 'cn.qwen.wan3-0-video',
+      capability: 'REFERENCE_TO_VIDEO' as const,
+    };
+    const parameters = seedOfficialVideoParameters(adapter, {}, '两人对话', [
+      'asset://second-image',
+      'asset://room',
+      'asset://first-image',
+    ]);
+    const result = addOfficialRoleVoices(adapter, parameters, [second, voices[0]!], undefined, [
+      { id: 'room', role: 'scene', label: '客厅', assetId: 'room', source: 'manual' },
+      { id: 'first', role: 'character', label: '主角', assetId: 'first-image', source: 'manual' },
+      { id: 'second', role: 'character', label: '配角', assetId: 'second-image', source: 'manual' },
+      { id: 'removed', role: 'prop', label: '已移除', assetId: 'removed', source: 'manual' },
+    ]);
+    expect(result.prompt).toContain('角色「主角」参考图片3');
+    expect(result.prompt).toContain('场景「客厅」参考图片2');
+    expect(result.prompt).toContain('角色「配角」参考图片1');
+    expect(result.prompt).toContain('角色「配角」使用音频1');
+    expect(result.prompt).toContain('角色「主角」使用音频2');
+    expect(result.prompt).not.toContain('已移除');
+    expect(JSON.stringify(result)).toContain('character-voice://second/version-2');
+    expect(parameters.prompt).toBe('两人对话');
+  });
   it.each([
     ['wan-video', 'cn.qwen.wan3-0-video', 3],
     ['seedance-video', 'cn.bytedance.seedance2-5.video', 2],
@@ -75,5 +131,13 @@ describe('official production input assembly', () => {
         { type: 'driving_audio', url: 'project-audio://dialogue' },
       ],
     });
+    const labelled = addOfficialRoleVoices(
+      driving,
+      { prompt: '对白', media: [{ type: 'first_frame', url: 'asset://frame' }] },
+      [],
+      'dialogue',
+      [{ id: 'actor', role: 'character', label: '主角', assetId: 'frame', source: 'manual' }],
+    );
+    expect(labelled.prompt).toContain('角色「主角」参考图片1');
   });
 });

@@ -24,6 +24,7 @@ const MAX_FINISH_REASON_LENGTH = 80;
 const MAX_RAW_USAGE_BYTES = 64 * 1024;
 
 const sessionMethods = new Set<WorkerMethod>([
+  'scene.save',
   'conversation.list',
   'conversation.create',
   'conversation.update',
@@ -957,11 +958,29 @@ export function validateSessionRequestParams(
         'sceneDocumentId',
         'videoPrompt',
         'materialBindings',
+        'characterBindings',
+        'dialogueAudioId',
         'expectedRowVersion',
       ]);
       optionalId(params, 'sceneId');
       requireString(params, 'title', MAX_TITLE_LENGTH);
       if (params.sceneDocumentId !== null) optionalId(params, 'sceneDocumentId');
+      if (params.dialogueAudioId !== null) optionalId(params, 'dialogueAudioId');
+      if (params.characterBindings !== undefined) {
+        if (!Array.isArray(params.characterBindings) || params.characterBindings.length > 30)
+          throw new RequestValidationError('characterBindings must contain at most 30 items.');
+        params.characterBindings.forEach((raw, index) => {
+          const binding = requireObject(raw, `characterBindings[${index}]`);
+          rejectUnknown(binding, [
+            'characterDocumentId',
+            'imageAssetId',
+            'voiceReferenceVersionId',
+          ]);
+          requireId(binding, 'characterDocumentId');
+          optionalId(binding, 'imageAssetId');
+          optionalId(binding, 'voiceReferenceVersionId');
+        });
+      }
       if (params.videoPrompt !== undefined) requireString(params, 'videoPrompt', 20_000, true);
       if (params.materialBindings !== undefined) {
         if (!Array.isArray(params.materialBindings) || params.materialBindings.length > 30) {

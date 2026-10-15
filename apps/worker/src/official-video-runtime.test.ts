@@ -120,6 +120,18 @@ async function fixture(
       ),
   );
   const definition = listProviderDefinitions().find((value) => value.providerType === provider)!;
+  const boundScene = content.saveScene({
+    sceneId: scene.id,
+    title: scene.title,
+    expectedRowVersion: scene.rowVersion,
+    characterBindings: [
+      {
+        characterDocumentId: character.id,
+        imageAssetId: imageId,
+        voiceReferenceVersionId: voice.versionId,
+      },
+    ],
+  });
   const stamp = new Date().toISOString();
   const profile: ProviderProfileInfo = {
     ...definition,
@@ -196,7 +208,7 @@ async function fixture(
   return {
     ps,
     project,
-    scene,
+    scene: boundScene,
     character,
     voice,
     imported,
@@ -229,6 +241,36 @@ describe('official audio reference video pipeline with actual local media', () =
         modelId: f.model.id,
       });
       expect(f.request).not.toHaveBeenCalled();
+      const snapshot = f.ps.access(
+        false,
+        (db) =>
+          JSON.parse(
+            (
+              db
+                .prepare('SELECT task_snapshot_json AS snapshot FROM generation_jobs WHERE id=?')
+                .get(pending.id) as { snapshot: string }
+            ).snapshot,
+          ) as { sceneBindings: { characters: unknown[] } },
+      );
+      expect(snapshot.sceneBindings.characters).toEqual(f.scene.characterBindings);
+      new ContentService(f.ps).saveScene({
+        sceneId: f.scene.id,
+        title: f.scene.title,
+        expectedRowVersion: f.scene.rowVersion,
+        characterBindings: [],
+      });
+      const frozen = f.ps.access(
+        false,
+        (db) =>
+          JSON.parse(
+            (
+              db
+                .prepare('SELECT task_snapshot_json AS snapshot FROM generation_jobs WHERE id=?')
+                .get(pending.id) as { snapshot: string }
+            ).snapshot,
+          ) as { sceneBindings: { characters: unknown[] } },
+      );
+      expect(frozen.sceneBindings.characters).toEqual(f.scene.characterBindings);
       const review = f.orchestration.requestSubmission({ jobId: pending.id });
       expect(review.confirmation).toBeDefined();
       const submitted = await f.orchestration.confirmSubmission({

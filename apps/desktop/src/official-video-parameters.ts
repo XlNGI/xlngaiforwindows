@@ -3,6 +3,7 @@ import type {
   AdapterParameters,
   AdapterParameterValue,
   CharacterVoiceReferenceInfo,
+  SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
 
 export const isOfficialVoiceVideo = (adapter: AdapterDescriptor | undefined) =>
@@ -22,6 +23,7 @@ export function seedOfficialVideoParameters(
   parameters: AdapterParameters,
   prompt?: string,
   images: string[] = [],
+  replaceImages = false,
 ): AdapterParameters {
   images = images.map((value) =>
     value.startsWith('asset://') ? value.replace('asset://', 'project-asset://') : value,
@@ -30,26 +32,33 @@ export function seedOfficialVideoParameters(
   delete next.images;
   if (adapter.provider === 'wan-video') {
     if (prompt) next.prompt = prompt;
-    if (images.length)
-      next.media = images.map((url, index) => ({
-        type: adapter.contractId?.includes('wan2-7')
-          ? index === 0
-            ? 'first_frame'
-            : 'last_frame'
-          : adapter.capability === 'START_END_TO_VIDEO'
+    if (images.length || replaceImages)
+      next.media = [
+        ...images.map((url, index) => ({
+          type: adapter.contractId?.includes('wan2-7')
             ? index === 0
               ? 'first_frame'
               : 'last_frame'
-            : 'reference_image',
-        url,
-      }));
+            : adapter.capability === 'START_END_TO_VIDEO'
+              ? index === 0
+                ? 'first_frame'
+                : 'last_frame'
+              : 'reference_image',
+          url,
+        })),
+        ...records(next.media).filter(
+          (item) =>
+            typeof item.type !== 'string' ||
+            !['reference_image', 'first_frame', 'last_frame'].includes(item.type),
+        ),
+      ];
   } else {
     const content = records(next.content);
     const previous = content.filter((item) => item.type !== 'text' && item.type !== 'image_url');
     const text = prompt ?? content.find((item) => item.type === 'text')?.text;
     next.content = [
       ...(typeof text === 'string' && text ? [{ type: 'text', text }] : []),
-      ...(images.length
+      ...(images.length || replaceImages
         ? images.map((url, index) => ({
             type: 'image_url',
             image_url: { url },
@@ -74,25 +83,58 @@ export function addOfficialRoleVoices(
   parameters: AdapterParameters,
   voices: CharacterVoiceReferenceInfo[],
   dialogueAudioId?: string,
+  imageBindings: SceneMaterialBindingInfo[] = [],
 ): AdapterParameters {
   const next = structuredClone(parameters);
+  const imageUrls =
+    adapter.provider === 'wan-video'
+      ? records(next.media)
+          .filter(
+            (item) =>
+              typeof item.type === 'string' &&
+              ['reference_image', 'first_frame', 'last_frame'].includes(item.type),
+          )
+          .map((item) => item.url)
+      : records(next.content)
+          .filter((item) => item.type === 'image_url')
+          .map((item) => (item.image_url as Record<string, AdapterParameterValue>)?.url);
+  const canonical = (value: unknown) =>
+    typeof value === 'string' ? value.replace(/^asset:\/\//u, 'project-asset://') : '';
+  const imageLines = imageBindings.flatMap((binding) => {
+    const index = imageUrls.findIndex(
+      (url) => canonical(url) === `project-asset://${binding.assetId}`,
+    );
+    return index < 0
+      ? []
+      : [
+          `${binding.role === 'character' ? '角色' : binding.role === 'scene' ? '场景' : '素材'}「${binding.label}」参考图片${index + 1}。`,
+        ];
+  });
   if (adapter.contractId?.includes('wan2-7')) {
     if (dialogueAudioId)
       next.media = [
         ...records(next.media).filter((item) => item.type !== 'driving_audio'),
         { type: 'driving_audio', url: `project-audio://${dialogueAudioId}` },
       ];
+    if (voices.length) throw new Error('万相 2.7 使用完整对白，不能提交角色音色参考。');
+    if (imageLines.length)
+      next.prompt =
+        `${typeof next.prompt === 'string' ? next.prompt : ''}\n${imageLines.join('\n')}`.trim();
     return next;
   }
-  if (!voices.length) return next;
-  const extra = voices
-    .map((voice, index) => `角色「${voice.characterName}」使用音频${index + 1}的音色。`)
-    .join('\n');
+  const extra = [
+    ...imageLines,
+    ...voices.map((voice, index) => `角色「${voice.characterName}」使用音频${index + 1}的音色。`),
+  ].join('\n');
+  if (!extra) return next;
   if (adapter.provider === 'wan-video') {
     const media = records(next.media);
-    if (media.some((item) => item.type === 'first_frame' || item.type === 'last_frame'))
+    if (
+      voices.length &&
+      media.some((item) => item.type === 'first_frame' || item.type === 'last_frame')
+    )
       throw new Error('严格首尾帧与声音参考不能混用，请切换为参考图片模式。');
-    if (media.some((item) => item.type === 'reference_audio'))
+    if (voices.length && media.some((item) => item.type === 'reference_audio'))
       throw new Error('请使用角色声音选择或手动参考音频其中一种，避免音频编号不明确。');
     next.media = [
       ...media,
@@ -105,6 +147,7 @@ export function addOfficialRoleVoices(
   } else {
     const content = records(next.content);
     if (
+      voices.length &&
       content.some(
         (item) =>
           item.role === 'first_frame' ||
@@ -113,7 +156,7 @@ export function addOfficialRoleVoices(
       )
     )
       throw new Error('严格首尾帧与声音参考不能混用，请切换为参考图片模式。');
-    if (content.some((item) => item.type === 'audio_url'))
+    if (voices.length && content.some((item) => item.type === 'audio_url'))
       throw new Error('请使用角色声音选择或手动参考音频其中一种，避免音频编号不明确。');
     const text = content.find((item) => item.type === 'text');
     next.content = [

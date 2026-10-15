@@ -1063,12 +1063,13 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
   save(record: SceneRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json, dialogue_audio_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
            scene_document_id = excluded.scene_document_id,
            video_prompt = excluded.video_prompt,
            material_bindings_json = excluded.material_bindings_json,
+           dialogue_audio_id = excluded.dialogue_audio_id,
            row_version = scenes.row_version + 1
          WHERE scenes.row_version = excluded.row_version`,
       )
@@ -1083,6 +1084,7 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.sceneDocumentId ?? null,
         record.videoPrompt ?? null,
         record.materialBindingsJson ?? '[]',
+        record.dialogueAudioId ?? null,
       );
     if (result.changes !== 1) throw new Error('SCENE_ROW_VERSION_CONFLICT');
     rebuildLibraryChunksForRecord(
@@ -1149,6 +1151,7 @@ interface SceneRow {
   scene_document_id: string | null;
   video_prompt: string | null;
   material_bindings_json: string;
+  dialogue_audio_id: string | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -1163,6 +1166,7 @@ function mapScene(row: SceneRow): SceneRecord {
     sceneDocumentId: row.scene_document_id ?? undefined,
     videoPrompt: row.video_prompt ?? undefined,
     materialBindingsJson: row.material_bindings_json || '[]',
+    dialogueAudioId: row.dialogue_audio_id ?? undefined,
     position: row.position,
     rowVersion: row.row_version,
     createdAt: row.created_at,

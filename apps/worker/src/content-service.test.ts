@@ -23,6 +23,78 @@ async function setup() {
 }
 
 describe('ContentService', () => {
+  it('saves independent cast bindings with CAS, preserves omitted values and rolls back invalid media', async () => {
+    const { projects, content } = await setup();
+    const character = content.saveDocument({
+      kind: 'character',
+      title: '无图片角色',
+      contentMarkdown: '# 角色',
+    });
+    const scene = content.saveScene({
+      title: '第一场',
+      characterBindings: [{ characterDocumentId: character.id }],
+    });
+    expect(scene.characterBindings).toEqual([{ characterDocumentId: character.id }]);
+    const renamed = content.saveScene({
+      sceneId: scene.id,
+      title: '改名',
+      expectedRowVersion: scene.rowVersion,
+    });
+    expect(renamed.characterBindings).toEqual(scene.characterBindings);
+    for (const characterBindings of [
+      [{ characterDocumentId: character.id, imageAssetId: 'missing' }],
+      [{ characterDocumentId: character.id, voiceReferenceVersionId: 'missing' }],
+      [{ characterDocumentId: character.id }, { characterDocumentId: character.id }],
+      [{ characterDocumentId: 'missing' }],
+    ])
+      expect(() =>
+        content.saveScene({
+          sceneId: scene.id,
+          title: '不应保存',
+          expectedRowVersion: renamed.rowVersion,
+          characterBindings,
+        }),
+      ).toThrow();
+    expect(content.listScenes()[0]).toMatchObject({
+      title: '改名',
+      rowVersion: renamed.rowVersion,
+      characterBindings: scene.characterBindings,
+    });
+    expect(() =>
+      content.saveScene({
+        sceneId: scene.id,
+        title: '过期',
+        expectedRowVersion: scene.rowVersion,
+        characterBindings: [],
+      }),
+    ).toThrow('SCENE_ROW_VERSION_CONFLICT');
+    projects.access(true, (db) =>
+      db
+        .prepare(
+          "INSERT INTO dubbing_cues(id,project_id,scene_id,speaker_kind,character_document_id,text,position,start_ms,created_at,updated_at) VALUES('cue',?,?, 'character',?,'你好',0,0,'now','now')",
+        )
+        .run(scene.projectId, scene.id, character.id),
+    );
+    expect(() =>
+      content.saveScene({
+        sceneId: scene.id,
+        title: scene.title,
+        expectedRowVersion: renamed.rowVersion,
+        characterBindings: [],
+      }),
+    ).toThrow('仍有本场台词');
+    projects.access(true, (db) =>
+      db.prepare("UPDATE dubbing_cues SET deleted_at='now' WHERE id='cue'").run(),
+    );
+    expect(
+      content.saveScene({
+        sceneId: scene.id,
+        title: scene.title,
+        expectedRowVersion: renamed.rowVersion,
+        characterBindings: [],
+      }).characterBindings,
+    ).toEqual([]);
+  });
   it('persists reusable scene document bindings, preserves them on rename and clears them explicitly', async () => {
     const { content } = await setup();
     const setting = content.saveDocument({
