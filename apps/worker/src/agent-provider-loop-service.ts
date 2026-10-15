@@ -2213,9 +2213,14 @@ export class AgentProviderLoopService {
             const sceneOrdinal = items.length;
             items.push({
               entityType: 'scene',
-              action: 'create',
+              action: scene.sceneId ? 'update' : 'create',
+              ...(scene.sceneId
+                ? { targetId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion }
+                : {}),
               title: scene.title,
               sceneDocumentId: scene.sceneDocumentId,
+              videoPrompt: scene.videoPrompt,
+              characterDocumentIds: scene.characterDocumentIds,
             });
             for (const shot of scene.shots) {
               items.push({
@@ -3356,6 +3361,7 @@ export class AgentProviderLoopService {
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
                  AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure')
+                 AND (tool_name <> 'scene.submit_structure' OR json_extract(result_summary_json,'$.status')='scene_structure_proposed')
              ) THEN NULL ELSE 'read-only' END,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
              WHERE id = ? AND status = 'running' AND phase = 'model_running'`,
@@ -4783,6 +4789,7 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
   'scene.submit_structure',
+  'scene.read',
   'document.submit_draft',
   'novel.chapter.write_draft',
   'project.get_context',

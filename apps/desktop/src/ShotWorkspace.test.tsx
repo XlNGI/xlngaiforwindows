@@ -1,12 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AssetInfo, DocumentSummary } from '@ai-video/contracts';
-import {
-  ShotWorkspace,
-  loadShotReferences,
-  mentionedTitle,
-  saveShotReferences,
-} from './ShotWorkspace';
+import { ShotWorkspace, loadShotReferences, saveShotReferences } from './ShotWorkspace';
 import { callWorker } from './worker-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
@@ -106,16 +101,6 @@ function renderWorkspace(
   );
   return { ...view, onGenerateImage, onGenerateVideo };
 }
-
-describe('mentionedTitle', () => {
-  it('reads character and scene titles from prompt tokens', () => {
-    expect(mentionedTitle('[\u89d2\u8272:\u6797\u6f88] \u56de\u5934', 'character')).toBe(
-      '\u6797\u6f88',
-    );
-    expect(mentionedTitle('[\u573a\u666f:\u65e7\u7801\u5934]', 'scene')).toBe('\u65e7\u7801\u5934');
-    expect(mentionedTitle('\u6ca1\u6709\u5f15\u7528', 'character')).toBeUndefined();
-  });
-});
 
 describe('shot reference storage', () => {
   it('saves and loads per-shot reference slots', () => {
@@ -274,7 +259,7 @@ describe('ShotWorkspace', () => {
     resolveOld([sceneAsset]);
     await waitFor(() => expect(screen.getByLabelText('场景参考')).toHaveValue(firstFrameAsset.id));
   });
-  it('fills empty reference slots from mentioned documents before generating an image', async () => {
+  it('does not create reference relationships from names or prompt placeholders', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
       if (method === 'asset.list') {
         const sourceDocumentId = (params as { sourceDocumentId?: string } | undefined)
@@ -296,16 +281,16 @@ describe('ShotWorkspace', () => {
       prompt: '[\u89d2\u8272:\u6797\u6f88] [\u573a\u666f:\u65e7\u7801\u5934] \u96e8\u591c',
     });
     fireEvent.click(screen.getByRole('button', { name: '\u751f\u6210\u672c\u955c\u753b\u9762' }));
-    await waitFor(() =>
-      expect(onGenerateImage).toHaveBeenCalledWith({
-        characterAssetId: 'character-asset',
-        sceneAssetId: 'scene-asset',
-      }),
+    await waitFor(() => expect(onGenerateImage).toHaveBeenCalledWith({}));
+    expect(loadShotReferences('project', 'shot')).toEqual({});
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'asset.list',
+      expect.objectContaining({ sourceDocumentId: characterDoc.id }),
     );
-    expect(loadShotReferences('project', 'shot')).toEqual({
-      characterAssetId: 'character-asset',
-      sceneAssetId: 'scene-asset',
-    });
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'asset.list',
+      expect.objectContaining({ sourceDocumentId: sceneDoc.id }),
+    );
   });
 
   it('keeps generate-video disabled until a reference or mention exists', () => {

@@ -28,7 +28,7 @@ export function workspaceResource(workspace: Workspace): ProjectStructureResourc
       ? {
           writeTool: 'scene.submit_structure',
           contentModel:
-            '场次绑定角色与场景页的制作场景文档（sceneDocumentId），再包含镜头（各有独立提示词）；多个场次可复用同一场景。提交后显示待审核方案，批准后进入目录；独立 Markdown 文档不会创建场次或镜头。',
+            'LLM 理解完整视频提示词（videoPrompt）并返回场景文档 ID（sceneDocumentId）和全部出场角色 ID（characterDocumentIds）；系统只校验 ID，不解析姓名。已有场次正文和关系按需用 scene.read 读取；修改需 sceneId、expectedRowVersion 和 shots:[]，新场次包含镜头。提交后显示待审核方案，批准后进入目录；独立 Markdown 文档不会创建场次或镜头。',
         }
       : {}),
     locator: { workspace, resourceId: id },

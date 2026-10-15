@@ -77,7 +77,12 @@ describe('ChangeSetReviewPanel', () => {
     const withPrompt = {
       ...proposal,
       items: [
-        proposal.items[0]!,
+        {
+          ...proposal.items[0]!,
+          videoPrompt: '司机转身，他没有开口。',
+          characterDocumentIds: ['driver-id'],
+          sceneDocumentId: 'courtyard-id',
+        },
         {
           ...proposal.items[1]!,
           prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
@@ -88,7 +93,36 @@ describe('ChangeSetReviewPanel', () => {
       if (method === 'agent.changeSet.list') return Promise.resolve([withPrompt]);
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
-    const { container } = render(<ChangeSetReviewPanel projectId="project-1" writable />);
+    const { container } = render(
+      <ChangeSetReviewPanel
+        projectId="project-1"
+        writable
+        documents={[
+          {
+            id: 'driver-id',
+            projectId: 'project-1',
+            title: '老周（司机）',
+            kind: 'character',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+          {
+            id: 'courtyard-id',
+            projectId: 'project-1',
+            title: '庭院',
+            kind: 'scene',
+            scopeType: 'project',
+            lifecycleStatus: 'active',
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+          },
+        ]}
+      />,
+    );
     fireEvent.click(await within(container).findByRole('button', { name: /Opening proposal/i }));
     const promptText = await within(container).findByText(
       (content, element) =>
@@ -96,6 +130,11 @@ describe('ChangeSetReviewPanel', () => {
     );
     expect(promptText.textContent).toContain('提示词：');
     expect(promptText.textContent).toContain('[角色:林澈]');
+    expect(within(container).getByText('出场角色：老周（司机）')).toBeInTheDocument();
+    expect(
+      within(container).getByText('完整视频提示词：司机转身，他没有开口。'),
+    ).toBeInTheDocument();
+    expect(within(container).getByText('绑定场景：庭院')).toBeInTheDocument();
   });
 
   it('does not render without a project or pending proposal', async () => {

@@ -1,6 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DocumentDetail, NovelChapterInfo, WorkerMethod } from '@ai-video/contracts';
+import type {
+  DocumentDetail,
+  NovelChapterInfo,
+  NovelMarkdownExportJobInfo,
+  WorkerMethod,
+} from '@ai-video/contracts';
 import { NovelWorkspace } from './NovelWorkspace';
 import { callWorker } from './worker-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -50,6 +55,17 @@ const documentDetail = (content = 'Draft'): DocumentDetail => ({
   createdAt: '2026-08-19T00:00:00.000Z',
   updatedAt: '2026-08-19T00:00:00.000Z',
 });
+
+const exportJob: NovelMarkdownExportJobInfo = {
+  id: 'export-1',
+  projectId: 'project-1',
+  exportType: 'work',
+  exportFormat: 'files',
+  packagePath: 'C:/Novel/exports/novel-export-1',
+  status: 'succeeded',
+  itemCount: 1,
+  createdAt: '2026-10-15T00:00:00.000Z',
+};
 
 afterEach(() => {
   cleanup();
@@ -181,7 +197,7 @@ describe('NovelWorkspace', () => {
     await screen.findByText(/Chapter 1 Opening/);
     expect(screen.queryByRole('button', { name: '生成本章正文' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /生成短剧内容/ })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('选择 Chapter 1 Opening')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('选择 Chapter 1 Opening')).not.toBeChecked();
   });
 
   it('exports the immutable work package through Worker', async () => {
@@ -189,19 +205,216 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [chapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare')
-        return { status: 'succeeded', packagePath: 'exports/novel' };
+      if (method === 'novel.export.prepare') return exportJob;
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    expect(screen.getByLabelText('包含草稿')).not.toBeChecked();
+    expect(callWorker).not.toHaveBeenCalledWith('novel.export.prepare', expect.anything());
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('novel.export.prepare', {
         exportType: 'work',
         exportFormat: 'files',
       }),
     );
+    expect(await screen.findByRole('status')).toHaveTextContent('导出完成，共 1 章');
+    expect(screen.getByText(exportJob.packagePath)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打开导出文件夹' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('novel.export.reveal', { jobId: exportJob.id }),
+    );
+  });
+
+  it('selects chapters without opening them and exports only the selected saved drafts as merged Markdown', async () => {
+    const second = { ...chapter, id: 'chapter-2', documentId: 'document-2', title: 'Second' };
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [chapter, second];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      if (method === 'novel.export.prepare') return { ...exportJob, exportFormat: 'merged' };
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    fireEvent.click(screen.getByLabelText('选择 Chapter 1 Second'));
+    expect(screen.getByText('已选 1 章')).toBeInTheDocument();
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.get'),
+    ).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    expect(screen.getByLabelText('导出范围')).toHaveValue('selection');
+    fireEvent.change(screen.getByLabelText('文件组织'), { target: { value: 'merged' } });
+    fireEvent.click(screen.getByLabelText('包含草稿'));
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('novel.export.prepare', {
+        exportType: 'selection',
+        chapterIds: ['chapter-2'],
+        exportFormat: 'merged',
+        includeDraft: true,
+      }),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent('导出完成，共 1 章');
+  });
+
+  it('selects only active search results, preserves hidden selections and supports clearing all', async () => {
+    const second = { ...chapter, id: 'chapter-2', title: 'Second' };
+    const archived = {
+      ...chapter,
+      id: 'chapter-3',
+      title: 'Archived',
+      lifecycleStatus: 'archived' as const,
+    };
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [chapter, second, archived];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    expect(screen.getByLabelText('选择 Chapter 1 Archived')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('搜索小说草稿'), { target: { value: 'Second' } });
+    fireEvent.click(screen.getByRole('button', { name: '全选搜索结果' }));
+    expect(screen.getByText('已选 1 章')).toBeInTheDocument();
+    expect(screen.getByLabelText('选择 Chapter 1 Second')).toBeChecked();
+    fireEvent.change(screen.getByLabelText('搜索小说草稿'), { target: { value: '' } });
+    expect(screen.getByLabelText('选择 Chapter 1 Opening')).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    expect(screen.getByText('已选 2 章')).toBeInTheDocument();
+    expect(screen.getByLabelText('选择 Chapter 1 Archived')).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: '取消全选' }));
+    expect(screen.getByText('已选 0 章')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    fireEvent.change(screen.getByLabelText('导出范围'), { target: { value: 'selection' } });
+    expect(screen.getByRole('button', { name: '开始导出' })).toBeDisabled();
+    expect(screen.getByText('请在章节列表勾选要导出的章节。')).toBeInTheDocument();
+  });
+
+  it('shows export failures and lets the user explicitly retry with drafts included', async () => {
+    mockWorker((method, params) => {
+      if (method === 'novel.chapter.list') return [chapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      if (method === 'novel.export.prepare') {
+        if (!(params as { includeDraft?: boolean }).includeDraft)
+          return Promise.reject(
+            new Error('所选范围没有已发布章节。若要导出草稿，请勾选“包含草稿”。'),
+          );
+        return exportJob;
+      }
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('导出失败：所选范围没有已发布章节');
+    expect(screen.queryByRole('button', { name: '打开导出文件夹' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('包含草稿'));
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('导出完成，共 1 章');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('switches an open export panel to the checked chapters and reports a failed job result', async () => {
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [chapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      if (method === 'novel.export.prepare')
+        return { ...exportJob, status: 'failed', errorMessage: '磁盘空间不足' };
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    expect(screen.getByLabelText('导出范围')).toHaveValue('work');
+    fireEvent.click(screen.getByLabelText('选择 Chapter 1 Opening'));
+    expect(screen.getByLabelText('导出范围')).toHaveValue('selection');
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('导出失败：磁盘空间不足');
+    expect(screen.queryByRole('button', { name: '打开导出文件夹' })).not.toBeInTheDocument();
+  });
+
+  it('shows pending export progress, prevents duplicate submission and ignores completion after switching projects', async () => {
+    let completeExport!: (job: NovelMarkdownExportJobInfo) => void;
+    const pending = new Promise<NovelMarkdownExportJobInfo>((resolve) => {
+      completeExport = resolve;
+    });
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [chapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      if (method === 'novel.export.prepare') return pending;
+      return {};
+    });
+    const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
+    expect(screen.getByRole('status')).toHaveTextContent('正在导出');
+    fireEvent.click(screen.getByRole('button', { name: '正在导出…' }));
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'novel.export.prepare'),
+    ).toHaveLength(1);
+    expect(screen.getByLabelText('包含草稿')).toBeDisabled();
+    rerender(<NovelWorkspace projectId="project-2" writable />);
+    await screen.findByLabelText('章节内容');
+    expect(screen.getByText('已选 0 章')).toBeInTheDocument();
+    await act(async () => {
+      completeExport(exportJob);
+      await pending;
+    });
+    expect(screen.queryByText(exportJob.packagePath)).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('reports skipped unpublished chapters and folder-opening errors without losing the export path', async () => {
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list')
+        return [chapter, { ...chapter, id: 'chapter-2', title: 'Second' }];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      if (method === 'novel.export.prepare') return exportJob;
+      if (method === 'novel.export.reveal') return Promise.reject(new Error('文件夹已被移动'));
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
+    fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('另有 1 章没有已发布版本，未导出');
+    fireEvent.click(screen.getByRole('button', { name: '打开导出文件夹' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('打开文件夹失败：文件夹已被移动');
+    expect(screen.getByText(exportJob.packagePath)).toBeInTheDocument();
+  });
+
+  it('removes archived chapters from the export selection after refresh and disables exporting read-only projects', async () => {
+    let archived = false;
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list')
+        return [{ ...chapter, lifecycleStatus: archived ? 'archived' : 'active' }];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      return {};
+    });
+    const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    expect(screen.getByText('已选 1 章')).toBeInTheDocument();
+    archived = true;
+    fireEvent.click(screen.getByRole('button', { name: '刷新章节' }));
+    await screen.findByText('已选 0 章');
+    expect(screen.getByLabelText('选择 Chapter 1 Opening')).toBeDisabled();
+    archived = false;
+    rerender(<NovelWorkspace projectId="project-1" writable={false} refreshToken={1} />);
+    await waitFor(() => expect(screen.getByLabelText('选择 Chapter 1 Opening')).toBeEnabled());
+    expect(screen.getByRole('button', { name: /导出 Markdown/ })).toBeDisabled();
   });
 
   it('previews selected Markdown chapters and imports them through Worker', async () => {

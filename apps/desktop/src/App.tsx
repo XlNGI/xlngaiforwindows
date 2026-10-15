@@ -1316,12 +1316,17 @@ export function App() {
     poll.timer = window.setInterval(readEvents, 400);
   };
 
-  const launchPreparedGeneration = (prepared: LlmGenerationPrepareResult): Promise<void> => {
+  const launchPreparedGeneration = (
+    prepared: LlmGenerationPrepareResult,
+    includeAttachments = true,
+  ): Promise<void> => {
     confirmationResolverRef.current?.(false);
     paidSubmissionResolverRef.current?.(false);
     mediaSelectionResolverRef.current?.(undefined);
-    activeMediaInputsRef.current = collectReferenceImageInputs(chatAttachments);
-    setChatAttachments([]);
+    activeMediaInputsRef.current = includeAttachments
+      ? collectReferenceImageInputs(chatAttachments)
+      : [];
+    if (includeAttachments) setChatAttachments([]);
     const agentTaskId =
       'agentTaskId' in prepared && typeof prepared.agentTaskId === 'string'
         ? prepared.agentTaskId
@@ -2082,6 +2087,7 @@ export function App() {
     );
     const nextShot = nextShots.find((item) => appliedShotIds.has(item.id)) ?? nextShots[0];
     setScene(nextScene);
+    setSceneVideoPrompt(nextScene?.videoPrompt ?? '');
     setShots(nextShots);
     setShot(nextShot);
     setShotPrompt(nextShot?.prompt ?? '');
@@ -2300,8 +2306,12 @@ export function App() {
       parameters?: import('@ai-video/contracts').AdapterParameters;
     },
     acceptedComposerValue = composerValue,
+    messageConversation = conversation,
+    includeAttachments = true,
   ) => {
-    if ((!composerValue.trim() && chatAttachments.length === 0) || !conversation) return;
+    const conversation = messageConversation;
+    const messageAttachments = includeAttachments ? chatAttachments : [];
+    if ((!composerValue.trim() && messageAttachments.length === 0) || !conversation) return;
     const requestKey = `${conversation.projectId}:${conversation.id}`;
     if (pendingMessageRequestsRef.current.has(requestKey)) return;
     pendingMessageRequestsRef.current.add(requestKey);
@@ -2324,8 +2334,8 @@ export function App() {
         setChatMessage(reason instanceof Error ? reason.message : '项目会话未打开');
         return;
       }
-      const attachmentContext = chatAttachments.length
-        ? `\n\n[附件：${chatAttachments.map((attachment) => attachment.name).join('、')}]${chatAttachments
+      const attachmentContext = messageAttachments.length
+        ? `\n\n[附件：${messageAttachments.map((attachment) => attachment.name).join('、')}]${messageAttachments
             .filter((attachment) => attachment.text)
             .map((attachment) => `\n\n--- ${attachment.name} ---\n${attachment.text}`)
             .join('')}`
@@ -2363,7 +2373,7 @@ export function App() {
           // Agent attachments can push the JSON sidecar envelope over 2 MiB.
           const agentAttachments = modelSelection?.parameters
             ? undefined
-            : buildAgentAttachments(chatAttachments);
+            : buildAgentAttachments(messageAttachments);
           const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
           const runParams: UnifiedAgentRunParams = {
             conversationId: conversation.id,
@@ -2407,7 +2417,7 @@ export function App() {
           if (unified.status === 'needs_parameters') {
             setAgentParameterRequest({
               composerPrompt: acceptedComposerValue,
-              referenceImageInputs: collectReferenceImageInputs(chatAttachments),
+              referenceImageInputs: collectReferenceImageInputs(messageAttachments),
               prompt: agentPrompt || '请根据附件生成内容。',
               ...unified,
             });
@@ -2490,7 +2500,7 @@ export function App() {
             setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
             return;
           }
-          void launchPreparedGeneration(unified);
+          void launchPreparedGeneration(unified, includeAttachments);
           clearAcceptedComposer();
         } catch (reason) {
           setChatMessage(readableFailure(reason, '生成启动失败'));
@@ -3620,6 +3630,48 @@ export function App() {
       />
     );
 
+  const requestSceneBindingReview = async (
+    nextPrompt = sceneVideoPrompt,
+    bindings = scene?.materialBindings ?? [],
+    characters = scene?.characterBindings ?? [],
+    dialogueAudioId = scene?.dialogueAudioId,
+  ) => {
+    if (!scene || !project) return;
+    const expectedProjectId = project.id;
+    const targetSceneId = scene.id;
+    let target = scene;
+    if (
+      JSON.stringify(bindings) !== JSON.stringify(scene.materialBindings ?? []) ||
+      JSON.stringify(characters) !== JSON.stringify(scene.characterBindings ?? []) ||
+      dialogueAudioId !== scene.dialogueAudioId
+    ) {
+      const saved = await saveSceneVideoPrompt(
+        scene.videoPrompt ?? '',
+        bindings,
+        characters,
+        dialogueAudioId,
+      );
+      if (!saved || activeProjectIdRef.current !== expectedProjectId || saved.id !== targetSceneId)
+        return;
+      target = saved;
+      setSceneVideoPrompt(nextPrompt);
+    }
+    const prompt = [
+      '请理解以下完整视频提示词，为已有场次关联对应场景和全部出场角色。先检索项目角色、场景资料，再调用 scene.submit_structure 返回结构化方案。',
+      '这是修改已有场次：使用 sceneId 和 expectedRowVersion，shots:[]，返回完整 characterDocumentIds 和 sceneDocumentId。保留下面的提示词正文，不创建重复场次。有歧义返回 needs_clarification 反馈，禁止按姓名猜 ID。',
+      JSON.stringify({
+        sceneId: target.id,
+        expectedRowVersion: target.rowVersion,
+        title: target.title,
+        videoPrompt: nextPrompt,
+      }),
+    ].join('\n\n');
+    workspaceDispatch({ type: 'open', panelId: 'conversation' });
+    const targetConversation = conversation ?? (await createConversation());
+    if (targetConversation && activeProjectIdRef.current === expectedProjectId)
+      await sendMessage(prompt, undefined, prompt, targetConversation, false);
+  };
+
   return (
     <div className="app-shell" data-left-open={leftOpen} data-navigation-mode={navigationMode}>
       <header
@@ -4398,16 +4450,30 @@ export function App() {
                           assets={assets}
                           writable={writable}
                           onPromptChange={setSceneVideoPrompt}
-                          onSave={(nextPrompt, bindings, characters, dialogueAudioId) =>
-                            void saveSceneVideoPrompt(
-                              nextPrompt,
+                          onRequestBindings={(prompt, bindings, characters, dialogueAudioId) =>
+                            void requestSceneBindingReview(
+                              prompt,
                               bindings,
                               characters,
                               dialogueAudioId,
                             )
                           }
+                          onSave={(nextPrompt, bindings, characters, dialogueAudioId) =>
+                            void (
+                              nextPrompt !== (scene.videoPrompt ?? '')
+                                ? requestSceneBindingReview
+                                : saveSceneVideoPrompt
+                            )(nextPrompt, bindings, characters, dialogueAudioId)
+                          }
                           onGenerateVideo={(bindings, characters, dialogueAudioId) =>
-                            void openSceneProduction(bindings, characters, dialogueAudioId)
+                            void (sceneVideoPrompt !== (scene.videoPrompt ?? '')
+                              ? requestSceneBindingReview(
+                                  sceneVideoPrompt,
+                                  bindings,
+                                  characters,
+                                  dialogueAudioId,
+                                )
+                              : openSceneProduction(bindings, characters, dialogueAudioId))
                           }
                           onOpenAsset={(assetId) => {
                             updateAssets(assets, assetId);

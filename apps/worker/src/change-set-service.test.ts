@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ChangeSetService } from './change-set-service.js';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
+import { VoiceReferenceRepository } from '@ai-video/persistence';
 
 const directories: string[] = [];
 const services: ProjectService[] = [];
@@ -28,6 +29,252 @@ async function setup(name = 'change-set') {
 }
 
 describe('ChangeSetService', () => {
+  it('reviews LLM scene/cast IDs and initializes media by those IDs, preserving selected voice versions on revision', async () => {
+    const { projects, content, changeSets } = await setup();
+    const setting = content.saveDocument({
+      kind: 'scene',
+      title: '庭院',
+      contentMarkdown: '# 庭院',
+    });
+    const actor = content.saveDocument({
+      kind: 'character',
+      title: '角色：老周（司机）',
+      contentMarkdown: '# 老周',
+    });
+    const voice = projects.access(true, (db, project) => {
+      db.prepare(
+        "INSERT INTO audio_files(id,project_id,kind,name,relative_path,mime,size_bytes,content_hash,duration_ms,sample_rate,channels,created_at) VALUES('sample',?,'reference','司机','assets/audio/reference/sample.wav','audio/wav',100,?,3000,48000,1,'now')",
+      ).run(project.id, 'a'.repeat(64));
+      for (const [id, documentId, kind] of [
+        ['actor-image', actor.id, 'character'],
+        ['scene-image', setting.id, 'scene'],
+      ]) {
+        db.prepare(
+          'INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,?,?,?,100,?)',
+        ).run(id, project.id, kind, `assets/${id}.png`, 'a'.repeat(64), 'now');
+        db.prepare(
+          "INSERT INTO generation_jobs(id,project_id,adapter_key,status,request_json,task_snapshot_json,created_at,updated_at) VALUES(?,?,'fixture','succeeded','{}',?,'now','now')",
+        ).run(`job-${id}`, project.id, JSON.stringify({ sourceDocumentId: documentId }));
+        db.prepare(
+          "INSERT INTO generation_results(id,job_id,asset_id,created_at) VALUES(?,?,?,'now')",
+        ).run(`result-${id}`, `job-${id}`, id);
+      }
+      return new VoiceReferenceRepository(db, project.id).save({
+        characterDocumentId: actor.id,
+        audioId: 'sample',
+      });
+    });
+    const item = {
+      entityType: 'scene' as const,
+      action: 'create' as const,
+      title: '相遇',
+      sceneDocumentId: setting.id,
+      videoPrompt: '司机转身，他没有开口。',
+      characterDocumentIds: [actor.id],
+    };
+    const proposal = changeSets.create({ title: 'LLM 方案', items: [item] });
+    expect(content.listScenes()).toHaveLength(0);
+    expect(changeSets.list()[0]?.items[0]).toMatchObject({
+      videoPrompt: item.videoPrompt,
+      characterDocumentIds: [actor.id],
+    });
+    expect(
+      changeSets.apply({ changeSetId: proposal.id, expectedRowVersion: proposal.rowVersion })
+        .status,
+    ).toBe('applied');
+    const scene = content.listScenes()[0]!;
+    expect(scene).toMatchObject({
+      videoPrompt: item.videoPrompt,
+      sceneDocumentId: setting.id,
+      characterBindings: [
+        {
+          characterDocumentId: actor.id,
+          imageAssetId: 'actor-image',
+          voiceReferenceVersionId: voice.versionId,
+        },
+      ],
+      materialBindings: [{ assetId: 'scene-image', sourceDocumentId: setting.id }],
+    });
+    projects.access(true, (db, project) =>
+      new VoiceReferenceRepository(db, project.id).save({
+        characterDocumentId: actor.id,
+        audioId: 'sample',
+        expectedRowVersion: voice.rowVersion,
+      }),
+    );
+    const revised = changeSets.create({
+      title: '修订',
+      items: [
+        {
+          ...item,
+          action: 'update',
+          targetId: scene.id,
+          expectedRowVersion: scene.rowVersion,
+          videoPrompt: '他独自坐下。',
+        },
+      ],
+    });
+    expect(
+      changeSets.apply({ changeSetId: revised.id, expectedRowVersion: revised.rowVersion }).status,
+    ).toBe('applied');
+    expect(content.listScenes()[0]?.characterBindings).toEqual(scene.characterBindings);
+    const current = content.listScenes()[0]!;
+    const cleared = content.saveScene({
+      sceneId: current.id,
+      title: current.title,
+      expectedRowVersion: current.rowVersion,
+      characterBindings: [{ characterDocumentId: actor.id }],
+    });
+    const clearScene = changeSets.create({
+      title: '清除场景',
+      items: [
+        {
+          ...item,
+          action: 'update',
+          targetId: scene.id,
+          expectedRowVersion: cleared.rowVersion,
+          sceneDocumentId: null,
+          videoPrompt: '他走进空白空间。',
+        },
+      ],
+    });
+    expect(
+      changeSets.apply({ changeSetId: clearScene.id, expectedRowVersion: clearScene.rowVersion })
+        .status,
+    ).toBe('applied');
+    expect(content.listScenes()[0]?.sceneDocumentId).toBeUndefined();
+    expect(content.listScenes()[0]?.materialBindings).toEqual([]);
+    expect(content.listScenes()[0]?.characterBindings).toEqual([{ characterDocumentId: actor.id }]);
+  });
+
+  it('rejects invalid structured cast without partial proposals and revalidates archived roles at approval', async () => {
+    const { projects, content, changeSets } = await setup();
+    const actor = content.saveDocument({
+      kind: 'character',
+      title: '同名角色',
+      contentMarkdown: '# 角色',
+    });
+    const setting = content.saveDocument({
+      kind: 'scene',
+      title: '同名角色',
+      contentMarkdown: '# 地点',
+    });
+    const novel = content.saveDocument({
+      kind: 'character',
+      title: '小说人物',
+      contentMarkdown: '# 小说人物',
+    });
+    projects.access(true, (db, project) => {
+      db.prepare(
+        "INSERT INTO document_bindings(id,project_id,document_id,role,domain_scope,status,row_version,created_at,updated_at) VALUES('novel-character-binding',?,?,'character-bible','novel','active',0,'now','now')",
+      ).run(project.id, novel.id);
+      db.exec(
+        "INSERT INTO projects(id,name,created_at,updated_at) VALUES('foreign','Foreign','now','now'); INSERT INTO documents(id,project_id,kind,title,created_at,updated_at) VALUES('foreign-role','foreign','character','同名角色','now','now');",
+      );
+    });
+    for (const ids of [
+      ['missing'],
+      [setting.id],
+      [actor.id, actor.id],
+      [novel.id],
+      ['foreign-role'],
+    ]) {
+      expect(() =>
+        changeSets.create({
+          title: '无效',
+          items: [
+            {
+              entityType: 'scene',
+              action: 'create',
+              title: '第一场',
+              sceneDocumentId: setting.id,
+              videoPrompt: '他转身。',
+              characterDocumentIds: ids,
+            },
+          ],
+        }),
+      ).toThrow();
+      expect(changeSets.list()).toEqual([]);
+    }
+    const proposal = changeSets.create({
+      title: '待审核',
+      items: [
+        {
+          entityType: 'scene',
+          action: 'create',
+          title: '第一场',
+          sceneDocumentId: setting.id,
+          videoPrompt: '他转身。',
+          characterDocumentIds: [actor.id],
+        },
+      ],
+    });
+    projects.access(true, (db) =>
+      db.prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?").run(actor.id),
+    );
+    expect(
+      changeSets.apply({ changeSetId: proposal.id, expectedRowVersion: proposal.rowVersion })
+        .status,
+    ).toBe('conflicted');
+    expect(content.listScenes()).toEqual([]);
+  });
+
+  it('rolls back prompt and bindings when a proposal is stale or removes a speaking role', async () => {
+    const { projects, content, changeSets } = await setup();
+    const actor = content.saveDocument({
+      kind: 'character',
+      title: '角色',
+      contentMarkdown: '# 角色',
+    });
+    const scene = content.saveScene({
+      title: '第一场',
+      videoPrompt: '原提示词',
+      characterBindings: [{ characterDocumentId: actor.id }],
+    });
+    const propose = () =>
+      changeSets.create({
+        title: '修订',
+        items: [
+          {
+            entityType: 'scene',
+            action: 'update',
+            targetId: scene.id,
+            expectedRowVersion: scene.rowVersion,
+            title: scene.title,
+            sceneDocumentId: null,
+            videoPrompt: '新提示词',
+            characterDocumentIds: [],
+          },
+        ],
+      });
+    const speaking = propose();
+    projects.access(true, (db, project) =>
+      db
+        .prepare(
+          "INSERT INTO dubbing_cues(id,project_id,scene_id,speaker_kind,character_document_id,text,position,start_ms,created_at,updated_at) VALUES('cue',?,?,'character',?,'你好',0,0,'now','now')",
+        )
+        .run(project.id, scene.id, actor.id),
+    );
+    expect(
+      changeSets.apply({ changeSetId: speaking.id, expectedRowVersion: speaking.rowVersion })
+        .status,
+    ).toBe('conflicted');
+    expect(content.listScenes()[0]).toMatchObject({
+      videoPrompt: '原提示词',
+      rowVersion: scene.rowVersion,
+      characterBindings: scene.characterBindings,
+    });
+    const stale = propose();
+    content.saveScene({
+      sceneId: scene.id,
+      title: '人工改名',
+      expectedRowVersion: scene.rowVersion,
+    });
+    expect(
+      changeSets.apply({ changeSetId: stale.id, expectedRowVersion: stale.rowVersion }).status,
+    ).toBe('conflicted');
+    expect(content.listScenes()[0]?.videoPrompt).toBe('原提示词');
+  });
   it('preserves scene bindings in proposals and rejects a scene document archived before approval', async () => {
     const { projects, content, changeSets } = await setup();
     const setting = content.saveDocument({

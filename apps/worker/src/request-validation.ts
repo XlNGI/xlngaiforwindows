@@ -65,6 +65,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'novel.intent.list',
   'novel.intent.cancel',
   'novel.export.prepare',
+  'novel.export.reveal',
   'agent.partial.list',
   'agent.partial.recover',
   'agent.partial.discard',
@@ -706,15 +707,19 @@ export function validateSessionRequestParams(
         if (
           !Array.isArray(params.chapterIds) ||
           params.chapterIds.length === 0 ||
-          params.chapterIds.length > 200
+          params.chapterIds.length > 10_000
         ) {
-          throw new RequestValidationError('chapterIds must contain between one and 200 IDs.');
+          throw new RequestValidationError('单次导出请选择 1 至 10000 个章节。');
         }
         for (const chapterId of params.chapterIds) {
           if (typeof chapterId !== 'string' || !chapterId.trim())
             throw new RequestValidationError('chapterIds must contain non-empty IDs.');
         }
       }
+      break;
+    case 'novel.export.reveal':
+      rejectUnknown(params, ['jobId']);
+      requireId(params, 'jobId');
       break;
     case 'agent.partial.list':
       rejectUnknown(params, ['includeTerminal']);
@@ -2117,6 +2122,8 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'sceneDocumentId',
       'title',
       'shotStatus',
+      'videoPrompt',
+      'characterDocumentIds',
       'prompt',
       'documentKind',
       'contentMarkdown',
@@ -2129,12 +2136,28 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
     requireEnum(item, 'action', new Set(['create', 'update']));
     optionalId(item, 'targetId');
     optionalId(item, 'parentSceneId');
-    optionalId(item, 'sceneDocumentId');
+    if (item.sceneDocumentId !== null) optionalId(item, 'sceneDocumentId');
     if (item.sceneDocumentId !== undefined && item.entityType !== 'scene')
       throw new RequestValidationError('sceneDocumentId is only allowed on scene items.');
     optionalInteger(item, 'parentItemOrdinal', 0, items.length - 1);
     requireString(item, 'title', MAX_TITLE_LENGTH);
     optionalString(item, 'shotStatus', 80);
+    if (item.videoPrompt !== undefined || item.characterDocumentIds !== undefined) {
+      if (item.entityType !== 'scene' || item.sceneDocumentId === undefined)
+        throw new RequestValidationError(
+          'Scene bindings require a scene item and explicit sceneDocumentId.',
+        );
+      requireString(item, 'videoPrompt', 20000);
+      if (
+        !Array.isArray(item.characterDocumentIds) ||
+        item.characterDocumentIds.length > 30 ||
+        new Set(item.characterDocumentIds).size !== item.characterDocumentIds.length ||
+        item.characterDocumentIds.some(
+          (id) => typeof id !== 'string' || !id.trim() || id.length > 200,
+        )
+      )
+        throw new RequestValidationError('Invalid characterDocumentIds.');
+    }
     optionalString(item, 'prompt', 2000);
     if (item.prompt !== undefined && item.entityType !== 'shot') {
       throw new RequestValidationError('prompt is only allowed on shot items.');

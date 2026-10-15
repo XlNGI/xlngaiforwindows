@@ -8,10 +8,16 @@ import type {
   AgentChangeSetItemInfo,
   AgentChangeSetListParams,
   AgentChangeSetRejectParams,
+  SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
-import { rebuildLibraryChunksForChangeSet } from '@ai-video/persistence';
+import { rebuildLibraryChunksForChangeSet, SceneCharacterRepository } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
+import {
+  requireProductionCharacters,
+  resolvedCast,
+  productionReferenceImage,
+} from './scene-cast-binding.js';
 
 type ChangeSetRow = {
   id: string;
@@ -37,6 +43,7 @@ type ItemRow = {
   title: string;
   shot_status: string | null;
   scene_document_id: string | null;
+  scene_bindings_json: string | null;
   shot_prompt: string | null;
   document_kind: AgentChangeSetItemInfo['documentKind'] | null;
   content_markdown: string | null;
@@ -70,6 +77,12 @@ function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
     parentItemOrdinal: row.parent_item_ordinal ?? undefined,
     title: row.title,
     sceneDocumentId: row.scene_document_id ?? undefined,
+    ...(row.scene_bindings_json
+      ? (JSON.parse(row.scene_bindings_json) as Pick<
+          AgentChangeSetItemDraft,
+          'sceneDocumentId' | 'videoPrompt' | 'characterDocumentIds'
+        >)
+      : {}),
     shotStatus: row.shot_status ?? undefined,
     prompt: row.shot_prompt ?? undefined,
     documentKind: row.document_kind ?? undefined,
@@ -110,13 +123,23 @@ export class ChangeSetService {
             parent_scene_id, parent_item_id, title, shot_status, document_kind,
             content_markdown, shot_prompt, scope_type, scope_id, expected_row_version,
             expected_current_version_id,
-            scene_document_id, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+            scene_document_id, scene_bindings_json, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
         );
         params.items.forEach((candidate, ordinal) => {
           const item = this.validateDraft(candidate, ordinal, params.items);
           if (item.sceneDocumentId)
             requireProductionSceneDocument(database, project.id, item.sceneDocumentId);
+          if (item.characterDocumentIds !== undefined) {
+            requireProductionCharacters(database, project.id, item.characterDocumentIds);
+            if (item.targetId) {
+              const target = database
+                .prepare('SELECT row_version FROM scenes WHERE id=? AND project_id=?')
+                .get(item.targetId, project.id) as { row_version: number } | undefined;
+              if (!target || target.row_version !== item.expectedRowVersion)
+                throw new Error('SCENE_ROW_VERSION_CONFLICT');
+            }
+          }
           insert.run(
             itemIds[ordinal],
             id,
@@ -137,6 +160,13 @@ export class ChangeSetService {
             item.expectedRowVersion ?? null,
             item.expectedCurrentVersionId ?? null,
             item.sceneDocumentId ?? null,
+            item.characterDocumentIds === undefined
+              ? null
+              : JSON.stringify({
+                  sceneDocumentId: item.sceneDocumentId,
+                  videoPrompt: item.videoPrompt,
+                  characterDocumentIds: item.characterDocumentIds,
+                }),
             now,
             now,
           );
@@ -270,7 +300,20 @@ export class ChangeSetService {
     if (item.sceneDocumentId !== undefined) {
       if (item.entityType !== 'scene')
         throw new Error('Only scene proposals can bind scene documents.');
-      item.sceneDocumentId = requiredText(item.sceneDocumentId, 'Scene document ID', 200);
+      if (item.sceneDocumentId !== null)
+        item.sceneDocumentId = requiredText(item.sceneDocumentId, 'Scene document ID', 200);
+    }
+    if (item.videoPrompt !== undefined || item.characterDocumentIds !== undefined) {
+      if (
+        item.entityType !== 'scene' ||
+        item.sceneDocumentId === undefined ||
+        !Array.isArray(item.characterDocumentIds) ||
+        typeof item.videoPrompt !== 'string'
+      )
+        throw new Error(
+          'Scene bindings require videoPrompt, sceneDocumentId and characterDocumentIds together.',
+        );
+      item.videoPrompt = requiredText(item.videoPrompt, 'Scene video prompt', 20000);
     }
     if (item.action === 'create') {
       if (item.targetId || item.expectedRowVersion !== undefined) {
@@ -347,6 +390,20 @@ export class ChangeSetService {
     item: ItemRow,
     now: string,
   ): string {
+    const bindings = item.scene_bindings_json
+      ? (JSON.parse(item.scene_bindings_json) as {
+          sceneDocumentId: string | null;
+          videoPrompt: string;
+          characterDocumentIds: string[];
+        })
+      : undefined;
+    if (bindings) {
+      try {
+        requireProductionCharacters(database, projectId, bindings.characterDocumentIds);
+      } catch {
+        throw new ChangeSetConflict('SCENE_CHARACTER_CONFLICT');
+      }
+    }
     if (item.scene_document_id) {
       try {
         requireProductionSceneDocument(database, projectId, item.scene_document_id);
@@ -372,6 +429,7 @@ export class ChangeSetService {
            VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
         )
         .run(id, projectId, item.title, position, now, now, item.scene_document_id);
+      if (bindings) this.applySceneBindings(database, projectId, id, bindings);
       return id;
     }
     if (item.entity_type === 'scene') {
@@ -390,6 +448,7 @@ export class ChangeSetService {
           item.expected_row_version,
         );
       if (result.changes !== 1) throw new ChangeSetConflict('SCENE_ROW_VERSION_CONFLICT');
+      if (bindings) this.applySceneBindings(database, projectId, item.target_id!, bindings);
       return item.target_id!;
     }
     if (item.action === 'create') {
@@ -442,6 +501,62 @@ export class ChangeSetService {
       );
     if (result.changes !== 1) throw new ChangeSetConflict('SHOT_ROW_VERSION_CONFLICT');
     return item.target_id!;
+  }
+
+  private applySceneBindings(
+    database: Database.Database,
+    projectId: string,
+    sceneId: string,
+    bindings: {
+      sceneDocumentId: string | null;
+      videoPrompt: string;
+      characterDocumentIds: string[];
+    },
+  ): void {
+    try {
+      const cast = resolvedCast(database, projectId, sceneId, bindings.characterDocumentIds);
+      const scene = database
+        .prepare('SELECT material_bindings_json FROM scenes WHERE id=? AND project_id=?')
+        .get(sceneId, projectId) as { material_bindings_json: string };
+      const previous = JSON.parse(scene.material_bindings_json) as SceneMaterialBindingInfo[];
+      const materials = previous.filter(
+        (item) =>
+          item.role !== 'scene' ||
+          item.source !== 'auto' ||
+          item.sourceDocumentId === bindings.sceneDocumentId,
+      );
+      if (bindings.sceneDocumentId && !materials.some((item) => item.role === 'scene')) {
+        const image = productionReferenceImage(database, projectId, bindings.sceneDocumentId);
+        const doc = database
+          .prepare('SELECT title FROM documents WHERE id=?')
+          .get(bindings.sceneDocumentId) as { title: string };
+        if (image)
+          materials.push({
+            id: `scene:${bindings.sceneDocumentId}`,
+            role: 'scene',
+            label: doc.title,
+            assetId: image.id,
+            sourceDocumentId: bindings.sceneDocumentId,
+            source: 'auto',
+          });
+      }
+      database
+        .prepare(
+          'UPDATE scenes SET video_prompt=?,scene_document_id=?,material_bindings_json=? WHERE id=? AND project_id=?',
+        )
+        .run(
+          bindings.videoPrompt,
+          bindings.sceneDocumentId,
+          JSON.stringify(materials),
+          sceneId,
+          projectId,
+        );
+      new SceneCharacterRepository(database).replace(sceneId, cast);
+    } catch (error) {
+      throw new ChangeSetConflict(
+        error instanceof Error ? error.message : 'SCENE_BINDING_CONFLICT',
+      );
+    }
   }
 
   private applyDocument(

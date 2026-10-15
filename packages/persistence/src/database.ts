@@ -42,6 +42,7 @@ import {
   MIGRATION_V40,
   MIGRATION_V41,
   MIGRATION_V42,
+  MIGRATION_V47,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { MIGRATION_V44 } from './migration-v44.js';
@@ -496,6 +497,19 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(46, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 46) {
+    checkpoint(database);
+    database.transaction(() => {
+      const columns = database.prepare('PRAGMA table_info(agent_change_set_items)').all() as Array<{
+        name: string;
+      }>;
+      if (!columns.some((column) => column.name === 'scene_bindings_json'))
+        database.exec(MIGRATION_V47);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(47, now);
     })();
   }
   return getSchemaVersion(database);

@@ -599,6 +599,7 @@ const methods = new Set<WorkerMethod>([
   'novel.intent.list',
   'novel.intent.cancel',
   'novel.export.prepare',
+  'novel.export.reveal',
   'agent.partial.list',
   'agent.partial.recover',
   'agent.partial.discard',
@@ -1312,6 +1313,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = markdownExportService.prepare(
             params as unknown as NovelMarkdownExportPrepareParams,
           );
+          break;
+        case 'novel.export.reveal':
+          result = await markdownExportService.reveal({ jobId: requireString(params, 'jobId') });
           break;
         case 'agent.partial.list':
           result = partialArtifactService.list(params);

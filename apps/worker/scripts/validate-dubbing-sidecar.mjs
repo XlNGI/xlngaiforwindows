@@ -156,7 +156,7 @@ try {
     name: 'Dubbing packaged smoke',
   });
   requireCondition(
-    project.schemaVersion >= 44,
+    project.schemaVersion >= 47,
     'Packaged sidecar did not migrate the dubbing schema.',
   );
   const scene = await request('scene.save', { title: '场次配音验证' });
@@ -165,6 +165,48 @@ try {
     title: '固定声音角色',
     contentMarkdown: '# 固定声音角色',
   });
+  const setting = await request('document.save', {
+    kind: 'scene',
+    title: '离线庭院',
+    contentMarkdown: '# 离线庭院',
+  });
+  const structuredPrompt = '司机转身，他没有开口。';
+  const bindingProposal = await request('agent.changeSet.create', {
+    title: '结构化绑定验证',
+    items: [
+      {
+        entityType: 'scene',
+        action: 'update',
+        targetId: scene.id,
+        expectedRowVersion: scene.rowVersion,
+        title: scene.title,
+        sceneDocumentId: setting.id,
+        videoPrompt: structuredPrompt,
+        characterDocumentIds: [character.id],
+      },
+    ],
+  });
+  const beforeApproval = (await request('scene.list')).find((item) => item.id === scene.id);
+  requireCondition(
+    !beforeApproval.videoPrompt && !beforeApproval.characterBindings.length,
+    'Proposal changed scene bindings before approval.',
+  );
+  requireCondition(
+    (
+      await request('agent.changeSet.apply', {
+        changeSetId: bindingProposal.id,
+        expectedRowVersion: bindingProposal.rowVersion,
+      })
+    ).status === 'applied',
+    'Structured binding approval failed.',
+  );
+  const approved = (await request('scene.list')).find((item) => item.id === scene.id);
+  requireCondition(
+    approved.videoPrompt === structuredPrompt &&
+      approved.sceneDocumentId === setting.id &&
+      approved.characterBindings[0]?.characterDocumentId === character.id,
+    'Structured prompt/scene/cast did not apply together.',
+  );
   const cue = await request('dubbing.cue.save', {
     sceneId: scene.id,
     speakerKind: 'character',
@@ -308,6 +350,8 @@ try {
   const exportedScene = (await request('scene.list')).find((item) => item.id === scene.id);
   requireCondition(
     exportedScene?.dialogueAudioId === imported.audio.id &&
+      exportedScene.videoPrompt === structuredPrompt &&
+      exportedScene.sceneDocumentId === setting.id &&
       exportedScene.characterBindings?.some((item) => item.characterDocumentId === character.id),
     'Exported scene lost its cast or dialogue binding.',
   );
@@ -334,6 +378,7 @@ try {
         taskLog: true,
         projectExportAndIntegrity: true,
         sceneCastAndDialoguePreserved: true,
+        structuredSceneBindingApplied: true,
         paidRequests: 0,
       },
       null,

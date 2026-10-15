@@ -16,7 +16,15 @@ export class SceneStructureSubmissionService {
       database.transaction(() => {
         if (
           Object.keys(args).some(
-            (key) => !['resourceId', 'expectedRevision', 'episodeTitle', 'scenes'].includes(key),
+            (key) =>
+              ![
+                'resourceId',
+                'expectedRevision',
+                'episodeTitle',
+                'scenes',
+                'resolution',
+                'feedback',
+              ].includes(key),
           )
         )
           throw new Error('Unsupported scene structure argument.');
@@ -44,22 +52,43 @@ export class SceneStructureSubmissionService {
           throw new Error(
             'New scenes and shots require workspace:shots from project.structure.get.',
           );
+        if (args.resolution === 'needs_clarification') {
+          if (
+            typeof args.feedback !== 'string' ||
+            !args.feedback.trim() ||
+            args.feedback.length > 4000 ||
+            !Array.isArray(args.scenes) ||
+            args.scenes.length
+          )
+            throw new Error('Clarification requires feedback and no proposed scenes.');
+          return {
+            status: 'scene_bindings_need_clarification',
+            feedback: args.feedback,
+            applied: false,
+            reviewRequired: false,
+            resourceId: 'workspace:shots',
+            locator: resource.locator,
+          };
+        }
+        if (args.resolution !== 'resolved')
+          throw new Error('Provide resolution: resolved or needs_clarification.');
         const structure = parseEpisodeStructureArguments(
           JSON.stringify({ episodeTitle: args.episodeTitle, scenes: args.scenes }),
         );
         validateEpisodeReferences(database, project.id, structure);
-        if (structure.scenes.some((scene) => !scene.sceneDocumentId))
-          throw new Error(
-            'Each scene requires sceneDocumentId from the production scene resources on 角色与场景. Create the scene prompt document first if necessary.',
-          );
         const items: AgentChangeSetItemDraft[] = [];
         for (const scene of structure.scenes) {
           const parentItemOrdinal = items.length;
           items.push({
             entityType: 'scene',
-            action: 'create',
+            action: scene.sceneId ? 'update' : 'create',
+            ...(scene.sceneId
+              ? { targetId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion }
+              : {}),
             title: scene.title,
             sceneDocumentId: scene.sceneDocumentId,
+            videoPrompt: scene.videoPrompt,
+            characterDocumentIds: scene.characterDocumentIds,
           });
           for (const shot of scene.shots)
             items.push({ entityType: 'shot', action: 'create', parentItemOrdinal, ...shot });

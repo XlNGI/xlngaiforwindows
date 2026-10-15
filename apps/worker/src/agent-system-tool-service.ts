@@ -133,6 +133,13 @@ export class AgentSystemToolService {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
     switch (operation) {
+      case 'scene.read': {
+        rejectUnknown(args, ['sceneId']);
+        const sceneId = requiredString(args.sceneId, 'sceneId', 200);
+        const scene = this.content.listScenes().find((item) => item.id === sceneId);
+        if (!scene) throw new Error('Scene was not found in the current project.');
+        return { status: 'read', scene };
+      }
       case 'scene.submit_structure':
         return new SceneStructureSubmissionService(this.projects).submit(args, identity);
       case 'document.submit_draft':

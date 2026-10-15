@@ -9,6 +9,7 @@ export type SystemAgentToolOperation =
   | 'document.submit_draft'
   | 'novel.chapter.write_draft'
   | 'scene.submit_structure'
+  | 'scene.read'
   | 'project.get_context'
   | 'project.structure.get'
   | 'project.integrity.check'
@@ -222,7 +223,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'novel.episode.submit_structure',
     description:
-      'Submit a short-drama episode scene/shot structure with a prompt for every shot. Creates one reviewable change set; never writes scenes or shots directly. Reference published characters and scenes with [character:name] / [scene:name] placeholders.',
+      'Submit a short-drama episode structure for review. Resolve scene and cast identities yourself using retrieved project resources; return real sceneDocumentId, all characterDocumentIds and a complete videoPrompt. Names and prompt placeholders never establish relationships.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -236,19 +237,45 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['title', 'sceneDocumentId', 'shots'],
+            required: ['title', 'sceneDocumentId', 'videoPrompt', 'characterDocumentIds', 'shots'],
             properties: {
               title: { type: 'string', minLength: 1, maxLength: 200 },
               sceneDocumentId: {
-                type: 'string',
+                type: ['string', 'null'],
                 minLength: 1,
                 maxLength: 200,
                 description:
                   'Actual documentId of a reusable production scene prompt document (kind=scene) on 角色与场景; obtain from project.structure.get. Multiple scene occurrences may reuse it.',
               },
+              sceneId: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 200,
+                description: 'Existing scene ID when revising bindings; omit for create.',
+              },
+              expectedRowVersion: {
+                type: 'integer',
+                minimum: 0,
+                description: 'Required with sceneId; obtain from project.structure.get.',
+              },
+              videoPrompt: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 20000,
+                description:
+                  'Complete scene video prompt. Identify ALL appearing characters semantically and return their real IDs separately.',
+              },
+              characterDocumentIds: {
+                type: 'array',
+                maxItems: 30,
+                uniqueItems: true,
+                items: { type: 'string', minLength: 1, maxLength: 200 },
+                description:
+                  'Complete ordered cast of real production character document IDs, including non-speaking characters; [] means no characters. Do not guess missing IDs.',
+              },
               shots: {
                 type: 'array',
-                minItems: 1,
+                minItems: 0,
                 maxItems: 30,
                 items: {
                   type: 'object',
@@ -373,18 +400,38 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'scene.read',
+    description:
+      'Read an existing scene on demand by its actual ID, including its full videoPrompt, sceneDocumentId, ordered character/media bindings and current rowVersion. Use before revising an existing scene; never infer the current prompt or relationships from its title.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sceneId'],
+      properties: { sceneId: { type: 'string', minLength: 1, maxLength: 200 } },
+    },
+  },
+  {
     name: 'scene.submit_structure',
     description:
-      'Create actual scene/shot proposals for 场次与镜头, with one prompt per shot. First retrieve project.structure.get and choose workspace:shots. Supply episodeTitle and scenes:[{title,sceneDocumentId,shots:[{title,prompt}]}]. Every scene must bind the actual documentId of its production scene prompt on 角色与场景. Retrieve that ID from project.structure.get; create the production scene document with document.submit_draft first if absent. Choose the scene using the story and scene definitions retrieved with library.search/read; when the location is unclear or several settings fit, clarify before submitting. Several scene occurrences can share one scene document. This saves a reviewable change set on that page; the scene/shot directory is populated only after the user approves. Report the returned changeSetId and pending-review status, never claim applied scenes. Do not replace this operation with document.submit_draft or an unattached storyboard document. Call sequentially for multiple structures.',
+      'Resolve scene/cast intent and submit create or update proposals for 场次与镜头. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,videoPrompt,sceneDocumentId,characterDocumentIds,shots}]. For new scenes provide at least one shot with title/prompt. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved proposals require user review; report changeSetId and pending-review state, never claim applied bindings.',
     parameters: {
       ...DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
         .parameters,
-      required: ['resourceId', 'episodeTitle', 'scenes'],
+      required: ['resourceId', 'resolution', 'episodeTitle', 'scenes'],
       properties: {
         ...(DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
           .parameters.properties as Record<string, unknown>),
         resourceId: RESOURCE_LOCATOR_PROPERTIES.resourceId,
         expectedRevision: RESOURCE_LOCATOR_PROPERTIES.expectedRevision,
+        resolution: { type: 'string', enum: ['resolved', 'needs_clarification'] },
+        feedback: { type: 'string', maxLength: 4000 },
+        scenes: {
+          ...((
+            DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
+              .parameters.properties as Record<string, unknown>
+          ).scenes as Record<string, unknown>),
+          minItems: 0,
+        },
       },
     },
   },
@@ -1053,6 +1100,7 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'document.create_draft': writePolicy(),
   'document.submit_draft': writePolicy(),
   'scene.submit_structure': writePolicy(),
+  'scene.read': readPolicy(),
   'novel.chapter.write_draft': writePolicy(),
   'document.list': readPolicy(),
   'document.read': readPolicy(),

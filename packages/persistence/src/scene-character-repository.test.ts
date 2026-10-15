@@ -86,7 +86,8 @@ describe('scene cast and audio storage', () => {
     try {
       db.exec(`DROP TRIGGER scene_dialogue_insert_valid;DROP TRIGGER scene_dialogue_update_valid;
         DROP TABLE scene_character_bindings;ALTER TABLE scenes DROP COLUMN dialogue_audio_id;
-        DELETE FROM schema_migrations WHERE version=46;`);
+        ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json;
+        DELETE FROM schema_migrations WHERE version>=46;`);
       db.prepare('UPDATE scenes SET material_bindings_json=? WHERE id=?').run(
         JSON.stringify([
           'invalid legacy entry',

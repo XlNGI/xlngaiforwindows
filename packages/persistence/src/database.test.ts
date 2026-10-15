@@ -49,6 +49,44 @@ function removeSceneBindingMigration(database: Awaited<ReturnType<typeof tempora
 }
 
 describe('project database', () => {
+  it('upgrades a real v46 proposal store without altering existing scene relationships', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database.exec(
+        "ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json; DELETE FROM schema_migrations WHERE version=47; INSERT INTO projects(id,name,created_at,updated_at) VALUES('v46','Legacy','now','now'); INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at) VALUES('scene','v46','旧场次',0,'旧提示词','now','now');",
+      );
+      expect(getSchemaVersion(database)).toBe(46);
+      database.exec(
+        "CREATE TRIGGER fail_v47 BEFORE INSERT ON schema_migrations WHEN NEW.version=47 BEGIN SELECT RAISE(ABORT,'fixture migration failure'); END;",
+      );
+      expect(() => migrateDatabase(database)).toThrow('fixture migration failure');
+      expect(getSchemaVersion(database)).toBe(46);
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM pragma_table_info('agent_change_set_items') WHERE name='scene_bindings_json'",
+          )
+          .get(),
+      ).toBeUndefined();
+      database.exec('DROP TRIGGER fail_v47');
+      expect(migrateDatabase(database)).toBe(47);
+      expect(migrateDatabase(database)).toBe(47);
+      expect(
+        database.prepare('SELECT title,video_prompt FROM scenes WHERE id=?').get('scene'),
+      ).toEqual({ title: '旧场次', video_prompt: '旧提示词' });
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM pragma_table_info('agent_change_set_items') WHERE name='scene_bindings_json'",
+          )
+          .get(),
+      ).toBeTruthy();
+      expect(checkIntegrity(database).ok).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
   it.each([false, true])(
     'upgrades v41 scene bindings atomically (conflict=%s)',
     async (conflict) => {

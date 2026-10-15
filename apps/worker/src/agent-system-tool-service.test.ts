@@ -150,6 +150,29 @@ async function setup() {
 }
 
 describe('AgentSystemToolService', () => {
+  it('reads the exact existing scene and its cast on demand without name resolution', async () => {
+    const { service, identity, content } = await setup();
+    const actor = content.saveDocument({
+      kind: 'character',
+      title: '老周',
+      contentMarkdown: '# 老周',
+    });
+    const scene = content.saveScene({
+      title: '同名场次',
+      videoPrompt: '司机转身，他没有说话。',
+      characterBindings: [{ characterDocumentId: actor.id }],
+    });
+    expect(service.execute('scene.read', { sceneId: scene.id }, identity)).toEqual({
+      status: 'read',
+      scene,
+    });
+    expect(() => service.execute('scene.read', { sceneId: 'missing' }, identity)).toThrow(
+      'current project',
+    );
+    expect(() =>
+      service.execute('scene.read', { sceneId: scene.id, prompt: '老周' }, identity),
+    ).toThrow('unsupported field');
+  });
   it('lists novel chapters without bodies and applies chapter lifecycle changes with CAS', async () => {
     const { service, identity, novels } = await setup();
     novels.getProfile({ createIfMissing: true });

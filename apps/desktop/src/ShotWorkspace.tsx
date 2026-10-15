@@ -43,13 +43,6 @@ export function saveShotReferences(
   }
 }
 
-export function mentionedTitle(prompt: string, kind: 'character' | 'scene'): string | undefined {
-  const pattern = kind === 'character' ? /\[角色:([^\]]+)\]/ : /\[场景:([^\]]+)\]/;
-  const match = prompt.match(pattern);
-  const title = match?.[1]?.trim();
-  return title || undefined;
-}
-
 function assetName(asset: AssetInfo): string {
   return asset.alias?.trim() || asset.relativePath.split(/[\\/]/).pop() || asset.id;
 }
@@ -261,46 +254,22 @@ export function ShotWorkspace({
     persist(next);
   };
 
-  const resolveMentions = async (): Promise<ShotReferenceAssets> => {
+  const resolveBoundReferences = async (): Promise<ShotReferenceAssets> => {
     const expectedScope = currentScope.current;
     let next = { ...refs };
-    const characterTitle = mentionedTitle(prompt, 'character');
-    const sceneTitle = mentionedTitle(prompt, 'scene');
-    if (characterTitle && !next.characterAssetId) {
-      const document = documents.find(
-        (item) => item.kind === 'character' && item.title.includes(characterTitle),
+    if (sceneDocumentId && !next.sceneAssetId && !refs.ignoreSceneBinding) {
+      if (!boundSceneAvailable) throw new Error('绑定场景资料不可用，请重新选择场次的场景。');
+      const items = await callWorker('asset.list', {
+        sourceDocumentId: sceneDocumentId,
+        sort: 'created-desc',
+        limit: 200,
+      });
+      const asset = items.find(
+        (item) => item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
       );
-      if (document) {
-        const items = await callWorker('asset.list', {
-          sourceDocumentId: document.id,
-          sort: 'created-desc',
-          limit: 1,
-        });
-        if (items[0]) next = { ...next, characterAssetId: items[0].id };
-      }
-    }
-    if ((sceneDocumentId || sceneTitle) && !next.sceneAssetId && !refs.ignoreSceneBinding) {
-      if (sceneDocumentId && !boundSceneAvailable)
-        throw new Error('绑定场景资料不可用，请重新选择场次的场景。');
-      const document = documents.find((item) =>
-        sceneDocumentId
-          ? item.id === sceneDocumentId
-          : item.kind === 'scene' && item.title.includes(sceneTitle!),
-      );
-      if (document) {
-        const items = await callWorker('asset.list', {
-          sourceDocumentId: document.id,
-          sort: 'created-desc',
-          limit: 1,
-        });
-        const asset = items.find(
-          (item) => item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
-        );
-        if (asset) {
-          next = { ...next, sceneAssetId: asset.id };
-          if (sceneDocumentId && currentScope.current === expectedScope)
-            setInheritedSceneAsset(asset);
-        }
+      if (asset) {
+        next = { ...next, sceneAssetId: asset.id };
+        if (currentScope.current === expectedScope) setInheritedSceneAsset(asset);
       }
     }
     if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
@@ -316,7 +285,7 @@ export function ShotWorkspace({
     const expectedScope = currentScope.current;
     setReferenceMessage('');
     try {
-      const resolved = await resolveMentions();
+      const resolved = await resolveBoundReferences();
       if (currentScope.current !== expectedScope) return;
       if (
         mode === 'video' &&
@@ -335,9 +304,6 @@ export function ShotWorkspace({
 
   const hasSelectedRefs = Boolean(
     refs.characterAssetId || effectiveRefs.sceneAssetId || refs.firstFrameAssetId,
-  );
-  const hasMentionedRefs = Boolean(
-    mentionedTitle(prompt, 'character') || mentionedTitle(prompt, 'scene'),
   );
 
   return (
@@ -381,7 +347,7 @@ export function ShotWorkspace({
           <button
             className="button secondary"
             type="button"
-            disabled={!writable || (!hasSelectedRefs && !hasMentionedRefs)}
+            disabled={!writable || (!hasSelectedRefs && !sceneDocumentId)}
             onClick={() => {
               void generate('video');
             }}
@@ -418,7 +384,7 @@ export function ShotWorkspace({
         <h2 id="shot-reference-heading">{'\u53c2\u8003\u56fe'}</h2>
         <p className="shot-reference-hint">
           {
-            '\u4ece\u7d20\u6750\u5e93\u62d6\u5165\uff0c\u6216\u5728\u63d0\u793a\u8bcd\u91cc\u5199 [角色:林澈] / [场景:旧码头] \u81ea\u52a8\u586b\u5165\u9ed8\u8ba4\u56fe\u3002'
+            '从素材库拖入或手动选择参考图。场景图沿用场次已确认的场景关联；提示词中的姓名不直接建立关系。'
           }
         </p>
         <div className="shot-reference-grid">

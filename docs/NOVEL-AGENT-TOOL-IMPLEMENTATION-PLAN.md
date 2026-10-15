@@ -2101,6 +2101,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 - [ ] P6 小说工作区与编辑器闭环（新建、导入、搜索、查看、CAS 编辑、软删除/恢复、“保存并切片”、Agent 按章节目标自动定位刷新及页面内容隔离核心流程已实现；多窗口与实机验收待完成）
 - [ ] P7 小说上下文、摘要与一致性（Schema v30 本地切片、旧项目回填、已保存草稿检索、摘要缓存、动态预算和一致性报告已实现；向量召回与长篇性能验收待完成）
 - [ ] P8 Markdown 导出与同项目短剧改编（v23 export job/item、files/merged、路径/输出完整性和 adaptation proposal 基础已实现；Windows 句柄竞态与完整人工验收待完成）
+- [x] P8 导出交互修复切片（2026-10-15）：逐章勾选、全选/取消全选、搜索结果全选、整部/所选范围、files/merged 选择、显式包含草稿、进度/错误/跳过章节提示及受控打开导出文件夹；合并草稿文件标记 `.draft`。本项不代表 P8 整体完成。
 - [ ] P9 企业级硬化与发布门禁
 
 ## 32. 完成定义
@@ -2130,6 +2131,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 | 日期 | 阶段 | 状态 | 验证命令/证据 | 未验证边界 | 负责人 |
 |---|---|---|---|---|---|
+| 2026-10-15 | P6/P8 小说导出交互修复 | 修复切片完成 | Desktop 增加逐章勾选、全选/取消全选、搜索结果全选、已选计数、整部/所选范围、files/merged 和显式包含草稿；已删除章节不可选，刷新时移除失效选择，切换项目隔离选择/异步结果。Worker 无已发布内容时给出中文草稿提示，按 job ID 校验当前项目及成功目录后打开文件夹；合并草稿输出 `merged.draft.md`，恢复兼容原 `merged.md` 并校验实际文件哈希；多选支持最多 10000 章。`pnpm --workspace-concurrency=1 -r --if-present test --maxWorkers=2` 全仓通过（1276 项），`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build`、`git diff --check`、`cargo fmt --check --manifest-path apps/desktop/src-tauri/Cargo.toml`、`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` 通过。Playwright/Edge 使用隔离 Worker 夹具验证搜索选择、草稿错误/重试、合并所选章节、打开目录请求及 800/520/390 宽度布局，报告与截图保存在 `.m2-ui-novel-export/`。 | 默认并发测试曾触发检索压力测试/项目锁测试超时，降低并发后全部通过。此轮未重新打包安装或进行 Windows Tauri 人工验收；P8 其余路径竞态/短剧改编工作仍未完成。 | Codex |
 | 2026-10-10 | P6 页面内容边界修复 | 核心切片完成 | 制作页独占可见工作区，项目编辑器隐藏并保留未保存内容，制作页与项目页分别保存布局；浮动文档不覆盖制作页；剧本与角色页过滤当前文档的页面归属，并禁用异页文档的保存/发布/分离操作；小说页移除通用文档入口，任务日志章节产物按 `documentId` 对应的 `chapterId` 回到小说页。Desktop 全套测试 261 项、typecheck、相关源文件 ESLint、Prettier、`git diff --check`、`pnpm.cmd tauri:build`（Release/x64 NSIS）及 Release Native preflight（窗口/Worker 启动、优雅退出/Worker 清理）通过；Playwright 使用隔离 RPC 测试数据在 1440x900、1280x720、390x844 验证小说/制作切换、未保存修改保留、正文隔离和无页面异常，截图与报告在 `.m2-ui-page-boundaries/`。 | 本次未重新执行安装/卸载烟测，避免影响现有安装目录；真实 Provider、多窗口人工验收及 P6 剩余项目仍未完成；全仓 lint 仍有既有 App.test/TaskPlan 三项错误。 | Codex |
 | 2026-08-28 | P6/P7 小说草稿 CRUD 与本地 RAG | 部分完成 | Schema v30 新增 `novel_rag_chunks` 及项目/章节/版本归属触发器；导入、用户保存、Agent 修订和版本恢复在正文事务内替换当前切片；v29 升级自动回填。小说上下文改为检索当前已保存草稿切片，短剧仅使用用户所选章节；Desktop 主流程提供新建、导入、标题搜索、查看、编辑、软删除/恢复和切片状态。Persistence 23 项、Worker 236 项、Desktop 148 项测试通过，三端聚焦 typecheck 通过。 | 当前召回为确定性本地词项相关性 + 首尾锚点，尚未接入 embedding/向量索引；长篇性能、真实 Windows Tauri、多窗口并发与正式发布门禁待验收。 | Codex |
 | 2026-08-19 | P3 Native runtime event replay slice | Partial | Added `agent.task.events` contract, project-scoped Worker query with cursor and bounded paging, request validation and handler dispatch; Desktop Native Agent generation now polls by task ID and clears the subscription on terminal state. Worker/Desktop focused tests and typechecks passed. | Native runtime start/subscribe/query/cancel, bounded interrupted recovery on app exit, real Provider and Windows acceptance remain open. | Codex |

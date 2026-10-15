@@ -1828,6 +1828,7 @@ describe('App', () => {
                   projectId: 'project',
                   title: '生成的庭院',
                   sceneDocumentId: sceneBoundDocumentId ?? undefined,
+                  videoPrompt: '司机转身，他没有开口。',
                   position: 0,
                   rowVersion: 0,
                   createdAt: 'now',
@@ -2112,6 +2113,7 @@ describe('App', () => {
       expect(await screen.findByRole('button', { name: '生成的庭院' })).toBeInTheDocument();
       expect(await screen.findByRole('button', { name: '庭院远景' })).toBeInTheDocument();
       expect(await screen.findByDisplayValue('清晨的庭院镜头提示词')).toBeInTheDocument();
+      expect(screen.getByLabelText('场次完整视频提示词')).toHaveValue('司机转身，他没有开口。');
       expect(callWorker).toHaveBeenCalledWith('shot.list', { sceneId: 'applied-scene' });
       expect(screen.getByLabelText('场次绑定场景')).toHaveValue(createdDocument.id);
       expect(screen.getByText(`绑定场景：${createdDocument.title}`)).toBeInTheDocument();
@@ -2135,6 +2137,45 @@ describe('App', () => {
         sceneDocumentId: createdDocument.id,
         expectedRowVersion: 1,
       });
+      fireEvent.change(screen.getByLabelText('场次完整视频提示词'), {
+        target: { value: '司机走进屋内，他坐下。' },
+      });
+      fireEvent.click(
+        within(screen.getByLabelText('场次完整视频提示词').closest('section')!).getByRole(
+          'button',
+          { name: '保存提示词' },
+        ),
+      );
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith(
+          'agent.run',
+          expect.objectContaining({
+            prompt: expect.stringContaining('司机走进屋内，他坐下。') as unknown,
+          }),
+        ),
+      );
+      const bindingRun = vi
+        .mocked(callWorker)
+        .mock.calls.filter(([method]) => method === 'agent.run')
+        .at(-1)?.[1] as unknown;
+      expect(bindingRun).toMatchObject({
+        prompt: expect.stringContaining('scene.submit_structure') as unknown,
+      });
+      expect(bindingRun).toMatchObject({
+        prompt: expect.stringContaining('"sceneId":"applied-scene"') as unknown,
+      });
+      expect(bindingRun).toMatchObject({
+        prompt: expect.stringContaining('"expectedRowVersion":2') as unknown,
+      });
+      expect(
+        vi
+          .mocked(callWorker)
+          .mock.calls.some(
+            ([method, params]) =>
+              method === 'scene.save' &&
+              (params as { videoPrompt?: string }).videoPrompt === '司机走进屋内，他坐下。',
+          ),
+      ).toBe(false);
       return;
     }
     if (isNovelReference) {
@@ -3434,7 +3475,7 @@ describe('App', () => {
     );
     expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('[角色:林澈] 雨夜里回头');
     expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
-    expect(screen.getByText('素材库图片')).toBeInTheDocument();
+    expect(screen.queryByText('素材库图片')).not.toBeInTheDocument();
   });
 
   it('reviews a direct paid image submission on the shared confirmation card', async () => {

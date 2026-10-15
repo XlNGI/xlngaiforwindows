@@ -3,6 +3,7 @@ import {
   BookOpen,
   CheckCircle2,
   ExternalLink,
+  FolderOpen,
   FileText,
   Plus,
   RefreshCw,
@@ -20,6 +21,8 @@ import type {
   DocumentVersionState,
   NovelChapterInfo,
   NovelConsistencyReport,
+  NovelMarkdownExportFormat,
+  NovelMarkdownExportJobInfo,
   NovelVolumeInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
@@ -87,7 +90,11 @@ function consistencyIssueLabel(code: NovelConsistencyReport['issues'][number]['c
   }
 }
 
-export function NovelWorkspace({
+export function NovelWorkspace(props: NovelWorkspaceProps) {
+  return <NovelProjectWorkspace key={props.projectId ?? 'no-project'} {...props} />;
+}
+
+function NovelProjectWorkspace({
   projectId,
   writable,
   focusChapterId,
@@ -110,6 +117,15 @@ export function NovelWorkspace({
   const [message, setMessage] = useState('');
   const [conflictDocument, setConflictDocument] = useState<DocumentDetail>();
   const [exportBusy, setExportBusy] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportChapterIds, setExportChapterIds] = useState<string[]>([]);
+  const [exportScope, setExportScope] = useState<'work' | 'selection'>('work');
+  const [exportFormat, setExportFormat] = useState<NovelMarkdownExportFormat>('files');
+  const [exportIncludeDraft, setExportIncludeDraft] = useState(false);
+  const [exportMessage, setExportMessage] = useState('');
+  const [exportError, setExportError] = useState(false);
+  const [exportResult, setExportResult] = useState<NovelMarkdownExportJobInfo>();
+  const [revealBusy, setRevealBusy] = useState(false);
   const [consistency, setConsistency] = useState<NovelConsistencyReport>();
   const [importPreview, setImportPreview] = useState<NovelImportChapterDraft[]>([]);
   const [importVolumeTitle, setImportVolumeTitle] = useState('');
@@ -124,9 +140,39 @@ export function NovelWorkspace({
           .includes(normalizedSearch),
       )
     : chapters;
+  const activeChapters = chapters.filter((chapter) => chapter.lifecycleStatus === 'active');
+  const visibleActiveChapters = filteredChapters.filter(
+    (chapter) => chapter.lifecycleStatus === 'active',
+  );
+  const checkedChapterIds = new Set(exportChapterIds);
+  const selectedExportIds = activeChapters
+    .filter((chapter) => checkedChapterIds.has(chapter.id))
+    .map((chapter) => chapter.id);
+  const selectedExportIdSet = new Set(selectedExportIds);
+  const exportCount = exportScope === 'work' ? activeChapters.length : selectedExportIds.length;
+
+  const selectVisibleChapters = () => {
+    setExportScope('selection');
+    setExportChapterIds((ids) => [
+      ...new Set([...ids, ...visibleActiveChapters.map((chapter) => chapter.id)]),
+    ]);
+  };
 
   const renderChapterItem = (chapter: NovelChapterInfo) => (
     <div className="novel-chapter-row" key={chapter.id}>
+      <input
+        type="checkbox"
+        aria-label={`选择 ${chapter.displayLabel} ${chapter.title}`}
+        checked={selectedExportIdSet.has(chapter.id)}
+        disabled={exportBusy || chapter.lifecycleStatus !== 'active'}
+        onChange={(event) => {
+          const checked = event.target.checked;
+          setExportScope('selection');
+          setExportChapterIds((ids) =>
+            checked ? [...new Set([...ids, chapter.id])] : ids.filter((id) => id !== chapter.id),
+          );
+        }}
+      />
       <button
         className={`tree-item ${selected?.id === chapter.id ? 'selected' : ''}`}
         type="button"
@@ -150,6 +196,10 @@ export function NovelWorkspace({
       callWorker('novel.volume.list', { includeArchived }),
     ]);
     setChapters(rows);
+    const activeIds = new Set(
+      rows.filter((row) => row.lifecycleStatus === 'active').map((row) => row.id),
+    );
+    setExportChapterIds((ids) => ids.filter((id) => activeIds.has(id)));
     setVolumes(volumeRows);
     if (focusReferenceId && !preferredId) {
       await openReference(focusReferenceId);
@@ -311,16 +361,46 @@ export function NovelWorkspace({
   };
 
   const exportWork = async () => {
-    if (!projectId || exportBusy) return;
+    if (!projectId || !writable || exportBusy || revealBusy || exportCount === 0) return;
     setExportBusy(true);
+    setExportError(false);
+    setExportResult(undefined);
+    setExportMessage('正在导出…');
     try {
       const job = await callWorker('novel.export.prepare', {
-        exportType: 'work',
-        exportFormat: 'files',
+        exportType: exportScope,
+        exportFormat,
+        ...(exportScope === 'selection' ? { chapterIds: selectedExportIds } : {}),
+        ...(exportIncludeDraft ? { includeDraft: true } : {}),
       });
-      setMessage(`${exportStatusLabel(job.status)}：${job.packagePath}`);
+      if (job.status !== 'succeeded') {
+        throw new Error(
+          job.errorMessage || `导出未完成（${exportStatusLabel(job.status)}），请重试。`,
+        );
+      }
+      setExportResult(job);
+      const omitted = exportCount - job.itemCount;
+      setExportMessage(
+        `导出完成，共 ${job.itemCount} 章。${omitted > 0 ? `另有 ${omitted} 章没有${exportIncludeDraft ? '已保存正文' : '已发布版本'}，未导出。` : ''}`,
+      );
+    } catch (error) {
+      setExportError(true);
+      setExportMessage(`导出失败：${error instanceof Error ? error.message : '请重试。'}`);
     } finally {
       setExportBusy(false);
+    }
+  };
+
+  const revealExport = async () => {
+    if (!exportResult || revealBusy) return;
+    setRevealBusy(true);
+    try {
+      await callWorker('novel.export.reveal', { jobId: exportResult.id });
+    } catch (error) {
+      setExportError(true);
+      setExportMessage(`打开文件夹失败：${error instanceof Error ? error.message : '请重试。'}`);
+    } finally {
+      setRevealBusy(false);
     }
   };
 
@@ -427,8 +507,12 @@ export function NovelWorkspace({
         <button
           className="button secondary"
           type="button"
-          disabled={exportBusy || chapters.length === 0}
-          onClick={() => void exportWork()}
+          disabled={exportBusy || !projectId || !writable || activeChapters.length === 0}
+          aria-expanded={exportOpen}
+          onClick={() => {
+            setExportScope(selectedExportIds.length > 0 ? 'selection' : 'work');
+            setExportOpen(true);
+          }}
         >
           <BookOpen size={13} /> 导出 Markdown
         </button>
@@ -450,6 +534,88 @@ export function NovelWorkspace({
         </button>
         {message && <span className="inline-status">{message}</span>}
       </header>
+      {exportOpen && (
+        <section className="novel-export-panel" aria-label="小说导出选项">
+          <div className="novel-export-heading">
+            <strong>导出 Markdown</strong>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={exportBusy}
+              onClick={() => setExportOpen(false)}
+            >
+              收起
+            </button>
+          </div>
+          <fieldset className="novel-export-options" disabled={exportBusy}>
+            <label>
+              导出范围
+              <select
+                value={exportScope}
+                onChange={(event) => setExportScope(event.target.value as 'work' | 'selection')}
+              >
+                <option value="work">整部小说（{activeChapters.length} 章）</option>
+                <option value="selection">所选章节（{selectedExportIds.length} 章）</option>
+              </select>
+            </label>
+            <label>
+              文件组织
+              <select
+                value={exportFormat}
+                onChange={(event) =>
+                  setExportFormat(event.target.value as NovelMarkdownExportFormat)
+                }
+              >
+                <option value="files">每章一个 Markdown 文件</option>
+                <option value="merged">合并为一个 Markdown 文件</option>
+              </select>
+            </label>
+            <label className="novel-export-draft-toggle">
+              <input
+                type="checkbox"
+                checked={exportIncludeDraft}
+                onChange={(event) => setExportIncludeDraft(event.target.checked)}
+              />
+              包含草稿
+            </label>
+            <button
+              className="button primary"
+              type="button"
+              disabled={!writable || revealBusy || exportCount === 0}
+              onClick={() => void exportWork()}
+            >
+              {exportBusy ? '正在导出…' : '开始导出'}
+            </button>
+          </fieldset>
+          <p className="novel-export-note">
+            默认导出已发布版本；包含草稿时使用最新已保存版本。未保存的修改请先保存。
+          </p>
+          {exportScope === 'selection' && exportCount === 0 && (
+            <p className="novel-export-note">请在章节列表勾选要导出的章节。</p>
+          )}
+          {exportMessage && (
+            <div
+              className={`novel-export-status${exportError ? ' is-error' : ''}`}
+              role={exportError ? 'alert' : 'status'}
+            >
+              {exportMessage}
+            </div>
+          )}
+          {exportResult && (
+            <div className="novel-export-result">
+              <span className="novel-export-path">{exportResult.packagePath}</span>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={revealBusy || exportBusy}
+                onClick={() => void revealExport()}
+              >
+                <FolderOpen size={14} /> {revealBusy ? '正在打开…' : '打开导出文件夹'}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
       {importPreview.length > 0 && (
         <section className="novel-import-preview" aria-label="小说导入预览">
           <div className="novel-import-preview-heading">
@@ -516,6 +682,25 @@ export function NovelWorkspace({
                   onChange={(event) => setSearchKeyword(event.target.value)}
                 />
               </label>
+              <div className="novel-chapter-selection" aria-label="导出章节选择">
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={exportBusy || visibleActiveChapters.length === 0}
+                  onClick={selectVisibleChapters}
+                >
+                  {normalizedSearch ? '全选搜索结果' : '全选'}
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={exportBusy || selectedExportIds.length === 0}
+                  onClick={() => setExportChapterIds([])}
+                >
+                  取消全选
+                </button>
+                <span>已选 {selectedExportIds.length} 章</span>
+              </div>
             </div>
             {referenceDocuments.length > 0 && (
               <div className="novel-volume-group" aria-label="小说资料">

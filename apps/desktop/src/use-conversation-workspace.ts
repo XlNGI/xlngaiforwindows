@@ -103,6 +103,7 @@ export function useConversationWorkspace({
       setMessages([]);
       setMessageNextCursor(undefined);
       setContextPreview(preview);
+      return created;
     } catch (reason) {
       if (requestId === conversationRequest.current) {
         setChatMessage(reason instanceof Error ? reason.message : '会话创建失败');

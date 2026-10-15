@@ -46,6 +46,7 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'chat.message.list',
   'context.preview',
   'novel.context.consistencyReport',
+  'novel.export.reveal',
   'agent.generation.cancel',
   'agent.task.get',
   'agent.task.events',

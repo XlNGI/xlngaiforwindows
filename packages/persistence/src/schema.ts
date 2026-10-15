@@ -1,4 +1,9 @@
-export const CURRENT_SCHEMA_VERSION = 46;
+export const CURRENT_SCHEMA_VERSION = 47;
+
+export const MIGRATION_V47 = `
+ALTER TABLE agent_change_set_items ADD COLUMN scene_bindings_json TEXT
+  CHECK (scene_bindings_json IS NULL OR (json_valid(scene_bindings_json) AND json_type(scene_bindings_json)='object'));
+`;
 
 export const MIGRATION_V43 = `
 ALTER TABLE scenes ADD COLUMN video_prompt TEXT;

@@ -1825,7 +1825,10 @@ export interface AgentChangeSetItemDraft {
   parentSceneId?: string;
   parentItemOrdinal?: number;
   /** Production scene document for a scene proposal. */
-  sceneDocumentId?: string;
+  sceneDocumentId?: string | null;
+  /** LLM-resolved scene prompt and complete cast, applied together after review. */
+  videoPrompt?: string;
+  characterDocumentIds?: string[];
   title: string;
   shotStatus?: string;
   /** Shot prompt for `shot` items; applied to `shots.prompt` when approved. */
@@ -3929,6 +3932,7 @@ export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceW
     params: NovelMarkdownExportPrepareParams;
     result: NovelMarkdownExportJobInfo;
   };
+  'novel.export.reveal': { params: { jobId: string }; result: PathResult };
   'novel.intent.list': { params: NovelPendingIntentListParams; result: AgentPendingIntentInfo[] };
   'novel.intent.cancel': { params: NovelPendingIntentCancelParams; result: AgentPendingIntentInfo };
   'agent.partial.list': {

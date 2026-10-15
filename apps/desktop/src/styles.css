@@ -2960,8 +2960,95 @@ button {
 
 .novel-toolbar {
   min-height: 42px;
-  padding: 0 14px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
   border-bottom: 0;
+}
+
+.novel-export-panel {
+  min-height: 0;
+  max-height: 45%;
+  flex: 0 0 auto;
+  margin: 0 14px 10px;
+  padding: 12px;
+  overflow: auto;
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--control-bg);
+  font-size: calc(12px * var(--ui-font-scale));
+}
+
+.novel-export-heading,
+.novel-export-options,
+.novel-export-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.novel-export-heading {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.novel-export-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  align-items: flex-end;
+  border: 0;
+}
+
+.novel-export-options > label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.novel-export-options select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  background: var(--surface-bg);
+}
+
+.novel-export-options > .novel-export-draft-toggle {
+  min-height: 30px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.novel-export-draft-toggle input {
+  accent-color: var(--accent-deep);
+}
+
+.novel-export-note {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.novel-export-status,
+.novel-export-result {
+  margin-top: 10px;
+}
+
+.novel-export-status.is-error {
+  color: var(--danger);
+}
+
+.novel-export-path {
+  min-width: 0;
+  flex: 1 1 220px;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
 }
 
 .novel-toolbar-title {
@@ -2969,6 +3056,10 @@ button {
   align-items: center;
   gap: 7px;
   margin-right: auto;
+}
+
+.novel-workspace .button.secondary {
+  display: flex;
 }
 
 .novel-consistency {
@@ -3039,7 +3130,23 @@ button {
   z-index: 1;
   top: -10px;
   padding: 0 0 8px;
-  background: transparent;
+  background: var(--surface-bg);
+}
+
+.novel-chapter-selection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--ui-font-scale));
+}
+
+.novel-chapter-selection .button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: inherit;
 }
 
 .novel-chapter-tools label {
@@ -3080,6 +3187,7 @@ button {
 .novel-chapter-row .tree-item {
   flex: 1;
   min-width: 0;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
 }
 
 .novel-chapter-row .tree-item small {
@@ -3087,6 +3195,7 @@ button {
   padding-left: 6px;
   flex: 0 0 auto;
   font-size: calc(10px * var(--ui-font-scale));
+  white-space: nowrap;
 }
 
 .rag-ready {

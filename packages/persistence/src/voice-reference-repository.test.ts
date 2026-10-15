@@ -37,7 +37,7 @@ describe('versioned role voice samples', () => {
   it('migrates, freezes versions, uses stable role identities and protects audio references', () => {
     const db = fixture();
     try {
-      expect(getSchemaVersion(db)).toBe(46);
+      expect(getSchemaVersion(db)).toBe(47);
       const repo = new VoiceReferenceRepository(db, 'one');
       const first = repo.save({ characterDocumentId: 'one-role', audioId: 'one-audio1' });
       db.prepare('UPDATE documents SET title=? WHERE id=?').run('新角色名', 'one-role');

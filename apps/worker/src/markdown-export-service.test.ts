@@ -1,11 +1,12 @@
 import { link, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { MarkdownExportService } from './markdown-export-service.js';
 import { NovelService } from './novel-service.js';
 import { ProjectService } from './project-service.js';
+import { validateSessionRequestParams } from './request-validation.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -18,6 +19,130 @@ afterEach(async () => {
 });
 
 describe('MarkdownExportService', () => {
+  it('requires explicit draft inclusion, exports only selected chapters in order and marks draft filenames', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-export-drafts-'));
+    directories.push(directory);
+    const project = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
+    projects.push(project);
+    project.create(join(directory, 'project'), 'Novel');
+    const novel = new NovelService(project);
+    const workflow = new DocumentWorkflowService(project);
+    const chapters = ['First', 'Second', 'Third'].map((title) => {
+      const chapter = novel.saveChapter({ title });
+      workflow.saveDraft({
+        documentId: chapter.documentId,
+        title,
+        contentMarkdown: `${title} body`,
+        expectedDocumentRowVersion: 0,
+        authorType: 'user',
+      });
+      return chapter;
+    });
+    const exports = new MarkdownExportService(project);
+    expect(() => exports.prepare({ exportType: 'work' })).toThrow('请勾选“包含草稿”');
+    const job = exports.prepare({
+      exportType: 'selection',
+      chapterIds: [chapters[2]!.id, chapters[0]!.id],
+      includeDraft: true,
+    });
+    expect(job.itemCount).toBe(2);
+    const manifest = JSON.parse(await readFile(join(job.packagePath, 'manifest.json'), 'utf8')) as {
+      items: Array<{ chapterId: string; sourceState: string; relativePath: string }>;
+    };
+    expect(manifest.items.map((item) => item.chapterId)).toEqual([
+      chapters[0]!.id,
+      chapters[2]!.id,
+    ]);
+    for (const item of manifest.items) {
+      expect(item.sourceState).toBe('draft');
+      expect(item.relativePath).toMatch(/\.draft\.v1\.md$/);
+    }
+    expect(
+      await readFile(join(job.packagePath, manifest.items[0]!.relativePath), 'utf8'),
+    ).toContain('First body');
+  });
+
+  it('marks merged drafts, verifies their recovery hashes and opens only a completed export owned by the current project', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ai-video-export-open-'));
+    directories.push(directory);
+    const project = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
+    projects.push(project);
+    project.create(join(directory, 'project'), 'Novel');
+    const chapter = new NovelService(project).saveChapter({ title: 'Draft' });
+    new DocumentWorkflowService(project).saveDraft({
+      documentId: chapter.documentId,
+      title: 'Draft',
+      contentMarkdown: 'Saved draft body',
+      expectedDocumentRowVersion: 0,
+      authorType: 'user',
+    });
+    const openDirectory = vi.fn();
+    const exports = new MarkdownExportService(project, openDirectory);
+    const job = exports.prepare({ exportType: 'work', exportFormat: 'merged', includeDraft: true });
+    expect(await readFile(join(job.packagePath, 'merged.draft.md'), 'utf8')).toContain(
+      'Saved draft body',
+    );
+    expect(await exports.reveal({ jobId: job.id })).toEqual({ path: job.packagePath });
+    expect(openDirectory).toHaveBeenCalledExactlyOnceWith(job.packagePath);
+    openDirectory.mockClear();
+    await expect(exports.reveal({ jobId: 'unknown-export' })).rejects.toThrow('没有找到已完成');
+    const setVerifying = () =>
+      project.access(true, (database) => {
+        database
+          .prepare("UPDATE markdown_export_jobs SET status = 'verifying' WHERE id = ?")
+          .run(job.id);
+        database
+          .prepare("UPDATE markdown_export_items SET status = 'verifying' WHERE job_id = ?")
+          .run(job.id);
+      });
+    setVerifying();
+    await expect(exports.reveal({ jobId: job.id })).rejects.toThrow('没有找到已完成');
+    expect(exports.reconcile()).toEqual({ succeeded: 1, failed: 0 });
+    await writeFile(join(job.packagePath, 'merged.draft.md'), 'Tampered body', 'utf8');
+    setVerifying();
+    expect(exports.reconcile()).toEqual({ succeeded: 0, failed: 1 });
+    expect(openDirectory).not.toHaveBeenCalled();
+
+    const otherJob = exports.prepare({ exportType: 'work', includeDraft: true });
+    project.access(true, (database) =>
+      database
+        .prepare('UPDATE markdown_export_jobs SET package_relative_path = ? WHERE id = ?')
+        .run('exports/../outside', otherJob.id),
+    );
+    await expect(exports.reveal({ jobId: otherJob.id })).rejects.toThrow('导出目录无效');
+    const movedJob = exports.prepare({ exportType: 'work', includeDraft: true });
+    await rm(movedJob.packagePath, { recursive: true, force: true });
+    await expect(exports.reveal({ jobId: movedJob.id })).rejects.toThrow('已被移动或删除');
+    project.close();
+    project.create(join(directory, 'other-project'), 'Other novel');
+    await expect(exports.reveal({ jobId: otherJob.id })).rejects.toThrow('没有找到已完成');
+    expect(openDirectory).not.toHaveBeenCalled();
+  });
+
+  it('accepts long-novel chapter selections and rejects arbitrary paths at the folder-opening boundary', () => {
+    const params = {
+      exportType: 'selection',
+      chapterIds: Array.from({ length: 1000 }, (_, index) => `chapter-${index}`),
+    };
+    expect(validateSessionRequestParams('novel.export.prepare', params)).toBe(params);
+    expect(() =>
+      validateSessionRequestParams('novel.export.prepare', {
+        ...params,
+        chapterIds: Array(10_001).fill('chapter'),
+      }),
+    ).toThrow('10000');
+    expect(validateSessionRequestParams('novel.export.reveal', { jobId: 'export' })).toEqual({
+      jobId: 'export',
+    });
+    expect(() =>
+      validateSessionRequestParams('novel.export.reveal', {
+        jobId: 'export',
+        path: 'C:/elsewhere',
+      }),
+    ).toThrow();
+    expect(() => validateSessionRequestParams('novel.export.reveal', { jobId: '' })).toThrow();
+  });
+
   it('freezes a published chapter into an immutable package and manifest', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ai-video-export-'));
     directories.push(directory);

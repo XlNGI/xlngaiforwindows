@@ -542,6 +542,18 @@ describe('AgentProviderLoopService', () => {
         title: '书房',
         contentMarkdown: '# 书房\n木桌和信件',
       });
+      const driver = await invoke('document.submit_draft', {
+        resourceId: 'workspace:characters',
+        documentKind: 'character',
+        title: '角色：老周（司机）',
+        contentMarkdown: '# 老周\n熟悉旧事的司机。',
+      });
+      const colleague = await invoke('document.submit_draft', {
+        resourceId: 'workspace:characters',
+        documentKind: 'character',
+        title: '角色：张明（前同事）',
+        contentMarkdown: '# 张明\n揭露真相的人。',
+      });
       const structure = await invoke('project.structure.get', {});
       const map = structure.resourceMap as ProjectStructureResult;
       expect(map.resources.find((item) => item.id === 'workspace:shots')?.writeTool).toBe(
@@ -550,6 +562,8 @@ describe('AgentProviderLoopService', () => {
       const scenes = [
         {
           title: '庭院',
+          videoPrompt: '他走过院落。',
+          characterDocumentIds: [driver.documentId, colleague.documentId],
           sceneDocumentId: courtyard.documentId,
           shots: [
             { title: '远景', prompt: '清晨的庭院' },
@@ -558,12 +572,14 @@ describe('AgentProviderLoopService', () => {
         },
         {
           title: '书房',
+          videoPrompt: '书桌上的信。',
+          characterDocumentIds: [],
           sceneDocumentId: study.documentId,
           shots: [{ title: '特写', prompt: '桌上的信' }],
         },
       ];
       for (const args of [
-        { episodeTitle: '第1集', scenes },
+        { resolution: 'resolved', episodeTitle: '第1集', scenes },
         { resourceId: 'workspace:novel', episodeTitle: '第1集', scenes },
         { resourceId: 'workspace:shots', episodeTitle: '第1集', scenes, expectedRevision: 'stale' },
         {
@@ -587,9 +603,23 @@ describe('AgentProviderLoopService', () => {
           contentMarkdown: '# 场次\n## 镜头',
         }),
       ).toMatchObject({ status: 'rejected' });
-      expect(workflow.listDocuments()).toHaveLength(2);
+      expect(workflow.listDocuments()).toHaveLength(4);
+      const clarified = await invoke('scene.submit_structure', {
+        resourceId: 'workspace:shots',
+        resolution: 'needs_clarification',
+        episodeTitle: '人物待确认',
+        scenes: [],
+        feedback: '“他”指的是司机还是前同事？',
+      });
+      expect(clarified).toMatchObject({
+        status: 'scene_bindings_need_clarification',
+        applied: false,
+        feedback: '“他”指的是司机还是前同事？',
+      });
+      expect(new ChangeSetService(project).list()).toHaveLength(0);
       const saved = await invoke('scene.submit_structure', {
         resourceId: 'workspace:shots',
+        resolution: 'resolved',
         expectedRevision: map.revision,
         episodeTitle: '第1集',
         scenes,
@@ -606,9 +636,6 @@ describe('AgentProviderLoopService', () => {
       expect(workflow.getTask({ taskId: agent.taskId }).changeSets).toEqual([
         expect.objectContaining({ changeSetId: proposal.id, status: 'proposed' }),
       ]);
-      loop.startProviderStep(prepared.stream);
-      loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' });
-      expect(workflow.getTask({ taskId: agent.taskId }).task.outcome).not.toBe('read-only');
       const applied = new ChangeSetService(project).apply({
         changeSetId: proposal.id,
         expectedRowVersion: proposal.rowVersion,
@@ -619,6 +646,19 @@ describe('AgentProviderLoopService', () => {
         courtyard.documentId,
       );
       expect(parents.find((item) => item.title === '书房')?.sceneDocumentId).toBe(study.documentId);
+      const courtyardScene = parents.find((item) => item.title === '庭院')!;
+      expect(courtyardScene.videoPrompt).toBe('他走过院落。');
+      expect(courtyardScene.characterBindings).toEqual([
+        { characterDocumentId: driver.documentId },
+        { characterDocumentId: colleague.documentId },
+      ]);
+      expect(await invoke('scene.read', { sceneId: courtyardScene.id })).toMatchObject({
+        scene: {
+          id: courtyardScene.id,
+          videoPrompt: '他走过院落。',
+          characterBindings: courtyardScene.characterBindings,
+        },
+      });
       expect(
         content
           .listShots(parents.find((item) => item.title === '庭院')!.id)
@@ -629,6 +669,49 @@ describe('AgentProviderLoopService', () => {
           .listShots(parents.find((item) => item.title === '书房')!.id)
           .map((item) => item.prompt),
       ).toEqual(['桌上的信']);
+      const revision = {
+        resourceId: 'workspace:shots',
+        resolution: 'resolved',
+        episodeTitle: '调整本场',
+        scenes: [
+          {
+            sceneId: courtyardScene.id,
+            expectedRowVersion: courtyardScene.rowVersion,
+            title: courtyardScene.title,
+            videoPrompt: '前同事独自留下。',
+            sceneDocumentId: study.documentId,
+            characterDocumentIds: [colleague.documentId],
+            shots: [],
+          },
+        ],
+      };
+      const updated = await invoke('scene.submit_structure', revision);
+      expect(updated).toMatchObject({ status: 'scene_structure_proposed', applied: false });
+      expect(
+        content.listScenes().find((item) => item.id === courtyardScene.id)?.characterBindings,
+      ).toHaveLength(2);
+      const pending = new ChangeSetService(project)
+        .list()
+        .find((item) => item.id === updated.changeSetId)!;
+      expect(
+        new ChangeSetService(project).apply({
+          changeSetId: pending.id,
+          expectedRowVersion: pending.rowVersion,
+        }).status,
+      ).toBe('applied');
+      expect(content.listScenes()).toHaveLength(2);
+      expect(content.listScenes().find((item) => item.id === courtyardScene.id)).toMatchObject({
+        videoPrompt: '前同事独自留下。',
+        sceneDocumentId: study.documentId,
+        characterBindings: [{ characterDocumentId: colleague.documentId }],
+      });
+      expect(content.listShots(courtyardScene.id)).toHaveLength(2);
+      expect(await invoke('scene.submit_structure', revision)).toMatchObject({
+        status: 'rejected',
+      });
+      loop.startProviderStep(prepared.stream);
+      loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' });
+      expect(workflow.getTask({ taskId: agent.taskId }).task.outcome).not.toBe('read-only');
     },
   );
 
@@ -2347,7 +2430,10 @@ describe('AgentProviderLoopService', () => {
         prompt,
       });
       await runtime.wait(prepared.stream.generationId);
-      expect(generations.get(prepared.stream.generationId).status).toBe('complete');
+      expect(
+        generations.get(prepared.stream.generationId).status,
+        generations.get(prepared.stream.generationId).error,
+      ).toBe('complete');
       expect(workflow.getDocument(target.documentId).currentVersion?.contentMarkdown).toBe(
         '陈拾推开拾光斋的门，午夜的钟声响起。',
       );
@@ -3779,6 +3865,9 @@ describe('AgentProviderLoopService', () => {
             scenes: [
               {
                 title: '旧码头 · 台风前夜',
+                sceneDocumentId: sceneDoc.id,
+                videoPrompt: '林澈站在旧码头。',
+                characterDocumentIds: [character.id],
                 shots: [
                   {
                     title: '海雾中的码头',
@@ -3788,10 +3877,16 @@ describe('AgentProviderLoopService', () => {
               },
               {
                 title: '街道',
+                sceneDocumentId: sceneDoc.id,
+                videoPrompt: '雨中的街道。',
+                characterDocumentIds: [],
                 shots: [{ title: '雨中街道', prompt: '街道上的雨。' }],
               },
               {
                 title: '房间',
+                sceneDocumentId: sceneDoc.id,
+                videoPrompt: '房间内的信件。',
+                characterDocumentIds: [],
                 shots: [{ title: '信件特写', prompt: '桌上的信件。' }],
               },
             ],
@@ -3837,7 +3932,7 @@ describe('AgentProviderLoopService', () => {
     ]);
   });
 
-  it('feeds an unpublished character reference back to the model for correction', async () => {
+  it('feeds an invalid structured character ID back to the model without guessing from prompt names', async () => {
     const { conversation, generations, loop, project } = await setup();
     const prepared = generations.prepare({
       conversationId: conversation.id,
@@ -3867,6 +3962,9 @@ describe('AgentProviderLoopService', () => {
             scenes: [
               {
                 title: '场次 01',
+                sceneDocumentId: 'missing-scene-id',
+                videoPrompt: '他转身。',
+                characterDocumentIds: ['missing-character-id'],
                 shots: [{ title: '镜头 01', prompt: '[角色:不存在的人物] 出现在画面中。' }],
               },
             ],
@@ -3878,7 +3976,7 @@ describe('AgentProviderLoopService', () => {
       error: { code: string; message: string };
     };
     expect(rejected.error.code).toBe('AGENT_TOOL_ARGUMENTS_INVALID');
-    expect(rejected.error.message).toContain('references unknown character "不存在的人物"');
+    expect(rejected.error.message).toContain('有效的制作场景');
     expect(new ChangeSetService(project).list({ includeTerminal: false })).toHaveLength(0);
   });
 
@@ -4071,6 +4169,9 @@ describe('AgentProviderLoopService', () => {
             scenes: [
               {
                 title: '白家三房 · 午后',
+                sceneDocumentId: scenePrompt.id,
+                videoPrompt: '午后的白家三房。',
+                characterDocumentIds: [],
                 shots: [
                   {
                     title: '屋檐下全景',

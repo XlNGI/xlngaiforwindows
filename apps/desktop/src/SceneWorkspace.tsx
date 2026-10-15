@@ -1,5 +1,5 @@
 import { Save, Video } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   AssetInfo,
   DocumentSummary,
@@ -14,19 +14,6 @@ import { callWorker } from './worker-client';
 import { AssetImagePreview } from './AssetImagePreview';
 import { DubbingScenePanel } from './dubbing/DubbingScenePanel';
 import { SceneCastEditor } from './SceneCastEditor';
-
-const REFERENCE_PATTERN = /\[(角色|场景|道具|人物|地点|物件):([^\]]+)\]/gu;
-
-function normalizeRole(value: string): SceneMaterialRole {
-  if (value === '角色' || value === '人物') return 'character';
-  if (value === '场景' || value === '地点') return 'scene';
-  if (value === '道具' || value === '物件') return 'prop';
-  return 'other';
-}
-
-function bindingKey(role: SceneMaterialRole, label: string): string {
-  return `${role}:${label.trim()}`;
-}
 
 function isImage(asset: AssetInfo): boolean {
   return !asset.deletedAt && !asset.kind.toLowerCase().includes('video');
@@ -48,6 +35,7 @@ function SceneWorkspaceContent({
   onSave,
   onGenerateVideo,
   onOpenAsset,
+  onRequestBindings,
 }: {
   projectId?: string;
   scene: SceneInfo;
@@ -69,6 +57,12 @@ function SceneWorkspaceContent({
     dialogueAudioId?: string,
   ) => void;
   onOpenAsset?: (assetId: string) => void;
+  onRequestBindings?: (
+    prompt: string,
+    bindings: SceneMaterialBindingInfo[],
+    characters: SceneCharacterBindingInfo[],
+    dialogueAudioId?: string,
+  ) => void;
 }) {
   const [localBindings, setLocalBindings] = useState(
     bindings.filter((item) => item.role !== 'character'),
@@ -78,11 +72,9 @@ function SceneWorkspaceContent({
   const [voices, setVoices] = useState<CharacterVoiceReferenceInfo[]>([]);
   const [audios, setAudios] = useState<AudioFileInfo[]>([]);
   const [audioLoaded, setAudioLoaded] = useState(false);
-  const requestSequence = useRef(0);
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    requestSequence.current++;
     setLocalBindings(
       bindings.filter(
         (item) =>
@@ -126,7 +118,6 @@ function SceneWorkspaceContent({
     window.addEventListener('scene-audio-updated', refresh);
     return () => {
       active = false;
-      requestSequence.current++;
       window.removeEventListener('character-voice-reference-updated', refresh);
       window.removeEventListener('scene-audio-updated', refresh);
     };
@@ -153,100 +144,7 @@ function SceneWorkspaceContent({
     return map;
   }, [assets]);
 
-  const autoBind = async () => {
-    if (!writable) return;
-    const sequence = ++requestSequence.current;
-    setMessage('正在识别场次素材…');
-    try {
-      const next = new Map<string, SceneMaterialBindingInfo>();
-      const nextCharacters: SceneCharacterBindingInfo[] = [];
-      const mentions = [...prompt.matchAll(REFERENCE_PATTERN)];
-      if (scene.sceneDocumentId) {
-        const bound = documents.find((document) => document.id === scene.sceneDocumentId);
-        if (bound) {
-          const sourceAssets = await callWorker('asset.list', {
-            sourceDocumentId: bound.id,
-            sort: 'created-desc',
-            limit: 1,
-          });
-          const asset = sourceAssets.find(isImage);
-          if (asset)
-            next.set(bindingKey('scene', bound.title), {
-              id: bindingKey('scene', bound.title),
-              role: 'scene',
-              label: bound.title,
-              assetId: asset.id,
-              sourceDocumentId: bound.id,
-              source: 'auto',
-            });
-        }
-      }
-      for (const match of mentions) {
-        const role = normalizeRole(match[1] ?? '');
-        const label = (match[2] ?? '').trim();
-        if (!label || next.has(bindingKey(role, label))) continue;
-        const matches = documents.filter(
-          (item) =>
-            item.title.trim() === label &&
-            item.domainScope !== 'novel' &&
-            item.lifecycleStatus !== 'archived' &&
-            item.projectId === projectId &&
-            (item.kind === role || role === 'prop' || role === 'other'),
-        );
-        const document = matches.length === 1 ? matches[0] : undefined;
-        if (!document) continue;
-        const sourceAssets = await callWorker('asset.list', {
-          sourceDocumentId: document.id,
-          sort: 'created-desc',
-          limit: 1,
-        });
-        const asset = sourceAssets.find(isImage);
-        if (role === 'character') {
-          const voice = voices.find((item) => item.characterDocumentId === document.id);
-          if (!nextCharacters.some((item) => item.characterDocumentId === document.id))
-            nextCharacters.push({
-              characterDocumentId: document.id,
-              ...(asset ? { imageAssetId: asset.id } : {}),
-              ...(voice ? { voiceReferenceVersionId: voice.versionId } : {}),
-            });
-        } else if (asset)
-          next.set(bindingKey(role, label), {
-            id: bindingKey(role, label),
-            role,
-            label,
-            assetId: asset.id,
-            sourceDocumentId: document.id,
-            source: 'auto',
-          });
-      }
-      if (sequence !== requestSequence.current) return;
-      const merged = [
-        ...localBindings,
-        ...[...next.values()].filter(
-          (item) => !localBindings.some((existing) => existing.id === item.id),
-        ),
-      ];
-      setLocalBindings(merged);
-      setCharacters((current) => [
-        ...current,
-        ...nextCharacters.filter(
-          (item) =>
-            !current.some((existing) => existing.characterDocumentId === item.characterDocumentId),
-        ),
-      ]);
-      setMessage(
-        merged.length || nextCharacters.length
-          ? '已识别场次角色与素材，可继续手动调整并保存。'
-          : '没有找到可用的参考图片。',
-      );
-    } catch (error) {
-      if (sequence !== requestSequence.current) return;
-      setMessage(error instanceof Error ? error.message : '素材识别失败。');
-    }
-  };
-
   const setAsset = (binding: SceneMaterialBindingInfo, assetId: string) => {
-    requestSequence.current++;
     setLocalBindings((current) =>
       current.map((item) =>
         item.id === binding.id ? { ...item, assetId, source: 'manual' } : item,
@@ -268,10 +166,12 @@ function SceneWorkspaceContent({
             <button
               className="button secondary"
               type="button"
-              disabled={!writable || !audioLoaded}
-              onClick={() => void autoBind()}
+              disabled={!writable || !audioLoaded || !prompt.trim() || !onRequestBindings}
+              onClick={() =>
+                onRequestBindings?.(prompt, localBindings, characters, dialogueAudioId)
+              }
             >
-              自动识别素材
+              让助手关联角色与场景
             </button>
             <button
               className="button secondary"
@@ -296,7 +196,6 @@ function SceneWorkspaceContent({
           aria-label="场次完整视频提示词"
           value={prompt}
           onChange={(event) => {
-            requestSequence.current++;
             onPromptChange(event.target.value);
           }}
           readOnly={!writable}
@@ -320,11 +219,9 @@ function SceneWorkspaceContent({
           dialogueAudioId={dialogueAudioId}
           writable={writable}
           onChange={(value) => {
-            requestSequence.current++;
             setCharacters(value);
           }}
           onDialogueChange={(value) => {
-            requestSequence.current++;
             setDialogueAudioId(value);
           }}
           onAudioImported={(audio) =>
@@ -336,15 +233,15 @@ function SceneWorkspaceContent({
         <div className="scene-prompt-heading">
           <div>
             <h2>场次参考素材</h2>
-            <p>场景和道具参考图可手动替换；角色参考图在上方出场角色中维护。</p>
+            <p>角色与场景由助手理解提示词后提出关联方案，批准后生效。参考图可手动调整。</p>
           </div>
           <button
             className="text-button"
             type="button"
-            disabled={!writable}
-            onClick={() => void autoBind()}
+            disabled={!writable || !prompt.trim() || !onRequestBindings}
+            onClick={() => onRequestBindings?.(prompt, localBindings, characters, dialogueAudioId)}
           >
-            重新识别
+            重新交给助手关联
           </button>
         </div>
         {localBindings.length === 0 ? (
@@ -391,7 +288,6 @@ function SceneWorkspaceContent({
                     type="button"
                     disabled={!writable}
                     onClick={() => {
-                      requestSequence.current++;
                       setLocalBindings((current) =>
                         current.filter((item) => item.id !== binding.id),
                       );

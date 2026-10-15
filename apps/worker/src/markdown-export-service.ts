@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   fstatSync,
@@ -17,6 +18,7 @@ import type {
   NovelMarkdownExportFormat,
   NovelMarkdownExportJobInfo,
   NovelMarkdownExportPrepareParams,
+  PathResult,
 } from '@ai-video/contracts';
 import { ProjectService } from './project-service.js';
 
@@ -38,6 +40,27 @@ type ExportRow = {
 
 function hash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function openExportDirectory(path: string): Promise<void> {
+  return new Promise((resolveOpened, reject) => {
+    const command =
+      process.platform === 'win32'
+        ? 'explorer.exe'
+        : process.platform === 'darwin'
+          ? 'open'
+          : 'xdg-open';
+    const child = spawn(command, [path], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      resolveOpened();
+    });
+  });
 }
 
 const WINDOWS_INVALID_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
@@ -159,7 +182,41 @@ function exportInfo(
 }
 
 export class MarkdownExportService {
-  constructor(private readonly projects: ProjectService) {}
+  constructor(
+    private readonly projects: ProjectService,
+    private readonly openDirectory: (path: string) => void | Promise<void> = openExportDirectory,
+  ) {}
+
+  async reveal(params: { jobId: string }): Promise<PathResult> {
+    const path = this.projects.access(false, (database, project) => {
+      const job = database
+        .prepare(
+          'SELECT package_relative_path, status FROM markdown_export_jobs WHERE id = ? AND project_id = ?',
+        )
+        .get(params.jobId, project.id) as
+        { package_relative_path: string; status: string } | undefined;
+      if (!job || job.status !== 'succeeded') throw new Error('没有找到已完成的小说导出。');
+      const packagePath = this.resolveProjectPath(project.rootPath, job.package_relative_path);
+      const insideExports = packagePath
+        ? relative(resolve(project.rootPath, 'exports'), packagePath)
+        : undefined;
+      if (
+        !packagePath ||
+        !insideExports ||
+        insideExports === '..' ||
+        insideExports.startsWith(`..${sep}`) ||
+        isAbsolute(insideExports)
+      ) {
+        throw new Error('小说导出目录无效，请重新导出。');
+      }
+      if (!existsSync(packagePath) || !lstatSync(packagePath).isDirectory()) {
+        throw new Error('导出文件夹已被移动或删除，请重新导出。');
+      }
+      return packagePath;
+    });
+    await this.openDirectory(path);
+    return { path };
+  }
 
   reconcile(): { succeeded: number; failed: number } {
     return this.projects.access(true, (database, project) =>
@@ -278,7 +335,7 @@ export class MarkdownExportService {
                   );
                   assertRegularSingleLinkFile(outputPath);
                   if (
-                    item.relativePath !== 'merged.md' &&
+                    job.export_format === 'files' &&
                     hash(readFileSync(outputPath).toString('utf8')) !== item.outputHash
                   ) {
                     valid = false;
@@ -286,11 +343,14 @@ export class MarkdownExportService {
                   }
                 }
                 if (valid && job.export_format === 'merged') {
-                  const mergedPath = join(packagePath, 'merged.md');
+                  const mergedRelativePath = storedItems[0]?.relative_path;
                   valid =
+                    typeof mergedRelativePath === 'string' &&
+                    storedItems.every((item) => item.relative_path === mergedRelativePath) &&
                     typeof parsed.mergedOutputHash === 'string' &&
-                    existsSync(mergedPath) &&
-                    hash(readFileSync(mergedPath).toString('utf8')) === parsed.mergedOutputHash;
+                    existsSync(join(packagePath, mergedRelativePath)) &&
+                    hash(readFileSync(join(packagePath, mergedRelativePath)).toString('utf8')) ===
+                      parsed.mergedOutputHash;
                 }
               }
             } catch {
@@ -327,7 +387,16 @@ export class MarkdownExportService {
       database.transaction(() => {
         const format = params.exportFormat ?? 'files';
         const rows = this.selectRows(database, project.id, params);
-        if (rows.length === 0) throw new Error('No exportable novel chapters were selected.');
+        if (rows.length === 0) {
+          throw new Error(
+            params.includeDraft
+              ? '所选章节没有已保存的正文，请先保存后再导出。'
+              : '所选范围没有已发布章节。若要导出草稿，请勾选“包含草稿”。',
+          );
+        }
+        const mergedFilename = rows.some((row) => row.source_state === 'draft')
+          ? 'merged.draft.md'
+          : 'merged.md';
         const id = randomUUID();
         const now = new Date().toISOString();
         const packageRelative = join(
@@ -383,7 +452,7 @@ export class MarkdownExportService {
             row.chapter_title,
             row.publication_no,
             row.version_no,
-            this.relativePath(row, ordinal, format),
+            this.relativePath(row, ordinal, format, mergedFilename),
             now,
           );
         });
@@ -408,7 +477,7 @@ export class MarkdownExportService {
           const manifestItems: Array<Record<string, unknown>> = [];
           let merged = '';
           rows.forEach((row, ordinal) => {
-            const relativePath = this.relativePath(row, ordinal, format);
+            const relativePath = this.relativePath(row, ordinal, format, mergedFilename);
             const body = `# ${row.display_label} ${row.chapter_title}\n\n${row.content_markdown.trim()}\n`;
             if (format === 'files') {
               const outputPath = join(stagingPath, relativePath);
@@ -436,7 +505,7 @@ export class MarkdownExportService {
           });
           const mergedOutputHash = format === 'merged' ? hash(merged) : undefined;
           if (format === 'merged')
-            writeFileSync(join(stagingPath, 'merged.md'), merged, {
+            writeFileSync(join(stagingPath, mergedFilename), merged, {
               encoding: 'utf8',
               flag: 'wx',
             });
@@ -561,8 +630,13 @@ export class MarkdownExportService {
       .all(...values) as ExportRow[];
   }
 
-  private relativePath(row: ExportRow, ordinal: number, format: NovelMarkdownExportFormat): string {
-    if (format === 'merged') return 'merged.md';
+  private relativePath(
+    row: ExportRow,
+    ordinal: number,
+    format: NovelMarkdownExportFormat,
+    mergedFilename: string,
+  ): string {
+    if (format === 'merged') return mergedFilename;
     const version =
       row.source_state === 'published' ? `v${row.publication_no ?? 0}` : `draft.v${row.version_no}`;
     const name = `${String(ordinal + 1).padStart(3, '0')}-${safeSegment(row.display_label, 'chapter')}-${safeSegment(row.chapter_title, 'untitled')}.${version}.md`;

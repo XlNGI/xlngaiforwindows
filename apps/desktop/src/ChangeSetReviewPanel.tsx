@@ -211,6 +211,23 @@ export function ChangeSetReviewPanel({
                               {`提示词：${item.prompt}`}
                             </small>
                           ) : null}
+                          {item.videoPrompt && (
+                            <small className="change-set-item-prompt">
+                              完整视频提示词：{item.videoPrompt}
+                            </small>
+                          )}
+                          {item.characterDocumentIds !== undefined && (
+                            <small>
+                              出场角色：
+                              {item.characterDocumentIds
+                                .map(
+                                  (id) =>
+                                    documents.find((document) => document.id === id)?.title ??
+                                    '角色资料不可用',
+                                )
+                                .join('、') || '无角色'}
+                            </small>
+                          )}
                           {item.sceneDocumentId ? (
                             <small>
                               绑定场景：

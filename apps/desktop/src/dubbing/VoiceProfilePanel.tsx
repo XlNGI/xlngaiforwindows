@@ -14,14 +14,14 @@ export function VoiceProfilePanel(props: {
     <>
       {props.characterDocumentId && (
         <VoiceReferencePanel
-          key={`${props.projectId}:${props.characterDocumentId}`}
+          key={`reference:${props.projectId}:${props.characterDocumentId}`}
           projectId={props.projectId}
           characterDocumentId={props.characterDocumentId}
           writable={props.writable}
         />
       )}
       <VoiceProfileEditor
-        key={`${props.projectId}:${props.characterDocumentId ?? 'narration'}`}
+        key={`profile:${props.projectId}:${props.characterDocumentId ?? 'narration'}`}
         {...props}
       />
     </>
