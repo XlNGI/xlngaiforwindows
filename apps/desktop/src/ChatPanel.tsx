@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { AssistantReply } from './AssistantReply';
+import { ComposerTextarea } from './ComposerTextarea';
 import type {
   AgentResearchMode,
   ChatMessageInfo,
@@ -241,6 +242,7 @@ export function ChatPanel({
   const catalogItems = visibleLibraryCatalog(contextPreview?.catalog ?? []);
   const fileInputId = 'chat-attachment-input';
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   /**
    * Model, provider and research-mode controls are configuration, not
    * conversation content. They live inside the composer as quiet chips so the
@@ -334,7 +336,7 @@ export function ChatPanel({
     onConfirmAgentAction,
   );
   return (
-    <section className="chat-panel panel-border" aria-label="项目 AI 助手">
+    <section ref={panelRef} className="chat-panel panel-border" aria-label="项目 AI 助手">
       {showHeading && (
         <div className="panel-heading">
           <span>项目 AI 助手</span>
@@ -869,76 +871,83 @@ export function ChatPanel({
           )}
           {modelControlsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </button>
-        {modelControlsOpen && llmProfiles.length > 0 && (
-          <div className="llm-provider-selectors" id="chat-model-controls">
-            <select
-              aria-label="LLM 供应商连接"
-              value={selectedLlmProfileId}
-              disabled={generationLocked}
-              onChange={(event) => onLlmProfileChange(event.target.value)}
-            >
-              {llmProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="LLM 模型"
-              value={selectedLlmModelId}
-              disabled={generationLocked}
-              onChange={(event) => onLlmModelChange(event.target.value)}
-            >
-              <option value="">{selectedLlmProfileId ? '请选择模型' : '请先选择供应商'}</option>
-              {llmModels
-                .filter((model) => model.providerProfileId === selectedLlmProfileId)
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.displayName}
-                  </option>
+        {((modelControlsOpen && llmProfiles.length > 0) || attachments.length > 0) && (
+          <div className="composer-context-controls">
+            {modelControlsOpen && llmProfiles.length > 0 && (
+              <div className="llm-provider-selectors" id="chat-model-controls">
+                <select
+                  aria-label="LLM 供应商连接"
+                  value={selectedLlmProfileId}
+                  disabled={generationLocked}
+                  onChange={(event) => onLlmProfileChange(event.target.value)}
+                >
+                  {llmProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="LLM 模型"
+                  value={selectedLlmModelId}
+                  disabled={generationLocked}
+                  onChange={(event) => onLlmModelChange(event.target.value)}
+                >
+                  <option value="">{selectedLlmProfileId ? '请选择模型' : '请先选择供应商'}</option>
+                  {llmModels
+                    .filter((model) => model.providerProfileId === selectedLlmProfileId)
+                    .map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.displayName}
+                      </option>
+                    ))}
+                </select>
+                {onResearchModeChange && (
+                  <select
+                    aria-label="Agent 研究模式"
+                    value={researchMode}
+                    disabled={generationLocked}
+                    onChange={(event) =>
+                      onResearchModeChange(event.target.value as AgentResearchMode)
+                    }
+                  >
+                    <option value="auto">研究：自动</option>
+                    <option value="project_only">研究：仅项目资料</option>
+                    <option value="network_disabled">研究：禁止联网</option>
+                  </select>
+                )}
+              </div>
+            )}
+            {attachments.length > 0 && (
+              <div className="chat-attachments" aria-label="已添加附件">
+                {attachments.map((attachment) => (
+                  <span className="chat-attachment" key={attachment.id}>
+                    {attachment.kind === 'image' && attachment.dataUrl && (
+                      <img src={attachment.dataUrl} alt="" className="chat-attachment-thumb" />
+                    )}
+                    {attachment.kind === 'video' && attachment.dataUrl && (
+                      <video src={attachment.dataUrl} className="chat-attachment-thumb" muted />
+                    )}
+                    <span title={attachment.name}>{attachment.name}</span>
+                    {onRemoveAttachment && (
+                      <button
+                        type="button"
+                        className="chat-attachment-remove"
+                        aria-label={`移除 ${attachment.name}`}
+                        onClick={() => onRemoveAttachment(attachment.id)}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
                 ))}
-            </select>
-            {onResearchModeChange && (
-              <select
-                aria-label="Agent 研究模式"
-                value={researchMode}
-                disabled={generationLocked}
-                onChange={(event) => onResearchModeChange(event.target.value as AgentResearchMode)}
-              >
-                <option value="auto">研究：自动</option>
-                <option value="project_only">研究：仅项目资料</option>
-                <option value="network_disabled">研究：禁止联网</option>
-              </select>
+              </div>
             )}
           </div>
         )}
-        {attachments.length > 0 && (
-          <div className="chat-attachments" aria-label="已添加附件">
-            {attachments.map((attachment) => (
-              <span className="chat-attachment" key={attachment.id}>
-                {attachment.kind === 'image' && attachment.dataUrl && (
-                  <img src={attachment.dataUrl} alt="" className="chat-attachment-thumb" />
-                )}
-                {attachment.kind === 'video' && attachment.dataUrl && (
-                  <video src={attachment.dataUrl} className="chat-attachment-thumb" muted />
-                )}
-                <span title={attachment.name}>{attachment.name}</span>
-                {onRemoveAttachment && (
-                  <button
-                    type="button"
-                    className="chat-attachment-remove"
-                    aria-label={`移除 ${attachment.name}`}
-                    onClick={() => onRemoveAttachment(attachment.id)}
-                  >
-                    ×
-                  </button>
-                )}
-              </span>
-            ))}
-          </div>
-        )}
-        <textarea
-          aria-label="会话消息"
+        <ComposerTextarea
+          key={conversation?.id ?? 'no-conversation'}
+          panelRef={panelRef}
           placeholder={
             isArchived
               ? '当前会话已归档，处于只读状态'
@@ -946,9 +955,8 @@ export function ChatPanel({
                 ? '描述你要完成的任务，需要时会检索项目里的草稿和已发布资料…'
                 : '请先新建会话'
           }
-          rows={3}
           value={composer}
-          onChange={(event) => onComposerChange(event.target.value)}
+          onChange={onComposerChange}
           onPaste={(event) => {
             if (event.clipboardData.files.length > 0) {
               event.preventDefault();
@@ -969,56 +977,58 @@ export function ChatPanel({
             }
           }}
           disabled={!conversation || !writable || isArchived}
+          actions={
+            generationLocked ? (
+              <button
+                className="icon-button send-button"
+                type="button"
+                title="停止生成"
+                onClick={onCancelGeneration}
+              >
+                <Square size={14} fill="currentColor" />
+              </button>
+            ) : (
+              <>
+                <input
+                  ref={fileInputRef}
+                  id={fileInputId}
+                  className="visually-hidden"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                  type="file"
+                  multiple
+                  accept="*/*"
+                  onChange={(event) => {
+                    if (event.target.files?.length) onAddAttachments?.(event.target.files);
+                    event.currentTarget.value = '';
+                  }}
+                  disabled={!conversation || !writable || isArchived}
+                />
+                <button
+                  type="button"
+                  className="icon-button subtle attachment-button"
+                  title="添加图片、视频或文件"
+                  aria-label="添加图片、视频或文件"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!conversation || !writable || isArchived}
+                >
+                  <Paperclip size={16} />
+                </button>
+                <button
+                  className="icon-button send-button"
+                  type="button"
+                  title="发送消息"
+                  onClick={onSendMessage}
+                  disabled={
+                    (!composer.trim() && attachments.length === 0) || !conversation || isArchived
+                  }
+                >
+                  <ChevronRight size={18} />
+                </button>
+              </>
+            )
+          }
         />
-        {generationLocked ? (
-          <button
-            className="icon-button send-button"
-            type="button"
-            title="停止生成"
-            onClick={onCancelGeneration}
-          >
-            <Square size={14} fill="currentColor" />
-          </button>
-        ) : (
-          <>
-            <input
-              ref={fileInputRef}
-              id={fileInputId}
-              className="visually-hidden"
-              aria-hidden="true"
-              tabIndex={-1}
-              type="file"
-              multiple
-              accept="*/*"
-              onChange={(event) => {
-                if (event.target.files?.length) onAddAttachments?.(event.target.files);
-                event.currentTarget.value = '';
-              }}
-              disabled={!conversation || !writable || isArchived}
-            />
-            <button
-              type="button"
-              className="icon-button subtle attachment-button"
-              title="添加图片、视频或文件"
-              aria-label="添加图片、视频或文件"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={!conversation || !writable || isArchived}
-            >
-              <Paperclip size={16} />
-            </button>
-            <button
-              className="icon-button send-button"
-              type="button"
-              title="发送消息"
-              onClick={onSendMessage}
-              disabled={
-                (!composer.trim() && attachments.length === 0) || !conversation || isArchived
-              }
-            >
-              <ChevronRight size={18} />
-            </button>
-          </>
-        )}
       </div>
     </section>
   );

@@ -79,12 +79,14 @@ const providerModels: ProviderModelInfo[] = [
 
 function mockWorker(
   implementation: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  unavailableMediaIds: string[] = [],
 ): void {
   vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
     if (method === 'provider.profile.list') return Promise.resolve([providerProfile]);
     if (method === 'provider.model.list') return Promise.resolve(providerModels);
     if (method === 'asset.mediaSource') {
       const assetId = params.assetId as string;
+      if (unavailableMediaIds.includes(assetId)) return Promise.reject(new Error('File missing'));
       return Promise.resolve({
         assetId,
         path: `D:\\Project\\assets\\images\\${assetId}.png`,
@@ -1360,6 +1362,21 @@ describe('ProductionPanel', () => {
       },
     });
     expect(await screen.findAllByText('素材库图片')).toHaveLength(2);
+    const startPreview = await screen.findByRole('button', { name: '放大查看首帧：素材库图片' });
+    expect(within(startPreview).getByRole('img')).toHaveAttribute(
+      'src',
+      '/worker-media/asset-start',
+    );
+    expect(
+      within(screen.getByRole('button', { name: '放大查看尾帧：素材库图片' })).getByRole('img'),
+    ).toHaveAttribute('src', '/worker-media/asset-end');
+    fireEvent.click(startPreview);
+    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+      'src',
+      '/worker-media/asset-start',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '关闭图片预览' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
     await waitFor(() => {
       const saveCall = vi
@@ -1382,7 +1399,7 @@ describe('ProductionPanel', () => {
     });
   });
 
-  it('selects ordered local start and end frames and submits Data URLs once', async () => {
+  it('previews and reorders local start and end frames and submits Data URLs once', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
@@ -1410,6 +1427,29 @@ describe('ProductionPanel', () => {
     });
     expect(await screen.findByText('end.jpg')).toBeInTheDocument();
 
+    const startPreview = screen.getByRole('button', { name: '放大查看首帧：start.png' });
+    const startSource = within(startPreview).getByRole('img').getAttribute('src');
+    const endPreview = screen.getByRole('button', { name: '放大查看尾帧：end.jpg' });
+    const endSource = within(endPreview).getByRole('img').getAttribute('src');
+    startPreview.focus();
+    fireEvent.click(startPreview);
+    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute('src', startSource);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(startPreview).toHaveFocus();
+
+    const firstRow = startPreview.closest('.url-list-item')!;
+    fireEvent.click(within(firstRow as HTMLElement).getByRole('button', { name: '下移' }));
+    const reorderedStart = screen.getByRole('button', { name: '放大查看首帧：end.jpg' });
+    const reorderedEnd = screen.getByRole('button', { name: '放大查看尾帧：start.png' });
+    expect(within(reorderedStart).getByRole('img')).toHaveAttribute('src', endSource);
+    expect(within(reorderedEnd).getByRole('img')).toHaveAttribute('src', startSource);
+    expect(reorderedStart.closest('.url-list-item')).toHaveTextContent('end.jpg');
+    expect(reorderedEnd.closest('.url-list-item')).toHaveTextContent('start.png');
+    fireEvent.click(reorderedStart);
+    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute('src', endSource);
+    fireEvent.click(screen.getByRole('button', { name: '关闭图片预览' }));
+
     await submitPaidGeneration('提交视频任务');
 
     await waitFor(() => {
@@ -1419,12 +1459,88 @@ describe('ProductionPanel', () => {
       const images = (prepareCall?.[1] as { parameters?: { images?: unknown[] } } | undefined)
         ?.parameters?.images;
       expect(images).toHaveLength(2);
-      expect(images?.[0]).toEqual(expect.stringMatching(/^data:image\/png;base64,/));
-      expect(images?.[1]).toEqual(expect.stringMatching(/^data:image\/jpeg;base64,/));
+      expect(images?.[0]).toEqual(expect.stringMatching(/^data:image\/jpeg;base64,/));
+      expect(images?.[1]).toEqual(expect.stringMatching(/^data:image\/png;base64,/));
     });
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'video.generate.prepare'),
     ).toHaveLength(1);
+  });
+
+  it('replaces and clears a selected image without retaining its open preview', async () => {
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    const picker = await screen.findByLabelText('为首帧选择本地图片');
+    fireEvent.change(picker, {
+      target: { files: [new File([png], 'first.png', { type: 'image/png' })] },
+    });
+    const firstPreview = await screen.findByRole('button', { name: '放大查看首帧：first.png' });
+    const firstSource = within(firstPreview).getByRole('img').getAttribute('src');
+    fireEvent.click(firstPreview);
+
+    fireEvent.change(picker, {
+      target: {
+        files: [new File([png, new Uint8Array([1])], 'replacement.png', { type: 'image/png' })],
+      },
+    });
+    const replacement = await screen.findByRole('button', {
+      name: '放大查看首帧：replacement.png',
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: '首帧：first.png' })).not.toBeInTheDocument();
+    expect(within(replacement).getByRole('img')).not.toHaveAttribute('src', firstSource);
+    fireEvent.click(replacement);
+    fireEvent.click(
+      within(replacement.closest('.url-list-item') as HTMLElement).getByRole('button', {
+        name: '清除此图片输入',
+      }),
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: '首帧：replacement.png' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('首帧 URL')).toHaveValue('');
+  });
+
+  it('keeps unavailable asset inputs editable when their preview cannot be read', async () => {
+    mockWorker(
+      (method) => {
+        if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+        if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+        if (method === 'generation.draft.get')
+          return Promise.resolve({
+            id: 'draft',
+            shotId: 'shot',
+            adapterKey: videoDescriptor.key,
+            parameters: { images: ['asset://missing-frame', ''] },
+            updatedAt: '2026-08-01T12:00:00.000Z',
+          });
+        if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+        throw new Error(`Unexpected method ${method}`);
+      },
+      ['missing-frame'],
+    );
+    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    const error = await screen.findByText('图片暂时无法预览');
+    expect(
+      screen.queryByRole('button', { name: '放大查看首帧：素材库图片' }),
+    ).not.toBeInTheDocument();
+    const row = error.closest('.url-list-item') as HTMLElement;
+    expect(within(row).getByLabelText('为首帧选择本地图片')).toBeEnabled();
+    fireEvent.click(within(row).getByRole('button', { name: '清除此图片输入' }));
+    expect(screen.queryByText('图片暂时无法预览')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('首帧 URL')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('首帧 URL'), {
+      target: { value: 'https://example.invalid/replacement.png' },
+    });
+    expect(screen.getByLabelText('首帧 URL')).toHaveValue(
+      'https://example.invalid/replacement.png',
+    );
   });
 
   it('keeps the existing URL after cancellation or an invalid local file selection', async () => {

@@ -1786,6 +1786,18 @@ function ParameterField({
         commitItems(items.filter((_, itemIndex) => itemIndex !== index));
       }
     };
+    const moveItem = (index: number, offset: number) => {
+      const destination = index + offset;
+      if (destination < 0 || destination >= items.length) return;
+      const next = [...items];
+      [next[index], next[destination]] = [next[destination]!, next[index]!];
+      setLocalFiles((current) => {
+        const updated = [...current];
+        [updated[index], updated[destination]] = [updated[destination], updated[index]];
+        return updated;
+      });
+      commitItems(next);
+    };
     const visibleError = selectionError || error;
     const dropAssets = async (event: React.DragEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -1830,21 +1842,27 @@ function ParameterField({
             const orderedRole = property.minItems === 2 && property.maxItems === 2;
             const rowLabel = orderedRole ? (index === 0 ? '首帧' : '尾帧') : undefined;
             const fileInputId = `${inputId}-file-${index}`;
+            const assetId = isAssetReference(item) ? item.slice(8) : undefined;
+            const hasImage = isLocalImageDataUrl(item) || Boolean(assetId);
+            const imageName = assetId ? '素材库图片' : (localFile?.name ?? '本地图片');
+            const previewLabel = `${rowLabel ?? property.title}：${imageName}`;
             return (
               <div className="url-list-item" key={`${field.key}-${index}`}>
                 {rowLabel && <span className="url-row-role">{rowLabel}</span>}
-                <div className="url-row">
-                  {isLocalImageDataUrl(item) || isAssetReference(item) ? (
+                <div className={`url-row${hasImage ? ' has-image' : ''}`}>
+                  {hasImage ? (
                     <div className="local-image-value" id={index === 0 ? inputId : undefined}>
-                      {isLocalImageDataUrl(item) ? (
-                        <img src={item} alt="" />
+                      {assetId ? (
+                        <AssetImagePreview
+                          assetId={assetId}
+                          projectId={projectId}
+                          alt={previewLabel}
+                        />
                       ) : (
-                        <ImagePlus size={18} />
+                        <ImagePreview src={item} alt={previewLabel} />
                       )}
                       <span>
-                        <strong>
-                          {isAssetReference(item) ? '素材库图片' : (localFile?.name ?? '本地图片')}
-                        </strong>
+                        <strong title={imageName}>{imageName}</strong>
                         {localFile && <small>{formatBytes(localFile.size)}</small>}
                       </span>
                     </div>
@@ -1890,12 +1908,7 @@ function ParameterField({
                     className="icon-button subtle"
                     type="button"
                     title="上移"
-                    onClick={() => {
-                      if (index === 0) return;
-                      const next = [...items];
-                      [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
-                      commitItems(next);
-                    }}
+                    onClick={() => moveItem(index, -1)}
                     disabled={index === 0}
                   >
                     <ChevronUp size={13} />
@@ -1904,12 +1917,7 @@ function ParameterField({
                     className="icon-button subtle"
                     type="button"
                     title="下移"
-                    onClick={() => {
-                      if (index >= items.length - 1) return;
-                      const next = [...items];
-                      [next[index], next[index + 1]] = [next[index + 1]!, next[index]!];
-                      commitItems(next);
-                    }}
+                    onClick={() => moveItem(index, 1)}
                     disabled={index >= items.length - 1}
                   >
                     <ChevronDown size={13} />

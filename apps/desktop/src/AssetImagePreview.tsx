@@ -4,28 +4,42 @@ import type { AssetInfo } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { ImagePreview } from './ImagePreview';
 
-export function AssetImagePreview({ asset }: { asset: AssetInfo }) {
-  const [source, setSource] = useState<{ assetId: string; src?: string; failed?: boolean }>();
-  const name = asset.alias?.trim() || asset.relativePath.split(/[\\/]/).pop() || '生成图片';
+type AssetImagePreviewProps =
+  { asset: AssetInfo } | { assetId: string; projectId?: string; alt: string };
+
+export function AssetImagePreview(props: AssetImagePreviewProps) {
+  const assetId = 'asset' in props ? props.asset.id : props.assetId;
+  const projectId = 'asset' in props ? props.asset.projectId : props.projectId;
+  const name =
+    'asset' in props
+      ? props.asset.alias?.trim() || props.asset.relativePath.split(/[\\/]/).pop() || '生成图片'
+      : props.alt;
+  const [source, setSource] = useState<{
+    assetId: string;
+    projectId?: string;
+    src?: string;
+    failed?: boolean;
+  }>();
   useEffect(() => {
     let active = true;
     void Promise.resolve()
-      .then(() => callWorker('asset.mediaSource', { assetId: asset.id }))
+      .then(() => callWorker('asset.mediaSource', { assetId }))
       .then((media) => {
         const src =
           '__TAURI_INTERNALS__' in window
             ? convertFileSrc(media.path)
-            : `/worker-media/${encodeURIComponent(asset.id)}`;
-        if (active) setSource({ assetId: asset.id, src });
+            : `/worker-media/${encodeURIComponent(assetId)}`;
+        if (active) setSource({ assetId, projectId, src });
       })
       .catch(() => {
-        if (active) setSource({ assetId: asset.id, failed: true });
+        if (active) setSource({ assetId, projectId, failed: true });
       });
     return () => {
       active = false;
     };
-  }, [asset.id, asset.projectId]);
-  const current = source?.assetId === asset.id ? source : undefined;
+  }, [assetId, projectId]);
+  const current =
+    source?.assetId === assetId && source.projectId === projectId ? source : undefined;
   return current?.src ? (
     <ImagePreview key={current.src} src={current.src} alt={name} />
   ) : (

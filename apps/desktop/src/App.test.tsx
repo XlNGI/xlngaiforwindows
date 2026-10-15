@@ -209,6 +209,137 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: modelId } });
   }
 
+  function mockComposerSend(
+    sendMethod: 'agent.run' | 'llm.generate' | 'chat.message.save',
+    response: Promise<unknown>,
+  ) {
+    const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
+    const conversation: ConversationInfo = {
+      id: 'composer-conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '输入草稿',
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const profile = {
+      id: 'composer-profile',
+      name: 'OpenAI',
+      category: 'llm' as const,
+      providerType: 'openai',
+      accessType: 'official' as const,
+      protocol: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: true,
+      connectionStatus: 'ready' as const,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const model = {
+      id: 'composer-model',
+      providerProfileId: profile.id,
+      remoteModelId: 'gpt-test',
+      displayName: 'GPT Test',
+      capabilities: {
+        text: true,
+        vision: false,
+        streaming: true,
+        reasoning: false,
+        tools: true,
+        structuredOutput: false,
+        embeddings: false,
+        imageGeneration: false,
+        videoGeneration: false,
+      },
+      source: 'manual' as const,
+      enabled: true,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation(((method: string, params: unknown) => {
+      if (method === sendMethod) return response;
+      if (method === 'project.current')
+        return Promise.resolve({
+          id: 'project',
+          name: 'Composer Project',
+          rootPath: 'D:\\Composer',
+          createdAt: 'now',
+          updatedAt: 'now',
+          mode: 'read-write',
+          schemaVersion: 5,
+        });
+      if (
+        [
+          'document.list',
+          'scene.list',
+          'constraint.list',
+          'asset.list',
+          'video.generate.list',
+          'novel.chapter.list',
+          'characterVoice.list',
+        ].includes(method)
+      )
+        return Promise.resolve([]);
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+      if (method === 'llm.status')
+        return Promise.resolve({
+          provider: 'OpenAI',
+          model: 'GPT Test',
+          configured: sendMethod !== 'chat.message.save',
+          configurationSource: sendMethod === 'agent.run' ? 'managed' : 'environment',
+        });
+      if (method === 'provider.profile.list')
+        return Promise.resolve(sendMethod === 'agent.run' ? [profile] : []);
+      if (method === 'provider.model.list') return Promise.resolve([model]);
+      if (method === 'conversation.list') return Promise.resolve({ items: [conversation] });
+      if (method === 'chat.message.list') return Promise.resolve({ items: [] });
+      if (method === 'context.preview')
+        return Promise.resolve({
+          version: 1,
+          scopeType: 'project',
+          scopeLabel: 'project',
+          estimatedTokens: 1,
+          budgetTokens: 1_000,
+          sources: [],
+        });
+      return baselineWorker(method as never, params as never);
+    }) as typeof callWorker);
+    const generation: LlmGenerationInfo = {
+      generationId: 'composer-generation',
+      conversationId: conversation.id,
+      snapshotId: 'composer-snapshot',
+      status: 'complete',
+      userMessage: {
+        id: 'composer-user',
+        conversationId: conversation.id,
+        role: 'user',
+        content: '发送中的原始草稿',
+        status: 'complete',
+        createdAt: 'now',
+      },
+      assistantMessage: {
+        id: 'composer-assistant',
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: '已接受请求',
+        status: 'complete',
+        createdAt: 'now',
+      },
+      sources: [],
+    };
+    return sendMethod === 'chat.message.save'
+      ? generation.userMessage
+      : sendMethod === 'llm.generate'
+        ? generation
+        : {
+            status: 'started',
+            capability: 'text',
+            generation,
+            stream: { projectId: conversation.projectId },
+          };
+  }
+
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
@@ -246,6 +377,151 @@ describe('App', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
   });
+
+  it.each([
+    ['agent.run', false],
+    ['agent.run', true],
+    ['llm.generate', false],
+    ['llm.generate', true],
+    ['chat.message.save', false],
+    ['chat.message.save', true],
+  ] as const)(
+    'preserves the composer after delayed %s failure (new draft: %s)',
+    async (method, edit) => {
+      let rejectRequest!: (reason: Error) => void;
+      const response = new Promise<unknown>((_resolve, reject) => {
+        rejectRequest = reject;
+      });
+      mockComposerSend(method, response);
+      render(<App />);
+      await screen.findByDisplayValue('输入草稿');
+      if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
+      const composer = screen.getByRole('textbox', { name: '会话消息' });
+      fireEvent.change(composer, { target: { value: '发送中的原始草稿' } });
+      fireEvent.click(screen.getByTitle('发送消息'));
+      await waitFor(() => expect(callWorker).toHaveBeenCalledWith(method, expect.anything()));
+      expect(composer).toHaveValue('发送中的原始草稿');
+      fireEvent.click(screen.getByTitle('发送消息'));
+      expect(vi.mocked(callWorker).mock.calls.filter(([name]) => name === method)).toHaveLength(1);
+      if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
+
+      await act(async () => {
+        rejectRequest(new Error('请求暂时不可用'));
+        await response.catch(() => undefined);
+      });
+
+      expect(await screen.findByText('请求暂时不可用')).toBeInTheDocument();
+      expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : '发送中的原始草稿');
+    },
+  );
+
+  it.each([
+    ['agent.run', false],
+    ['agent.run', true],
+    ['llm.generate', false],
+    ['llm.generate', true],
+    ['chat.message.save', false],
+    ['chat.message.save', true],
+  ] as const)(
+    'clears only the accepted draft after delayed %s success (new draft: %s)',
+    async (method, edit) => {
+      let resolveRequest!: (value: unknown) => void;
+      const response = new Promise<unknown>((resolve) => {
+        resolveRequest = resolve;
+      });
+      const accepted = mockComposerSend(method, response);
+      render(<App />);
+      await screen.findByDisplayValue('输入草稿');
+      if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
+      const composer = screen.getByRole('textbox', { name: '会话消息' });
+      fireEvent.change(composer, { target: { value: '发送中的原始草稿' } });
+      fireEvent.click(screen.getByTitle('发送消息'));
+      await waitFor(() => expect(callWorker).toHaveBeenCalledWith(method, expect.anything()));
+      expect(composer).toHaveValue('发送中的原始草稿');
+      if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
+
+      await act(async () => {
+        resolveRequest(accepted);
+        await response;
+      });
+
+      await waitFor(() => expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : ''));
+      expect(screen.getByText('发送中的原始草稿')).toBeInTheDocument();
+    },
+  );
+
+  it.each([false, true])(
+    'clears only the original draft after submitting attachment parameters (new draft: %s)',
+    async (edit) => {
+      let resolveRequest!: (value: unknown) => void;
+      const response = new Promise<unknown>((resolve) => {
+        resolveRequest = resolve;
+      });
+      const accepted = mockComposerSend('agent.run', response);
+      const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
+      let runs = 0;
+      const adapter: AdapterDescriptor = {
+        key: 'TEXT_TO_IMAGE:test:v1',
+        capability: 'TEXT_TO_IMAGE',
+        capabilityLabel: '文生图',
+        provider: 'test',
+        providerLabel: 'Test',
+        model: 'test',
+        modelLabel: 'Test',
+        apiVersion: 'v1',
+        schemaVersion: 1,
+        endpoint: 'https://example.com/generate',
+        documentationUrl: 'https://example.com/docs',
+        credentialProvider: 'test',
+        parameterSchema: {
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+          type: 'object',
+          additionalProperties: false,
+          required: [],
+          properties: {},
+        },
+        uiSchema: { fields: [] },
+      };
+      vi.mocked(callWorker).mockImplementation(((method: string, params: unknown) => {
+        if (method === 'agent.run' && ++runs === 1)
+          return Promise.resolve({
+            status: 'needs_parameters',
+            capability: 'image',
+            providerProfileId: 'composer-profile',
+            modelId: 'composer-model',
+            modelName: 'Test Image',
+            adapters: [adapter],
+            affectsCost: false,
+          });
+        return baselineWorker(method as never, params as never);
+      }) as typeof callWorker);
+      render(<App />);
+      await screen.findByDisplayValue('输入草稿');
+      selectLlm('composer-profile', 'composer-model');
+      const composer = screen.getByRole('textbox', { name: '会话消息' });
+      fireEvent.change(composer, { target: { value: '发送中的原始草稿' } });
+      fireEvent.change(document.querySelector('input[type="file"]')!, {
+        target: { files: [new File(['reference'], '参考资料.bin')] },
+      });
+      await screen.findByText('参考资料.bin');
+      fireEvent.click(screen.getByTitle('发送消息'));
+      const parameters = await screen.findByRole('dialog', { name: '补充生成参数' });
+      expect(composer).toHaveValue('发送中的原始草稿');
+      fireEvent.click(within(parameters).getByRole('button', { name: '提交生成' }));
+      await waitFor(() => expect(runs).toBe(2));
+      const submitted = vi
+        .mocked(callWorker)
+        .mock.calls.filter(([method]) => method === 'agent.run');
+      expect(submitted[1]?.[1]).toHaveProperty('prompt');
+      expect((submitted[1]?.[1] as { prompt: string }).prompt).toContain('[附件：参考资料.bin]');
+      if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
+      await act(async () => {
+        resolveRequest(accepted);
+        await response;
+      });
+      await waitFor(() => expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : ''));
+    },
+  );
 
   it('renders the M2 workspace areas and runtime health', async () => {
     const { container } = render(<App />);
@@ -3315,6 +3591,7 @@ describe('App', () => {
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: imageJob.id }),
     );
+    expect(screen.getByRole('textbox', { name: '会话消息' })).toHaveValue('生成一张角色图');
     expect(callWorker).not.toHaveBeenCalledWith(
       'media.generation.confirmSubmission',
       expect.anything(),

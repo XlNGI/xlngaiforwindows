@@ -382,7 +382,7 @@ export function ProviderConnectionsView({
         </div>
       </aside>
 
-      <main className="provider-detail-pane">
+      <main className={`provider-detail-pane${editor ? ' is-editing' : ''}`}>
         {legacyMigrations.length > 0 && (
           <div className="legacy-migration-list">
             {legacyMigrations.map((entry) => (

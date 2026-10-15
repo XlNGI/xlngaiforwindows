@@ -729,6 +729,7 @@ export function App() {
   >(initialAgentModelPreferences);
   const [agentParameterRequest, setAgentParameterRequest] = useState<{
     prompt: string;
+    composerPrompt: string;
     capability: 'image' | 'video';
     providerProfileId: string;
     modelId: string;
@@ -782,6 +783,7 @@ export function App() {
   >(undefined);
   const activeMediaInputsRef = useRef<string[]>([]);
   const retryRequestsRef = useRef(new Set<string>());
+  const pendingMessageRequestsRef = useRef(new Set<string>());
   const projectActionRequest = useRef(0);
   const projectContentRequest = useRef(0);
   const generationPollVersion = useRef(0);
@@ -2251,227 +2253,254 @@ export function App() {
       adapterKey?: string;
       parameters?: import('@ai-video/contracts').AdapterParameters;
     },
+    acceptedComposerValue = composerValue,
   ) => {
     if ((!composerValue.trim() && chatAttachments.length === 0) || !conversation) return;
-    // A Worker sidecar can restart independently of the Desktop window. In
-    // that case restore the project session before any Agent/media operation.
-    try {
-      await ensureWorkerProjectSession();
-    } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '项目会话未打开');
-      return;
-    }
+    const requestKey = `${conversation.projectId}:${conversation.id}`;
+    if (pendingMessageRequestsRef.current.has(requestKey)) return;
+    pendingMessageRequestsRef.current.add(requestKey);
     const prompt = composerValue;
-    const attachmentContext = chatAttachments.length
-      ? `\n\n[附件：${chatAttachments.map((attachment) => attachment.name).join('、')}]${chatAttachments
-          .filter((attachment) => attachment.text)
-          .map((attachment) => `\n\n--- ${attachment.name} ---\n${attachment.text}`)
-          .join('')}`
-      : '';
-    const promptForAgent = prompt.includes('[附件：') ? prompt : `${prompt}${attachmentContext}`;
-    setComposer('');
-    if (
-      (selectedLlmProfile || llmProfiles.length > 0) &&
-      (modelSelection || (selectedLlmProfile && selectedLlmModel) || llmProfiles.length > 0)
-    ) {
+    const clearAcceptedComposer = () => {
+      setComposer((current) =>
+        activeProjectIdRef.current === conversation.projectId &&
+        generationPollOwner.current.conversationId === conversation.id &&
+        current === acceptedComposerValue
+          ? ''
+          : current,
+      );
+    };
+    try {
+      // A Worker sidecar can restart independently of the Desktop window. In
+      // that case restore the project session before any Agent/media operation.
       try {
-        setAgentModelSelection(undefined);
-        setAgentParameterRequest(undefined);
-        const capability = 'text' as const;
-        const agentPrompt = promptForAgent;
-        const remembered = conversation ? agentModelPreferences[conversation.id]?.text : undefined;
-        const runModel = resolveAgentRunModelSelection(
-          capability,
-          modelSelection
-            ? {
-                providerProfileId: modelSelection.providerProfileId,
-                modelId: modelSelection.modelId,
-              }
-            : undefined,
-          remembered,
-          selectedLlmProfile && selectedLlmModel
-            ? { providerProfileId: selectedLlmProfile.id, modelId: selectedLlmModel.id }
-            : undefined,
-        );
-        const providerProfileId = runModel?.providerProfileId;
-        const modelId = runModel?.modelId;
-        // Media parameter submission already carries local reference data in
-        // `parameters.images`/video fields. Sending the same data again as
-        // Agent attachments can push the JSON sidecar envelope over 2 MiB.
-        const agentAttachments = modelSelection?.parameters
-          ? undefined
-          : buildAgentAttachments(chatAttachments);
-        const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
-        const runParams: UnifiedAgentRunParams = {
-          conversationId: conversation.id,
-          prompt: agentPrompt || '请分析我提供的附件。',
-          capability,
-          idempotencyKey,
-          ...(agentAttachments && agentAttachments.length > 0
-            ? { attachments: agentAttachments }
-            : {}),
-          ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
-          researchMode,
-          ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
-          ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
-        };
-        const unified = await callWorker('agent.run', runParams);
-        if (
-          unified.status !== 'needs_model_selection' &&
-          providerProfileId &&
-          modelId &&
-          conversation &&
-          capability === 'text'
-        ) {
-          void callWorker('conversation.modelPreference.set', {
-            conversationId: conversation.id,
-            capability: 'text',
-            providerProfileId,
-            modelId,
-          }).catch(() => undefined);
-        }
-        if (unified.status === 'needs_model_selection') {
-          setComposer(prompt);
-          setChatMessage('');
-          setAgentModelSelection({
-            prompt: agentPrompt || '请分析我提供的附件。',
-            composerPrompt: prompt,
-            capability: unified.capability,
-            models: unified.models,
-            reason: unified.reason,
-          });
-          return;
-        }
-        if (unified.status === 'needs_parameters') {
-          setComposer(prompt);
-          setAgentParameterRequest({
-            referenceImageInputs: collectReferenceImageInputs(chatAttachments),
-            prompt: agentPrompt || '请根据附件生成内容。',
-            ...unified,
-          });
-          setChatMessage('');
-          return;
-        }
-        if (unified.status === 'pending_intent') {
-          setComposer(prompt);
-          const reason = unified.pendingIntent.reasonCode;
-          setChatMessage(
-            reason === 'TARGET_REQUIRED'
-              ? '请补充要操作的小说章节或新章节标题，助手会继续当前任务。'
-              : reason === 'AMBIGUOUS_ACTION'
-                ? '请明确是新建、续写还是重写小说章节。'
-                : '当前小说任务需要补充说明后才能继续。',
+        await ensureWorkerProjectSession();
+      } catch (reason) {
+        setChatMessage(reason instanceof Error ? reason.message : '项目会话未打开');
+        return;
+      }
+      const attachmentContext = chatAttachments.length
+        ? `\n\n[附件：${chatAttachments.map((attachment) => attachment.name).join('、')}]${chatAttachments
+            .filter((attachment) => attachment.text)
+            .map((attachment) => `\n\n--- ${attachment.name} ---\n${attachment.text}`)
+            .join('')}`
+        : '';
+      const promptForAgent = prompt.includes('[附件：') ? prompt : `${prompt}${attachmentContext}`;
+      if (
+        (selectedLlmProfile || llmProfiles.length > 0) &&
+        (modelSelection || (selectedLlmProfile && selectedLlmModel) || llmProfiles.length > 0)
+      ) {
+        try {
+          setAgentModelSelection(undefined);
+          setAgentParameterRequest(undefined);
+          const capability = 'text' as const;
+          const agentPrompt = promptForAgent;
+          const remembered = conversation
+            ? agentModelPreferences[conversation.id]?.text
+            : undefined;
+          const runModel = resolveAgentRunModelSelection(
+            capability,
+            modelSelection
+              ? {
+                  providerProfileId: modelSelection.providerProfileId,
+                  modelId: modelSelection.modelId,
+                }
+              : undefined,
+            remembered,
+            selectedLlmProfile && selectedLlmModel
+              ? { providerProfileId: selectedLlmProfile.id, modelId: selectedLlmModel.id }
+              : undefined,
           );
-          return;
-        }
-        if (unified.status === 'image_prepared' || unified.status === 'video_prepared') {
-          if (unified.status === 'image_prepared') {
-            /* paid submission is Worker-owned and requires a fresh confirmation */
-            const pending = await callWorker('media.generation.requestSubmission', {
-              jobId: unified.job.id,
+          const providerProfileId = runModel?.providerProfileId;
+          const modelId = runModel?.modelId;
+          // Media parameter submission already carries local reference data in
+          // `parameters.images`/video fields. Sending the same data again as
+          // Agent attachments can push the JSON sidecar envelope over 2 MiB.
+          const agentAttachments = modelSelection?.parameters
+            ? undefined
+            : buildAgentAttachments(chatAttachments);
+          const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
+          const runParams: UnifiedAgentRunParams = {
+            conversationId: conversation.id,
+            prompt: agentPrompt || '请分析我提供的附件。',
+            capability,
+            idempotencyKey,
+            ...(agentAttachments && agentAttachments.length > 0
+              ? { attachments: agentAttachments }
+              : {}),
+            ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
+            researchMode,
+            ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
+            ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
+          };
+          const unified = await callWorker('agent.run', runParams);
+          if (
+            unified.status !== 'needs_model_selection' &&
+            providerProfileId &&
+            modelId &&
+            conversation &&
+            capability === 'text'
+          ) {
+            void callWorker('conversation.modelPreference.set', {
+              conversationId: conversation.id,
+              capability: 'text',
+              providerProfileId,
+              modelId,
+            }).catch(() => undefined);
+          }
+          if (unified.status === 'needs_model_selection') {
+            setChatMessage('');
+            setAgentModelSelection({
+              prompt: agentPrompt || '请分析我提供的附件。',
+              composerPrompt: prompt,
+              capability: unified.capability,
+              models: unified.models,
+              reason: unified.reason,
             });
-            if (!pending.confirmation)
-              throw new Error('Image submission confirmation is unavailable.');
-            if (!(await requestMediaSubmissionApproval(pending.confirmation))) {
-              await callWorker('media.task.cancel', { jobId: unified.job.id });
-              return;
-            }
-            const submitted = await callWorker('media.generation.confirmSubmission', {
-              jobId: unified.job.id,
-              confirmationToken: pending.confirmation.confirmationToken,
-              approved: true,
+            return;
+          }
+          if (unified.status === 'needs_parameters') {
+            setAgentParameterRequest({
+              composerPrompt: acceptedComposerValue,
+              referenceImageInputs: collectReferenceImageInputs(chatAttachments),
+              prompt: agentPrompt || '请根据附件生成内容。',
+              ...unified,
             });
-            const completed = submitted.job;
-            if (completed.status === 'succeeded') {
-              const nextAssets = await callWorker('asset.list', {});
-              updateAssets(nextAssets, completed.results[0]?.asset?.id);
-            }
+            setChatMessage('');
+            return;
+          }
+          if (unified.status === 'pending_intent') {
+            const reason = unified.pendingIntent.reasonCode;
             setChatMessage(
-              completed.status === 'succeeded'
-                ? '图片已生成并新增到素材库。'
-                : (completed.error ?? '图片生成失败。'),
+              reason === 'TARGET_REQUIRED'
+                ? '请补充要操作的小说章节或新章节标题，助手会继续当前任务。'
+                : reason === 'AMBIGUOUS_ACTION'
+                  ? '请明确是新建、续写还是重写小说章节。'
+                  : '当前小说任务需要补充说明后才能继续。',
             );
-          } else {
-            const pending = await callWorker('media.generation.requestSubmission', {
-              jobId: unified.job.id,
-            });
-            if (!pending.confirmation)
-              throw new Error('Video submission confirmation is unavailable.');
-            if (!(await requestMediaSubmissionApproval(pending.confirmation))) {
-              await callWorker('media.task.cancel', { jobId: unified.job.id });
-              return;
-            }
-            const response = (
-              await callWorker('media.generation.confirmSubmission', {
+            return;
+          }
+          if (unified.status === 'image_prepared' || unified.status === 'video_prepared') {
+            if (unified.status === 'image_prepared') {
+              /* paid submission is Worker-owned and requires a fresh confirmation */
+              const pending = await callWorker('media.generation.requestSubmission', {
+                jobId: unified.job.id,
+              });
+              if (!pending.confirmation)
+                throw new Error('Image submission confirmation is unavailable.');
+              if (!(await requestMediaSubmissionApproval(pending.confirmation))) {
+                await callWorker('media.task.cancel', { jobId: unified.job.id });
+                return;
+              }
+              const submitted = await callWorker('media.generation.confirmSubmission', {
                 jobId: unified.job.id,
                 confirmationToken: pending.confirmation.confirmationToken,
                 approved: true,
-              })
-            ).job as import('@ai-video/contracts').VideoGenerationJobInfo;
-            if (response.status === 'failed' || !response.providerTaskId) {
-              const failed = response;
-              setChatMessage(failed.error ?? '视频任务提交失败。');
+              });
+              const completed = submitted.job;
+              if (completed.status === 'succeeded') {
+                clearAcceptedComposer();
+                setChatAttachments([]);
+                const nextAssets = await callWorker('asset.list', {});
+                updateAssets(nextAssets, completed.results[0]?.asset?.id);
+              }
+              setChatMessage(
+                completed.status === 'succeeded'
+                  ? '图片已生成并新增到素材库。'
+                  : (completed.error ?? '图片生成失败。'),
+              );
             } else {
-              setChatMessage('视频任务已提交，可能产生费用；请在制作面板查看进度。');
+              const pending = await callWorker('media.generation.requestSubmission', {
+                jobId: unified.job.id,
+              });
+              if (!pending.confirmation)
+                throw new Error('Video submission confirmation is unavailable.');
+              if (!(await requestMediaSubmissionApproval(pending.confirmation))) {
+                await callWorker('media.task.cancel', { jobId: unified.job.id });
+                return;
+              }
+              const response = (
+                await callWorker('media.generation.confirmSubmission', {
+                  jobId: unified.job.id,
+                  confirmationToken: pending.confirmation.confirmationToken,
+                  approved: true,
+                })
+              ).job as import('@ai-video/contracts').VideoGenerationJobInfo;
+              if (
+                response.status === 'failed' ||
+                response.status === 'cancelled' ||
+                !response.providerTaskId
+              ) {
+                const failed = response;
+                setChatMessage(failed.error ?? '视频任务提交失败。');
+              } else {
+                clearAcceptedComposer();
+                setChatAttachments([]);
+                setChatMessage('视频任务已提交，可能产生费用；请在制作面板查看进度。');
+              }
             }
+            return;
           }
-          setChatAttachments([]);
-          return;
+          if (!('generation' in unified) || !('stream' in unified)) {
+            setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
+            return;
+          }
+          void launchPreparedGeneration(unified);
+          clearAcceptedComposer();
+        } catch (reason) {
+          setChatMessage(readableFailure(reason, '生成启动失败'));
+          void loadLlmCatalog();
         }
-        if (!('generation' in unified) || !('stream' in unified)) {
-          setComposer(prompt);
-          setChatMessage('Agent 任务需要进一步澄清，当前没有创建生成任务。');
-          return;
+        return;
+      }
+      if (selectedLlmProfile && selectedLlmModel) {
+        try {
+          const idempotencyKey = `desktop-prepare:${conversation.id}:${crypto.randomUUID()}`;
+          const prepared = await callWorker('llm.generation.prepare', {
+            conversationId: conversation.id,
+            prompt,
+            providerProfileId: selectedLlmProfile.id,
+            modelId: selectedLlmModel.id,
+            idempotencyKey,
+          });
+          void launchPreparedGeneration(prepared);
+          clearAcceptedComposer();
+        } catch (reason) {
+          setChatMessage(readableFailure(reason, '生成启动失败'));
+          void loadLlmCatalog();
         }
-        void launchPreparedGeneration(unified);
-      } catch (reason) {
-        setComposer(prompt);
-        setChatMessage(readableFailure(reason, '生成启动失败'));
-        void loadLlmCatalog();
+        return;
       }
-      return;
-    }
-    if (selectedLlmProfile && selectedLlmModel) {
+      if (llmStatus?.configured) {
+        try {
+          const idempotencyKey = `desktop-generate:${conversation.id}:${crypto.randomUUID()}`;
+          const started = await callWorker('llm.generate', {
+            conversationId: conversation.id,
+            prompt,
+            idempotencyKey,
+          });
+          setGeneration(started);
+          setMessages((current) => [...current, started.userMessage, started.assistantMessage]);
+          clearAcceptedComposer();
+        } catch (reason) {
+          setChatMessage(reason instanceof Error ? reason.message : '生成启动失败');
+        }
+        return;
+      }
       try {
-        const idempotencyKey = `desktop-prepare:${conversation.id}:${crypto.randomUUID()}`;
-        const prepared = await callWorker('llm.generation.prepare', {
+        const saved = await callWorker('chat.message.save', {
           conversationId: conversation.id,
-          prompt,
-          providerProfileId: selectedLlmProfile.id,
-          modelId: selectedLlmModel.id,
-          idempotencyKey,
+          role: 'user',
+          content: prompt,
         });
-        void launchPreparedGeneration(prepared);
+        setMessages((current) => [...current, saved]);
+        clearAcceptedComposer();
+        setChatMessage('消息已保存；在供应商与模型中添加 LLM 连接后可生成回复');
       } catch (reason) {
-        setComposer(prompt);
-        setChatMessage(readableFailure(reason, '生成启动失败'));
-        void loadLlmCatalog();
+        setChatMessage(readableFailure(reason, '消息保存失败'));
       }
-      return;
+    } finally {
+      pendingMessageRequestsRef.current.delete(requestKey);
     }
-    if (llmStatus?.configured) {
-      try {
-        const idempotencyKey = `desktop-generate:${conversation.id}:${crypto.randomUUID()}`;
-        const started = await callWorker('llm.generate', {
-          conversationId: conversation.id,
-          prompt,
-          idempotencyKey,
-        });
-        setGeneration(started);
-        setMessages((current) => [...current, started.userMessage, started.assistantMessage]);
-      } catch (reason) {
-        setComposer(prompt);
-        setChatMessage(reason instanceof Error ? reason.message : '生成启动失败');
-      }
-      return;
-    }
-    const saved = await callWorker('chat.message.save', {
-      conversationId: conversation.id,
-      role: 'user',
-      content: prompt,
-    });
-    setMessages((current) => [...current, saved]);
-    setChatMessage('消息已保存；在供应商与模型中添加 LLM 连接后可生成回复');
   };
 
   const addChatAttachments = async (files: FileList | File[]) => {
@@ -3269,12 +3298,16 @@ export function App() {
           };
         }
         setAgentParameterRequest(undefined);
-        void sendMessage(pending.prompt, {
-          providerProfileId: pending.providerProfileId,
-          modelId: pending.modelId,
-          adapterKey,
-          parameters: adapterParameters,
-        });
+        void sendMessage(
+          pending.prompt,
+          {
+            providerProfileId: pending.providerProfileId,
+            modelId: pending.modelId,
+            adapterKey,
+            parameters: adapterParameters,
+          },
+          pending.composerPrompt,
+        );
       }}
     />
   );

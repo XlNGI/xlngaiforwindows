@@ -148,6 +148,7 @@ export function ProviderEditor({
               key={definition.id}
               type="button"
               className={definition.id === selectedDefinition?.id ? 'selected' : ''}
+              title={definition.name}
               onClick={() => {
                 setDefinitionId(definition.id);
                 if (!profile) setName(definition.name);
@@ -155,7 +156,7 @@ export function ProviderEditor({
             >
               <span className="provider-logo">{definition.name.slice(0, 2)}</span>
               <strong>{definition.name}</strong>
-              <small>{definition.protocol}</small>
+              <small title={definition.protocol}>{definition.protocol}</small>
             </button>
           ))}
         </div>
