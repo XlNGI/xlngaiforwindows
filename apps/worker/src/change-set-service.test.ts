@@ -29,7 +29,7 @@ async function setup(name = 'change-set') {
 }
 
 describe('ChangeSetService', () => {
-  it('reviews LLM scene/cast IDs and initializes media by those IDs, preserving selected voice versions on revision', async () => {
+  it('reviews LLM scene/cast IDs and follows character defaults, preserving explicit selections on revision', async () => {
     const { projects, content, changeSets } = await setup();
     const setting = content.saveDocument({
       kind: 'scene',
@@ -89,8 +89,6 @@ describe('ChangeSetService', () => {
       characterBindings: [
         {
           characterDocumentId: actor.id,
-          imageAssetId: 'actor-image',
-          voiceReferenceVersionId: voice.versionId,
         },
       ],
       materialBindings: [{ assetId: 'scene-image', sourceDocumentId: setting.id }],

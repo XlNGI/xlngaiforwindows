@@ -192,7 +192,7 @@ flowchart LR
 }
 ```
 
-- 限制：`scenes` 1–20；每场 `shots` 1–30；`prompt` ≤ 2,000 字符；全部字段 `additionalProperties: false`；
+- 限制：`scenes` 1–20；每场 `shots` 1–30；`prompt` ≤ 20,000 字符（2026-10-16 结构化制作指令扩展，见 `PRODUCTION-EXECUTION-IMPLEMENTATION-PLAN.md`）；全部字段 `additionalProperties: false`；
 - Worker 转换规则：每个 scene → `entityType='scene', action='create'`；每个 shot → `entityType='shot', action='create'`（`parentItemOrdinal` 指向所属 scene item，`prompt` 写入 `shot_prompt`）；
 - 引用校验：`[角色:X]`/`[场景:Y]` 必须命中已发布 character/scene 资料，否则工具失败。
 
@@ -299,7 +299,7 @@ flowchart LR
 
 - [x] 会话携带并冻结 `selectedChapterIds`，ChatPanel 支持“短剧创作”模式与意图推断（`inferShortDramaIntent`）；
 - [x] 2026-10-13：移除小说页生成快捷按钮和章节勾选，正文与短剧生成统一由会话发起；
-- [x] 场次与镜头页 prompt 展示/编辑（保存走 `shot.save`，≤2000 字符）；
+- [x] 场次与镜头页 prompt 展示/编辑（保存走 `shot.save`，≤20,000 字符）；
 - [x] 场次工作区展示/编辑完整视频提示词；自动识别 `[角色:]`、`[场景:]`、`[道具:]` 引用并显示可替换素材；场次视频沿用 ProductionPanel 的参数预填与付费确认链；
 - [x] ChangeSetReviewPanel 展示 shot prompt 预览；
 - [x] 文档编辑器 kind 选择器（角色与场景页可建 character/scene 文档）。
@@ -333,7 +333,7 @@ flowchart LR
 | 生成内容跨集不一致 | 短剧域上下文注入已发布角色/场景；引用校验；人工门禁 |
 | 章节变更后产物过期 | 来源版本/哈希冻结 + 摘要 stale + 血缘标记，提示重新生成 |
 | 镜头提示词与角色/场景资料漂移 | `[角色:X]`/`[场景:Y]` 占位符 + 引用集合硬校验 |
-| change set 规模过大 | scenes ≤ 20、每场 shots ≤ 30、prompt ≤ 2,000 字符硬上限 |
+| change set 规模过大 | scenes ≤ 20、每场 shots ≤ 30、prompt ≤ 20,000 字符硬上限；供应商长度限制另行校验 |
 | 工具结果与正式表冲突 | 继续使用 change set CAS/事务回滚，不直接写正式表 |
 
 ## 15. 完成定义

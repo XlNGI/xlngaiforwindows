@@ -360,6 +360,23 @@ describe('official audio reference video pipeline with actual local media', () =
       }),
     ).toThrow('已更新');
     expect(f.request).not.toHaveBeenCalled();
+    const pinned = new ContentService(f.ps).saveScene({
+      title: '保留历史音色',
+      characterBindings: [
+        { characterDocumentId: f.character.id, voiceReferenceVersionId: f.voice.versionId },
+      ],
+    });
+    expect(() =>
+      f.prepare.prepareVideo({
+        adapterKey: f.adapterKey,
+        sceneId: pinned.id,
+        parameters: f.parameters,
+        providerRegion: 'cn',
+        providerProfileId: f.profile.id,
+        modelId: f.model.id,
+      }),
+    ).not.toThrow();
+    expect(f.request).not.toHaveBeenCalled();
     const simple = f.videos.prepare({
       adapterKey: f.adapterKey,
       parameters: { prompt: '你好' },

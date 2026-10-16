@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { ImagePreview } from './ImagePreview';
+import { useProductionInstructions } from './use-production-instructions';
 import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
 import {
   addOfficialRoleVoices,
@@ -324,6 +325,60 @@ export function ProductionPanel({
   const [catalogModelId, setCatalogModelId] = useState('');
   const [adapter, setAdapter] = useState<AdapterDescriptor>();
   const [parameters, setParameters] = useState<AdapterParameters>({});
+  const [formReady, setFormReady] = useState(false);
+  const [draftOverrides, setDraftOverrides] = useState<AdapterParameters>();
+  const productionInstructions = useProductionInstructions({
+    projectId,
+    target:
+      sourceDocumentId && (preferredAssetKind === 'character' || preferredAssetKind === 'scene')
+        ? {
+            kind: preferredAssetKind === 'character' ? 'character' : 'setting',
+            id: sourceDocumentId,
+          }
+        : sceneId
+          ? { kind: 'scene', id: sceneId }
+          : shotId
+            ? { kind: 'shot', id: shotId }
+            : undefined,
+    adapter,
+    providerKey: `${selectedProfileId}:${catalogModelId}`,
+    ready: formReady && adapter?.key === adapterKey,
+    setParameters,
+    initialOverrides: draftOverrides,
+    preparePatch: (compiled, current) => {
+      const next = { ...compiled.parameters };
+      if (!adapter || !compiled.sceneInputs) return next;
+      const { scene: latest, media } = compiled.sceneInputs;
+      const bindings = [
+        ...(latest.materialBindings ?? []).filter((b) => b.role !== 'character'),
+        ...(latest.characterBindings ?? []).flatMap((binding) => {
+          const character = media.characters.find(
+            (c) => c.characterDocumentId === binding.characterDocumentId,
+          );
+          const id = binding.imageDisabled
+            ? undefined
+            : (binding.imageAssetId ?? character?.defaultImage?.id);
+          return id
+            ? [
+                {
+                  id: `cast-${binding.characterDocumentId}`,
+                  role: 'character' as const,
+                  label:
+                    compiled.sceneInputs!.characterNames[binding.characterDocumentId] ?? '角色',
+                  assetId: id,
+                  sourceDocumentId: binding.characterDocumentId,
+                  source: 'auto' as const,
+                },
+              ]
+            : [];
+        }),
+      ];
+      const images = bindings.map((binding) => `project-asset://${binding.assetId}`);
+      return isOfficialVoiceVideo(adapter)
+        ? seedOfficialVideoParameters(adapter, { ...current, ...next }, undefined, images, true)
+        : { ...next, ...(adapter.parameterSchema.properties.images ? { images } : {}) };
+    },
+  });
   const [errors, setErrors] = useState<AdapterValidationError[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -348,9 +403,88 @@ export function ProductionPanel({
   const [voiceReferences, setVoiceReferences] = useState<CharacterVoiceReferenceInfo[]>([]);
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<string[]>([]);
   const [dialogueAudio, setDialogueAudio] = useState<AudioFileInfo>();
-  const [boundScene, setBoundScene] = useState<SceneInfo>();
+  const [rawBoundScene, setBoundScene] = useState<SceneInfo>();
+  const boundScene = rawBoundScene
+    ? {
+        ...rawBoundScene,
+        characterBindings: rawBoundScene.characterBindings?.map((binding) => ({
+          ...binding,
+          voiceReferenceVersionId: binding.voiceDisabled
+            ? undefined
+            : (binding.voiceReferenceVersionId ??
+              voiceReferences.find((v) => v.characterDocumentId === binding.characterDocumentId)
+                ?.versionId),
+        })),
+      }
+    : undefined;
   const [sceneInputsLoading, setSceneInputsLoading] = useState(false);
   const [sceneInputsError, setSceneInputsError] = useState('');
+  const compiledSceneInputs = productionInstructions.result?.sceneInputs;
+  const compiledSceneInputsRef = useRef(compiledSceneInputs);
+  compiledSceneInputsRef.current = compiledSceneInputs;
+  const compiledReferenceBindings = useMemo<SceneMaterialBindingInfo[] | undefined>(() => {
+    if (!compiledSceneInputs || productionInstructions.result?.issues.length) return undefined;
+    const { scene: latest, media } = compiledSceneInputs;
+    return [
+      ...(latest.materialBindings ?? []).filter((b) => b.role !== 'character'),
+      ...(latest.characterBindings ?? []).flatMap((binding) => {
+        const id = binding.imageDisabled
+          ? undefined
+          : (binding.imageAssetId ??
+            media.characters.find((c) => c.characterDocumentId === binding.characterDocumentId)
+              ?.defaultImage?.id);
+        return id
+          ? [
+              {
+                id: `cast-${binding.characterDocumentId}`,
+                role: 'character' as const,
+                label: compiledSceneInputs.characterNames[binding.characterDocumentId] ?? '角色',
+                assetId: id,
+                sourceDocumentId: binding.characterDocumentId,
+                source: 'auto' as const,
+              },
+            ]
+          : [];
+      }),
+    ];
+  }, [compiledSceneInputs, productionInstructions.result?.issues]);
+  useEffect(() => {
+    if (!compiledSceneInputs || productionInstructions.result?.issues.length) return;
+    const { scene: latest, media } = compiledSceneInputs;
+    setSceneInputsLoading(false);
+    setSceneInputsError('');
+    setBoundScene(latest);
+    setVoiceReferences(media.voices);
+    setSelectedVoiceIds(
+      (latest.characterBindings ?? [])
+        .filter(
+          (binding) =>
+            !binding.voiceDisabled &&
+            (binding.voiceReferenceVersionId ||
+              media.characters.find((c) => c.characterDocumentId === binding.characterDocumentId)
+                ?.voice),
+        )
+        .map((binding) => binding.characterDocumentId),
+    );
+    setDialogueAudio(undefined);
+    if (latest.dialogueAudioId) {
+      let active = true;
+      setSceneInputsLoading(true);
+      void callWorker('audio.get', { audioId: latest.dialogueAudioId })
+        .then((value) => {
+          if (active) setDialogueAudio(value ?? undefined);
+        })
+        .catch(() => {
+          if (active) setSceneInputsError('完整对白不可用，请重新绑定。');
+        })
+        .finally(() => {
+          if (active) setSceneInputsLoading(false);
+        });
+      return () => {
+        active = false;
+      };
+    }
+  }, [compiledSceneInputs, productionInstructions.result?.issues]);
   useEffect(() => {
     let active = true;
     setVoiceReferences([]);
@@ -369,13 +503,14 @@ export function ProductionPanel({
       const token = ++sequence;
       if (projectId)
         void Promise.all([
-          isOfficialVoiceVideo(adapter)
+          isOfficialVoiceVideo(adapter) || sceneId
             ? callWorker('characterVoiceReference.list', {})
             : Promise.resolve([]),
           sceneId ? callWorker('scene.list', {}) : Promise.resolve([]),
         ])
           .then(async ([values, scenes]) => {
             if (!active || token !== sequence) return;
+            if (compiledSceneInputsRef.current) return;
             setVoiceReferences(values ?? []);
             if (sceneId && !defaultsApplied) {
               const currentScene = scenes.find((item) => item.id === sceneId);
@@ -391,7 +526,14 @@ export function ProductionPanel({
                   adapter?.contractId?.includes('wan2-7')
                     ? []
                     : (currentScene.characterBindings ?? [])
-                        .filter((binding) => binding.voiceReferenceVersionId)
+                        .filter(
+                          (binding) =>
+                            !binding.voiceDisabled &&
+                            (binding.voiceReferenceVersionId ||
+                              values?.some(
+                                (v) => v.characterDocumentId === binding.characterDocumentId,
+                              )),
+                        )
                         .map((binding) => binding.characterDocumentId),
                 );
               }
@@ -457,25 +599,25 @@ export function ProductionPanel({
   }, [preferredAssetKind, sourceDocumentId]);
 
   useEffect(() => {
-    if (!seedPrompt && !seedImages?.length) return;
-    if (isOfficialVoiceVideo(adapter)) {
-      setParameters((current) =>
-        seedOfficialVideoParameters(
-          adapter!,
-          current,
-          seedPrompt,
-          seedImages ?? [],
-          seedImages !== undefined,
-        ),
-      );
-      return;
-    }
-    setParameters((current) => ({
-      ...current,
-      ...(seedPrompt ? { prompt: seedPrompt } : {}),
-      ...(seedImages?.length ? { images: seedImages } : {}),
-    }));
-  }, [seedPrompt, seedImages, sourceDocumentId, adapter]);
+    if (!seedPrompt && seedImages === undefined) return;
+    setParameters((current) =>
+      productionInstructions.preserveEdits(
+        isOfficialVoiceVideo(adapter)
+          ? seedOfficialVideoParameters(
+              adapter!,
+              current,
+              seedPrompt,
+              seedImages ?? [],
+              seedImages !== undefined,
+            )
+          : {
+              ...current,
+              ...(seedPrompt ? { prompt: seedPrompt } : {}),
+              ...(seedImages ? { images: seedImages } : {}),
+            },
+      ),
+    );
+  }, [seedPrompt, seedImages, sourceDocumentId, adapter, productionInstructions.preserveEdits]);
 
   useEffect(() => {
     if (focusedAssetId && assets.some((item) => item.id === focusedAssetId)) {
@@ -568,6 +710,8 @@ export function ProductionPanel({
 
   useEffect(() => {
     const selected = catalog?.adapters.find((item) => item.key === adapterKey);
+    setFormReady(false);
+    setDraftOverrides(undefined);
     if (!selected) {
       setAdapter(undefined);
       setParameters({});
@@ -632,6 +776,7 @@ export function ProductionPanel({
             providerProfileId: selectedProfile.id,
             modelId: selectedModel.remoteModelId,
           });
+          if (active && draft?.parameters) setDraftOverrides(draft.parameters);
           // Precedence: schema defaults < remembered form values < project draft < document seed.
           if (active)
             setParameters(
@@ -646,6 +791,9 @@ export function ProductionPanel({
             setParameters(withSeed({ ...defaults, ...readStoredParameters(resolved.key) }));
         }
       })
+      .finally(() => {
+        if (active) setFormReady(true);
+      })
       .catch((reason) => {
         if (active) {
           setAdapter(undefined);
@@ -656,7 +804,17 @@ export function ProductionPanel({
     return () => {
       active = false;
     };
-  }, [adapterKey, catalog, catalogModelId, models, projectId, selectedProfile, shotId]);
+  }, [
+    adapterKey,
+    catalog,
+    catalogModelId,
+    models,
+    projectId,
+    selectedProfile,
+    shotId,
+    sceneId,
+    sourceDocumentId,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -773,6 +931,7 @@ export function ProductionPanel({
   };
 
   const updateParameter = (key: string, value: AdapterParameters[string] | undefined) => {
+    productionInstructions.changed(key, value);
     setParameters((current) => {
       const next = { ...current };
       if (value === undefined || value === '') {
@@ -900,6 +1059,7 @@ export function ProductionPanel({
     setBusy(true);
     setGenerationStatus('');
     try {
+      const productionSource = await productionInstructions.beforeSubmit();
       const submissionParameters = await resolveAssetReferences(parameters);
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
@@ -911,6 +1071,7 @@ export function ProductionPanel({
         return;
       }
       const job = await callWorker('image.generate.prepare', {
+        ...(productionSource ? { productionSource } : {}),
         shotId,
         sourceDocumentId,
         adapterKey: adapter.key,
@@ -996,6 +1157,7 @@ export function ProductionPanel({
     setBusy(true);
     setGenerationStatus('');
     try {
+      const productionSource = await productionInstructions.beforeSubmit();
       if (sceneInputsLoading || sceneInputsError)
         throw new Error(sceneInputsError || '正在读取场次绑定，请稍后提交。');
       const driving = adapter.contractId?.includes('wan2-7');
@@ -1023,9 +1185,14 @@ export function ProductionPanel({
           '当前模型使用完整对白驱动，不能使用本场的角色音色样本；请绑定完整对白或选择支持音色参考的模型。',
         );
       const selectedVoices = selectedVoiceIds.map((id) => {
-        const voice = voiceReferences.find((item) => item.characterDocumentId === id);
         const binding = boundScene?.characterBindings?.find(
           (item) => item.characterDocumentId === id,
+        );
+        const voice = voiceReferences.find(
+          (item) =>
+            item.characterDocumentId === id &&
+            (!binding?.voiceReferenceVersionId ||
+              item.versionId === binding.voiceReferenceVersionId),
         );
         if (
           !voice ||
@@ -1040,7 +1207,7 @@ export function ProductionPanel({
             parameters,
             selectedVoices,
             dialogueAudio?.id,
-            seedReferenceBindings,
+            compiledReferenceBindings ?? seedReferenceBindings,
           )
         : await resolveAssetReferences(parameters);
       const validation = await callWorker('adapter.validate', {
@@ -1053,6 +1220,7 @@ export function ProductionPanel({
         return;
       }
       const prepared = await callWorker('video.generate.prepare', {
+        ...(productionSource ? { productionSource } : {}),
         shotId,
         sceneId,
         adapterKey: adapter.key,
@@ -1315,6 +1483,35 @@ export function ProductionPanel({
                   </span>
                 </div>
                 <div className="parameter-fields">
+                  {(productionInstructions.result?.source || productionInstructions.error) && (
+                    <section aria-label="制作内容适配">
+                      {productionInstructions.overriddenFields.length > 0 && (
+                        <p>已保留你修改或保存的表单值；重新填入会替换这些值。</p>
+                      )}
+                      <p
+                        role={
+                          productionInstructions.error ||
+                          productionInstructions.result?.issues.length
+                            ? 'alert'
+                            : 'status'
+                        }
+                      >
+                        {productionInstructions.error ||
+                          productionInstructions.result?.issues
+                            .map((issue) => issue.message)
+                            .join('；') ||
+                          `已填入制作内容 · 版本 ${productionInstructions.result?.source?.revision}`}
+                      </p>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        disabled={busy || productionInstructions.loading}
+                        onClick={productionInstructions.refill}
+                      >
+                        重新填入制作内容
+                      </button>
+                    </section>
+                  )}
                   {basicFields.map((field) => (
                     <ParameterField
                       key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}

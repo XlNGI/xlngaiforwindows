@@ -42,5 +42,17 @@ export async function callWorker<M extends WorkerMethod>(
       });
 
   if (!response.ok) throw new WorkerClientError(response.error);
+  if (
+    [
+      'scene.save',
+      'shot.save',
+      'document.save',
+      'document.draft.save',
+      'document.restore',
+      'agent.changeSet.apply',
+      'characterVoiceReference.save',
+    ].includes(method)
+  )
+    window.dispatchEvent(new Event('production-source-updated'));
   return response.result;
 }

@@ -10,6 +10,24 @@ export class VoiceReferenceRepository {
     private readonly database: Database.Database,
     private readonly projectId: string,
   ) {}
+  forCharacters(characterIds: string[], versionIds: string[] = []): CharacterVoiceReferenceInfo[] {
+    if (!characterIds.length) return [];
+    return this.database
+      .prepare(
+        `
+      SELECT r.id,r.project_id AS projectId,r.character_document_id AS characterDocumentId,d.title AS characterName,
+        v.id AS versionId,v.revision,r.row_version AS rowVersion,a.id AS audioId,a.name AS audioName,
+        a.duration_ms AS durationMs,a.size_bytes AS sizeBytes,a.mime
+      FROM character_voice_references r JOIN character_voice_reference_versions v ON v.reference_id=r.id AND v.project_id=r.project_id
+      JOIN documents d ON d.id=r.character_document_id AND d.project_id=r.project_id
+      JOIN audio_files a ON a.id=v.audio_id AND a.project_id=r.project_id
+      WHERE r.project_id=? AND r.character_document_id IN (${characterIds.map(() => '?').join(',')})
+        AND a.deleted_at IS NULL AND (v.id=r.current_version_id ${versionIds.length ? `OR v.id IN (${versionIds.map(() => '?').join(',')})` : ''})
+      ORDER BY v.revision DESC,v.id
+    `,
+      )
+      .all(this.projectId, ...characterIds, ...versionIds) as CharacterVoiceReferenceInfo[];
+  }
   list(): CharacterVoiceReferenceInfo[] {
     return this.database
       .prepare(

@@ -82,6 +82,8 @@ function mockWorker(
   unavailableMediaIds: string[] = [],
 ): void {
   vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+    if (method === 'production.compile' || method === 'production.read')
+      return Promise.resolve({ target: params.target, rowVersion: 1, parameters: {}, issues: [] });
     if (method === 'provider.profile.list') return Promise.resolve([providerProfile]);
     if (method === 'provider.model.list') return Promise.resolve(providerModels);
     if (method === 'asset.mediaSource') {

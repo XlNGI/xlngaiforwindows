@@ -43,6 +43,8 @@ import {
   MIGRATION_V41,
   MIGRATION_V42,
   MIGRATION_V47,
+  MIGRATION_V48,
+  MIGRATION_V49,
 } from './schema.js';
 import { runV14Rebuild } from './migration-v14.js';
 import { MIGRATION_V44 } from './migration-v44.js';
@@ -510,6 +512,28 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(47, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 47) {
+    checkpoint(database);
+    database.transaction(() => {
+      const columns = database
+        .prepare('PRAGMA table_info(scene_character_bindings)')
+        .all() as Array<{ name: string }>;
+      // Historical migration fixtures may retain columns from a newer schema.
+      if (!columns.some((column) => column.name === 'image_disabled')) database.exec(MIGRATION_V48);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(48, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 48) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V49);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(49, now);
     })();
   }
   return getSchemaVersion(database);

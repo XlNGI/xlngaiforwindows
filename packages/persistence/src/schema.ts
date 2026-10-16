@@ -1,4 +1,44 @@
-export const CURRENT_SCHEMA_VERSION = 47;
+export const CURRENT_SCHEMA_VERSION = 49;
+
+export const MIGRATION_V49 = `
+ALTER TABLE shots RENAME COLUMN prompt TO prompt_v29;
+ALTER TABLE shots ADD COLUMN prompt TEXT CHECK(prompt IS NULL OR length(trim(prompt)) <= 20000);
+UPDATE shots SET prompt=prompt_v29;
+ALTER TABLE shots DROP COLUMN prompt_v29;
+DROP TRIGGER agent_change_set_item_shot_prompt_match;
+ALTER TABLE agent_change_set_items RENAME COLUMN shot_prompt TO shot_prompt_v29;
+ALTER TABLE agent_change_set_items ADD COLUMN shot_prompt TEXT CHECK(shot_prompt IS NULL OR length(trim(shot_prompt)) <= 20000);
+UPDATE agent_change_set_items SET shot_prompt=shot_prompt_v29;
+ALTER TABLE agent_change_set_items DROP COLUMN shot_prompt_v29;
+CREATE TRIGGER agent_change_set_item_shot_prompt_match
+BEFORE INSERT ON agent_change_set_items
+WHEN NEW.shot_prompt IS NOT NULL AND NEW.entity_type != 'shot'
+BEGIN
+  SELECT RAISE(ABORT, 'shot prompt is only allowed on shot items');
+END;
+CREATE TABLE IF NOT EXISTS production_execution_lists (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+  execution_key TEXT NOT NULL, request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
+  result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  UNIQUE(project_id, execution_key)
+);
+CREATE TABLE IF NOT EXISTS production_instruction_versions (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+  target_kind TEXT NOT NULL CHECK(target_kind IN ('character','setting','scene','shot')),
+  target_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+  instruction_json TEXT NOT NULL CHECK(json_valid(instruction_json)),
+  source_hash TEXT NOT NULL, execution_list_id TEXT NOT NULL REFERENCES production_execution_lists(id),
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id,target_kind,target_id,revision)
+);
+CREATE INDEX IF NOT EXISTS production_instruction_target ON production_instruction_versions(project_id,target_kind,target_id,revision DESC);
+`;
+
+export const MIGRATION_V48 = `
+ALTER TABLE scene_character_bindings ADD COLUMN image_disabled INTEGER NOT NULL DEFAULT 0 CHECK(image_disabled IN (0,1));
+ALTER TABLE scene_character_bindings ADD COLUMN voice_disabled INTEGER NOT NULL DEFAULT 0 CHECK(voice_disabled IN (0,1));
+CREATE INDEX IF NOT EXISTS generation_jobs_source_document ON generation_jobs(project_id, json_extract(task_snapshot_json,'$.sourceDocumentId'));
+`;
 
 export const MIGRATION_V47 = `
 ALTER TABLE agent_change_set_items ADD COLUMN scene_bindings_json TEXT

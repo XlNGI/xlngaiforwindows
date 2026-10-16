@@ -7,13 +7,13 @@ import type {
   SceneMaterialBindingInfo,
   SceneMaterialRole,
   SceneCharacterBindingInfo,
-  CharacterVoiceReferenceInfo,
   AudioFileInfo,
 } from '@ai-video/contracts';
 import { callWorker } from './worker-client';
 import { AssetImagePreview } from './AssetImagePreview';
 import { DubbingScenePanel } from './dubbing/DubbingScenePanel';
 import { SceneCastEditor } from './SceneCastEditor';
+import { sceneMediaParams, useSceneMedia } from './scene-media';
 
 function isImage(asset: AssetInfo): boolean {
   return !asset.deletedAt && !asset.kind.toLowerCase().includes('video');
@@ -36,6 +36,7 @@ function SceneWorkspaceContent({
   onGenerateVideo,
   onOpenAsset,
   onRequestBindings,
+  mediaRevision,
 }: {
   projectId?: string;
   scene: SceneInfo;
@@ -44,6 +45,7 @@ function SceneWorkspaceContent({
   documents: DocumentSummary[];
   assets: AssetInfo[];
   writable: boolean;
+  mediaRevision?: number;
   onPromptChange: (value: string) => void;
   onSave: (
     prompt: string,
@@ -69,10 +71,21 @@ function SceneWorkspaceContent({
   );
   const [characters, setCharacters] = useState(scene.characterBindings ?? []);
   const [dialogueAudioId, setDialogueAudioId] = useState(scene.dialogueAudioId);
-  const [voices, setVoices] = useState<CharacterVoiceReferenceInfo[]>([]);
   const [audios, setAudios] = useState<AudioFileInfo[]>([]);
   const [audioLoaded, setAudioLoaded] = useState(false);
   const [message, setMessage] = useState('');
+  const revision = useMemo(() => ({ mediaRevision, assets }), [mediaRevision, assets]);
+  const params = sceneMediaParams(
+    characters,
+    localBindings.map((b) => b.assetId),
+  );
+  const media = useSceneMedia(projectId, params, revision);
+  const mediaAssets = useMemo(() => {
+    const selected = new Set(params.assetIds);
+    const map = new Map(assets.filter((a) => !selected.has(a.id)).map((a) => [a.id, a]));
+    for (const asset of media.value?.assets ?? []) map.set(asset.id, asset);
+    return [...map.values()];
+  }, [assets, media.value]);
 
   useEffect(() => {
     setLocalBindings(
@@ -95,13 +108,9 @@ function SceneWorkspaceContent({
     const refresh = () => {
       const token = ++sequence;
       if (projectId)
-        void Promise.all([
-          callWorker('characterVoiceReference.list', {}),
-          callWorker('audio.list', {}),
-        ])
-          .then(([nextVoices, nextAudios]) => {
+        void callWorker('audio.list', {})
+          .then((nextAudios) => {
             if (active && token === sequence) {
-              setVoices(nextVoices ?? []);
               setAudios(nextAudios ?? []);
               setAudioLoaded(true);
             }
@@ -114,11 +123,9 @@ function SceneWorkspaceContent({
           });
     };
     refresh();
-    window.addEventListener('character-voice-reference-updated', refresh);
     window.addEventListener('scene-audio-updated', refresh);
     return () => {
       active = false;
-      window.removeEventListener('character-voice-reference-updated', refresh);
       window.removeEventListener('scene-audio-updated', refresh);
     };
   }, [projectId]);
@@ -130,7 +137,7 @@ function SceneWorkspaceContent({
       prop: [],
       other: [],
     };
-    for (const asset of assets.filter(isImage)) {
+    for (const asset of mediaAssets.filter(isImage)) {
       const kind = asset.kind.toLowerCase();
       const role = kind.includes('character')
         ? 'character'
@@ -142,7 +149,7 @@ function SceneWorkspaceContent({
       map[role].push(asset);
     }
     return map;
-  }, [assets]);
+  }, [mediaAssets]);
 
   const setAsset = (binding: SceneMaterialBindingInfo, assetId: string) => {
     setLocalBindings((current) =>
@@ -152,7 +159,15 @@ function SceneWorkspaceContent({
     );
   };
   const tooManyReferences =
-    localBindings.length + characters.filter((item) => item.imageAssetId).length > 30;
+    localBindings.length +
+      characters.filter(
+        (item) =>
+          !item.imageDisabled &&
+          (item.imageAssetId ||
+            media.value?.characters.find((c) => c.characterDocumentId === item.characterDocumentId)
+              ?.defaultImage),
+      ).length >
+    30;
 
   return (
     <div className="scene-workspace">
@@ -184,7 +199,13 @@ function SceneWorkspaceContent({
             <button
               className="button primary"
               type="button"
-              disabled={!writable || !prompt.trim() || tooManyReferences}
+              disabled={
+                !writable ||
+                !prompt.trim() ||
+                tooManyReferences ||
+                media.loading ||
+                Boolean(media.error)
+              }
               onClick={() => onGenerateVideo(localBindings, characters, dialogueAudioId)}
             >
               <Video size={14} /> 生成场次视频
@@ -202,6 +223,14 @@ function SceneWorkspaceContent({
           placeholder="输入这一场完整的视频提示词…"
         />
         {message ? <div className="inline-status">{message}</div> : null}
+        {media.error ? (
+          <div role="status">
+            {media.error}{' '}
+            <button type="button" onClick={media.retry}>
+              重试读取参考资料
+            </button>
+          </div>
+        ) : null}
         {tooManyReferences ? (
           <div className="inline-status">
             场次参考图片过多，请减少绑定；实际模型限制将在制作页检查。
@@ -213,8 +242,10 @@ function SceneWorkspaceContent({
           projectId={projectId}
           characters={characters}
           documents={documents}
-          assets={assets}
-          voices={voices}
+          assets={mediaAssets}
+          voices={media.value?.voices ?? []}
+          defaults={media.value?.characters ?? []}
+          mediaLoading={media.loading}
           audios={audios}
           dialogueAudioId={dialogueAudioId}
           writable={writable}
@@ -252,8 +283,8 @@ function SceneWorkspaceContent({
               const candidates =
                 candidatesByRole[binding.role].length > 0
                   ? candidatesByRole[binding.role]
-                  : assets.filter(isImage);
-              const asset = assets.find((item) => item.id === binding.assetId);
+                  : mediaAssets.filter(isImage);
+              const asset = mediaAssets.find((item) => item.id === binding.assetId);
               return (
                 <article className="scene-material-card" key={binding.id}>
                   <strong>{binding.label}</strong>

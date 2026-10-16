@@ -25,6 +25,7 @@ import {
 } from '@ai-video/persistence';
 import { resolveProjectRelativePath, type ProjectService } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
+import { requireProductionCharacters } from './scene-cast-binding.js';
 
 const OFFICIAL_PROVIDERS = new Set(['wan-video', 'seedance-video', 'minimax-video']);
 export const isOfficialVideoAdapter = (key: string) =>
@@ -51,9 +52,6 @@ export function materializeOfficialVideoInputs(
   const references: MediaInputReferenceV1[] = [];
   const paths: string[] = [];
   const replacements = new Map<string, string>();
-  const voiceReferences = projects.access(false, (database) =>
-    new VoiceReferenceRepository(database, project.id).list(),
-  );
   function materialize(original: string): string {
     if (replacements.has(original)) return replacements.get(original)!;
     let bytes: Buffer;
@@ -68,7 +66,32 @@ export function materializeOfficialVideoInputs(
         .slice('character-voice://'.length)
         .split('/');
       const voice = original.startsWith('character-voice://')
-        ? voiceReferences.find((value) => value.characterDocumentId === characterId)
+        ? projects.access(false, (database) => {
+            requireProductionCharacters(database, project.id, [characterId!]);
+            const repository = new VoiceReferenceRepository(database, project.id);
+            const sceneId =
+              params.sceneId ??
+              (params.shotId
+                ? createRepositories(database).shots.get(params.shotId)?.sceneId
+                : undefined);
+            const pinned =
+              selectedVersionId &&
+              sceneId &&
+              database
+                .prepare(
+                  'SELECT 1 FROM scene_character_bindings b JOIN scenes s ON s.id=b.scene_id WHERE s.id=? AND s.project_id=? AND b.character_document_id=? AND b.voice_reference_version_id=? AND b.voice_disabled=0',
+                )
+                .get(sceneId, project.id, characterId, selectedVersionId);
+            return (
+              pinned
+                ? repository.forCharacters([characterId!], [selectedVersionId])
+                : repository.list()
+            ).find(
+              (value) =>
+                value.characterDocumentId === characterId &&
+                (!pinned || value.versionId === selectedVersionId),
+            );
+          })
         : undefined;
       if (original.startsWith('character-voice://') && !voice)
         throw new Error('角色还没有绑定可用声音样本，或已归档。');

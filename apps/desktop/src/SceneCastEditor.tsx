@@ -7,17 +7,37 @@ import type {
   CharacterVoiceReferenceInfo,
   DocumentSummary,
   SceneCharacterBindingInfo,
+  SceneCharacterMediaInfo,
 } from '@ai-video/contracts';
 import { AssetImagePreview } from './AssetImagePreview';
 import { useDubbingMedia } from './dubbing/media';
 
 function AudioPreview({ projectId, audioId }: { projectId: string; audioId?: string }) {
-  const media = useDubbingMedia(projectId, audioId, true);
+  return audioId ? (
+    <RequestedAudioPreview
+      key={`${projectId}:${audioId}`}
+      projectId={projectId}
+      audioId={audioId}
+    />
+  ) : null;
+}
+function RequestedAudioPreview({ projectId, audioId }: { projectId: string; audioId: string }) {
+  const [requested, setRequested] = useState(false);
+  const media = useDubbingMedia(projectId, requested ? audioId : undefined, true);
   return media?.src ? (
-    <audio controls preload="none" src={media.src} aria-label="试听绑定音频" />
+    <audio controls autoPlay preload="none" src={media.src} aria-label="试听绑定音频" />
   ) : media?.error ? (
     <small>{media.error}</small>
-  ) : null;
+  ) : (
+    <button
+      className="text-button"
+      type="button"
+      disabled={requested}
+      onClick={() => setRequested(true)}
+    >
+      {requested ? '正在读取音频…' : '试听绑定音频'}
+    </button>
+  );
 }
 
 export function SceneCastEditor({
@@ -26,6 +46,8 @@ export function SceneCastEditor({
   documents,
   assets,
   voices,
+  defaults,
+  mediaLoading,
   audios,
   dialogueAudioId,
   writable,
@@ -38,6 +60,8 @@ export function SceneCastEditor({
   documents: DocumentSummary[];
   assets: AssetInfo[];
   voices: CharacterVoiceReferenceInfo[];
+  defaults: SceneCharacterMediaInfo[];
+  mediaLoading: boolean;
   audios: AudioFileInfo[];
   dialogueAudioId?: string;
   writable: boolean;
@@ -105,7 +129,7 @@ export function SceneCastEditor({
       <div className="scene-prompt-heading">
         <div>
           <h2>出场角色与声音</h2>
-          <p>角色可先绑定，再补参考图和声音。保存后用于本场视频与配音。</p>
+          <p>默认沿用角色参考资料；可为本场指定图片和声音，或选择不使用。</p>
         </div>
       </div>
       <div className="scene-cast-add">
@@ -131,12 +155,10 @@ export function SceneCastEditor({
           type="button"
           disabled={!writable || !selected || characters.length >= 30}
           onClick={() => {
-            const voice = voices.find((item) => item.characterDocumentId === selected);
             onChange([
               ...characters,
               {
                 characterDocumentId: selected,
-                ...(voice ? { voiceReferenceVersionId: voice.versionId } : {}),
               },
             ]);
             setSelected('');
@@ -149,14 +171,36 @@ export function SceneCastEditor({
         {characters.map((character) => {
           const document = documents.find((item) => item.id === character.characterDocumentId);
           const name = document?.title ?? '角色资料不可用';
-          const voice = voices.find(
+          const inherited = defaults.find(
             (item) => item.characterDocumentId === character.characterDocumentId,
           );
+          const voice = inherited?.voice;
+          const selectedVoice = character.voiceDisabled
+            ? undefined
+            : character.voiceReferenceVersionId
+              ? voices.find(
+                  (item) =>
+                    item.versionId === character.voiceReferenceVersionId &&
+                    item.characterDocumentId === character.characterDocumentId,
+                )
+              : voice;
           const stale = Boolean(
             character.voiceReferenceVersionId &&
             character.voiceReferenceVersionId !== voice?.versionId,
           );
-          const image = images.find((item) => item.id === character.imageAssetId);
+          const image = character.imageDisabled
+            ? undefined
+            : character.imageAssetId
+              ? images.find((item) => item.id === character.imageAssetId)
+              : inherited?.defaultImage;
+          const candidates = [
+            ...new Map(
+              [...(inherited?.images ?? []), ...(image ? [image] : [])].map((asset) => [
+                asset.id,
+                asset,
+              ]),
+            ).values(),
+          ];
           return (
             <article className="scene-material-card" key={character.characterDocumentId}>
               <strong>{name}</strong>
@@ -165,26 +209,36 @@ export function SceneCastEditor({
                 <AssetImagePreview asset={image} />
               ) : (
                 <div className="scene-material-missing">
-                  {character.imageAssetId ? '参考图不可用' : '尚未选择参考图'}
+                  {mediaLoading
+                    ? '正在读取参考资料…'
+                    : character.imageDisabled
+                      ? '本场不使用参考图'
+                      : character.imageAssetId
+                        ? '参考图不可用'
+                        : '角色尚无参考图'}
                 </div>
               )}
               <label>
                 参考图
                 <select
                   aria-label={`${name}角色参考图`}
-                  value={character.imageAssetId ?? ''}
+                  value={character.imageDisabled ? 'none' : (character.imageAssetId ?? 'default')}
                   disabled={!writable}
                   onChange={(event) =>
                     update(character.characterDocumentId, {
-                      imageAssetId: event.target.value || undefined,
+                      imageAssetId: ['default', 'none'].includes(event.target.value)
+                        ? undefined
+                        : event.target.value,
+                      imageDisabled: event.target.value === 'none' ? true : undefined,
                     })
                   }
                 >
-                  <option value="">不使用参考图</option>
+                  <option value="default">使用角色默认参考图</option>
+                  <option value="none">不使用参考图</option>
                   {character.imageAssetId && !image && (
                     <option value={character.imageAssetId}>原参考图不可用</option>
                   )}
-                  {images.map((asset) => (
+                  {(candidates.length ? candidates : images).map((asset) => (
                     <option key={asset.id} value={asset.id}>
                       {asset.alias || asset.relativePath.split(/[\\/]/).pop()}
                     </option>
@@ -195,15 +249,23 @@ export function SceneCastEditor({
                 声音样本
                 <select
                   aria-label={`${name}声音样本`}
-                  value={character.voiceReferenceVersionId ?? ''}
+                  value={
+                    character.voiceDisabled
+                      ? 'none'
+                      : (character.voiceReferenceVersionId ?? 'default')
+                  }
                   disabled={!writable}
                   onChange={(event) =>
                     update(character.characterDocumentId, {
-                      voiceReferenceVersionId: event.target.value || undefined,
+                      voiceReferenceVersionId: ['default', 'none'].includes(event.target.value)
+                        ? undefined
+                        : event.target.value,
+                      voiceDisabled: event.target.value === 'none' ? true : undefined,
                     })
                   }
                 >
-                  <option value="">不使用声音参考</option>
+                  <option value="default">使用角色默认声音</option>
+                  <option value="none">不使用声音参考</option>
                   {stale && (
                     <option value={character.voiceReferenceVersionId}>
                       原声音版本已更新，请重新选择
@@ -219,9 +281,9 @@ export function SceneCastEditor({
               {stale && (
                 <small role="status">声音样本已更新，重新选择后再生成；已保存任务不受影响。</small>
               )}
-              {!voice && <small>可在角色资料中导入声音样本。</small>}
-              {voice && voice.versionId === character.voiceReferenceVersionId && (
-                <AudioPreview projectId={projectId} audioId={voice.audioId} />
+              {!voice && !mediaLoading && <small>可在角色资料中导入声音样本。</small>}
+              {selectedVoice && (
+                <AudioPreview projectId={projectId} audioId={selectedVoice.audioId} />
               )}
               <button
                 className="text-button"

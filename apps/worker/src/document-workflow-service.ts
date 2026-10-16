@@ -1606,6 +1606,13 @@ export class DocumentWorkflowService {
       }
       return {
         task: toTask(task),
+        ...(database
+          .prepare(
+            "SELECT 1 FROM agent_tool_calls WHERE task_id=? AND project_id=? AND tool_name='production.execute' AND status='succeeded' LIMIT 1",
+          )
+          .get(task.id, project.id)
+          ? { productionUpdated: true }
+          : {}),
         ...(target ? { target } : {}),
         ...(pendingConfirmation ? { pendingConfirmation } : {}),
         ...(pendingSchemaConfirmation ? { pendingSchemaConfirmation } : {}),

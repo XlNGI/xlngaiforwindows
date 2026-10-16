@@ -1,5 +1,7 @@
 import { tmpdir } from 'node:os';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
+import { resolveSceneMedia } from './scene-media-service.js';
+import { ProductionService } from './production-service.js';
 import type { CharacterVoiceReferenceSaveParams } from '@ai-video/contracts';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
@@ -520,6 +522,8 @@ function toModelSchemaInfo(
 const methods = new Set<WorkerMethod>([
   'characterVoice.list',
   'characterVoice.save',
+  'characterVoiceReference.list',
+  'characterVoiceReference.save',
   'audio.import',
   'audio.list',
   'audio.get',
@@ -645,6 +649,8 @@ const methods = new Set<WorkerMethod>([
   'agent.changeSet.apply',
   'agent.changeSet.reject',
   'scene.list',
+  'production.read',
+  'production.compile',
   'scene.save',
   'shot.list',
   'shot.save',
@@ -701,6 +707,7 @@ const methods = new Set<WorkerMethod>([
   'video.generate.list',
   'project.task.subscribe',
   'asset.list',
+  'scene.media.resolve',
   'asset.preview',
   'asset.mediaSource',
   'asset.open',
@@ -1160,6 +1167,22 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       result = infrastructure.result;
     } else {
       switch (request.method) {
+        case 'production.read':
+          result = new ProductionService(projectService).read(
+            params.target as import('@ai-video/contracts').ProductionTarget,
+          );
+          break;
+        case 'production.compile':
+          result = new ProductionService(projectService).compile(
+            params as unknown as import('@ai-video/contracts').ProductionCompileParams,
+          );
+          break;
+        case 'scene.media.resolve':
+          result = resolveSceneMedia(
+            projectService,
+            params as unknown as import('@ai-video/contracts').SceneMediaResolveParams,
+          );
+          break;
         case 'characterVoice.list':
           result = dubbingService.listVoices(params.includeArchived === true);
           break;

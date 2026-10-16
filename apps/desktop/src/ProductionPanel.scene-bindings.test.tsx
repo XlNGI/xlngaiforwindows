@@ -4,6 +4,7 @@ import type {
   AdapterDescriptor,
   SceneInfo,
   VideoGenerationPrepareParams,
+  ProductionCompileResult,
 } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
 import { callWorker } from './worker-client';
@@ -95,6 +96,8 @@ function mock(
   audioImport: Promise<unknown> = Promise.resolve({ audio: dialogue }),
 ) {
   vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+    if (method === 'production.compile' || method === 'production.read')
+      return Promise.resolve({ target: params.target, rowVersion: 1, parameters: {}, issues: [] });
     if (method === 'adapter.catalog')
       return Promise.resolve({
         capabilities: [{ key: 'REFERENCE_TO_VIDEO', label: '参考生视频' }],
@@ -186,6 +189,113 @@ function mock(
 }
 
 describe('scene production bindings', () => {
+  it('refills current images and bindings together after a structured source changes', async () => {
+    mock(scene);
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    const source = {
+      target: { kind: 'scene' as const, id: 'scene' },
+      instructionId: 'instruction',
+      revision: 1,
+      token: 'a'.repeat(64),
+    };
+    const result = (image: string, revision: number): ProductionCompileResult => ({
+      target: source.target,
+      rowVersion: revision,
+      source: { ...source, revision, token: String(revision).repeat(64) },
+      parameters: { prompt: `制作版本${revision}` },
+      issues: [],
+      sceneInputs: {
+        scene: {
+          ...scene,
+          characterBindings: [
+            { characterDocumentId: 'actor', imageAssetId: image, voiceDisabled: true },
+          ],
+        },
+        media: { assets: [], voices: [], characters: [] },
+        characterNames: { actor: '林澈' },
+      },
+    });
+    let latest = result('old-image', 1);
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
+      method === 'production.compile' || method === 'production.read'
+        ? Promise.resolve(latest)
+        : fallback(method as never, params)) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        seedPrompt="原文"
+        writable
+      />,
+    );
+    await screen.findByText(/已填入制作内容 · 版本 1/);
+    latest = result('new-image', 2);
+    window.dispatchEvent(new Event('production-source-updated'));
+    await screen.findByText(/来源内容或素材绑定已更新/);
+    fireEvent.click(screen.getByRole('button', { name: '重新填入制作内容' }));
+    await screen.findByText(/已填入制作内容 · 版本 2/);
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      ).toBe(true),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(
+        ([method]) => method === 'video.generate.prepare',
+      )![1] as VideoGenerationPrepareParams;
+    expect(prepared.productionSource?.revision).toBe(2);
+    expect(prepared.parameters.media).toEqual([
+      { type: 'reference_image', url: 'project-asset://new-image' },
+    ]);
+    expect(prepared.parameters.prompt).toContain('角色「林澈」参考图 1');
+    expect(JSON.stringify(prepared.parameters)).not.toContain('old-image');
+  });
+  it.each([false, true])(
+    'freezes a default voice version before payment and respects disabling (disabled=%s)',
+    async (disabled) => {
+      mock({
+        ...scene,
+        characterBindings: [
+          { characterDocumentId: 'actor', ...(disabled ? { voiceDisabled: true } : {}) },
+        ],
+      });
+      render(
+        <ProductionPanel
+          expanded
+          capability="REFERENCE_TO_VIDEO"
+          projectId="project"
+          sceneId="scene"
+          seedPrompt="对白"
+          writable
+        />,
+      );
+      const checkbox = await screen.findByRole('checkbox', { name: /林澈/ });
+      await waitFor(() => expect(checkbox).toHaveProperty('checked', !disabled));
+      fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+      await waitFor(() =>
+        expect(
+          vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+        ).toBe(true),
+      );
+      const prepared = vi
+        .mocked(callWorker)
+        .mock.calls.find(
+          ([method]) => method === 'video.generate.prepare',
+        )?.[1] as VideoGenerationPrepareParams;
+      expect(prepared.parameters.media ?? []).toEqual(
+        disabled ? [] : [{ type: 'reference_audio', url: 'character-voice://actor/voice-v1' }],
+      );
+      expect(
+        vi
+          .mocked(callWorker)
+          .mock.calls.some(([method]) => method === 'media.generation.confirmSubmission'),
+      ).toBe(false);
+    },
+  );
   it('rejects voice samples on a dialogue driving model when no complete dialogue is bound', async () => {
     mock(scene, drivingAdapter);
     render(

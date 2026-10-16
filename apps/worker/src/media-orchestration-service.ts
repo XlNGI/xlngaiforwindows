@@ -12,6 +12,7 @@ import type {
   NativeProviderMediaCancelParams,
   NativeProviderMediaSubmitParams,
   VideoGenerationJobInfo,
+  ProductionSource,
 } from '@ai-video/contracts';
 import type { JobRecord } from '@ai-video/domain';
 import { createRepositories } from '@ai-video/persistence';
@@ -28,6 +29,7 @@ import { NativeProviderRequestError, type NativeProviderBridge } from './native-
 import type { ProjectService } from './project-service.js';
 import type { VideoGenerationService } from './video-generation-service.js';
 import { resolveMediaProviderRoute } from './media-preparation-service.js';
+import { ProductionService } from './production-service.js';
 
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 // Includes Native admission, connection, synchronous inference, and result transfer.
@@ -202,6 +204,12 @@ export class MediaOrchestrationService {
         project.updatedAt = now;
         return { kind, job: cancelled, skip: true as const };
       }
+      const source = snapshot.productionSource as ProductionSource | undefined;
+      if (source)
+        new ProductionService(this.projects).assertSource(source, source.target, job.adapterKey, {
+          parameters: resolved.parameters,
+          inputs: resolved.inputs,
+        });
       const updated = {
         ...job,
         mediaState: 'submitting' as const,

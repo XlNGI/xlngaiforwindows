@@ -49,12 +49,54 @@ function removeSceneBindingMigration(database: Awaited<ReturnType<typeof tempora
 }
 
 describe('project database', () => {
+  it('upgrades populated v48 shot prompts atomically and keeps the shot-only proposal guard', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database.exec(`DROP TABLE production_instruction_versions;
+        DROP TABLE production_execution_lists;
+        ALTER TABLE shots RENAME COLUMN prompt TO old_prompt;
+        ALTER TABLE shots ADD COLUMN prompt TEXT CHECK(prompt IS NULL OR length(trim(prompt))<=2000);
+        UPDATE shots SET prompt=old_prompt;
+        ALTER TABLE shots DROP COLUMN old_prompt;
+        DELETE FROM schema_migrations WHERE version=49;
+        INSERT INTO projects(id,name,created_at,updated_at) VALUES('p48','旧项目','now','now');
+        INSERT INTO scenes(id,project_id,title,position,created_at,updated_at) VALUES('scene48','p48','场次',0,'now','now');
+        INSERT INTO shots(id,scene_id,title,position,prompt,created_at,updated_at,row_version) VALUES('shot48','scene48','镜头',0,'原始提示词','now','now',4);
+        CREATE TRIGGER fail_production_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=49 BEGIN SELECT RAISE(ABORT,'v49 failure'); END;`);
+      expect(() => migrateDatabase(database)).toThrow('v49 failure');
+      expect(getSchemaVersion(database)).toBe(48);
+      expect(() =>
+        database.prepare("UPDATE shots SET prompt=? WHERE id='shot48'").run('雨'.repeat(3000)),
+      ).toThrow();
+      database.exec('DROP TRIGGER fail_production_migration');
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(
+        database.prepare("SELECT scene_id,prompt,row_version FROM shots WHERE id='shot48'").get(),
+      ).toEqual({ scene_id: 'scene48', prompt: '原始提示词', row_version: 4 });
+      expect(() =>
+        database.prepare("UPDATE shots SET prompt=? WHERE id='shot48'").run('雨'.repeat(3000)),
+      ).not.toThrow();
+      expect(() =>
+        database.prepare("UPDATE shots SET prompt=? WHERE id='shot48'").run('雨'.repeat(20001)),
+      ).toThrow();
+      const trigger = database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE name='agent_change_set_item_shot_prompt_match'",
+        )
+        .get() as { sql: string };
+      expect(trigger.sql).toContain("NEW.entity_type != 'shot'");
+      expect(checkIntegrity(database).ok).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
   it('upgrades a real v46 proposal store without altering existing scene relationships', async () => {
     const database = await temporaryDatabase();
     try {
       migrateDatabase(database);
       database.exec(
-        "ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json; DELETE FROM schema_migrations WHERE version=47; INSERT INTO projects(id,name,created_at,updated_at) VALUES('v46','Legacy','now','now'); INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at) VALUES('scene','v46','旧场次',0,'旧提示词','now','now');",
+        "ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json; DELETE FROM schema_migrations WHERE version>=47; INSERT INTO projects(id,name,created_at,updated_at) VALUES('v46','Legacy','now','now'); INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at) VALUES('scene','v46','旧场次',0,'旧提示词','now','now');",
       );
       expect(getSchemaVersion(database)).toBe(46);
       database.exec(
@@ -70,8 +112,8 @@ describe('project database', () => {
           .get(),
       ).toBeUndefined();
       database.exec('DROP TRIGGER fail_v47');
-      expect(migrateDatabase(database)).toBe(47);
-      expect(migrateDatabase(database)).toBe(47);
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
       expect(
         database.prepare('SELECT title,video_prompt FROM scenes WHERE id=?').get('scene'),
       ).toEqual({ title: '旧场次', video_prompt: '旧提示词' });

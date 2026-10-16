@@ -29,6 +29,8 @@ import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { AgentDraftSubmissionService } from './agent-draft-submission-service.js';
 import { compileProjectResourceMap } from './project-resource-map.js';
 import { SceneStructureSubmissionService } from './scene-structure-submission-service.js';
+import { ProductionService } from './production-service.js';
+import type { ProductionTarget } from '@ai-video/contracts';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -133,6 +135,28 @@ export class AgentSystemToolService {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
     switch (operation) {
+      case 'production.read':
+        rejectUnknown(args, ['target']);
+        return new ProductionService(this.projects).read(
+          args.target as ProductionTarget,
+        ) as unknown as Record<string, unknown>;
+      case 'production.execute': {
+        const executing = this.projects.access(false, (db) =>
+          db
+            .prepare(
+              `SELECT 1 FROM agent_tasks t JOIN agent_tool_calls c ON c.task_id=t.id WHERE t.id=? AND t.project_id=? AND t.project_session_id=? AND t.conversation_id=? AND t.status='running' AND t.phase='model_running' AND c.id=? AND c.status='executing' AND c.tool_name='production.execute'`,
+            )
+            .get(
+              identity.taskId,
+              identity.projectId,
+              identity.projectSessionId,
+              identity.conversationId,
+              identity.toolCallId,
+            ),
+        );
+        if (!executing) throw new Error('制作清单需要当前会话中正在执行的工具调用。');
+        return new ProductionService(this.projects).execute(args, identity);
+      }
       case 'scene.read': {
         rejectUnknown(args, ['sceneId']);
         const sceneId = requiredString(args.sceneId, 'sceneId', 200);

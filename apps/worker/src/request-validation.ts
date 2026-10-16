@@ -24,6 +24,8 @@ const MAX_FINISH_REASON_LENGTH = 80;
 const MAX_RAW_USAGE_BYTES = 64 * 1024;
 
 const sessionMethods = new Set<WorkerMethod>([
+  'production.read',
+  'production.compile',
   'scene.save',
   'conversation.list',
   'conversation.create',
@@ -520,6 +522,22 @@ export function validateSessionRequestParams(
   method: WorkerMethod,
   input: unknown,
 ): Record<string, unknown> {
+  if (method === 'scene.media.resolve') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(params, ['characterDocumentIds', 'assetIds', 'voiceVersionIds']);
+    for (const [field, max] of [
+      ['characterDocumentIds', 30],
+      ['assetIds', 60],
+      ['voiceVersionIds', 30],
+    ] as const) {
+      const values = params[field];
+      if (values === undefined && field !== 'characterDocumentIds') continue;
+      if (!Array.isArray(values) || values.length > max || new Set(values).size !== values.length)
+        throw new RequestValidationError(`${field} must contain at most ${max} unique IDs.`);
+      for (const value of values) requireId({ id: value }, 'id');
+    }
+    return params;
+  }
   if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
   if (method === 'characterVoiceReference.list' || method === 'characterVoiceReference.save') {
     const params = requireObject(input, 'params');
@@ -956,6 +974,24 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['messageId']);
       requireId(params, 'messageId');
       break;
+    case 'production.read':
+    case 'production.compile': {
+      rejectUnknown(
+        params,
+        method === 'production.read' ? ['target'] : ['target', 'adapterKey', 'expectedToken'],
+      );
+      const target = params.target as Record<string, unknown> | undefined;
+      if (!target || typeof target !== 'object' || Array.isArray(target))
+        throw new RequestValidationError('制作目标无效。');
+      rejectUnknown(target, ['kind', 'id']);
+      requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
+      requireId(target, 'id');
+      if (method === 'production.compile') {
+        requireString(params, 'adapterKey', 256);
+        optionalString(params, 'expectedToken', 128);
+      }
+      break;
+    }
     case 'scene.save':
       rejectUnknown(params, [
         'sceneId',
@@ -980,10 +1016,21 @@ export function validateSessionRequestParams(
             'characterDocumentId',
             'imageAssetId',
             'voiceReferenceVersionId',
+            'imageDisabled',
+            'voiceDisabled',
           ]);
           requireId(binding, 'characterDocumentId');
           optionalId(binding, 'imageAssetId');
           optionalId(binding, 'voiceReferenceVersionId');
+          for (const field of ['imageDisabled', 'voiceDisabled']) {
+            if (binding[field] !== undefined && typeof binding[field] !== 'boolean')
+              throw new RequestValidationError(`${field} must be boolean.`);
+          }
+          if (
+            (binding.imageDisabled && binding.imageAssetId) ||
+            (binding.voiceDisabled && binding.voiceReferenceVersionId)
+          )
+            throw new RequestValidationError('Disabled media cannot also have a selected ID.');
         });
       }
       if (params.videoPrompt !== undefined) requireString(params, 'videoPrompt', 20_000, true);
@@ -1027,7 +1074,9 @@ export function validateSessionRequestParams(
       rejectUnknown(params, []);
       break;
     case 'image.generate.prepare':
+      validateProductionSource(params);
       rejectUnknown(params, [
+        'productionSource',
         'shotId',
         'sourceDocumentId',
         'adapterKey',
@@ -1094,7 +1143,9 @@ export function validateSessionRequestParams(
       optionalId(params, 'projectSessionId');
       break;
     case 'video.generate.prepare':
+      validateProductionSource(params);
       rejectUnknown(params, [
+        'productionSource',
         'shotId',
         'sceneId',
         'adapterKey',
@@ -2158,7 +2209,7 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       )
         throw new RequestValidationError('Invalid characterDocumentIds.');
     }
-    optionalString(item, 'prompt', 2000);
+    optionalString(item, 'prompt', 20000);
     if (item.prompt !== undefined && item.entityType !== 'shot') {
       throw new RequestValidationError('prompt is only allowed on shot items.');
     }
@@ -2177,6 +2228,21 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
     optionalInteger(item, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
     optionalId(item, 'expectedCurrentVersionId');
   });
+}
+
+function validateProductionSource(params: Record<string, unknown>): void {
+  if (params.productionSource === undefined) return;
+  const source = requireObject(params.productionSource, 'productionSource');
+  rejectUnknown(source, ['target', 'instructionId', 'revision', 'token']);
+  const target = requireObject(source.target, 'productionSource.target');
+  rejectUnknown(target, ['kind', 'id']);
+  requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
+  requireId(target, 'id');
+  requireId(source, 'instructionId');
+  requireInteger(source, 'revision', 1, Number.MAX_SAFE_INTEGER);
+  requireString(source, 'token', 64);
+  if (typeof source.token !== 'string' || !/^[a-f0-9]{64}$/u.test(source.token))
+    throw new RequestValidationError('制作来源标识无效。');
 }
 
 function validateSelectedChapterIds(params: Record<string, unknown>): void {

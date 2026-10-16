@@ -336,9 +336,9 @@ describe('ContentService', () => {
       content.saveShot({
         sceneId: scene.id,
         title: '镜头 02',
-        prompt: 'x'.repeat(2001),
+        prompt: 'x'.repeat(20001),
       }),
-    ).toThrow('Shot prompt must be at most 2000 characters.');
+    ).toThrow('Shot prompt must be at most 20000 characters.');
   });
 
   it('renames, archives, restores, and filters conversations', async () => {

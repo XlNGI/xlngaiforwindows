@@ -111,9 +111,9 @@ export function parseEpisodeStructureArguments(value: string): EpisodeStructure 
           `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
         );
       const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
-      if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 2000) {
+      if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 20000) {
         throw new Error(
-          `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 2000 characters.`,
+          `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 20000 characters.`,
         );
       }
       shots.push({ title: shotTitle, prompt: shot.prompt.trim() });

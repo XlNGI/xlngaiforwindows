@@ -4,8 +4,11 @@ import type {
   AgentToolRiskLevel,
   LlmToolDefinition,
 } from '@ai-video/contracts';
+import { productionExecuteSchema, productionTargetSchema } from '@ai-video/contracts';
 
 export type SystemAgentToolOperation =
+  | 'production.execute'
+  | 'production.read'
   | 'document.submit_draft'
   | 'novel.chapter.write_draft'
   | 'scene.submit_structure'
@@ -283,7 +286,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
                   required: ['title', 'prompt'],
                   properties: {
                     title: { type: 'string', minLength: 1, maxLength: 200 },
-                    prompt: { type: 'string', minLength: 1, maxLength: 2000 },
+                    prompt: { type: 'string', minLength: 1, maxLength: 20000 },
                   },
                 },
               },
@@ -399,6 +402,23 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 };
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
+  {
+    name: 'production.read',
+    description:
+      'Read structured production instructions, target rowVersion, source version and continuity issues on demand. kind=character/setting refers to production documents, scene/shot to the actual scene/shot. Read before updating. No content is automatically injected.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['target'],
+      properties: { target: productionTargetSchema },
+    },
+  },
+  {
+    name: 'production.execute',
+    description:
+      'Execute a versioned structured production list on existing project objects. First create production documents through document.submit_draft and scenes/shots through scene.submit_structure (respect review); then use their real IDs and current rowVersion. Each set_prompt operation writes its rendered text and immutable instruction atomically, preserving all existing bindings. Include detailed subjects, visual design, beats/camera/dialogue, audio, generation requirements, resource needs and explicit continuity before/after/locked facts and predecessors. Missing resources are needs, never invented IDs. States/results are Worker-owned. executionKey is stable for retries, changed content uses a new key. User selects media model later in the production form; never choose or submit a paid model here. Tool result status=applied confirms local writes only.',
+    parameters: productionExecuteSchema,
+  },
   {
     name: 'scene.read',
     description:
@@ -1101,6 +1121,8 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'document.submit_draft': writePolicy(),
   'scene.submit_structure': writePolicy(),
   'scene.read': readPolicy(),
+  'production.read': readPolicy(),
+  'production.execute': writePolicy(),
   'novel.chapter.write_draft': writePolicy(),
   'document.list': readPolicy(),
   'document.read': readPolicy(),

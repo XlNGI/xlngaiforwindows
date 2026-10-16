@@ -351,8 +351,8 @@ export class ContentService {
   saveShot(params: ShotSaveParams): ShotInfo {
     const title = required(params.title, 'Shot title');
     const prompt = params.prompt === undefined ? undefined : params.prompt.trim();
-    if (prompt !== undefined && prompt.length > 2000) {
-      throw new Error('Shot prompt must be at most 2000 characters.');
+    if (prompt !== undefined && prompt.length > 20000) {
+      throw new Error('Shot prompt must be at most 20000 characters.');
     }
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);

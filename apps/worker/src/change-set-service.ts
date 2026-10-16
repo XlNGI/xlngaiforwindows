@@ -380,7 +380,7 @@ export class ChangeSetService {
     }
     if (item.shotStatus !== undefined)
       item.shotStatus = requiredText(item.shotStatus, 'Shot status', 80);
-    if (item.prompt !== undefined) item.prompt = requiredText(item.prompt, 'Shot prompt', 2000);
+    if (item.prompt !== undefined) item.prompt = requiredText(item.prompt, 'Shot prompt', 20000);
     return item;
   }
 

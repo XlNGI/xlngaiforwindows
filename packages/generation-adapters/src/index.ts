@@ -1342,3 +1342,8 @@ export function validateAdapterParameters(
   const valid = validator(validationParameters);
   return { valid: Boolean(valid), errors: validationErrors(validator.errors) };
 }
+export {
+  parseProductionExecution,
+  inspectProductionInstruction,
+  compileProductionParameters,
+} from './production.js';

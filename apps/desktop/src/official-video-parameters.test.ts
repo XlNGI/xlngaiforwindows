@@ -53,6 +53,7 @@ describe('official production input assembly', () => {
     const adapter = {
       provider: 'wan-video',
       contractId: 'cn.qwen.wan3-0-video',
+      contractRevision: 3,
       capability: 'REFERENCE_TO_VIDEO' as const,
     };
     const parameters = seedOfficialVideoParameters(adapter, {}, '两人对话', [
@@ -66,9 +67,9 @@ describe('official production input assembly', () => {
       { id: 'second', role: 'character', label: '配角', assetId: 'second-image', source: 'manual' },
       { id: 'removed', role: 'prop', label: '已移除', assetId: 'removed', source: 'manual' },
     ]);
-    expect(result.prompt).toContain('角色「主角」参考图片3');
-    expect(result.prompt).toContain('场景「客厅」参考图片2');
-    expect(result.prompt).toContain('角色「配角」参考图片1');
+    expect(result.prompt).toContain('角色「主角」参考图 3');
+    expect(result.prompt).toContain('场景「客厅」参考图 2');
+    expect(result.prompt).toContain('角色「配角」参考图 1');
     expect(result.prompt).toContain('角色「配角」使用音频1');
     expect(result.prompt).toContain('角色「主角」使用音频2');
     expect(result.prompt).not.toContain('已移除');
@@ -116,6 +117,7 @@ describe('official production input assembly', () => {
     const driving = {
       provider: 'wan-video',
       contractId: 'cn.qwen.wan2-7-i2v',
+      contractRevision: 2,
       capability: 'IMAGE_TO_VIDEO' as const,
     };
     expect(
@@ -138,6 +140,6 @@ describe('official production input assembly', () => {
       'dialogue',
       [{ id: 'actor', role: 'character', label: '主角', assetId: 'frame', source: 'manual' }],
     );
-    expect(labelled.prompt).toContain('角色「主角」参考图片1');
+    expect(labelled.prompt).toContain('角色「主角」参考首帧图');
   });
 });

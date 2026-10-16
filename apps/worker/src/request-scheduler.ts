@@ -5,6 +5,7 @@ export interface RequestSchedulerOptions {
 }
 
 const concurrentReadMethods = new Set<WorkerMethod>([
+  'scene.media.resolve',
   'characterVoice.list',
   'characterVoiceReference.list',
   'audio.list',
@@ -41,6 +42,8 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'document.get',
   'document.versions',
   'scene.list',
+  'production.read',
+  'production.compile',
   'shot.list',
   'conversation.list',
   'chat.message.list',

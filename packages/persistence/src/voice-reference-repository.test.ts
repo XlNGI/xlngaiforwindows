@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { migrateDatabase, getSchemaVersion } from './database.js';
 import { VoiceReferenceRepository } from './voice-reference-repository.js';
 import { DubbingRepository } from './dubbing-repository.js';
+import { CURRENT_SCHEMA_VERSION } from './schema.js';
 
 function fixture() {
   const db = new Database(':memory:');
@@ -37,7 +38,7 @@ describe('versioned role voice samples', () => {
   it('migrates, freezes versions, uses stable role identities and protects audio references', () => {
     const db = fixture();
     try {
-      expect(getSchemaVersion(db)).toBe(47);
+      expect(getSchemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
       const repo = new VoiceReferenceRepository(db, 'one');
       const first = repo.save({ characterDocumentId: 'one-role', audioId: 'one-audio1' });
       db.prepare('UPDATE documents SET title=? WHERE id=?').run('新角色名', 'one-role');

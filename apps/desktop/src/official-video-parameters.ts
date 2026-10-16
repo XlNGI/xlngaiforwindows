@@ -5,6 +5,7 @@ import type {
   CharacterVoiceReferenceInfo,
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
+import { productionImageReference } from '@ai-video/contracts';
 
 export const isOfficialVoiceVideo = (adapter: AdapterDescriptor | undefined) =>
   Boolean(adapter && ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider));
@@ -16,7 +17,9 @@ const records = (
         Boolean(item && typeof item === 'object' && !Array.isArray(item)),
       )
     : [];
-type OfficialVideoAdapter = Pick<AdapterDescriptor, 'provider' | 'contractId' | 'capability'>;
+type OfficialVideoAdapter = Pick<AdapterDescriptor, 'provider' | 'contractId' | 'capability'> & {
+  contractRevision?: number;
+};
 
 export function seedOfficialVideoParameters(
   adapter: OfficialVideoAdapter,
@@ -104,10 +107,11 @@ export function addOfficialRoleVoices(
     const index = imageUrls.findIndex(
       (url) => canonical(url) === `project-asset://${binding.assetId}`,
     );
-    return index < 0
+    const reference = productionImageReference(adapter, index + 1);
+    return index < 0 || !reference
       ? []
       : [
-          `${binding.role === 'character' ? '角色' : binding.role === 'scene' ? '场景' : '素材'}「${binding.label}」参考图片${index + 1}。`,
+          `${binding.role === 'character' ? '角色' : binding.role === 'scene' ? '场景' : '素材'}「${binding.label}」参考${reference}。`,
         ];
   });
   if (adapter.contractId?.includes('wan2-7')) {

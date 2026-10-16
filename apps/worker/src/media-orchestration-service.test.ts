@@ -17,6 +17,8 @@ import { MediaOrchestrationService } from './media-orchestration-service.js';
 import { NativeProviderRequestError, NativeProviderBridge } from './native-provider-bridge.js';
 import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
+import { ContentService } from './content-service.js';
+import { ProductionService } from './production-service.js';
 
 const roots: string[] = [];
 const projects: ProjectService[] = [];
@@ -160,6 +162,72 @@ function prepareVideo(videos: VideoGenerationService) {
 }
 
 describe('MediaOrchestrationService', () => {
+  it('rechecks the structured source at paid confirmation and still permits rejecting a stale draft', async () => {
+    const { projectsService, images, service, request } = await setup();
+    const content = new ContentService(projectsService);
+    const actor = content.saveDocument({
+      kind: 'character',
+      title: '林澈',
+      contentMarkdown: '原始',
+    });
+    const production = new ProductionService(projectsService);
+    const target = { kind: 'character' as const, id: actor.id };
+    production.execute({
+      executionKey: 'confirmation',
+      operations: [
+        {
+          action: 'set_prompt',
+          target,
+          expectedRowVersion: actor.rowVersion,
+          instruction: {
+            version: 1,
+            summary: '蓝色外套',
+            subjects: [],
+            visual: {},
+            beats: [],
+            audio: { mode: 'silent' },
+            generation: {},
+            resources: [],
+            continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
+          },
+        },
+      ],
+    });
+    const source = production.read(target).source!;
+    const job = images.prepare({
+      adapterKey: imageSelection.adapterKey,
+      parameters: { prompt: '蓝色外套', aspect_ratio: '16:9', resolution: '1080p' },
+      sourceDocumentId: actor.id,
+      productionSource: source,
+      providerProfileId,
+      modelId: imageSelection.modelId,
+      mediaModelSelection: imageSelection,
+    });
+    const pending = service.requestSubmission({ jobId: job.id });
+    content.saveDocument({
+      documentId: actor.id,
+      kind: 'character',
+      title: actor.title,
+      contentMarkdown: '红色外套',
+    });
+    await expect(
+      service.confirmSubmission({
+        jobId: job.id,
+        confirmationToken: pending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).rejects.toThrow('制作来源');
+    expect(request).not.toHaveBeenCalled();
+    expect(images.get(job.id).mediaState).toBe('awaiting_confirmation');
+    await expect(
+      service.confirmSubmission({
+        jobId: job.id,
+        confirmationToken: pending.confirmation!.confirmationToken,
+        approved: false,
+      }),
+    ).resolves.toMatchObject({ job: { mediaState: 'cancelled' } });
+    expect(request).not.toHaveBeenCalled();
+  });
   it('records local output failures after HTTP success as failed without resubmitting', async () => {
     const { images, service, request } = await setup();
     const job = prepareImage(images);

@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DocumentSummary, SceneInfo } from '@ai-video/contracts';
+import type { DocumentSummary, SceneInfo, SceneMediaResolveResult } from '@ai-video/contracts';
 import { SceneWorkspace } from './SceneWorkspace';
 import { callWorker } from './worker-client';
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
@@ -49,9 +49,11 @@ function mockWorker() {
     Promise.resolve(
       method === 'characterVoiceReference.list'
         ? [voice]
-        : method === 'audio.mediaSource'
-          ? { path: 'D:/sample.wav' }
-          : [],
+        : method === 'scene.media.resolve'
+          ? { characters: [{ characterDocumentId: 'actor', voice }], assets: [], voices: [voice] }
+          : method === 'audio.mediaSource'
+            ? { path: 'D:/sample.wav' }
+            : [],
     ),
   );
 }
@@ -72,31 +74,170 @@ function props() {
 }
 
 describe('scene cast bindings', () => {
+  it('resolves late media outside the first library page and preserves explicit disabling across updates', async () => {
+    let available = false;
+    const image = {
+      id: 'late-image',
+      projectId: 'project',
+      kind: 'character',
+      relativePath: 'assets/late.png',
+      contentHash: 'hash',
+      sizeBytes: 100,
+      createdAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) =>
+      Promise.resolve(
+        method === 'scene.media.resolve'
+          ? {
+              characters: [
+                {
+                  characterDocumentId: 'actor',
+                  ...(available ? { defaultImage: image, voice } : {}),
+                },
+              ],
+              assets: available ? [image] : [],
+              voices: available ? [voice] : [],
+            }
+          : method === 'asset.mediaSource'
+            ? { assetId: image.id, path: 'D:/late.png', contentType: 'image/png' }
+            : method === 'audio.mediaSource'
+              ? { path: 'D:/sample.wav' }
+              : [],
+      ),
+    );
+    const p = props();
+    render(
+      <SceneWorkspace
+        {...p}
+        scene={{ ...scene, characterBindings: [{ characterDocumentId: 'actor' }] }}
+      />,
+    );
+    expect(await screen.findByText('角色尚无参考图')).toBeInTheDocument();
+    available = true;
+    await act(() =>
+      window.dispatchEvent(
+        new CustomEvent('character-voice-reference-updated', {
+          detail: { projectId: 'project', characterDocumentId: 'actor' },
+        }),
+      ),
+    );
+    expect(await screen.findByRole('img', { name: 'late.png' })).toHaveAttribute(
+      'src',
+      '/worker-media/late-image',
+    );
+    expect(callWorker).not.toHaveBeenCalledWith('audio.mediaSource', { audioId: voice.audioId });
+    fireEvent.click(screen.getByRole('button', { name: '试听绑定音频' }));
+    expect(await screen.findByLabelText('试听绑定音频')).toHaveAttribute('preload', 'none');
+    fireEvent.change(screen.getByLabelText('林澈角色参考图'), { target: { value: 'none' } });
+    fireEvent.change(screen.getByLabelText('林澈声音样本'), { target: { value: 'none' } });
+    await act(() =>
+      window.dispatchEvent(
+        new CustomEvent('character-voice-reference-updated', {
+          detail: { projectId: 'project', characterDocumentId: 'actor' },
+        }),
+      ),
+    );
+    await waitFor(() => expect(screen.getByText('本场不使用参考图')).toBeInTheDocument());
+    expect(screen.queryByRole('img', { name: 'late.png' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '试听绑定音频' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
+    expect(p.onSave).toHaveBeenCalledWith(
+      p.prompt,
+      [],
+      [{ characterDocumentId: 'actor', imageDisabled: true, voiceDisabled: true }],
+      undefined,
+    );
+  });
+
+  it('previews a fixed historical voice, ignores foreign updates and discards late project responses', async () => {
+    let release: (value: SceneMediaResolveResult) => void = () => undefined;
+    const old = { ...voice, versionId: 'old', audioId: 'old-audio' };
+    vi.mocked(callWorker).mockImplementation((method: string) =>
+      method === 'scene.media.resolve'
+        ? new Promise<SceneMediaResolveResult>((resolve) => {
+            release = resolve;
+          })
+        : Promise.resolve(method === 'audio.mediaSource' ? { path: 'D:/old.wav' } : []),
+    );
+    const p = props();
+    const view = render(
+      <SceneWorkspace
+        {...p}
+        scene={{
+          ...scene,
+          characterBindings: [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'old' }],
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('scene.media.resolve', expect.anything()),
+    );
+    await act(() =>
+      Promise.resolve(
+        release({
+          characters: [{ characterDocumentId: 'actor', voice }],
+          assets: [],
+          voices: [voice, old],
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '试听绑定音频' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('audio.mediaSource', { audioId: 'old-audio' }),
+    );
+    const before = vi.mocked(callWorker).mock.calls.length;
+    await act(() =>
+      window.dispatchEvent(
+        new CustomEvent('character-voice-reference-updated', { detail: { projectId: 'other' } }),
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    expect(vi.mocked(callWorker).mock.calls).toHaveLength(before);
+    view.rerender(
+      <SceneWorkspace {...p} projectId="next" scene={{ ...scene, projectId: 'next' }} />,
+    );
+    await act(() =>
+      Promise.resolve(
+        release({
+          characters: [{ characterDocumentId: 'actor', voice }],
+          assets: [],
+          voices: [voice, old],
+        }),
+      ),
+    );
+    expect(screen.queryByLabelText('林澈声音样本')).not.toBeInTheDocument();
+  });
   it('adds a character and default voice without an image and saves the explicit relationship', async () => {
     mockWorker();
     const p = props();
     render(<SceneWorkspace {...p} />);
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('characterVoiceReference.list', {}),
+      expect(callWorker).toHaveBeenCalledWith('scene.media.resolve', {
+        characterDocumentIds: [],
+        assetIds: [],
+        voiceVersionIds: [],
+      }),
     );
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '让助手关联角色与场景' })).toBeEnabled(),
     );
     fireEvent.change(screen.getByLabelText('选择出场角色'), { target: { value: 'actor' } });
     fireEvent.click(screen.getByRole('button', { name: '添加角色' }));
-    expect(screen.getByLabelText('林澈声音样本')).toHaveValue('v1');
-    expect(screen.getByText('尚未选择参考图')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('林澈声音样本')).toHaveValue('default'));
+    expect(await screen.findByText('角色尚无参考图')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
     expect(p.onSave).toHaveBeenCalledWith(
       '本场对话',
       [],
-      [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'v1' }],
+      [{ characterDocumentId: 'actor' }],
       undefined,
     );
     fireEvent.click(screen.getByRole('button', { name: '生成场次视频' }));
     expect(p.onGenerateVideo).toHaveBeenCalledWith(
       [],
-      [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'v1' }],
+      [{ characterDocumentId: 'actor' }],
       undefined,
     );
   });
@@ -120,12 +261,12 @@ describe('scene cast bindings', () => {
       [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'old' }],
       undefined,
     );
-    fireEvent.change(screen.getByLabelText('林澈声音样本'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('林澈声音样本'), { target: { value: 'none' } });
     fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
     expect(p.onSave).toHaveBeenLastCalledWith(
       p.prompt,
       [],
-      [{ characterDocumentId: 'actor', voiceReferenceVersionId: undefined }],
+      [{ characterDocumentId: 'actor', voiceReferenceVersionId: undefined, voiceDisabled: true }],
       undefined,
     );
   });

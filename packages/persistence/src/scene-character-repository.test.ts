@@ -35,6 +35,32 @@ function fixture() {
 }
 
 describe('scene cast and audio storage', () => {
+  it('upgrades v47 selections without losing fixed IDs and persists disabled media independently', () => {
+    const db = fixture();
+    try {
+      const repo = new SceneCharacterRepository(db);
+      repo.replace('one-scene', [
+        { characterDocumentId: 'one-role', imageAssetId: 'one-character' },
+      ]);
+      db.exec(
+        'ALTER TABLE scene_character_bindings DROP COLUMN image_disabled; ALTER TABLE scene_character_bindings DROP COLUMN voice_disabled; DELETE FROM schema_migrations WHERE version>=48; DROP INDEX generation_jobs_source_document;',
+      );
+      migrateDatabase(db);
+      expect(repo.list('one-scene')).toEqual([
+        { characterDocumentId: 'one-role', imageAssetId: 'one-character' },
+      ]);
+      repo.replace('one-scene', [
+        { characterDocumentId: 'one-role', imageDisabled: true, voiceDisabled: true },
+      ]);
+      migrateDatabase(db);
+      expect(repo.list('one-scene')).toEqual([
+        { characterDocumentId: 'one-role', imageDisabled: true, voiceDisabled: true },
+      ]);
+      expect(checkIntegrity(db).ok).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
   it('binds characters without images and atomically rejects foreign images, voices and video assets', () => {
     const db = fixture();
     try {

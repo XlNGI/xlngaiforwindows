@@ -52,6 +52,7 @@ export class AgentDraftSubmissionService {
     operation: 'document.submit_draft' | 'novel.chapter.write_draft',
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
+    artifactKey = identity.toolCallId,
   ): Record<string, unknown> {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -153,7 +154,7 @@ export class AgentDraftSubmissionService {
             prompt: title,
             title,
             structured: true,
-            idempotencyKey: `model-tool:${identity.toolCallId}`,
+            idempotencyKey: `model-tool:${artifactKey}`,
             intent: {
               action,
               chapterId,
@@ -285,7 +286,7 @@ export class AgentDraftSubmissionService {
                 baseVersionId,
               }),
               requestHash,
-              `model-tool:${identity.toolCallId}`,
+              `model-tool:${artifactKey}`,
               now,
               now,
               now,

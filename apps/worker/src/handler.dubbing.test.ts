@@ -8,7 +8,7 @@ import type { WorkerMethod, WorkerMethodMap } from '@ai-video/contracts';
 import { IPC_PROTOCOL_VERSION } from '@ai-video/contracts';
 import { createRepositories, DubbingRepository, openProjectDatabase } from '@ai-video/persistence';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { handleRequest } from './handler.js';
+import { handleRequest, parseRequest } from './handler.js';
 import { ProjectService } from './project-service.js';
 
 // The singleton handler keeps its settings connection until the worker exits.
@@ -27,12 +27,13 @@ const profileIds: string[] = [];
 const owners: ProjectService[] = [];
 const digest = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex');
 async function rpc<M extends WorkerMethod>(method: M, params: WorkerMethodMap[M]['params']) {
-  const response = await handleRequest({
+  const request = parseRequest({
     id: randomUUID(),
     protocolVersion: IPC_PROTOCOL_VERSION,
     method,
     params,
   });
+  const response = 'ok' in request ? request : await handleRequest(request);
   if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
   return response.result as WorkerMethodMap[M]['result'];
 }
@@ -106,6 +107,60 @@ afterEach(async () => {
 });
 
 describe('dubbing Worker RPC integration', () => {
+  it.each(['wav', 'mp3'])(
+    'imports and persists a role voice sample through the %s RPC entrypoint',
+    async (format) => {
+      const f = await fixture();
+      let sourcePath = f.wav;
+      if (format === 'mp3') {
+        sourcePath = join(f.directory, 'sample.mp3');
+        execFileSync(
+          resolve('../desktop/src-tauri/resources/ffmpeg/ffmpeg.exe'),
+          ['-v', 'error', '-i', f.wav, sourcePath],
+          { windowsHide: true },
+        );
+      }
+      expect(await rpc('characterVoiceReference.list', {})).toEqual([]);
+      const imported = await rpc('audio.import', { sourcePath, kind: 'reference' });
+      const saved = await rpc('characterVoiceReference.save', {
+        characterDocumentId: f.character.id,
+        audioId: imported.audio.id,
+        expectedRowVersion: 0,
+      });
+      expect(saved).toMatchObject({
+        projectId: f.project.id,
+        characterDocumentId: f.character.id,
+        audioId: imported.audio.id,
+        revision: 1,
+        rowVersion: 1,
+      });
+      expect(await rpc('characterVoiceReference.list', {})).toEqual([saved]);
+      const source = await rpc('audio.mediaSource', { audioId: saved.audioId });
+      expect(digest(await readFile(source.path))).toBe(imported.audio.contentHash);
+      expect(await rpc('asset.list', {})).toEqual([]);
+
+      const replacement = await rpc('characterVoiceReference.save', {
+        characterDocumentId: f.character.id,
+        audioId: imported.audio.id,
+        expectedRowVersion: saved.rowVersion,
+      });
+      expect(replacement).toMatchObject({ id: saved.id, revision: 2, rowVersion: 2 });
+      expect(replacement.versionId).not.toBe(saved.versionId);
+      await expect(
+        rpc('characterVoiceReference.save', {
+          characterDocumentId: f.character.id,
+          audioId: imported.audio.id,
+          expectedRowVersion: saved.rowVersion,
+        }),
+      ).rejects.toThrow('角色声音样本已变化');
+      await rpc('project.close', {});
+      await rpc('project.open', { rootPath: f.root });
+      expect(await rpc('characterVoiceReference.list', {})).toEqual([replacement]);
+      await rpc('project.create', { rootPath: join(f.directory, 'other'), name: '独立项目' });
+      expect(await rpc('characterVoiceReference.list', {})).toEqual([]);
+    },
+  );
+
   it('keeps scene and task subscriptions bounded while retaining full frozen job history on demand', async () => {
     const f = await fixture();
     const imported = await rpc('audio.import', {

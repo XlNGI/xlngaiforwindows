@@ -10,6 +10,14 @@ export * from './dubbing.js';
 export * from './voice-reference.js';
 export * from './official-video-endpoint.js';
 import type { VoiceReferenceWorkerMethodMap } from './voice-reference.js';
+export * from './production.js';
+import type {
+  ProductionReadResult,
+  ProductionCompileParams,
+  ProductionCompileResult,
+  ProductionTarget,
+  ProductionSource,
+} from './production.js';
 
 export const IPC_PROTOCOL_VERSION = 1 as const;
 
@@ -1573,6 +1581,7 @@ export interface AgentResearchSourceInfo {
 
 export interface AgentTaskDetail {
   task: AgentTaskInfo;
+  productionUpdated?: boolean;
   target?: AgentTaskTargetInfo;
   pendingConfirmation?: AgentTaskPendingConfirmationInfo;
   pendingSchemaConfirmation?: AgentTaskPendingSchemaConfirmationInfo;
@@ -1745,6 +1754,28 @@ export interface SceneCharacterBindingInfo {
   characterDocumentId: string;
   imageAssetId?: string;
   voiceReferenceVersionId?: string;
+  /** Missing selection follows the character default; disabling is explicit. */
+  imageDisabled?: boolean;
+  voiceDisabled?: boolean;
+}
+
+export interface SceneCharacterMediaInfo {
+  characterDocumentId: string;
+  defaultImage?: AssetInfo;
+  images?: AssetInfo[];
+  voice?: import('./voice-reference.js').CharacterVoiceReferenceInfo;
+}
+
+export interface SceneMediaResolveParams {
+  characterDocumentIds: string[];
+  assetIds?: string[];
+  voiceVersionIds?: string[];
+}
+
+export interface SceneMediaResolveResult {
+  characters: SceneCharacterMediaInfo[];
+  assets: AssetInfo[];
+  voices: import('./voice-reference.js').CharacterVoiceReferenceInfo[];
 }
 
 export interface SceneMaterialBindingInfo {
@@ -3470,6 +3501,7 @@ export interface ImageGenerationJobInfo {
 }
 
 export interface ImageGenerationPrepareParams {
+  productionSource?: ProductionSource;
   shotId?: string;
   sourceDocumentId?: string;
   adapterKey: string;
@@ -3594,6 +3626,7 @@ export interface ProjectTaskSnapshot {
 }
 
 export interface VideoGenerationPrepareParams {
+  productionSource?: ProductionSource;
   shotId?: string;
   sceneId?: string;
   adapterKey: string;
@@ -3776,6 +3809,7 @@ export interface AssetSourceInfo {
 }
 
 export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceWorkerMethodMap {
+  'scene.media.resolve': { params: SceneMediaResolveParams; result: SceneMediaResolveResult };
   health: { params: Record<string, never>; result: HealthResult };
   'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
   'project.create': { params: ProjectCreateParams; result: ProjectInfo };
@@ -4058,6 +4092,8 @@ export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceW
     result: GenerationJobEventsPage;
   };
   'scene.list': { params: Record<string, never>; result: SceneInfo[] };
+  'production.read': { params: { target: ProductionTarget }; result: ProductionReadResult };
+  'production.compile': { params: ProductionCompileParams; result: ProductionCompileResult };
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
   'shot.save': { params: ShotSaveParams; result: ShotInfo };

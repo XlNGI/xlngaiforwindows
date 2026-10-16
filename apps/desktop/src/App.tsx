@@ -80,6 +80,7 @@ import { ProductionPanel } from './ProductionPanel';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
 import { SceneWorkspace } from './SceneWorkspace';
 import { sceneReferenceBindings } from './scene-reference-bindings';
+import { effectiveSceneCast, readSceneMedia, sceneMediaParams } from './scene-media';
 import { ScriptWorkspace } from './ScriptWorkspace';
 import { ShotWorkspace, type ShotReferenceAssets } from './ShotWorkspace';
 import { MaintenanceDialog } from './MaintenanceDialog';
@@ -697,6 +698,8 @@ export function App() {
 
   const [scenes, setScenes] = useState<SceneInfo[]>([]);
   const [scene, setScene] = useState<SceneInfo>();
+  const activeSceneIdRef = useRef(scene?.id);
+  activeSceneIdRef.current = scene?.id;
   const [proposalRefreshRevision, setProposalRefreshRevision] = useState(0);
   const [focusChangeSetId, setFocusChangeSetId] = useState<string>();
   const [sceneBindingBusy, setSceneBindingBusy] = useState(false);
@@ -1373,6 +1376,10 @@ export function App() {
           if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
           if (detail) {
             rememberAgentTask(detail);
+            if (detail.productionUpdated)
+              window.dispatchEvent(
+                new CustomEvent('production-source-updated', { detail: { agent: true } }),
+              );
             const proposal = detail.changeSets?.at(-1);
             const lastDocument = detail.documents.at(-1);
             if (proposal && (!lastDocument || proposal.createdAt >= lastDocument.createdAt)) {
@@ -2030,6 +2037,44 @@ export function App() {
     };
   }, [project?.id]);
 
+  useEffect(() => {
+    let active = true;
+    const refresh = (event: Event) => {
+      if (!(event as CustomEvent<{ agent?: boolean }>).detail?.agent || !project?.id) return;
+      void Promise.all([
+        callWorker('scene.list', {}),
+        scene?.id ? callWorker('shot.list', { sceneId: scene.id }) : Promise.resolve([]),
+      ])
+        .then(([nextScenes, nextShots]) => {
+          if (!active || activeProjectIdRef.current !== project.id) return;
+          setScenes(nextScenes);
+          setShots(nextShots);
+          setScene((current) => {
+            const next = nextScenes.find((item) => item.id === current?.id);
+            if (next)
+              setSceneVideoPrompt((text) =>
+                text === (current?.videoPrompt ?? '') ? (next.videoPrompt ?? '') : text,
+              );
+            return next ?? current;
+          });
+          setShot((current) => {
+            const next = nextShots.find((item) => item.id === current?.id);
+            if (next)
+              setShotPrompt((text) =>
+                text === (current?.prompt ?? '') ? (next.prompt ?? '') : text,
+              );
+            return next ?? current;
+          });
+        })
+        .catch(() => setContentMessage('制作内容已更新，页面刷新失败，请重新打开对应页面。'));
+    };
+    window.addEventListener('production-source-updated', refresh);
+    return () => {
+      active = false;
+      window.removeEventListener('production-source-updated', refresh);
+    };
+  }, [project?.id, scene?.id]);
+
   const bindSceneDocument = async (sceneDocumentId: string) => {
     if (!scene || !writable || sceneBindingBusy) return;
     const expectedProjectId = project?.id;
@@ -2183,7 +2228,19 @@ export function App() {
       )
         return;
     }
-    const references = sceneReferenceBindings(materialBindings, characterBindings, documents);
+    const expectedProjectId = project?.id;
+    if (!expectedProjectId) return;
+    let resolvedCharacters;
+    try {
+      const media = await readSceneMedia(expectedProjectId, sceneMediaParams(characterBindings));
+      if (activeProjectIdRef.current !== expectedProjectId || activeSceneIdRef.current !== scene.id)
+        return;
+      resolvedCharacters = effectiveSceneCast(characterBindings, media);
+    } catch {
+      setContentMessage('场次参考资料读取失败，请重试。');
+      return;
+    }
+    const references = sceneReferenceBindings(materialBindings, resolvedCharacters, documents);
     setProductionSeed({
       sceneId: scene.id,
       prompt: sceneVideoPrompt.trim(),
@@ -4444,6 +4501,7 @@ export function App() {
                         <SceneWorkspace
                           projectId={project.id}
                           scene={scene}
+                          mediaRevision={taskCompletionRevision}
                           prompt={sceneVideoPrompt}
                           bindings={scene.materialBindings ?? []}
                           documents={documents}

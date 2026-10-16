@@ -39,6 +39,7 @@ import { NetworkAdmissionError } from '@ai-video/llm';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
 import { withNetworkResponse } from './network-transfer.js';
+import { ProductionService } from './production-service.js';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -82,6 +83,21 @@ export class ImageGenerationService {
     if (!validation.valid) throw new Error('Image generation parameters are invalid.');
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
+      if (params.sourceDocumentId || params.shotId) {
+        const kind = params.sourceDocumentId
+          ? repositories.documents.get(params.sourceDocumentId)?.kind === 'character'
+            ? 'character'
+            : 'setting'
+          : 'shot';
+        new ProductionService(this.projects).assertSource(
+          params.productionSource,
+          { kind, id: (params.sourceDocumentId ?? params.shotId)! },
+          params.adapterKey,
+          { parameters: params.parameters, inputs: params.mediaInputReferences },
+        );
+      }
+      if (params.productionSource && !params.sourceDocumentId && !params.shotId)
+        throw new Error('制作来源缺少目标对象。');
       if (params.shotId) {
         const shot = repositories.shots.get(params.shotId);
         const scene = shot ? repositories.scenes.get(shot.sceneId) : undefined;
@@ -104,6 +120,7 @@ export class ImageGenerationService {
         requestJson: JSON.stringify(redactParameters(params.parameters)),
         taskSnapshotJson: JSON.stringify({
           version: 1,
+          productionSource: params.productionSource,
           capability: 'image',
           adapterKey: params.adapterKey,
           schemaVersion: adapter.schemaVersion,

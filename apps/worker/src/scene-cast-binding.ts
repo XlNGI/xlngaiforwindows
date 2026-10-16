@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { SceneCharacterBindingInfo } from '@ai-video/contracts';
-import { SceneCharacterRepository, VoiceReferenceRepository } from '@ai-video/persistence';
+import { SceneCharacterRepository } from '@ai-video/persistence';
 
 /** Validate model-selected identities; prompt text is never used to infer a relationship. */
 export function requireProductionCharacters(
@@ -42,16 +42,11 @@ export function resolvedCast(
     .all(sceneId) as Array<{ id: string }>;
   if (speakers.some((speaker) => !ids.includes(speaker.id)))
     throw new Error('角色仍有本场台词，请先移除或更改对应台词。');
-  const voices = new VoiceReferenceRepository(database, projectId).list();
   return ids.map((id) => {
     const existing = previous.find((item) => item.characterDocumentId === id);
     if (existing) return existing;
-    const voice = voices.find((item) => item.characterDocumentId === id);
-    const image = productionReferenceImage(database, projectId, id);
     return {
       characterDocumentId: id,
-      ...(image ? { imageAssetId: image.id } : {}),
-      ...(voice ? { voiceReferenceVersionId: voice.versionId } : {}),
     };
   });
 }

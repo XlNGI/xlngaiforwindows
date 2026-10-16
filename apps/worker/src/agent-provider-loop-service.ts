@@ -3360,7 +3360,7 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure')
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure', 'production.execute')
                  AND (tool_name <> 'scene.submit_structure' OR json_extract(result_summary_json,'$.status')='scene_structure_proposed')
              ) THEN NULL ELSE 'read-only' END,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
@@ -4788,6 +4788,8 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 }
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
+  'production.read',
+  'production.execute',
   'scene.submit_structure',
   'scene.read',
   'document.submit_draft',
