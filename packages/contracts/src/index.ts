@@ -2365,6 +2365,7 @@ export interface LlmGenerationPrepareResult {
 }
 
 export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
+  inferenceSettings?: LlmInferenceSettings;
   providerProfileId: string;
   modelId: string;
   remoteModelId: string;
@@ -2376,6 +2377,13 @@ export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
   attachments?: LlmInputAttachment[];
   tools?: LlmToolDefinition[];
   continuation?: LlmToolContinuation;
+}
+
+export interface LlmInferenceSettings {
+  maxOutputTokens: number;
+  outputTokenParameter: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
+  /** No provider-specific reasoning capability has been declared. */
+  reasoning: 'provider_default';
 }
 
 export interface LlmToolDefinition {
@@ -2440,6 +2448,7 @@ export type HostMethod =
 
 /** Provider request data that is safe to cross the sidecar boundary. Credentials and headers are absent. */
 export interface NativeProviderStreamStartParams extends LlmGenerationIdentity {
+  inferenceSettings?: LlmInferenceSettings;
   providerProfileId: string;
   modelId: string;
   remoteModelId: string;
@@ -2560,6 +2569,16 @@ export interface HostError {
 }
 
 export type NativeProviderHostEvent =
+  | {
+      type: 'request_progress';
+      projectSessionId: string;
+      stage: string;
+      argumentBytes?: number;
+      toolName?: string;
+      receivedBytes?: number;
+      requestBodyHash?: string;
+      requestBodyBytes?: number;
+    }
   | { type: 'started'; projectSessionId: string }
   | { type: 'text_delta'; projectSessionId: string; delta: string }
   | { type: 'thinking_delta'; projectSessionId: string; delta: string }
@@ -2927,6 +2946,9 @@ export interface ConversationRuntimeLiveAction {
   id: string;
   toolName: string;
   status: 'running' | 'succeeded' | 'failed';
+  phase?: string;
+  argumentBytes?: number;
+  lastActivityAt?: string;
 }
 
 export interface ConversationRuntimeGetResult {

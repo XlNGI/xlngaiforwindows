@@ -122,6 +122,16 @@ describe('Agent library retrieval integration', () => {
       let read: LibraryReadResult | undefined;
       let writtenDocumentId: string | undefined;
       faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'tools.load',
+              { names: ['document.create_draft'] },
+              { id: 'load-draft-tool' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-draft-tool' },
+        ),
         (context) => {
           expect(context.tools?.map((tool) => tool.name)).toContain('library.search');
           expect(context.systemPrompt).not.toContain(opening);
@@ -226,7 +236,7 @@ describe('Agent library retrieval integration', () => {
       await runtime.wait(prepared.stream.generationId);
 
       expect(generations.get(prepared.stream.generationId).status).toBe('complete');
-      expect(faux.state.callCount).toBe(4);
+      expect(faux.state.callCount).toBe(5);
       expect(searched?.sources[0]?.sourceId).toBe(firstChapter.id);
       expect(read?.content).toContain(ending);
       expect(writtenDocumentId).toBeDefined();

@@ -6,6 +6,8 @@ import type {
   LlmToolDefinition,
 } from '@ai-video/contracts';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { validateToolArguments } from '@earendil-works/pi-ai';
+import { boundedValidationError } from './agent-provider-tool-gateway.js';
 import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -40,6 +42,11 @@ class DuplicatePiToolCall extends Error {
  * project, chapter, document, or filesystem authority.
  */
 export class DomainToolGateway {
+  private validationFailures = 0;
+  assertRepairBudget(): void {
+    if (this.validationFailures >= 3)
+      throw new Error('TOOL_REPAIR_LIMIT: 参数校验修复达到3次上限，请缩小提交。');
+  }
   constructor(
     private readonly projects: ProjectService,
     private readonly plans: TaskPlanService,
@@ -62,6 +69,44 @@ export class DomainToolGateway {
       // Pi accepts the same JSON Schema dialect used by the Worker contracts.
       parameters: definition.parameters,
       executionMode: unifiedAgentToolRegistry.executionMode(definition.name),
+      prepareArguments: (args: unknown) => {
+        try {
+          this.assertRepairBudget();
+          const validated: unknown = validateToolArguments(definition, {
+            type: 'toolCall',
+            id: 'validation',
+            name: definition.name,
+            arguments: args as Record<string, unknown>,
+          });
+          return validated;
+        } catch (error) {
+          this.validationFailures += 1;
+          const reason = boundedValidationError(error);
+          this.projects.access(true, (db, project) => {
+            if (
+              project.id !== this.identity.projectId ||
+              this.projects.currentSessionId() !== this.identity.projectSessionId
+            )
+              return;
+            db.prepare(
+              `INSERT INTO agent_task_events(id,task_id,project_id,sequence,event_type,level,actor_type,summary,created_at)
+              SELECT ?,?,?,COALESCE(MAX(sequence),-1)+1,'tool_validation_failed','error','system',?,? FROM agent_task_events WHERE task_id=?`,
+            ).run(
+              randomUUID(),
+              this.identity.taskId,
+              project.id,
+              JSON.stringify({
+                operation: definition.name,
+                argumentBytes: Buffer.byteLength(JSON.stringify(args) ?? ''),
+                reason,
+              }),
+              new Date().toISOString(),
+              this.identity.taskId,
+            );
+          });
+          throw new Error(reason);
+        }
+      },
       execute: async (toolCallId, args) => this.execute(toolCallId, grant, args as ToolArguments),
     } as AgentTool;
   }
@@ -75,6 +120,7 @@ export class DomainToolGateway {
     try {
       const result = await this.executeUnlogged(grant, args);
       this.finishToolCall(call, result);
+      this.validationFailures = 0;
       return result;
     } catch (error) {
       if (!(error instanceof DuplicatePiToolCall)) this.failToolCall(call, error);

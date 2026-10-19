@@ -8,6 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{ipc::Channel, Manager};
 use windows_sys::Win32::{
     Foundation::GetLastError,
@@ -58,6 +59,8 @@ pub(crate) struct LlmStreamStart {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LlmRuntimeRequest {
+    #[serde(default)]
+    inference_settings: Option<LlmInferenceSettings>,
     generation_id: String,
     attempt_id: String,
     project_id: String,
@@ -77,6 +80,51 @@ struct LlmRuntimeRequest {
     tools: Vec<LlmToolDefinition>,
     #[serde(default)]
     continuation: Option<LlmToolContinuation>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LlmInferenceSettings {
+    max_output_tokens: u32,
+    output_token_parameter: String,
+    reasoning: String,
+}
+
+impl LlmInferenceSettings {
+    fn validate(&self, protocol: &str) -> Result<(), String> {
+        let valid_parameter = match protocol {
+            "openai-responses" => self.output_token_parameter == "max_output_tokens",
+            "openai-chat-completions" => ["max_tokens", "max_completion_tokens"]
+                .contains(&self.output_token_parameter.as_str()),
+            _ => false,
+        };
+        if !valid_parameter
+            || !(1..=131072).contains(&self.max_output_tokens)
+            || self.reasoning != "provider_default"
+        {
+            return Err("Unsupported inference settings for this protocol.".to_string());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_provider_inference_settings(
+    protocol: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let settings: LlmInferenceSettings = serde_json::from_value(value.clone())
+        .map_err(|_| "Native Provider inferenceSettings have an invalid shape".to_string())?;
+    settings.validate(protocol)
+}
+
+#[cfg(test)]
+pub(crate) fn request_body_for_contract_test(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let runtime: LlmRuntimeRequest =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    let body = build_request_body(&runtime).map_err(|error| error.message)?;
+    serde_json::from_slice(&body).map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Deserialize)]
@@ -190,6 +238,19 @@ pub(crate) struct AgentToolConfirmationRequest {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum LlmStreamEvent {
+    RequestProgress {
+        stage: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_body_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_body_bytes: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        argument_bytes: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        received_bytes: Option<u64>,
+    },
     Started,
     Delta {
         delta: String,
@@ -202,6 +263,7 @@ pub(crate) enum LlmStreamEvent {
     },
     ToolCalls {
         calls: Vec<LlmToolCall>,
+        finish_reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_response_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -842,7 +904,8 @@ fn run_agent_runtime(
                         );
                         Ok(())
                     }
-                    LlmStreamEvent::ThinkingDelta { .. } => Ok(()),
+                    LlmStreamEvent::ThinkingDelta { .. }
+                    | LlmStreamEvent::RequestProgress { .. } => Ok(()),
                     LlmStreamEvent::Confirmation { .. } => Err(StreamFailure::new(
                         "Provider emitted an unexpected Agent confirmation event.",
                         false,
@@ -851,6 +914,7 @@ fn run_agent_runtime(
                         calls,
                         provider_response_id,
                         usage,
+                        ..
                     } => {
                         let provider_response_id = provider_response_id.ok_or_else(|| {
                             StreamFailure::new(
@@ -1143,6 +1207,17 @@ where
         .map_err(|message| StreamFailure::new(message, false))?;
 
     let origin = request_guard::origin_key(endpoint.secure, &endpoint.host, endpoint.port);
+    let mut queued = request_progress("native_queued", None);
+    if let LlmStreamEvent::RequestProgress {
+        request_body_hash,
+        request_body_bytes,
+        ..
+    } = &mut queued
+    {
+        *request_body_hash = Some(format!("{:x}", Sha256::digest(&body)));
+        *request_body_bytes = Some(body.len());
+    }
+    emit(queued)?;
     let permit = acquire(&origin, &cancellation).map_err(|error| {
         if cancellation.is_cancelled() {
             StreamFailure::cancelled()
@@ -1150,6 +1225,7 @@ where
             StreamFailure::admission(error)
         }
     })?;
+    emit(request_progress("admitted", None))?;
     let result = (|| -> Result<(), StreamFailure> {
         let agent = wide("unicomp/0.1");
         let host = wide(&endpoint.host);
@@ -1243,6 +1319,7 @@ where
                 "LLM request could not be sent",
             ));
         }
+        emit(request_progress("sent", None))?;
         if unsafe { WinHttpReceiveResponse(cancellation.request()?, std::ptr::null_mut()) } == 0 {
             return Err(transport_failure(
                 &cancellation,
@@ -1250,6 +1327,7 @@ where
             ));
         }
         let status = query_status(cancellation.request()?)?;
+        emit(request_progress("headers", None))?;
         if !(200..=299).contains(&status) {
             let retry_after =
                 query_optional_header(cancellation.request()?, WINHTTP_QUERY_RETRY_AFTER);
@@ -1320,6 +1398,9 @@ where
                 break;
             }
             received_bytes += u64::from(read);
+            if received_bytes == u64::from(read) {
+                emit(request_progress("first_byte", Some(received_bytes)))?;
+            }
             parser.feed(&chunk[..read as usize], |event| emit(event))?;
             // SSE success ends the response independently of HTTP connection
             // closure. Some gateways keep the chunked connection open afterward.
@@ -1350,6 +1431,7 @@ where
             }
             emit(LlmStreamEvent::ToolCalls {
                 calls,
+                finish_reason: completed.finish_reason,
                 provider_response_id,
                 usage: completed.usage,
             })?;
@@ -1382,7 +1464,7 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
         "# Project context\n\n{}\n\n# User request\n\n{}",
         runtime.context, runtime.prompt
     );
-    let value = if runtime.protocol == "openai-responses" {
+    let mut value = if runtime.protocol == "openai-responses" {
         let input = if runtime.attachments.is_empty() {
             serde_json::Value::String(context.clone())
         } else {
@@ -1565,8 +1647,25 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
         }
         value
     };
+    if let Some(settings) = &runtime.inference_settings {
+        settings
+            .validate(&runtime.protocol)
+            .map_err(|error| StreamFailure::new(error, false))?;
+        value[&settings.output_token_parameter] = serde_json::json!(settings.max_output_tokens);
+    }
     serde_json::to_vec(&value)
         .map_err(|_| StreamFailure::new("LLM request could not be serialized.", false))
+}
+
+fn request_progress(stage: &str, received_bytes: Option<u64>) -> LlmStreamEvent {
+    LlmStreamEvent::RequestProgress {
+        stage: stage.to_string(),
+        argument_bytes: None,
+        tool_name: None,
+        received_bytes,
+        request_body_hash: None,
+        request_body_bytes: None,
+    }
 }
 
 fn append_chat_continuation(
@@ -1863,6 +1962,7 @@ struct SseParser {
     tool_calls: HashMap<String, ToolCallAccumulator>,
     next_tool_call_ordinal: u64,
     visible_text: String,
+    last_progress: Instant,
 }
 
 struct ToolCallAccumulator {
@@ -1882,6 +1982,7 @@ impl SseParser {
             tool_calls: HashMap::new(),
             next_tool_call_ordinal: 0,
             visible_text: String::new(),
+            last_progress: Instant::now() - Duration::from_secs(1),
         }
     }
 
@@ -1924,6 +2025,14 @@ impl SseParser {
             .with_outcome(Outcome::Failure));
         }
         let mut tool_calls = self.tool_calls.into_values().collect::<Vec<_>>();
+        if matches!(
+            self.finish_reason.as_deref(),
+            Some("length" | "max_tokens" | "max_output_tokens" | "content_filter" | "incomplete")
+        ) {
+            return Err(StreamFailure::new(format!("INCOMPLETE_PROVIDER_OUTPUT: finishReason={}; {} tool calls, {} argument bytes. No tool was executed.",
+                self.finish_reason.as_deref().unwrap_or("unknown"), tool_calls.len(),
+                tool_calls.iter().map(|item| item.call.arguments_json.len()).sum::<usize>()), false));
+        }
         tool_calls.sort_by_key(|item| item.ordinal);
         let protocol = self.protocol;
         let tool_calls = tool_calls
@@ -1946,6 +2055,17 @@ impl SseParser {
             ));
         }
         let mut provider_response_id = self.provider_response_id;
+        for call in &tool_calls {
+            if !serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+                .is_ok_and(|value| value.is_object())
+            {
+                return Err(StreamFailure::new(format!(
+                    "INVALID_TOOL_ARGUMENTS: {} returned invalid object JSON ({} bytes); finishReason={}. No tool was executed.",
+                    call.name.chars().take(128).collect::<String>(), call.arguments_json.len(),
+                    self.finish_reason.as_deref().unwrap_or("unknown")
+                ), false));
+            }
+        }
         if protocol == "openai-chat-completions"
             && provider_response_id.is_none()
             && !tool_calls.is_empty()
@@ -1996,11 +2116,40 @@ impl SseParser {
                 return Err(StreamFailure::new(message, true));
             }
         }
-        if self.protocol == "openai-responses" {
+        let result = if self.protocol == "openai-responses" {
             self.parse_responses_event(&value, emit)
         } else {
             self.parse_chat_event(&value, emit)
+        };
+        result?;
+        if !self.tool_calls.is_empty() && self.last_progress.elapsed() >= Duration::from_millis(500)
+        {
+            self.last_progress = Instant::now();
+            let name = self
+                .tool_calls
+                .values()
+                .max_by_key(|item| item.ordinal)
+                .map(|item| {
+                    decode_chat_tool_name(&item.call.name)
+                        .chars()
+                        .take(256)
+                        .collect()
+                });
+            emit(LlmStreamEvent::RequestProgress {
+                stage: "tool_arguments".to_string(),
+                request_body_hash: None,
+                request_body_bytes: None,
+                argument_bytes: Some(
+                    self.tool_calls
+                        .values()
+                        .map(|item| item.call.arguments_json.len())
+                        .sum(),
+                ),
+                tool_name: name,
+                received_bytes: None,
+            })?;
         }
+        Ok(())
     }
 
     fn parse_responses_event<F>(
@@ -2549,7 +2698,10 @@ mod tests {
             mock_runtime(port),
             CredentialSecret::for_test("test-key"),
             Arc::new(LlmCancellation::default()),
-            |_| panic!("no stream event before admission"),
+            |event| {
+                assert!(matches!(event, LlmStreamEvent::RequestProgress { .. }));
+                Ok(())
+            },
             true,
             |origin, cancelled| scheduler.acquire(origin, || cancelled.is_cancelled()),
         )
@@ -2634,7 +2786,10 @@ mod tests {
                 mock_runtime(port),
                 CredentialSecret::for_test("test-key"),
                 native_cancellation,
-                |_| panic!("queued stream cannot emit"),
+                |event| {
+                    assert!(matches!(event, LlmStreamEvent::RequestProgress { .. }));
+                    Ok(())
+                },
                 true,
                 |origin, cancelled| {
                     queued_tx.send(()).unwrap();
@@ -2904,7 +3059,69 @@ mod tests {
                 authorization_handle: None,
             }]
         );
-        assert!(events.is_empty());
+        assert!(events
+            .iter()
+            .all(|event| matches!(event, LlmStreamEvent::RequestProgress { .. })));
+    }
+
+    #[test]
+    fn rejects_invalid_object_arguments_and_output_limits_for_both_protocols() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            for (arguments, reason) in [
+                ("{\"private\":", "tool_calls"),
+                ("[]", "completed"),
+                ("{}", "length"),
+            ] {
+                let mut parser = SseParser::new(protocol);
+                parser.completed = true;
+                parser.finish_reason = Some(reason.to_string());
+                parser.tool_calls.insert(
+                    "call".to_string(),
+                    super::ToolCallAccumulator {
+                        ordinal: 0,
+                        call: super::LlmToolCall {
+                            id: "call".to_string(),
+                            name: "scene.submit_structure".to_string(),
+                            arguments_json: arguments.to_string(),
+                            authorization_handle: None,
+                        },
+                    },
+                );
+                let error = parser
+                    .finish(|_| Ok(()))
+                    .err()
+                    .expect("incomplete arguments must fail");
+                assert!(error.message.contains("No tool was executed"));
+                assert!(!error.message.contains("private"));
+            }
+        }
+    }
+
+    #[test]
+    fn maps_only_explicit_protocol_output_settings_and_rejects_unsupported_parameters() {
+        for (protocol, parameter) in [
+            ("openai-responses", "max_output_tokens"),
+            ("openai-chat-completions", "max_completion_tokens"),
+            ("openai-chat-completions", "max_tokens"),
+        ] {
+            let mut runtime = mock_runtime(1);
+            runtime.protocol = protocol.to_string();
+            runtime.inference_settings = Some(super::LlmInferenceSettings {
+                max_output_tokens: 8192,
+                output_token_parameter: parameter.to_string(),
+                reasoning: "provider_default".to_string(),
+            });
+            let body: serde_json::Value =
+                serde_json::from_slice(&super::build_request_body(&runtime).unwrap()).unwrap();
+            assert_eq!(body[parameter], 8192);
+            assert!(body.get("reasoning").is_none());
+            runtime
+                .inference_settings
+                .as_mut()
+                .unwrap()
+                .output_token_parameter = "unsupported".to_string();
+            assert!(super::build_request_body(&runtime).is_err());
+        }
     }
 
     #[test]
@@ -2953,6 +3170,7 @@ mod tests {
     fn serializes_tool_call_event_fields_for_the_desktop_contract() {
         let serialized = serde_json::to_value(LlmStreamEvent::ToolCalls {
             calls: Vec::new(),
+            finish_reason: Some("tool_calls".to_string()),
             provider_response_id: Some("chat-tool-call:call_1".to_string()),
             usage: None,
         })
@@ -3177,6 +3395,7 @@ mod tests {
     #[test]
     fn sends_tools_and_continuation_outputs_to_responses() {
         let runtime = LlmRuntimeRequest {
+            inference_settings: None,
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),
@@ -3234,6 +3453,7 @@ mod tests {
     #[test]
     fn sends_tools_to_chat_completions_without_authorization_handles() {
         let runtime = LlmRuntimeRequest {
+            inference_settings: None,
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),
@@ -3271,6 +3491,7 @@ mod tests {
     #[test]
     fn sends_image_attachments_as_native_multimodal_content() {
         let runtime = LlmRuntimeRequest {
+            inference_settings: None,
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),
@@ -3306,6 +3527,7 @@ mod tests {
     #[test]
     fn rebuilds_chat_tool_calls_and_outputs_for_continuation() {
         let runtime = LlmRuntimeRequest {
+            inference_settings: None,
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),
@@ -3424,6 +3646,7 @@ mod tests {
     #[test]
     fn rejects_chat_continuation_without_matching_output() {
         let runtime = LlmRuntimeRequest {
+            inference_settings: None,
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),
@@ -3534,6 +3757,7 @@ mod tests {
             .expect("mock response should be written");
         });
         let runtime = LlmRuntimeRequest {
+            inference_settings: None,
             generation_id: "generation".to_string(),
             attempt_id: "attempt".to_string(),
             project_id: "project".to_string(),

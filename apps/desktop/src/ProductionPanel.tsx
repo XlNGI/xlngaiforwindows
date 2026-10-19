@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { ImagePreview } from './ImagePreview';
 import { useProductionInstructions } from './use-production-instructions';
 import { ProjectProductionDefaults } from './ProjectProductionDefaults';
@@ -42,7 +41,6 @@ import type {
   AssetInfo,
   GenerationCapability,
   ImageAssetKind,
-  ImagePreviewInfo,
   MediaSubmissionConfirmationRequest,
   MediaTaskCancellationOutcome,
   ProviderModelInfo,
@@ -53,7 +51,7 @@ import type {
   SceneInfo,
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
-import { projectWorker, workerMediaUrl } from './worker-scope';
+import { projectWorker } from './worker-scope';
 import {
   adapterBindsCatalogModel,
   isWanMediaAdapter,
@@ -86,7 +84,6 @@ interface ProductionPanelProps {
   projectSessionId?: string;
   /** Identity of the loaded project view, including reopening the same project. */
   projectViewEpoch?: object;
-  projectRootPath?: string;
   shotId?: string;
   sceneId?: string;
   sourceDocumentId?: string;
@@ -99,7 +96,6 @@ interface ProductionPanelProps {
   assets?: AssetInfo[];
   videoJobs?: VideoGenerationJobInfo[];
   imageJobs?: import('@ai-video/contracts').ImageGenerationJobInfo[];
-  focusedAssetId?: string;
   focusedJobId?: string;
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
   onOpenAssetLibrary?: (assetId?: string) => void;
@@ -230,14 +226,6 @@ function cancellationMessage(cancellation?: MediaTaskCancellationOutcome): strin
   return `视频任务已取消，仅停止本地轮询；${reason}，Provider 任务可能仍会继续。`;
 }
 
-function isVideoAsset(asset: AssetInfo | undefined): boolean {
-  return (
-    asset?.kind === 'generated-video' ||
-    asset?.kind === 'shot-video' ||
-    asset?.kind === 'scene-video'
-  );
-}
-
 function isAssetReference(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('asset://') && value.length > 8;
 }
@@ -277,26 +265,12 @@ function formatVideoCost(cost: VideoGenerationMetadataInfo['cost'] | undefined):
 const SUBMISSION_UNKNOWN_MESSAGE =
   '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。';
 
-function mediaSrcForAbsolutePath(absolutePath: string): string | undefined {
-  try {
-    return convertFileSrc(absolutePath);
-  } catch {
-    return undefined;
-  }
-}
-
-function mediaSrcForAsset(assetId: string, absolutePath: string): string | undefined {
-  if (!('__TAURI_INTERNALS__' in window)) return workerMediaUrl(assetId);
-  return mediaSrcForAbsolutePath(absolutePath);
-}
-
 export function ProductionPanel({
   expanded = false,
   capability,
   projectId,
   projectSessionId,
   projectViewEpoch,
-  projectRootPath,
   shotId,
   sceneId,
   sourceDocumentId,
@@ -306,10 +280,8 @@ export function ProductionPanel({
   seedImageBindings,
   preferredAssetKind,
   writable,
-  assets: controlledAssets,
   videoJobs = [],
   imageJobs = [],
-  focusedAssetId,
   focusedJobId,
   onAssetsChanged,
   onOpenAssetLibrary,
@@ -567,15 +539,6 @@ export function ProductionPanel({
     preferredAssetKind ?? 'generated-image',
   );
   const [videoAssetKind, setVideoAssetKind] = useState<VideoAssetKind>('shot-video');
-  const [localAssets, setLocalAssets] = useState<AssetInfo[]>([]);
-  const [selectedAssetId, setSelectedAssetId] = useState<string>();
-  const [preview, setPreview] = useState<ImagePreviewInfo>();
-  const [generatedImages, setGeneratedImages] = useState<{
-    projectId?: string;
-    assets: AssetInfo[];
-  }>();
-  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
-  const [savingPreview, setSavingPreview] = useState(false);
   const submissionScope = useMemo(
     () => ({}),
     [projectId, projectSessionId, projectViewEpoch, shotId, sceneId, sourceDocumentId],
@@ -597,9 +560,6 @@ export function ProductionPanel({
     setBusy(false);
     setGenerationJobId(undefined);
     setGenerationStatus('');
-    setPreview(undefined);
-    setGeneratedImages(undefined);
-    setSavingPreview(false);
     setMessage('');
     setErrors([]);
     return () => {
@@ -611,20 +571,10 @@ export function ProductionPanel({
   seedPromptRef.current = seedPrompt;
   const seedImagesRef = useRef(seedImages);
   seedImagesRef.current = seedImages;
-  const assets = controlledAssets ?? localAssets;
-  const selectedAsset = assets.find((item) => item.id === selectedAssetId);
-  const selectedImageAsset = isVideoAsset(selectedAsset) ? undefined : selectedAsset;
-  const selectedVideoAsset = isVideoAsset(selectedAsset) ? selectedAsset : undefined;
-  const unsavedPreview = preview?.jobId && !preview.assetId ? preview : undefined;
-  const showResultPreview = Boolean(preview || selectedImageAsset || selectedVideoAsset);
   const effectiveCapability =
     catalog?.capabilities.some((item) => item.key === capability) === true
       ? capability!
       : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
-
-  useEffect(() => {
-    setGeneratedImages(undefined);
-  }, [projectId, shotId, sceneId, sourceDocumentId]);
 
   useEffect(() => {
     if (preferredAssetKind) setAssetKind(preferredAssetKind);
@@ -660,11 +610,8 @@ export function ProductionPanel({
   ]);
 
   useEffect(() => {
-    if (focusedAssetId && assets.some((item) => item.id === focusedAssetId)) {
-      setSelectedAssetId(focusedAssetId);
-    }
     if (focusedJobId) setGenerationJobId(focusedJobId);
-  }, [assets, focusedAssetId, focusedJobId]);
+  }, [focusedJobId]);
 
   useEffect(() => {
     let active = true;
@@ -872,56 +819,6 @@ export function ProductionPanel({
     seedImageBindings,
   ]);
 
-  useEffect(() => {
-    let active = true;
-    if (controlledAssets !== undefined) return () => undefined;
-    setLocalAssets([]);
-    setSelectedAssetId(undefined);
-    if (!projectId) return () => undefined;
-    void callWorker('asset.list', {})
-      .then((items) => {
-        if (active) setLocalAssets(items);
-      })
-      .catch((reason) => {
-        if (active) setGenerationStatus(errorMessage(reason, '素材列表读取失败。'));
-      });
-    return () => {
-      active = false;
-    };
-  }, [controlledAssets, projectId]);
-
-  useEffect(() => {
-    if (!selectedAssetId || isVideoAsset(selectedAsset)) {
-      // Keep unsaved generation previews (jobId without assetId) when selection clears or a video is selected.
-      setPreview((current) => (current?.jobId && !current.assetId ? current : undefined));
-      return;
-    }
-    let active = true;
-    setPreview((current) => (current?.assetId === selectedAssetId ? current : undefined));
-    void callWorker('asset.mediaSource', { assetId: selectedAssetId })
-      .then((source) => {
-        const dataUrl = mediaSrcForAsset(selectedAssetId, source.path);
-        if (active && dataUrl) {
-          setPreview({ assetId: selectedAssetId, dataUrl, contentType: source.contentType });
-        }
-      })
-      .catch((reason) => {
-        if (active) setGenerationStatus(errorMessage(reason, '素材预览读取失败。'));
-      });
-    return () => {
-      active = false;
-    };
-  }, [selectedAsset?.kind, selectedAssetId]);
-
-  useEffect(() => {
-    if (!selectedAsset || !isVideoAsset(selectedAsset) || !projectRootPath) {
-      setVideoPreviewUrl(undefined);
-      return;
-    }
-    const root = projectRootPath.replace(/[\\/]+$/, '');
-    setVideoPreviewUrl(mediaSrcForAbsolutePath(`${root}\\${selectedAsset.relativePath}`));
-  }, [projectRootPath, selectedAsset]);
-
   const capabilityAdapters = useMemo(
     () => catalog?.adapters.filter((item) => item.capability === effectiveCapability) ?? [],
     [catalog, effectiveCapability],
@@ -1003,24 +900,7 @@ export function ProductionPanel({
     setGenerationStatus('');
   };
 
-  const publishAssets = (nextAssets: AssetInfo[], nextSelectedAssetId?: string) => {
-    if (controlledAssets === undefined) setLocalAssets(nextAssets);
-    if (nextSelectedAssetId !== undefined) {
-      setSelectedAssetId(nextSelectedAssetId);
-    } else if (selectedAssetId && !nextAssets.some((item) => item.id === selectedAssetId)) {
-      setSelectedAssetId(nextAssets[0]?.id);
-    }
-    onAssetsChanged?.(nextAssets, nextSelectedAssetId);
-  };
-
-  const localAssetPath = (asset: AssetInfo): string => {
-    if (!projectRootPath) return asset.relativePath;
-    const root = projectRootPath.replace(/[\\/]+$/, '');
-    return `${root}\\${asset.relativePath}`;
-  };
-
-  const revealAsset = async (asset: AssetInfo | undefined = selectedAsset) => {
-    if (!asset) return;
+  const revealAsset = async (asset: AssetInfo) => {
     try {
       const result = await callWorker('asset.reveal', { assetId: asset.id });
       setGenerationStatus(`已打开本地位置：${result.path}`);
@@ -1035,33 +915,6 @@ export function ProductionPanel({
       setGenerationStatus('已使用本机默认应用打开素材。');
     } catch (reason) {
       setGenerationStatus(errorMessage(reason, '素材打开失败。'));
-    }
-  };
-
-  const savePreviewToAssetLibrary = async () => {
-    if (!preview?.jobId || preview.assetId || !writable) return;
-    const scope = submissionScope;
-    const isCurrent = () => currentSubmissionScope.current === scope;
-    setSavingPreview(true);
-    setGenerationStatus('');
-    try {
-      const saved = await callWorker('image.generate.savePreview', {
-        jobId: preview.jobId,
-        dataUrl: preview.dataUrl,
-        contentType: preview.contentType,
-        assetKind,
-      });
-      if (!isCurrent()) return;
-      const savedAsset = saved.results.find((result) => result.asset)?.asset;
-      const nextAssets = await callWorker('asset.list', {});
-      if (!isCurrent()) return;
-      publishAssets(nextAssets, savedAsset?.id);
-      if (saved.preview) setPreview(saved.preview);
-      setGenerationStatus('图片已保存到本地素材库。');
-    } catch (reason) {
-      if (isCurrent()) setGenerationStatus(errorMessage(reason, '预览保存失败。'));
-    } finally {
-      if (isCurrent()) setSavingPreview(false);
     }
   };
 
@@ -1168,38 +1021,11 @@ export function ProductionPanel({
       const completed = (await completion)
         .job as import('@ai-video/contracts').ImageGenerationJobInfo;
       if (!isCurrent()) return;
-      if (completed.status === 'succeeded' && completed.preview) {
-        setPreview(completed.preview);
-      }
       const savedAsset = completed.results.find((result) => result.asset)?.asset;
-      if (completed.status === 'succeeded') {
-        setGeneratedImages({
-          projectId,
-          assets: completed.results.flatMap((result) => (result.asset ? [result.asset] : [])),
-        });
-      }
       if (completed.status === 'succeeded' && savedAsset) {
         const nextAssets = await callWorker('asset.list', {});
         if (!isCurrent()) return;
-        publishAssets(nextAssets, savedAsset.id);
-        if (completed.preview) {
-          setPreview(completed.preview);
-        } else {
-          await callWorker('asset.mediaSource', { assetId: savedAsset.id })
-            .then((source) => {
-              if (!isCurrent()) return;
-              const dataUrl = mediaSrcForAsset(savedAsset.id, source.path);
-              if (dataUrl) {
-                setPreview({
-                  assetId: savedAsset.id,
-                  jobId: completed.id,
-                  dataUrl,
-                  contentType: source.contentType,
-                });
-              }
-            })
-            .catch(() => undefined);
-        }
+        onAssetsChanged?.(nextAssets, savedAsset.id);
       }
       if (!isCurrent()) return;
       setGenerationStatus(
@@ -1440,32 +1266,6 @@ export function ProductionPanel({
     }
   };
 
-  const renameAsset = async (asset: AssetInfo) => {
-    const currentName = asset.relativePath.split(/[\\/]/).pop() ?? 'image.png';
-    const name = window.prompt('请输入新文件名，并保留扩展名：', currentName);
-    if (!name) return;
-    try {
-      const renamed = await callWorker('asset.rename', { assetId: asset.id, name });
-      publishAssets(
-        assets.map((item) => (item.id === renamed.id ? renamed : item)),
-        renamed.id,
-      );
-    } catch (reason) {
-      setGenerationStatus(errorMessage(reason, '素材重命名失败。'));
-    }
-  };
-
-  const removeAsset = async (asset: AssetInfo) => {
-    if (!window.confirm('确定删除此图片素材？')) return;
-    try {
-      await callWorker('asset.delete', { assetId: asset.id });
-      const nextAssets = assets.filter((item) => item.id !== asset.id);
-      publishAssets(nextAssets);
-    } catch (reason) {
-      setGenerationStatus(errorMessage(reason, '素材删除失败。'));
-    }
-  };
-
   const cancelImage = async () => {
     if (!generationJobId) return;
     const owner = activeSubmission.current;
@@ -1568,7 +1368,10 @@ export function ProductionPanel({
                       {profile.name} ·{' '}
                       {profile.providerType === 'unicompapi'
                         ? 'UniCompAPI'
-                        : profile.baseUrl === 'https://api.vidu.cn'
+                        : profile.baseUrl === 'https://api.vidu.cn' ||
+                            ['wan-video', 'seedance-video', 'minimax-video'].includes(
+                              profile.providerType,
+                            )
                           ? '中国站'
                           : '国际站'}
                     </option>
@@ -2042,7 +1845,8 @@ export function ProductionPanel({
                                 className="button primary video-task-result-button"
                                 type="button"
                                 title="查看生成素材"
-                                onClick={() => setSelectedAssetId(resultAsset.id)}
+                                disabled={!onOpenAssetLibrary}
+                                onClick={() => onOpenAssetLibrary?.(resultAsset.id)}
                               >
                                 <Eye size={13} />
                                 查看素材
@@ -2077,169 +1881,6 @@ export function ProductionPanel({
                     )}
                   </section>
                 )}
-              </>
-            )}
-          </div>
-
-          <div className="production-panel-result" aria-label="生成结果">
-            <header className="production-result-header">
-              <strong>生成结果</strong>
-              {showResultPreview && <span>自动预览</span>}
-            </header>
-            {showResultPreview ? (
-              <div className="asset-preview-card result-preview-card">
-                <div className="asset-preview-frame">
-                  {selectedVideoAsset ? (
-                    videoPreviewUrl ? (
-                      <video
-                        key={selectedVideoAsset.id}
-                        src={videoPreviewUrl}
-                        controls
-                        autoPlay
-                        playsInline
-                        aria-label={selectedVideoAsset.relativePath}
-                      />
-                    ) : (
-                      <div className="video-result-fallback">
-                        <Video size={36} />
-                        <span>视频已就绪</span>
-                        <button
-                          className="button primary"
-                          type="button"
-                          onClick={() => void openAsset(selectedVideoAsset)}
-                        >
-                          <Play size={14} />
-                          播放视频
-                        </button>
-                      </div>
-                    )
-                  ) : preview ? (
-                    <ImagePreview
-                      key={preview.dataUrl}
-                      src={preview.dataUrl}
-                      alt={selectedImageAsset?.relativePath ?? '生成图片预览'}
-                    />
-                  ) : (
-                    <span>正在读取预览</span>
-                  )}
-                </div>
-                <div className="asset-preview-meta">
-                  <strong>
-                    {selectedVideoAsset?.relativePath ??
-                      selectedImageAsset?.relativePath ??
-                      '本次生成预览'}
-                  </strong>
-                  {(selectedVideoAsset || selectedImageAsset) && (
-                    <small>{localAssetPath(selectedVideoAsset ?? selectedImageAsset!)}</small>
-                  )}
-                </div>
-                {(selectedImageAsset || selectedVideoAsset) && (
-                  <div className="asset-actions">
-                    <button
-                      className="button"
-                      type="button"
-                      onClick={() => void revealAsset(selectedVideoAsset ?? selectedImageAsset)}
-                    >
-                      <FolderOpen size={14} />
-                      打开位置
-                    </button>
-                    <button
-                      className="button"
-                      type="button"
-                      onClick={() =>
-                        onOpenAssetLibrary?.((selectedVideoAsset ?? selectedImageAsset)!.id)
-                      }
-                    >
-                      <Eye size={14} />
-                      查看素材库
-                    </button>
-                  </div>
-                )}
-                {unsavedPreview && !selectedImageAsset && !selectedVideoAsset && (
-                  <div className="asset-actions single">
-                    <button
-                      className="button primary"
-                      type="button"
-                      onClick={() => void savePreviewToAssetLibrary()}
-                      disabled={!writable || savingPreview}
-                    >
-                      <Save size={14} />
-                      保存到素材库
-                    </button>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="production-result-empty">
-                <ImagePlus size={28} />
-                <strong>生成完成后将在此自动预览</strong>
-                <span>图片直接显示；视频完成后自动选中并尝试内嵌播放。</span>
-              </div>
-            )}
-            {assets.length > 0 && (
-              <>
-                {generatedImages &&
-                generatedImages.projectId === projectId &&
-                generatedImages.assets.length > 1 ? (
-                  <div className="generated-image-results" aria-label="本次生成的全部图片">
-                    {generatedImages.assets.map((item) => (
-                      <AssetImagePreview key={item.id} asset={item} />
-                    ))}
-                  </div>
-                ) : null}
-                <div className="asset-list" aria-label="素材列表">
-                  {assets.map((asset) => (
-                    <div
-                      className={`asset-row${asset.id === selectedAssetId ? ' selected' : ''}`}
-                      key={asset.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelectedAssetId(asset.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ')
-                          setSelectedAssetId(asset.id);
-                      }}
-                    >
-                      <span title={asset.sourceUrl}>{asset.relativePath}</span>
-                      <small title={localAssetPath(asset)}>
-                        {asset.kind} · {(asset.sizeBytes / 1024).toFixed(1)} KiB
-                      </small>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="打开位置"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void revealAsset(asset);
-                        }}
-                      >
-                        <FolderOpen size={13} />
-                      </button>
-                      <button
-                        className="icon-button subtle"
-                        type="button"
-                        title="重命名素材"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void renameAsset(asset);
-                        }}
-                      >
-                        <Save size={13} />
-                      </button>
-                      <button
-                        className="icon-button danger"
-                        type="button"
-                        title="删除素材"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void removeAsset(asset);
-                        }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
               </>
             )}
           </div>

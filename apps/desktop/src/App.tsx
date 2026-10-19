@@ -3682,22 +3682,6 @@ export function App() {
       onRemoveAttachment={removeChatAttachment}
       onCancelGeneration={() => void cancelGeneration()}
       allowConcurrentTasks={Boolean(selectedLlmProfile && selectedLlmModel)}
-      runningGenerations={[...nativeRuns.current.values()]
-        .filter(
-          (entry) =>
-            entry.run.identity.projectId === project?.id &&
-            entry.run.identity.conversationId === conversation?.id &&
-            isGenerationActive(entry.state),
-        )
-        .map((entry) => entry.state)}
-      onSelectGeneration={(id) => {
-        const entry = nativeRuns.current.get(id);
-        if (entry) {
-          setGeneration(entry.state);
-          setLiveAgentActions(entry.actions);
-          if (entry.taskId) startAgentTaskEventPolling(entry.taskId);
-        }
-      }}
       onSendMessage={() => void sendMessage(composer, undefined, composer, conversation, true)}
       agentParameterRequest={agentParameterRequest}
       onSubmitAgentParameters={(adapterKey, parameters) => {
@@ -3768,7 +3752,6 @@ export function App() {
       expanded
       capability={productionCapability}
       projectId={project?.id}
-      projectRootPath={project?.rootPath}
       projectSessionId={workerScope(project?.id)?.projectSessionId}
       onRequestSubmissionApproval={requestMediaSubmissionApproval}
       projectViewEpoch={project}
@@ -3788,7 +3771,6 @@ export function App() {
       assets={assets}
       videoJobs={projectTasks?.videoJobs ?? []}
       imageJobs={projectTasks?.imageJobs ?? []}
-      focusedAssetId={focusedSource?.assetId}
       focusedJobId={focusedSource?.jobId}
       onAssetsChanged={updateAssets}
       onOpenAssetLibrary={(assetId) => {

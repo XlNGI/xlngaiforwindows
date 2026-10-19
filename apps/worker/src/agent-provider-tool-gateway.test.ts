@@ -8,6 +8,12 @@ import {
   AgentProviderToolGateway,
   type AgentProviderToolExecutor,
 } from './agent-provider-tool-gateway.js';
+import {
+  SYSTEM_AGENT_TOOLS,
+  LIBRARY_AGENT_TOOLS,
+  MEDIA_AGENT_TOOLS,
+  RESEARCH_AGENT_TOOLS,
+} from './agent-tool-definitions.js';
 
 const identity: LlmGenerationIdentity = {
   generationId: 'generation',
@@ -51,6 +57,46 @@ function executor(
 }
 
 describe('AgentProviderToolGateway', () => {
+  it('loads only model-selected schemas from a compact catalog while retaining Worker authorization', async () => {
+    const worker = executor({});
+    const definitions = [
+      ...SYSTEM_AGENT_TOOLS,
+      ...LIBRARY_AGENT_TOOLS,
+      ...MEDIA_AGENT_TOOLS,
+      ...RESEARCH_AGENT_TOOLS,
+    ].map((tool) => ({
+      ...tool,
+      authorizationHandle: 'private-worker-capability',
+    }));
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      definitions,
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      true,
+    );
+    const initial = gateway.currentDefinitions();
+    expect(initial.map((tool) => tool.name)).not.toContain('scene.submit_structure');
+    expect(initial.map((tool) => tool.name)).toContain('tools.load');
+    expect(Buffer.byteLength(JSON.stringify(initial))).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(definitions)) * 0.6,
+    );
+    const load = gateway.tools().find((tool) => tool.name === 'tools.load')!;
+    await load.execute('load', { names: ['scene.structure.stage'] });
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).toContain(
+      'scene.structure.stage',
+    );
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).not.toContain(
+      'production.execute',
+    );
+    expect(worker.executeTools).not.toHaveBeenCalled();
+    expect(() => load.execute('unauthorized', { names: ['invented.operation'] })).toThrow(
+      'authorized',
+    );
+  });
   it('keeps the authorization handle outside Provider arguments and returns the Worker result', async () => {
     const nextDefinition = definition('research.search', 'next-handle');
     const worker = executor({

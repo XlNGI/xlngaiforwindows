@@ -3204,6 +3204,32 @@ where
     F: FnMut(serde_json::Value) -> Result<(), llm_stream::StreamFailure>,
 {
     match event {
+        llm_stream::LlmStreamEvent::RequestProgress {
+            stage,
+            argument_bytes,
+            tool_name,
+            received_bytes,
+            request_body_hash,
+            request_body_bytes,
+        } => {
+            let mut value = serde_json::json!({ "type": "request_progress", "stage": stage });
+            if let Some(bytes) = argument_bytes {
+                value["argumentBytes"] = serde_json::json!(bytes);
+            }
+            if let Some(name) = tool_name {
+                value["toolName"] = serde_json::json!(name);
+            }
+            if let Some(bytes) = received_bytes {
+                value["receivedBytes"] = serde_json::json!(bytes);
+            }
+            if let Some(hash) = request_body_hash {
+                value["requestBodyHash"] = serde_json::json!(hash);
+            }
+            if let Some(bytes) = request_body_bytes {
+                value["requestBodyBytes"] = serde_json::json!(bytes);
+            }
+            emit(value)
+        }
         llm_stream::LlmStreamEvent::Started => emit(serde_json::json!({ "type": "started" })),
         llm_stream::LlmStreamEvent::Delta { delta } => {
             emit(serde_json::json!({ "type": "text_delta", "delta": delta }))
@@ -3213,6 +3239,7 @@ where
         }
         llm_stream::LlmStreamEvent::ToolCalls {
             calls,
+            finish_reason,
             provider_response_id,
             usage,
         } => {
@@ -3255,7 +3282,7 @@ where
             emit(serde_json::json!({
                 "type": "complete",
                 "providerResponseId": provider_response_id,
-                "finishReason": "tool_calls",
+                "finishReason": finish_reason,
             }))
         }
         llm_stream::LlmStreamEvent::Complete {
@@ -3368,6 +3395,7 @@ fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), Stri
         .ok_or("Native Provider params must be an object")?;
     let allowed = [
         "generationId",
+        "inferenceSettings",
         "attemptId",
         "projectId",
         "projectSessionId",
@@ -3407,6 +3435,12 @@ fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), Stri
     }
     if contains_sensitive_host_data(value) {
         return Err("Sensitive data cannot cross the Native Provider boundary".to_string());
+    }
+    if let Some(settings) = value.get("inferenceSettings") {
+        llm_stream::validate_provider_inference_settings(
+            value["protocol"].as_str().unwrap_or_default(),
+            settings,
+        )?;
     }
     Ok(())
 }
@@ -5649,9 +5683,8 @@ mod tests {
         assert!(error.contains("mismatched correlation ID"));
     }
 
-    #[test]
-    fn native_provider_host_contract_rejects_secrets_unknown_fields_and_oversize() {
-        let valid = json!({
+    fn native_provider_stream_fixture() -> serde_json::Value {
+        json!({
             "generationId": "generation",
             "attemptId": "attempt",
             "projectId": "project",
@@ -5670,7 +5703,110 @@ mod tests {
                 "mimeType": "image/png",
                 "dataUrl": "data:image/png;base64,AAAA"
             }]
+        })
+    }
+
+    #[test]
+    fn native_provider_host_contract_accepts_inference_settings_through_request_body() {
+        for (protocol, parameter) in [
+            ("openai-responses", "max_output_tokens"),
+            ("openai-chat-completions", "max_tokens"),
+            ("openai-chat-completions", "max_completion_tokens"),
+        ] {
+            let mut value = native_provider_stream_fixture();
+            value["protocol"] = json!(protocol);
+            value["inferenceSettings"] = json!({
+                "maxOutputTokens": 8192,
+                "outputTokenParameter": parameter,
+                "reasoning": "provider_default",
+            });
+            assert!(validate_provider_stream_params(&value).is_ok());
+            let body = crate::llm_stream::request_body_for_contract_test(value).unwrap();
+            assert_eq!(body[parameter], 8192);
+            assert!(body.get("inferenceSettings").is_none());
+        }
+        let value = native_provider_stream_fixture();
+        assert!(validate_provider_stream_params(&value).is_ok());
+        let body = crate::llm_stream::request_body_for_contract_test(value).unwrap();
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn native_provider_host_contract_rejects_invalid_inference_settings() {
+        for settings in [
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"maxOutputTokens": 0, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
+            json!({"maxOutputTokens": 131073, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
+            json!({"maxOutputTokens": 1.5, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
+            json!({"maxOutputTokens": 8192, "outputTokenParameter": "max_tokens", "reasoning": "provider_default"}),
+            json!({"maxOutputTokens": 8192, "outputTokenParameter": "max_output_tokens", "reasoning": "off"}),
+            json!({"maxOutputTokens": 8192, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default", "extra": true}),
+        ] {
+            let mut value = native_provider_stream_fixture();
+            value["inferenceSettings"] = settings;
+            assert!(validate_provider_stream_params(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn native_provider_host_contract_accepts_actual_worker_envelopes_with_settings() {
+        let worker_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worker");
+        let script = r#"
+            import { NativeProviderBridge, createPiStreamFunction } from './dist/native-provider-bridge.js';
+            const cases = JSON.parse(process.argv[1]);
+            const envelopes = [];
+            const bridge = new NativeProviderBridge({ send: async (envelope) => { envelopes.push(envelope); } });
+            const model = { id: 'mock', name: 'mock', api: 'openai-responses', provider: 'test', baseUrl: 'https://example.com/v1', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 };
+            for (const params of cases) {
+                createPiStreamFunction(bridge, () => params)(model, { messages: [] });
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+            process.stdout.write(JSON.stringify(envelopes));
+        "#;
+        let cases = ["openai-responses", "openai-chat-completions"].map(|protocol| {
+            let mut value = native_provider_stream_fixture();
+            value["protocol"] = json!(protocol);
+            value["inferenceSettings"] = json!({
+                "maxOutputTokens": 8192,
+                "outputTokenParameter": if protocol == "openai-responses" { "max_output_tokens" } else { "max_completion_tokens" },
+                "reasoning": "provider_default",
+            });
+            value
         });
+        let output = Command::new("node")
+            .args([
+                "--input-type=module",
+                "-e",
+                script,
+                &serde_json::to_string(&cases).unwrap(),
+            ])
+            .current_dir(worker_directory)
+            .output()
+            .expect("Worker bridge fixture should start");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelopes: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelopes.len(), 2);
+        for envelope in envelopes {
+            validate_host_request_envelope(&envelope).unwrap();
+            let params = &envelope["params"];
+            validate_provider_stream_params(params).unwrap();
+            let body = crate::llm_stream::request_body_for_contract_test(params.clone()).unwrap();
+            let parameter = params["inferenceSettings"]["outputTokenParameter"]
+                .as_str()
+                .unwrap();
+            assert_eq!(body[parameter], 8192);
+        }
+    }
+
+    #[test]
+    fn native_provider_host_contract_rejects_secrets_unknown_fields_and_oversize() {
+        let valid = native_provider_stream_fixture();
         assert!(validate_provider_stream_params(&valid).is_ok());
         let mut with_api_key = valid.clone();
         with_api_key["apiKey"] = json!("secret");

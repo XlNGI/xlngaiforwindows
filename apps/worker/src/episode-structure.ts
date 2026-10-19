@@ -63,12 +63,24 @@ export function parseEpisodeStructureArguments(
       throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
     const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
     const sceneInstruction = parseInstruction(scene.instruction, 'scene');
-    if (requireDetailed && sceneInstruction?.version !== 2)
+    if (requireDetailed && !scene.sceneId && sceneInstruction?.version !== 2)
       throw new Error(
         '新场次制作方案必须提供v2结构化指令：故事时间、地点、风格、叙事目的及每镜剧情预计时长。',
       );
     if (scene.videoPrompt === undefined && sceneInstruction)
       scene.videoPrompt = renderProductionInstruction(sceneInstruction);
+    if (
+      sceneInstruction &&
+      typeof scene.videoPrompt === 'string' &&
+      !renderProductionInstruction(sceneInstruction).includes(scene.videoPrompt.trim())
+    )
+      throw new Error(
+        `scenes[${sceneIndex}].videoPrompt conflicts with instruction; submit instruction only or preserve text in a binding-only update.`,
+      );
+    if (sceneInstruction && renderProductionInstruction(sceneInstruction).length > 20000)
+      throw new Error(
+        `scenes[${sceneIndex}].instruction renders beyond 20000 characters; split the shared setup and shots.`,
+      );
     if (
       scene.sceneDocumentId !== undefined &&
       scene.sceneDocumentId !== null &&
@@ -134,6 +146,18 @@ export function parseEpisodeStructureArguments(
         throw new Error('详细场次的每个分镜都必须提供结构化指令和剧情预计时长。');
       if (shot.prompt === undefined && shotInstruction)
         shot.prompt = renderProductionInstruction(shotInstruction);
+      if (
+        shotInstruction &&
+        typeof shot.prompt === 'string' &&
+        !renderProductionInstruction(shotInstruction).includes(shot.prompt.trim())
+      )
+        throw new Error(
+          `scenes[${sceneIndex}].shots[${shotIndex}].prompt conflicts with instruction; submit instruction only.`,
+        );
+      if (shotInstruction && renderProductionInstruction(shotInstruction).length > 20000)
+        throw new Error(
+          `scenes[${sceneIndex}].shots[${shotIndex}].instruction renders beyond 20000 characters; split the shot.`,
+        );
       if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 20000) {
         throw new Error(
           `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 20000 characters.`,
@@ -162,6 +186,10 @@ export function parseEpisodeStructureArguments(
         : {}),
     });
   }
+  if (scenes.reduce((total, scene) => total + 1 + scene.shots.length, 0) > 100)
+    throw new Error(
+      'scenes exceeds the proposal limit of 100 scene + shot items; split into multiple proposals.',
+    );
   return { episodeTitle, scenes };
 }
 
@@ -179,6 +207,15 @@ export function validateEpisodeReferences(
   structure: EpisodeStructure,
 ): void {
   for (const scene of structure.scenes) {
+    if (scene.sceneId && scene.videoPrompt === undefined && !scene.instruction) {
+      const current = database
+        .prepare('SELECT video_prompt,row_version FROM scenes WHERE id=? AND project_id=?')
+        .get(scene.sceneId, projectId) as
+        { video_prompt: string | null; row_version: number } | undefined;
+      if (!current || current.row_version !== scene.expectedRowVersion)
+        throw new Error('SCENE_ROW_VERSION_CONFLICT');
+      scene.videoPrompt = current.video_prompt ?? '';
+    }
     if (
       scene.sceneDocumentId === undefined ||
       (!scene.sceneId && !scene.sceneDocumentId) ||

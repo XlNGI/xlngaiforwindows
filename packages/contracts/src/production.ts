@@ -454,6 +454,33 @@ export const detailedProductionInstructionSchema = {
   properties: { ...productionInstructionSchema.properties, version: { type: 'integer', const: 2 } },
 };
 
+/** Shared by model tools and Worker authoring validation; saved v1 remains readable. */
+export const sceneProductionInstructionSchema = {
+  ...detailedProductionInstructionSchema,
+  required: [...detailedProductionInstructionSchema.required, 'storyTime', 'location'],
+  anyOf: [
+    { required: ['style'], properties: { style: { type: 'object', minProperties: 1 } } },
+    {
+      required: ['visual'],
+      properties: {
+        visual: { type: 'object', required: ['style'], properties: { style: { type: 'string' } } },
+      },
+    },
+  ],
+};
+
+export const shotProductionInstructionSchema = {
+  ...detailedProductionInstructionSchema,
+  required: [...detailedProductionInstructionSchema.required, 'timing', 'stillFrame'],
+  properties: {
+    ...detailedProductionInstructionSchema.properties,
+    beats: {
+      ...(productionInstructionSchema.properties.beats as Record<string, unknown>),
+      minItems: 1,
+    },
+  },
+};
+
 export const productionDefaultsSchema = object({
   style: productionInstructionSchema.properties.style,
   visual: productionInstructionSchema.properties.visual,

@@ -1112,7 +1112,7 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText(`${providerProfile.name} · Vidu · API v3`)).toBeInTheDocument();
   });
 
-  it('loads persisted assets when a project opens', async () => {
+  it('keeps production parameters free of the result preview and full asset list', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
       if (method === 'adapter.resolve') return Promise.resolve(descriptor);
@@ -1134,15 +1134,16 @@ describe('ProductionPanel', () => {
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(<ProductionPanel projectId="project" shotId="shot" writable />);
+    render(<ProductionPanel expanded projectId="project" shotId="shot" writable />);
 
-    expect(await screen.findByText('assets/images/persisted.png')).toBeInTheDocument();
-    expect(callWorker).toHaveBeenCalledWith('asset.list', {});
-    expect(screen.getByTitle('重命名素材')).toBeInTheDocument();
-    expect(screen.getByTitle('删除素材')).toBeInTheDocument();
+    expect(await screen.findByLabelText(/画面提示词/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('素材列表')).not.toBeInTheDocument();
+    expect(screen.queryByText('生成完成后将在此自动预览')).not.toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('asset.list', {});
   });
 
-  it('saves a generated image locally by default and exposes preview, reveal, and library actions', async () => {
+  it('saves a generated image locally and refreshes its owning gallery without a result pane', async () => {
     const onAssetsChanged = vi.fn();
     const onOpenAssetLibrary = vi.fn();
     mockWorker((method) => {
@@ -1176,7 +1177,6 @@ describe('ProductionPanel', () => {
     render(
       <ProductionPanel
         projectId="project"
-        projectRootPath="D:\\Project"
         shotId="shot"
         writable
         onAssetsChanged={onAssetsChanged}
@@ -1205,27 +1205,14 @@ describe('ProductionPanel', () => {
     );
     expect(confirmDialog).not.toHaveBeenCalled();
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
-    expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
-    expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
-      'src',
-      `/worker-media/${savedAsset.id}`,
-    );
     expect(onAssetsChanged).toHaveBeenCalledWith([savedAsset], savedAsset.id);
-    fireEvent.click(screen.getByRole('button', { name: `放大查看${savedAsset.relativePath}` }));
-    expect(
-      screen.getByRole('dialog', { name: `图片预览：${savedAsset.relativePath}` }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '关闭图片预览' }));
-
-    fireEvent.click(screen.getAllByRole('button', { name: '打开位置' })[0]!);
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('asset.reveal', { assetId: savedAsset.id }),
-    );
-    fireEvent.click(screen.getByRole('button', { name: '查看素材库' }));
-    expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedAsset.id);
+    expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: savedAsset.relativePath })).not.toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('asset.mediaSource', { assetId: savedAsset.id });
   });
 
-  it('previews every image returned by one generation and enlarges each independently', async () => {
+  it('refreshes all images returned by one generation without loading result previews', async () => {
+    const onAssetsChanged = vi.fn();
     const generated = [
       savedAsset,
       { ...savedAsset, id: 'second-image', relativePath: 'assets/images/second.png' },
@@ -1253,75 +1240,26 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
-    render(<ProductionPanel projectId="project" shotId="shot" writable />);
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        onAssetsChanged={onAssetsChanged}
+      />,
+    );
     fireEvent.change(await screen.findByLabelText(/画面提示词/), { target: { value: '电影画面' } });
     await submitPaidGeneration('生成图片');
-    const results = await screen.findByLabelText('本次生成的全部图片');
-    expect(await within(results).findByRole('img', { name: 'second.png' })).toHaveAttribute(
-      'src',
-      '/worker-media/second-image?thumbnail=1',
-    );
-    expect(within(results).getAllByRole('img')).toHaveLength(2);
-    fireEvent.click(within(results).getByRole('button', { name: '放大查看second.png' }));
-    expect(await within(screen.getByRole('dialog')).findByRole('img')).toHaveAttribute(
-      'src',
-      '/worker-media/second-image',
-    );
-    fireEvent.keyDown(document, { key: 'Escape' });
-  });
-
-  it('selects the automatically saved result after clearing a previously selected asset', async () => {
-    const priorAsset: AssetInfo = {
-      ...savedAsset,
-      id: 'asset-prior',
-      relativePath: 'assets/images/prior.png',
-    };
-    mockWorker((method, params) => {
-      if (method === 'adapter.catalog') return Promise.resolve(catalog);
-      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
-      if (method === 'generation.draft.get') return Promise.resolve(null);
-      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
-      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
-      if (method === 'media.generation.requestSubmission')
-        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
-      if (method === 'media.generation.confirmSubmission')
-        return Promise.resolve({
-          kind: 'image',
-          job: imageJob('succeeded', { withPreview: true }),
-        });
-      if (method === 'asset.list') return Promise.resolve([priorAsset, savedAsset]);
-      if (method === 'asset.preview') {
-        const assetId = (params as { assetId: string }).assetId;
-        return Promise.resolve({
-          assetId,
-          dataUrl:
-            assetId === priorAsset.id
-              ? 'data:image/png;base64,prior'
-              : 'data:image/png;base64,asset',
-          contentType: 'image/png',
-        });
-      }
-      if (method === 'video.generate.list') return Promise.resolve([]);
-      throw new Error(`Unexpected method ${method}`);
-    });
-
-    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[priorAsset]} />);
-    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
-      target: { value: '电影画面' },
-    });
-    fireEvent.click(await screen.findByText(priorAsset.relativePath));
-    expect(await screen.findByRole('img', { name: priorAsset.relativePath })).toBeInTheDocument();
-
-    await submitPaidGeneration('生成图片');
-
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByRole('img', { name: '生成图片预览' })).toHaveAttribute(
-        'src',
-        `/worker-media/${savedAsset.id}`,
-      ),
-    );
-    expect(screen.queryByRole('button', { name: '保存到素材库' })).not.toBeInTheDocument();
+    expect(onAssetsChanged).toHaveBeenCalledWith(generated, savedAsset.id);
+    expect(screen.queryByLabelText('本次生成的全部图片')).not.toBeInTheDocument();
+    expect(
+      vi
+        .mocked(callWorker)
+        .mock.calls.some(
+          ([method]) => method === 'asset.mediaSource' || method === 'asset.thumbnail',
+        ),
+    ).toBe(false);
   });
 
   it('explains why draft save is blocked when no shot is selected', async () => {
@@ -1366,12 +1304,8 @@ describe('ProductionPanel', () => {
       ),
     );
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: savedAsset.relativePath })).toHaveAttribute(
-      'src',
-      `/worker-media/${savedAsset.id}`,
-    );
-    expect(screen.getAllByText(savedAsset.relativePath).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText(savedAsset.relativePath)).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: savedAsset.relativePath })).not.toBeInTheDocument();
   });
 
   it('keeps a prepared image job in submission_unknown when Provider acceptance is ambiguous', async () => {
@@ -1887,7 +1821,8 @@ describe('ProductionPanel', () => {
     expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: 'video-job' });
   });
 
-  it('offers a primary material action when a video task completes', async () => {
+  it('opens the asset library when a completed video task is selected', async () => {
+    const onOpenAssetLibrary = vi.fn();
     const completed = {
       ...videoJob('succeeded'),
       results: [
@@ -1915,13 +1850,14 @@ describe('ProductionPanel', () => {
         writable
         assets={[savedVideoAsset]}
         videoJobs={[completed]}
+        onOpenAssetLibrary={onOpenAssetLibrary}
       />,
     );
 
     expect(await screen.findByText(/结果已进入素材库/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '查看素材' }));
-    expect(await screen.findByText('视频已就绪')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '播放视频' })).toBeInTheDocument();
+    expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedVideoAsset.id);
+    expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
   });
 
   it('renders Worker-owned task snapshots without polling or observing the Provider', async () => {

@@ -21,6 +21,7 @@ import type {
 } from '@ai-video/contracts';
 import { Agent, type AgentContext, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works/pi-ai';
+import { randomUUID } from 'node:crypto';
 import { createPiStreamFunction, NativeProviderBridge } from './native-provider-bridge.js';
 import { DomainToolGateway, type PiToolIdentity } from './domain-tool-gateway.js';
 import { ExecutionPool, type ExecutionLease } from './execution-pool.js';
@@ -130,10 +131,29 @@ export class PiConversationRuntime implements ConversationRuntime {
     this.options.generation.runtime(identity);
     if (existing) return { runtime: 'pi', taskId: existing.taskId };
     const controller = new AbortController();
+    const schedulingId = randomUUID();
+    this.options.providerTools?.recordProviderRequest?.(
+      identity,
+      schedulingId,
+      'dependency_wait',
+      {},
+    );
     const completion = Promise.resolve().then(async () => {
       try {
         await this.options.generation.waitUntilReady?.(identity, controller.signal);
+        this.options.providerTools?.recordProviderRequest?.(
+          identity,
+          schedulingId,
+          'capacity_wait',
+          {},
+        );
         await this.capacity.run('text', request.projectId, controller.signal, async (lease) => {
+          this.options.providerTools?.recordProviderRequest?.(
+            identity,
+            schedulingId,
+            'complete',
+            {},
+          );
           this.executionLeases.set(identity.generationId, lease);
           try {
             await this.startAdmitted(request);
@@ -144,6 +164,12 @@ export class PiConversationRuntime implements ConversationRuntime {
           }
         });
       } catch (error) {
+        this.options.providerTools?.recordProviderRequest?.(
+          identity,
+          schedulingId,
+          controller.signal.aborted ? 'cancelled' : 'failed',
+          {},
+        );
         const current = this.options.generation.get(identity.generationId);
         if (['prepared', 'streaming'].includes(current.status)) {
           this.options.providerTools?.terminateGeneration(
@@ -272,6 +298,8 @@ export class PiConversationRuntime implements ConversationRuntime {
         return undefined;
       },
       prepareNextTurnWithContext: ({ message, toolResults, context }) => {
+        providerGateway?.assertRepairBudget();
+        gateway?.assertRepairBudget();
         providerGateway?.finishProviderResponse();
         const supplements =
           this.options.generation.consumeSupplements?.(identity.generationId) ?? [];
@@ -519,6 +547,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       (request) => this.requestMediaSelection(identity.generationId, request),
       (request) => this.requestMediaSubmission(identity.generationId, request),
       planHooks,
+      !planned,
     );
   }
 
@@ -617,15 +646,57 @@ export class PiConversationRuntime implements ConversationRuntime {
 
   private createNativeStream(identity: LlmGenerationIdentity): StreamFn {
     if (!this.options.bridge) throw new Error('Pi runtime requires a NativeProviderBridge.');
-    return createPiStreamFunction(this.options.bridge, (_model, context) => {
-      const runtime = this.options.generation.runtime(identity);
-      return nativeParams({
-        ...runtime,
-        systemInstruction: context.systemPrompt ?? runtime.systemInstruction,
-        // Pi's system prompt already includes the frozen project context.
-        context: context.systemPrompt === undefined ? runtime.context : '',
-      });
-    });
+    const observations = new Map<string, { at: number; seen: Set<string> }>();
+    return createPiStreamFunction(
+      this.options.bridge,
+      (model, context, options) => {
+        const runtime = this.options.generation.runtime(identity);
+        return nativeParams({
+          ...runtime,
+          systemInstruction: context.systemPrompt ?? runtime.systemInstruction,
+          // Pi's system prompt already includes the frozen project context.
+          context: context.systemPrompt === undefined ? runtime.context : '',
+          inferenceSettings: runtime.inferenceSettings
+            ? {
+                ...runtime.inferenceSettings,
+                maxOutputTokens: Math.min(
+                  options?.maxTokens ?? model.maxTokens,
+                  runtime.inferenceSettings.maxOutputTokens,
+                ),
+              }
+            : undefined,
+        });
+      },
+      (requestId, stage, metadata) => {
+        const previous = observations.get(requestId) ?? { at: 0, seen: new Set<string>() };
+        const now = Date.now();
+        const terminal = ['complete', 'failed', 'cancelled'].includes(stage);
+        const first = !previous.seen.has(stage);
+        previous.seen.add(stage);
+        if (first || terminal || now - previous.at >= 500) {
+          this.options.providerTools?.recordProviderRequest?.(identity, requestId, stage, metadata);
+          previous.at = now;
+        }
+        if (terminal) observations.delete(requestId);
+        else observations.set(requestId, previous);
+        const active = this.active.get(identity.generationId);
+        if (active) {
+          let live = active.liveActions.find((item) => item.id === requestId);
+          if (!live) {
+            live = { id: requestId, toolName: 'model.request', status: 'running' };
+            active.liveActions.push(live);
+          }
+          live.phase = stage;
+          live.lastActivityAt = new Date().toISOString();
+          if (typeof metadata.toolName === 'string') live.toolName = metadata.toolName;
+          if (typeof metadata.argumentBytes === 'number')
+            live.argumentBytes = metadata.argumentBytes;
+          if (terminal) live.status = stage === 'complete' ? 'succeeded' : 'failed';
+          if (active.liveActions.length > 80)
+            active.liveActions.splice(0, active.liveActions.length - 80);
+        }
+      },
+    );
   }
 
   private async run(
@@ -694,7 +765,7 @@ export class PiConversationRuntime implements ConversationRuntime {
 function unifiedAgentInstruction(base: string): string {
   base +=
     '\nFor production prompt authoring, use production.read on demand and production.execute with a structured execution list for existing approved character/setting/scene/shot IDs. Fill only relevant fields, including explicit continuity before/after/locked facts and predecessor IDs when supported by the story. These are authored requirements, never proof that a generated video followed them. Read the target rowVersion first; stable executionKey retries identical content only. Do not fabricate resource IDs or system statuses. Create documents with the existing draft tools, and propose scene/cast/shot relationships through the existing review tools before updating production instructions. A manual prompt/cast edit makes the old instruction stale; read the current state and write a new instruction revision preserving that edit. The user chooses the Provider/model after entering the production form. Do not change official model contracts or make paid submissions from this checklist.';
-  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. Before saving text, retrieve project.structure.get or project.get_context and choose the resourceMap destination by the user's goal. Echo the resourceId in the write call. Novel chapter bodies and novel outlines/settings belong to the 小说 workspace; short-drama outlines/plans belong to 剧本, and production character/scene prompts belong to 角色与场景. 场次与镜头 is a scene → shot tree with an independent prompt per shot. Call scene.submit_structure with resourceId:workspace:shots, resolution:resolved, episodeTitle, and scenes:[{title,videoPrompt,sceneDocumentId,characterDocumentIds,shots:[{title,prompt}]}]. You must semantically identify ALL appearing characters, including silent characters, aliases and pronouns, and the scene from project resources read on demand. Return actual document IDs; the system never infers relationships from names or prompt placeholders. Read existing scenes with scene.read on demand before revising them. For existing scenes include sceneId/current expectedRowVersion and shots:[] instead of creating duplicates; return the full updated cast and preserve prompt text unless asked to rewrite. If a reference is ambiguous or missing return resolution:needs_clarification, scenes:[], feedback, and no binding changes. Create missing character/scene documents first only if authorized. A changeSetId means pending review on that page; the directory receives entities only after user approval. A standalone storyboard document never creates scene/shot entries. Report the actual returned state. A document kind such as outline does not determine whether it is a novel or screenplay. The project name and current visible page do not override the user's goal. For existing resources echo their actual document/node ID and current version/CAS. Check the returned locator.workspace, resourceId and documentVersionId before reporting where content was saved. For an explicit image or video generation request, call media.image.prepare or media.video.prepare; do not merely write a prompt or claim the application cannot generate media. The user, never the Agent or Worker, chooses the concrete media Provider/model from compatible candidates. A media prepare result creates only a local draft and never means that a paid Provider request was submitted. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
+  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. Before saving text, retrieve project.structure.get or project.get_context and choose the resourceMap destination by the user's goal. Echo the resourceId in the write call. Novel chapter bodies and novel outlines/settings belong to the 小说 workspace; short-drama outlines/plans belong to 剧本, and production character/scene prompts belong to 角色与场景. 场次与镜头 is a scene → shot tree with an independent prompt per shot. Choose needed tools with tools.load from the compact catalog; this only loads schemas and never grants authorization. For scene/shot authoring submit instruction only; the system renders prompts. Use scene.structure.stage for multi-scene or long plans: save shared scene setup then at most four shots per call, query missing ranges after interruptions and finalize one complete review proposal. For a small scene.submit_structure call use resourceId:workspace:shots, resolution:resolved and real reference IDs. You must semantically identify ALL appearing characters, including silent characters, aliases and pronouns, and the scene from project resources read on demand. Return actual document IDs; the system never infers relationships from names or prompt placeholders. Read existing scenes with scene.read on demand before revising them. For existing scenes include sceneId/current expectedRowVersion and shots:[] instead of creating duplicates; return the full updated cast and preserve prompt text unless asked to rewrite. If a reference is ambiguous or missing return resolution:needs_clarification, scenes:[], feedback, and no binding changes. Create missing character/scene documents first only if authorized. A changeSetId means pending review on that page; the directory receives entities only after user approval. A standalone storyboard document never creates scene/shot entries. Report the actual returned state. A document kind such as outline does not determine whether it is a novel or screenplay. The project name and current visible page do not override the user's goal. For existing resources echo their actual document/node ID and current version/CAS. Check the returned locator.workspace, resourceId and documentVersionId before reporting where content was saved. For an explicit image or video generation request, call media.image.prepare or media.video.prepare; do not merely write a prompt or claim the application cannot generate media. The user, never the Agent or Worker, chooses the concrete media Provider/model from compatible candidates. A media prepare result creates only a local draft and never means that a paid Provider request was submitted. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
 }
 
 function withFrozenContext(instruction: string, context: string): string {
@@ -713,7 +784,7 @@ function modelFromRuntime(runtime: LlmGenerationRuntimeRequest): Model<string> {
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,
-    maxTokens: 16_384,
+    maxTokens: runtime.inferenceSettings?.maxOutputTokens ?? 16_384,
   };
 }
 
@@ -835,8 +906,7 @@ function buildContinuation(
     output: result.content
       .filter((item) => item.type === 'text')
       .map((item) => item.text)
-      .join('\n')
-      .slice(0, 100_000),
+      .join('\n'),
   }));
   if (protocol === 'openai-responses') {
     return { protocol, previousResponseId: message.responseId!, outputs };
@@ -866,17 +936,38 @@ function buildContinuation(
         output: item.content
           .filter((block) => block.type === 'text')
           .map((block) => block.text)
-          .join('\n')
-          .slice(0, 100_000),
+          .join('\n'),
       });
     }
   }
   return {
     protocol,
     providerResponseId: message.responseId ?? `pi:${calls[0]?.id ?? 'tool-turn'}`,
-    history,
+    history: compactRepeatedResults(history, outputs),
     content: assistantText(message),
     calls,
     outputs,
   };
+}
+
+/** Keep one exact copy of repeated read results; no unique content or constraints are removed. */
+export function compactRepeatedResults(
+  history: LlmChatToolTurn[],
+  current: Array<{ callId: string; output: string }>,
+): LlmChatToolTurn[] {
+  const copies = new Map(current.map((output) => [output.output, output.callId]));
+  const result = structuredClone(history);
+  for (const turn of [...result].reverse()) {
+    for (const output of [...turn.outputs].reverse()) {
+      const latest = copies.get(output.output);
+      if (latest && output.output.length > 2000)
+        output.output = JSON.stringify({
+          status: 'identical_result',
+          fullResultCallId: latest,
+          instruction: 'The exact result is retained at the later tool result in this request.',
+        });
+      else copies.set(output.output, output.callId);
+    }
+  }
+  return result;
 }

@@ -411,6 +411,16 @@ describe('AgentProviderLoopService', () => {
       expect(workflow.listDocuments()).toHaveLength(0);
       const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
       faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'tools.load',
+              { names: ['document.list', 'novel.chapter.list', 'novel.chapter.write_draft'] },
+              { id: 'load-tools' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-response' },
+        ),
         fauxAssistantMessage([fauxToolCall('document.list', {}, { id: 'list-documents' })], {
           stopReason: 'toolUse',
           responseId: 'list-response',
@@ -2337,6 +2347,16 @@ describe('AgentProviderLoopService', () => {
       const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
       faux.setResponses([
         fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'tools.load',
+              { names: ['novel.chapter.submit_draft'] },
+              { id: 'load-tools' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-response' },
+        ),
+        fauxAssistantMessage(
           [fauxToolCall('library.search', { query: '已有故事设定' }, { id: 'lookup' })],
           { stopReason: 'toolUse', responseId: 'lookup-response' },
         ),
@@ -2462,6 +2482,16 @@ describe('AgentProviderLoopService', () => {
       );
       const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
       faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'tools.load',
+              { names: ['novel.chapter.submit_draft', 'project.get_context'] },
+              { id: 'load-tools' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-response' },
+        ),
         fauxAssistantMessage([fauxToolCall('project.get_context', {}, { id: 'context' })], {
           stopReason: 'toolUse',
           responseId: 'context-response',
@@ -3091,6 +3121,264 @@ describe('AgentProviderLoopService', () => {
       ).toEqual({ used_call_count: 2 });
     });
   });
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'reads more than six sources across batches while preserving the final document call (%s)',
+    async (protocol) => {
+      const { conversation, generations, loop, project } = await setup(protocol);
+      const content = new ContentService(project);
+      for (let index = 0; index < 15; index += 1) {
+        content.saveDocument({
+          kind: 'character',
+          title: `Production source ${index}`,
+          contentMarkdown: `Verified appearance details for character ${index}.`,
+        });
+      }
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: 'Read the production sources before writing the shot plan.',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, 'Read the production sources.');
+      loop.startProviderStep(prepared.stream);
+      const searched = await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'source_lookup',
+        calls: [
+          {
+            id: 'source_lookup',
+            name: 'library.search',
+            authorizationHandle: agent.tools.find((tool) => tool.name === 'library.search')!
+              .authorizationHandle,
+            argumentsJson: JSON.stringify({ query: 'Production source', limit: 20 }),
+          },
+        ],
+      });
+      const { sources } = JSON.parse(searched.continuation!.outputs[0]!.output) as {
+        sources: Array<{ sourceHandle: string }>;
+      };
+      expect(sources).toHaveLength(15);
+      const readTool = agent.tools.find((tool) => tool.name === 'library.read')!;
+      const outputs: Array<{
+        status: string;
+        errorCode?: string;
+        message?: string;
+        budget: { taskRemaining: number; readRemaining: number };
+      }> = [];
+      let offset = 0;
+      let remainingTools = searched.tools;
+      // The screenshot failed on the seventh read, in a four-call then three-call sequence.
+      for (const size of [4, 3, 6, 2]) {
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: `source_reads_${offset}`,
+          calls: sources.slice(offset, offset + size).map((source, index) => ({
+            id: `source_read_${offset + index}`,
+            name: 'library.read',
+            authorizationHandle: readTool.authorizationHandle,
+            argumentsJson: JSON.stringify({
+              sourceHandle: source.sourceHandle,
+              readMode: 'source',
+            }),
+          })),
+        });
+        outputs.push(
+          ...result.continuation!.outputs.map(
+            (output) => JSON.parse(output.output) as (typeof outputs)[number],
+          ),
+        );
+        remainingTools = result.tools;
+        offset += size;
+      }
+      expect(outputs.slice(0, 14).map((output) => output.status)).toEqual(Array(14).fill('read'));
+      expect(outputs[6]).toMatchObject({ budget: { taskRemaining: 7, readRemaining: 9 } });
+      expect(outputs[14]).toMatchObject({
+        status: 'failed',
+        errorCode: 'LIBRARY_BUDGET_EXCEEDED',
+        budget: { taskRemaining: 0, readRemaining: 2 },
+      });
+      expect(outputs[14]!.message).toContain('task');
+      expect(remainingTools!.map((tool) => tool.name)).not.toContain('library.read');
+      const drafted = await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'sourced_draft',
+        calls: [
+          {
+            id: 'sourced_draft',
+            name: 'document.create_draft',
+            authorizationHandle: remainingTools!.find(
+              (tool) => tool.name === 'document.create_draft',
+            )!.authorizationHandle,
+            argumentsJson: JSON.stringify({
+              title: 'Shot plan',
+              contentMarkdown: 'Plan based on verified appearance details.',
+            }),
+          },
+        ],
+      });
+      expect(drafted.continuation!.outputs[0]!.output).toContain('draft_created');
+      expect(
+        project.access(false, (db) =>
+          db
+            .prepare('SELECT tool_call_limit, tool_call_count FROM agent_tasks WHERE id = ?')
+            .get(agent.taskId),
+        ),
+      ).toEqual({ tool_call_limit: 16, tool_call_count: 16 });
+    },
+  );
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'allows eight searches on one authorization and rejects the ninth (%s)',
+    async (protocol) => {
+      const { conversation, generations, loop, project } = await setup(protocol);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: 'Locate several project sources.',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, 'Locate several project sources.');
+      loop.startProviderStep(prepared.stream);
+      const searchTool = agent.tools.find((tool) => tool.name === 'library.search')!;
+      const outputs: Array<{
+        status: string;
+        errorCode?: string;
+        budget: { searchRemaining: number };
+      }> = [];
+      for (let index = 0; index < 9; index += 1) {
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: `lookup_${index}`,
+          calls: [
+            {
+              id: `lookup_${index}`,
+              name: 'library.search',
+              authorizationHandle: searchTool.authorizationHandle,
+              argumentsJson: JSON.stringify({ query: `Source ${index}` }),
+            },
+          ],
+        });
+        outputs.push(
+          JSON.parse(result.continuation!.outputs[0]!.output) as (typeof outputs)[number],
+        );
+      }
+      expect(outputs.slice(0, 8).map((output) => output.status)).toEqual(Array(8).fill('searched'));
+      expect(outputs[8]).toMatchObject({
+        status: 'failed',
+        errorCode: 'LIBRARY_BUDGET_EXCEEDED',
+        budget: { searchRemaining: 0 },
+      });
+      expect(loop.refreshTools(prepared.stream).map((tool) => tool.name)).not.toContain(
+        'library.search',
+      );
+      expect(
+        project.access(false, (db) =>
+          db.prepare('SELECT tool_call_count FROM agent_tasks WHERE id = ?').get(agent.taskId),
+        ),
+      ).toEqual({ tool_call_count: 8 });
+    },
+  );
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'keeps the sixteen-read limit across authorization renewal (%s)',
+    async (protocol) => {
+      const { conversation, generations, loop, project } = await setup(protocol);
+      const body = 'Current source appearance details. '.repeat(100);
+      new ContentService(project).saveDocument({
+        kind: 'character',
+        title: 'Paged source',
+        contentMarkdown: body,
+      });
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: 'Read a long source in pages.',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, 'Read a long source in pages.');
+      // Exercise the read ceiling independently of the smaller default task quota.
+      project.access(true, (db) =>
+        db.prepare('UPDATE agent_tasks SET tool_call_limit = 32 WHERE id = ?').run(agent.taskId),
+      );
+      loop.startProviderStep(prepared.stream);
+      let tools = loop.advanceTextTurn({
+        ...prepared.stream,
+        providerResponseId: 'quota_fixture',
+        finishReason: 'completed',
+      });
+      loop.startProviderStep(prepared.stream);
+      const searched = await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'page_lookup',
+        calls: [
+          {
+            id: 'page_lookup',
+            name: 'library.search',
+            authorizationHandle: tools.find((tool) => tool.name === 'library.search')!
+              .authorizationHandle,
+            argumentsJson: JSON.stringify({ query: 'Paged source' }),
+          },
+        ],
+      });
+      const { sources } = JSON.parse(searched.continuation!.outputs[0]!.output) as {
+        sources: Array<{ sourceHandle: string }>;
+      };
+      let offset = 0;
+      let reconstructed = '';
+      for (let index = 0; index < 17; index += 1) {
+        if (index === 8) {
+          tools = loop.advanceTextTurn({
+            ...prepared.stream,
+            providerResponseId: 'renewal',
+            finishReason: 'completed',
+          });
+          loop.startProviderStep(prepared.stream);
+        }
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: `page_${index}`,
+          calls: [
+            {
+              id: `page_${index}`,
+              name: 'library.read',
+              authorizationHandle: tools.find((tool) => tool.name === 'library.read')!
+                .authorizationHandle,
+              argumentsJson: JSON.stringify({
+                sourceHandle: sources[0]!.sourceHandle,
+                readMode: 'source',
+                offset,
+                maxChars: 100,
+              }),
+            },
+          ],
+        });
+        const output = JSON.parse(result.continuation!.outputs[0]!.output) as {
+          status: string;
+          content: string;
+          nextOffset: number;
+          budget: { taskRemaining: number; readRemaining: number };
+        };
+        if (index < 16) {
+          expect(output.status).toBe('read');
+          reconstructed += output.content;
+          offset = output.nextOffset;
+        } else {
+          expect(output).toMatchObject({
+            status: 'failed',
+            errorCode: 'LIBRARY_BUDGET_EXCEEDED',
+            budget: { taskRemaining: 14, readRemaining: 0 },
+          });
+        }
+      }
+      expect(reconstructed).toBe(body.slice(0, 1600));
+      expect(
+        project.access(false, (db) =>
+          db.prepare('SELECT tool_call_count FROM agent_tasks WHERE id = ?').get(agent.taskId),
+        ),
+      ).toEqual({ tool_call_count: 17 });
+    },
+  );
 
   it('reuses the same research authorization across sequential Provider tool calls', async () => {
     const research = new ResearchService({
@@ -4651,6 +4939,16 @@ describe('AgentProviderLoopService', () => {
       faux.setResponses(
         write
           ? [
+              fauxAssistantMessage(
+                [
+                  fauxToolCall(
+                    'tools.load',
+                    { names: ['document.create_draft'] },
+                    { id: 'load-tools' },
+                  ),
+                ],
+                { stopReason: 'toolUse', responseId: 'load-response' },
+              ),
               fauxAssistantMessage(
                 [
                   fauxToolCall(

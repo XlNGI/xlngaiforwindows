@@ -31,6 +31,7 @@ import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { AgentDraftSubmissionService } from './agent-draft-submission-service.js';
 import { compileProjectResourceMap } from './project-resource-map.js';
 import { SceneStructureSubmissionService } from './scene-structure-submission-service.js';
+import { splitConversationRequest } from './conversation-request.js';
 import { ProductionService } from './production-service.js';
 import type { ProductionTarget } from '@ai-video/contracts';
 import type { NovelBatchService } from './novel-batch-service.js';
@@ -198,6 +199,8 @@ export class AgentSystemToolService {
       }
       case 'scene.submit_structure':
         return new SceneStructureSubmissionService(this.projects).submit(args, identity);
+      case 'scene.structure.stage':
+        return new SceneStructureSubmissionService(this.projects).stage(args, identity);
       case 'document.submit_draft':
       case 'novel.chapter.write_draft':
         if (!this.documents) throw unavailable('Draft submission');
@@ -284,8 +287,8 @@ export class AgentSystemToolService {
   ): Record<string, unknown> {
     rejectUnknown(args, ['decision', 'targetGenerationId', 'content', 'rationale']);
     const decision = requiredString(args.decision, 'decision', 32) as
-      'independent' | 'follow_up' | 'supplement';
-    if (!new Set(['independent', 'follow_up', 'supplement']).has(decision))
+      'independent' | 'follow_up' | 'supplement' | 'inspect';
+    if (!new Set(['independent', 'follow_up', 'supplement', 'inspect']).has(decision))
       throw new Error('Invalid task route decision.');
     const targetGenerationId =
       args.targetGenerationId === undefined
@@ -359,7 +362,7 @@ export class AgentSystemToolService {
             throw new Error('目标任务尚未完成，暂时不能建立有序跟进；请独立执行或补充该任务。');
           const snapshot = JSON.stringify({
             generationId: target.id,
-            userMessage: { content: target.user_content },
+            userMessage: { content: splitConversationRequest(target.user_content).request },
             assistantMessage: { content: target.assistant_content },
           });
           database
@@ -373,10 +376,41 @@ export class AgentSystemToolService {
             decision,
             generationId: current.id,
             targetGenerationId: target.id,
-            targetSummary: target.assistant_content.slice(0, 4000),
+            targetStatus: target.status,
+            targetRequest: splitConversationRequest(target.user_content).request.slice(0, 800),
+            targetSummary: target.assistant_content.slice(0, 1600),
+            summaryIsAssistantClaim: true,
             rationale,
           };
         }
+        if (decision === 'inspect') {
+          const artifacts = database
+            .prepare(
+              `SELECT sets.id,sets.title,sets.status FROM agent_change_sets sets
+            JOIN agent_task_generations links ON links.task_id=sets.task_id WHERE links.generation_id=? LIMIT 20`,
+            )
+            .all(target.id);
+          const outputs = database
+            .prepare(
+              `SELECT calls.tool_name,calls.status,calls.result_document_id,calls.result_document_version_id
+            FROM agent_tool_calls calls WHERE calls.generation_id=? AND calls.result_document_id IS NOT NULL ORDER BY calls.created_at DESC LIMIT 20`,
+            )
+            .all(target.id);
+          this.appendRoutingEvent(database, project.id, identity.taskId, '查询任务结果', rationale);
+          return {
+            status: 'inspected',
+            decision,
+            targetGenerationId: target.id,
+            targetStatus: target.status,
+            targetRequest: splitConversationRequest(target.user_content).request.slice(0, 800),
+            artifacts,
+            outputs,
+            dependencyEstablished: false,
+            rationale,
+          };
+        }
+        if (!['prepared', 'streaming'].includes(target.status))
+          throw new Error('只能向仍在运行的任务补充指令；失败或取消任务请使用 inspect。');
         const messageId = randomUUID();
         const now = new Date().toISOString();
         database
@@ -691,18 +725,20 @@ export class AgentSystemToolService {
   }
 
   private projectStructure(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['includeArchived']);
+    rejectUnknown(args, ['includeArchived', 'detail']);
     const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
     if (!this.structureCompiler) throw unavailable('Project structure');
     return this.projects.access(false, (database, project) => ({
       version: 1,
       status: 'succeeded',
       resourceMap: compileProjectResourceMap(database, project, includeArchived),
-      ...boundedStructurePreview(
-        this.structureCompiler!.compileFromDatabase(database, project, {
-          includeArchived,
-        }),
-      ),
+      ...(args.detail === 'full'
+        ? boundedStructurePreview(
+            this.structureCompiler!.compileFromDatabase(database, project, {
+              includeArchived,
+            }),
+          )
+        : { detail: 'compact', expandWith: 'project.structure.get detail=full' }),
     }));
   }
 

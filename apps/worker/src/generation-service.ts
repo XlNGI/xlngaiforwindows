@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { splitConversationRequest } from './conversation-request.js';
 import type {
   AgentGenerationPrepareParams,
   ChatMessageInfo,
@@ -516,7 +517,7 @@ export class GenerationService {
     const current = state.assistantMessage.content;
     // Native/Pi callbacks can arrive concurrently around a tool continuation.
     // A delayed or replaced snapshot is stale rather than an invalid generation.
-    if (!params.content.startsWith(current)) {
+    if (params.content === current || !params.content.startsWith(current)) {
       return publicState(state);
     }
     const observedAt = nowIso();
@@ -526,12 +527,19 @@ export class GenerationService {
       firstTokenAt:
         state.attempt.firstTokenAt || !params.content ? state.attempt.firstTokenAt : observedAt,
     };
-    const saved = this.persistAssistantAndAttempt(state, params.content, 'streaming', attempt);
-    if (!saved) throw new Error('Project session changed during generation.');
     state.status = 'streaming';
     state.attempt = attempt;
-    state.assistantMessage = saved;
-    state.persistedCharacters = saved.content.length;
+    state.assistantMessage = {
+      ...state.assistantMessage,
+      content: params.content,
+      status: 'streaming',
+    };
+    if (
+      state.persistedCharacters === 0 ||
+      params.content.length - state.persistedCharacters >= this.flushCharacterThreshold
+    )
+      this.flushStreaming(state);
+    else this.scheduleFlush(state);
     return publicState(state);
   }
 
@@ -667,6 +675,11 @@ export class GenerationService {
       return database.transaction(() => {
         const recoveredAt = nowIso();
         const failureMessage = '生成因 Worker 重启而中断。';
+        database
+          .prepare(
+            `UPDATE llm_provider_requests SET stage='failed',updated_at=?,completed_at=? WHERE project_id=? AND completed_at IS NULL`,
+          )
+          .run(recoveredAt, recoveredAt, project.id);
         const messages = repositories.chatMessages.failStreamingByProject(
           project.id,
           failureMessage,
@@ -857,6 +870,7 @@ export class GenerationService {
       providerProfileId: selection.providerProfileId,
       modelId: selection.modelId,
       remoteModelId: selection.remoteModelId,
+      inferenceSettings: selection.inferenceSettings,
       protocol: selection.protocol,
       baseUrl: selection.baseUrl,
       systemInstruction,
@@ -1051,6 +1065,10 @@ export class GenerationService {
           startedAt,
         );
         repositories.llmGenerations.insert(record);
+        const input = splitConversationRequest(userMessage.content);
+        database
+          .prepare('UPDATE llm_generations SET user_request=?,session_constraints=? WHERE id=?')
+          .run(input.request, input.constraints, generationId);
         database
           .prepare(
             `INSERT INTO generation_branches(generation_id,branch_id,input_message_id,history_cutoff,
@@ -1080,21 +1098,24 @@ export class GenerationService {
     const activeTaskContext = this.projects.access(false, (database, project) => {
       const rows = database
         .prepare(
-          `SELECT generations.id,generations.status,substr(messages.content,1,240) AS prompt
+          `SELECT generations.id,generations.status,COALESCE(generations.user_request,messages.content) AS prompt,
+            generations.created_at,
+            (SELECT COUNT(*) FROM agent_change_sets sets JOIN agent_task_generations links ON links.task_id=sets.task_id WHERE links.generation_id=generations.id) AS proposals
            FROM llm_generations generations
            JOIN chat_messages messages ON messages.id=generations.user_message_id
           WHERE generations.project_id=? AND generations.conversation_id=?
             AND generations.id<>?
-            AND generations.status IN ('prepared','streaming','complete')
           ORDER BY generations.created_at DESC LIMIT 8`,
         )
         .all(project.id, conversationId, generationId) as Array<{
         id: string;
         status: string;
         prompt: string;
+        created_at: string;
+        proposals: number;
       }>;
       if (!rows.length) return '';
-      return `\n\n当前会话存在以下活动或最近完成的任务。请由你判断本条消息与它们的关系；需要关联时先调用 conversation.task.route，不能依据界面默认值替用户决定：\n${rows.map((row) => `- generationId=${row.id}；状态=${row.status}；用户请求=${row.prompt}`).join('\n')}\n可选关系：independent（独立执行）、follow_up（继续已完成任务）、supplement（向活动任务补充指令）。若无明确关系，选择 independent。`;
+      return `\n\n当前会话最近任务。由你判断语义关系，需要关联时调用 conversation.task.route：\n${rows.map((row) => `- generationId=${row.id}；状态=${row.status}；创建=${row.created_at}；提案数=${row.proposals}；用户请求=${JSON.stringify(splitConversationRequest(row.prompt).request.slice(0, 800))}`).join('\n')}\n可选关系：independent（独立执行）、follow_up（继续成功任务）、inspect（查询失败/取消/其他任务的真实结果，不建立成功依赖）、supplement（向活动任务补充指令）。无明确关系选择 independent。`;
     });
     return {
       state,

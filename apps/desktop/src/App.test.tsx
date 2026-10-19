@@ -2450,6 +2450,11 @@ describe('App', () => {
       expect(batchCalls.filter(([method]) => method === 'chat.message.save')).toHaveLength(0);
       const run = batchCalls.find(([method]) => method === 'agent.run');
       expect(run?.[1]).not.toHaveProperty('novelIntent');
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(screen.getByLabelText('会话消息')).toHaveValue(''));
+      expect(screen.getByLabelText('章节内容')).toHaveValue('Agent 桌面人工测试成功');
       return;
     }
     expect((await screen.findAllByText(createdDocument.title)).length).toBeGreaterThan(0);

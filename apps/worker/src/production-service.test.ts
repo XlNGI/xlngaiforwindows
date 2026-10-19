@@ -525,7 +525,7 @@ describe('production execution in the project store', () => {
           scenes: [{ title: '场次', shots: [{ title: '分镜', instruction: detail }] }],
         }),
       ),
-    ).toThrow('预计时长');
+    ).toThrow('timing');
     const changes = new ChangeSetService(f.projects);
     const proposal = changes.create({
       title: '审核原子性',
@@ -538,6 +538,7 @@ describe('production execution in the project store', () => {
           instruction: {
             ...detail,
             timing: { estimatedDurationSeconds: 3, rationale: '回头观察' },
+            stillFrame: '回头之前的画面',
           },
           prompt: '回头',
         },

@@ -57,6 +57,8 @@ import { MIGRATION_V53 } from './migration-v53.js';
 import { MIGRATION_V54 } from './migration-v54.js';
 import { MIGRATION_V55 } from './migration-v55.js';
 import { MIGRATION_V56 } from './migration-v56.js';
+import { widenLibraryReadAuthorizationLimit } from './migration-v57.js';
+import { MIGRATION_V58 } from './migration-v58.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -603,6 +605,25 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(56, now);
+    })();
+  }
+  if (currentVersion < 57) {
+    widenLibraryReadAuthorizationLimit(database, now);
+  }
+  if (currentVersion < 58) {
+    database.transaction(() => {
+      const columns = new Set(
+        (
+          database.prepare('PRAGMA table_info(llm_generations)').all() as Array<{ name: string }>
+        ).map((column) => column.name),
+      );
+      for (const column of ['user_request', 'session_constraints'])
+        if (!columns.has(column))
+          database.exec(`ALTER TABLE llm_generations ADD COLUMN ${column} TEXT`);
+      database.exec(MIGRATION_V58);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(58, now);
     })();
   }
   return getSchemaVersion(database);
