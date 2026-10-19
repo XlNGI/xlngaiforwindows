@@ -16,7 +16,7 @@ describe('model contract registry', () => {
     expect(contract).toMatchObject({ status: 'verified', capabilities: { audioInput: true } });
     expect(contract.parameterSchema.properties).toHaveProperty('media');
     expect(getModelContract('cn.qwen.wan3-0-video', 1)?.capabilities.audioInput).toBe(false);
-    expect(resolveModelBinding('unicompapi', 'wan3.0-video')?.contract.contractRevision).toBe(1);
+    expect(resolveModelBinding('unicompapi', 'wan3.0-video')?.contract.contractRevision).toBe(3);
     expect(
       getModelContract('cn.kling.character-element')?.parameterSchema.properties,
     ).toHaveProperty('element_voice_id');

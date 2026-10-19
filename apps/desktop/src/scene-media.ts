@@ -4,10 +4,11 @@ import type {
   SceneMediaResolveParams,
   SceneMediaResolveResult,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
 
 const pending = new Map<string, Promise<SceneMediaResolveResult>>();
 export function readSceneMedia(projectId: string, params: SceneMediaResolveParams) {
+  const callWorker = projectWorker();
   const key = `${projectId}:${JSON.stringify(params)}`;
   let request = pending.get(key);
   if (!request) {

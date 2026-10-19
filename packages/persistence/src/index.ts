@@ -15,3 +15,6 @@ export * from './project-library-chunks.js';
 export * from './project-structure.js';
 export * from './repositories.js';
 export * from './schema.js';
+export * from './task-history.js';
+export * from './migration-v55.js';
+export * from './shot-continuity.js';

@@ -110,6 +110,7 @@ created -> streaming -> complete
 | 未声明字段和凭据不可进入草稿 | Adapter Schema/Worker Draft Service | additional-properties/credential-exclusion |
 | 模型能力组合必须在 Worker 复验 | Adapter Registry | duration-resolution/reference-count |
 | 草稿不得跨镜头或跨项目 | Worker Draft Service/SQLite | shot-adapter-ownership |
+| 镜头衔接必须人工确认画面，LLM 迟到结果不得覆盖新来源 | Shot Continuity / FFmpeg / SQLite / Desktop | exact-frame-pixels/manual-anchor/CAS/source-change/reframe-adoption/transaction-compensation |
 | 凭据只进入 Windows 安全存储 | Tauri Credential Commands | provider-allowlist/native-status |
 | 多进程只允许一个写者 | Worker Project Service | multi-process-lock-race |
 | 损坏恢复不泄漏连接 | Worker Project/Persistence | corrupt-restore-cleanup |
@@ -147,6 +148,18 @@ created -> streaming -> complete
 | 研究桥慢连接和取消风暴不造成无界线程或内存 | Native Research Bridge | response-permit-lifetime/cancel-registry-bound/early-cancel-ttl |
 
 后续里程碑必须在本表中追加不变量，不得删除历史条目来规避门禁。
+
+2026-10-17 多项目后端新增追踪（原 project.open/close 兼容路径仍保留原语义；以下适用于新 runtime 入口）：
+
+| 不变量 | 负责模块 | 验证证据 |
+| --- | --- | --- |
+| 激活 B 不停止 A，A/B 请求与增量各自落盘 | Runtime Registry / 每项目服务工厂 / Pi | runtime integration 双项目视频与文本流 |
+| 排队请求绑定入队时项目，卸载重开拒绝旧 epoch | IPC bind / RequestScheduler / Registry | queued-A/activate-B、旧代次请求、独立短写队列 |
+| 项目路径、身份和写锁不能被其他容器接管 | Registry / ProjectService guard | clone ID、expected ID、链接拒绝、只读及目录身份恢复 |
+| 容量与项目句柄有界，排队及活动任务不得被空闲回收 | Shared TaskCapacity / Registry 引用 | 两类请求容量、轮转、取消等待与 idle eviction |
+| 恢复选择仅登记本地元数据，不复制正文或索引 | App Schema v8 / AppSettings | 迁移回滚、升级备份、显式 opt-in 恢复、缺失目录及卸载关闭恢复 |
+
+详见 [并发计划 P2 验收](./code-traces/2026-10-17-concurrency-p2.md)。前端多任务、真实 Provider、应用休眠和完整升级验收仍按后续阶段记录。
 
 2026-10-14 固定角色配音新增追踪：
 
@@ -216,6 +229,8 @@ created -> streaming -> complete
 
 ## 7. 签收规则
 
+2026-10-17 完整场次制作 P6：项目 Schema v54，详细场次/逐镜指令、剧情估时、全部分镜预填、模型参数映射与分段制作来源完成。全仓 1,431 项、typecheck、lint、format:check、build、git diff --check 通过；未调用真实付费 Provider，未重打安装包，不改变既有发布验收边界。详见 [完整场次制作验证](./code-traces/2026-10-17-scene-production.md)。
+
 - `P0`、`P1` 已知问题必须清零。
 - `P2` 问题必须记录接受原因、影响范围、负责人和计划修复里程碑。
 - 单元、契约、集成和原生端检查全部通过。
@@ -238,3 +253,7 @@ created -> streaming -> complete
 -> 真实环境验证
 -> 里程碑签收
 ```
+
+2026-10-17 并发计划 P3 增量：Desktop 的项目激活和会话切换只切换观察；显式卸载仍停止对应本地运行。请求/媒体预览绑定原项目运行代次，多任务确认按 owner/token 排队，断线不取消 Worker Pi。旧回调及 finally 不得更新新项目视图。证据：[P3 验收](./code-traces/2026-10-17-concurrency-p3.md)。
+
+2026-10-17 统一并发 P6：P0–P5 及自动化组合门禁完成，项目 Schema v53 / 应用 v8。全仓 1,405 项、Rust 157 项、实际本地 FFmpeg、独立打包 Sidecar、Windows Edge 双页面与 NSIS 构建通过；末次图片迟到输出清理另有 65 项回归。pnpm audit 请求链失败，npm 官方生产依赖公告直接查询为 0；未冒充该命令通过。完整 Windows 休眠、安装升级回滚、签名及 DOCX 渲染验收仍为 HOLD。详见 [P6 记录](./code-traces/2026-10-17-concurrency-p6.md)。

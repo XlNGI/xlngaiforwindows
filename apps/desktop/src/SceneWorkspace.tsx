@@ -5,12 +5,12 @@ import type {
   DocumentSummary,
   SceneInfo,
   SceneMaterialBindingInfo,
-  SceneMaterialRole,
   SceneCharacterBindingInfo,
   AudioFileInfo,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
-import { AssetImagePreview } from './AssetImagePreview';
+import { projectWorker } from './worker-scope';
+import { ReferenceCard, referenceAssetName } from './ReferenceCard';
+import { SceneSettingCard, useSceneSettingImages } from './SceneSettingCard';
 import { DubbingScenePanel } from './dubbing/DubbingScenePanel';
 import { SceneCastEditor } from './SceneCastEditor';
 import { sceneMediaParams, useSceneMedia } from './scene-media';
@@ -37,6 +37,10 @@ function SceneWorkspaceContent({
   onOpenAsset,
   onRequestBindings,
   mediaRevision,
+  onBindSceneDocument,
+  onOpenDocument,
+  sceneBindingBusy,
+  sceneBindingMessage,
 }: {
   projectId?: string;
   scene: SceneInfo;
@@ -46,6 +50,10 @@ function SceneWorkspaceContent({
   assets: AssetInfo[];
   writable: boolean;
   mediaRevision?: number;
+  onBindSceneDocument?: (id: string) => void;
+  onOpenDocument?: (id: string) => void;
+  sceneBindingBusy?: boolean;
+  sceneBindingMessage?: string;
   onPromptChange: (value: string) => void;
   onSave: (
     prompt: string,
@@ -66,6 +74,7 @@ function SceneWorkspaceContent({
     dialogueAudioId?: string,
   ) => void;
 }) {
+  const callWorker = projectWorker();
   const [localBindings, setLocalBindings] = useState(
     bindings.filter((item) => item.role !== 'character'),
   );
@@ -75,6 +84,23 @@ function SceneWorkspaceContent({
   const [audioLoaded, setAudioLoaded] = useState(false);
   const [message, setMessage] = useState('');
   const revision = useMemo(() => ({ mediaRevision, assets }), [mediaRevision, assets]);
+  const setting = useSceneSettingImages(projectId, scene.sceneDocumentId, documents, revision);
+  const sceneBinding = localBindings.find((b) => b.role === 'scene');
+  const defaultSceneImage = setting.assets[0];
+  const effectiveBindings =
+    sceneBinding || !defaultSceneImage
+      ? localBindings
+      : [
+          ...localBindings,
+          {
+            id: `scene:${scene.id}`,
+            role: 'scene' as const,
+            label: documents.find((d) => d.id === scene.sceneDocumentId)?.title ?? '场景',
+            assetId: defaultSceneImage.id,
+            sourceDocumentId: scene.sceneDocumentId,
+            source: 'auto' as const,
+          },
+        ];
   const params = sceneMediaParams(
     characters,
     localBindings.map((b) => b.assetId),
@@ -87,6 +113,8 @@ function SceneWorkspaceContent({
     return [...map.values()];
   }, [assets, media.value]);
 
+  const savedMaterials = JSON.stringify(bindings);
+  const savedCharacters = JSON.stringify(scene.characterBindings ?? []);
   useEffect(() => {
     setLocalBindings(
       bindings.filter(
@@ -99,9 +127,25 @@ function SceneWorkspaceContent({
           ),
       ),
     );
+  }, [savedMaterials]);
+  useEffect(() => {
+    setLocalBindings((current) =>
+      current.filter(
+        (b) =>
+          !(
+            b.role === 'scene' &&
+            b.source === 'auto' &&
+            b.sourceDocumentId !== scene.sceneDocumentId
+          ),
+      ),
+    );
+  }, [scene.sceneDocumentId]);
+  useEffect(() => {
     setCharacters(scene.characterBindings ?? []);
+  }, [savedCharacters]);
+  useEffect(() => {
     setDialogueAudioId(scene.dialogueAudioId);
-  }, [scene.rowVersion, scene.sceneDocumentId]);
+  }, [scene.dialogueAudioId]);
   useEffect(() => {
     let active = true;
     let sequence = 0;
@@ -130,27 +174,6 @@ function SceneWorkspaceContent({
     };
   }, [projectId]);
 
-  const candidatesByRole = useMemo(() => {
-    const map: Record<SceneMaterialRole, AssetInfo[]> = {
-      character: [],
-      scene: [],
-      prop: [],
-      other: [],
-    };
-    for (const asset of mediaAssets.filter(isImage)) {
-      const kind = asset.kind.toLowerCase();
-      const role = kind.includes('character')
-        ? 'character'
-        : kind.includes('scene')
-          ? 'scene'
-          : kind.includes('prop')
-            ? 'prop'
-            : 'other';
-      map[role].push(asset);
-    }
-    return map;
-  }, [mediaAssets]);
-
   const setAsset = (binding: SceneMaterialBindingInfo, assetId: string) => {
     setLocalBindings((current) =>
       current.map((item) =>
@@ -159,7 +182,7 @@ function SceneWorkspaceContent({
     );
   };
   const tooManyReferences =
-    localBindings.length +
+    effectiveBindings.length +
       characters.filter(
         (item) =>
           !item.imageDisabled &&
@@ -183,7 +206,7 @@ function SceneWorkspaceContent({
               type="button"
               disabled={!writable || !audioLoaded || !prompt.trim() || !onRequestBindings}
               onClick={() =>
-                onRequestBindings?.(prompt, localBindings, characters, dialogueAudioId)
+                onRequestBindings?.(prompt, effectiveBindings, characters, dialogueAudioId)
               }
             >
               让助手关联角色与场景
@@ -192,7 +215,7 @@ function SceneWorkspaceContent({
               className="button secondary"
               type="button"
               disabled={!writable}
-              onClick={() => onSave(prompt, localBindings, characters, dialogueAudioId)}
+              onClick={() => onSave(prompt, effectiveBindings, characters, dialogueAudioId)}
             >
               <Save size={14} /> 保存提示词
             </button>
@@ -204,9 +227,11 @@ function SceneWorkspaceContent({
                 !prompt.trim() ||
                 tooManyReferences ||
                 media.loading ||
+                setting.loading ||
+                Boolean(setting.error) ||
                 Boolean(media.error)
               }
-              onClick={() => onGenerateVideo(localBindings, characters, dialogueAudioId)}
+              onClick={() => onGenerateVideo(effectiveBindings, characters, dialogueAudioId)}
             >
               <Video size={14} /> 生成场次视频
             </button>
@@ -258,62 +283,101 @@ function SceneWorkspaceContent({
           onAudioImported={(audio) =>
             setAudios((current) => [audio, ...current.filter((item) => item.id !== audio.id)])
           }
-        />
-      )}
-      <section className="scene-material-panel" aria-label="场次参考素材">
-        <div className="scene-prompt-heading">
-          <div>
-            <h2>场次参考素材</h2>
-            <p>角色与场景由助手理解提示词后提出关联方案，批准后生效。参考图可手动调整。</p>
-          </div>
-          <button
-            className="text-button"
-            type="button"
-            disabled={!writable || !prompt.trim() || !onRequestBindings}
-            onClick={() => onRequestBindings?.(prompt, localBindings, characters, dialogueAudioId)}
-          >
-            重新交给助手关联
-          </button>
-        </div>
-        {localBindings.length === 0 ? (
-          <p className="tree-empty">暂无绑定素材</p>
-        ) : (
-          <div className="scene-material-grid">
-            {localBindings.map((binding) => {
-              const candidates =
-                candidatesByRole[binding.role].length > 0
-                  ? candidatesByRole[binding.role]
-                  : mediaAssets.filter(isImage);
+          actions={
+            <button
+              className="text-button"
+              type="button"
+              disabled={!writable || !prompt.trim() || !onRequestBindings}
+              onClick={() =>
+                onRequestBindings?.(prompt, effectiveBindings, characters, dialogueAudioId)
+              }
+            >
+              重新交给助手关联
+            </button>
+          }
+        >
+          <SceneSettingCard
+            projectId={projectId}
+            documentId={scene.sceneDocumentId}
+            documents={documents}
+            asset={
+              sceneBinding
+                ? mediaAssets.find((a) => a.id === sceneBinding.assetId)
+                : defaultSceneImage
+            }
+            images={setting.assets}
+            candidates={mediaAssets.filter(isImage)}
+            writable={writable}
+            busy={sceneBindingBusy}
+            message={sceneBindingMessage || setting.error}
+            onBind={onBindSceneDocument}
+            onOpen={onOpenDocument}
+            canClear={!scene.sceneDocumentId}
+            onSelectImage={(id) =>
+              setLocalBindings((current) => [
+                ...current.filter((b) => b.id !== sceneBinding?.id),
+                ...(id
+                  ? [
+                      {
+                        id: sceneBinding?.id ?? `scene:${scene.id}`,
+                        role: 'scene' as const,
+                        label: '场景参考',
+                        assetId: id,
+                        sourceDocumentId: scene.sceneDocumentId,
+                        source: 'manual' as const,
+                      },
+                    ]
+                  : []),
+              ])
+            }
+            onDropAsset={(asset) =>
+              setLocalBindings((current) => [
+                ...current.filter((b) => b.id !== sceneBinding?.id),
+                {
+                  id: sceneBinding?.id ?? `scene:${scene.id}`,
+                  role: 'scene',
+                  label: '场景参考',
+                  assetId: asset.id,
+                  sourceDocumentId: scene.sceneDocumentId,
+                  source: 'manual',
+                },
+              ])
+            }
+            onRestore={
+              sceneBinding && scene.sceneDocumentId
+                ? () =>
+                    setLocalBindings((current) => current.filter((b) => b.id !== sceneBinding?.id))
+                : undefined
+            }
+          />
+          {localBindings
+            .filter((b) => b.id !== sceneBinding?.id)
+            .map((binding) => {
+              const candidates = mediaAssets.filter(isImage);
               const asset = mediaAssets.find((item) => item.id === binding.assetId);
               return (
-                <article className="scene-material-card" key={binding.id}>
-                  <strong>{binding.label}</strong>
-                  <span>
-                    {binding.role === 'character'
-                      ? '角色'
-                      : binding.role === 'scene'
-                        ? '场景'
-                        : binding.role === 'prop'
-                          ? '道具'
-                          : '素材'}
-                  </span>
-                  {asset ? (
-                    <AssetImagePreview asset={asset} />
-                  ) : (
-                    <div className="scene-material-missing">未选择图片</div>
-                  )}
-                  <select
-                    aria-label={`${binding.label}参考图`}
-                    value={binding.assetId}
-                    disabled={!writable}
-                    onChange={(event) => setAsset(binding, event.target.value)}
-                  >
-                    {candidates.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.alias || item.relativePath.split(/[\\/]/).pop() || item.id}
-                      </option>
-                    ))}
-                  </select>
+                <ReferenceCard
+                  label={binding.label}
+                  asset={asset}
+                  projectId={projectId}
+                  writable={writable}
+                  onDropAsset={(a) => setAsset(binding, a.id)}
+                  key={binding.id}
+                  selector={
+                    <select
+                      aria-label={`${binding.label}参考图`}
+                      value={binding.assetId}
+                      disabled={!writable}
+                      onChange={(event) => setAsset(binding, event.target.value)}
+                    >
+                      {candidates.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {referenceAssetName(item)}
+                        </option>
+                      ))}
+                    </select>
+                  }
+                >
                   <button
                     className="text-button"
                     type="button"
@@ -326,12 +390,11 @@ function SceneWorkspaceContent({
                   >
                     移除{binding.label}
                   </button>
-                </article>
+                </ReferenceCard>
               );
             })}
-          </div>
-        )}
-      </section>
+        </SceneCastEditor>
+      )}
       {projectId ? (
         <DubbingScenePanel
           projectId={projectId}

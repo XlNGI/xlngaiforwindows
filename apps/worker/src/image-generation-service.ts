@@ -40,6 +40,7 @@ import { ProjectService, resolveProjectRelativePath } from './project-service.js
 import { assertStorageCapacity } from './storage-capacity.js';
 import { withNetworkResponse } from './network-transfer.js';
 import { ProductionService } from './production-service.js';
+import { ExecutionPool, mapConcurrent } from './execution-pool.js';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -65,10 +66,16 @@ interface PersistedImage {
 type AssetPathOpener = (path: string) => void;
 
 export class ImageGenerationService {
+  private readonly completions = new Map<
+    string,
+    { hash: string; work: Promise<ImageGenerationJobInfo> }
+  >();
+  private readonly downloadControllers = new Map<string, AbortController>();
   constructor(
     private readonly projects: ProjectService,
     private readonly openAssetPath: AssetPathOpener = revealPathInFileManager,
     private readonly playAssetPath: AssetPathOpener = openPathWithDefaultApplication,
+    private readonly capacity = new ExecutionPool(),
   ) {}
 
   prepare(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
@@ -161,6 +168,39 @@ export class ImageGenerationService {
   }
 
   async complete(params: ImageGenerationCompleteParams): Promise<ImageGenerationJobInfo> {
+    this.assertProjectSession(params.projectSessionId);
+    const key = `${params.projectSessionId ?? this.projects.currentSessionId()}:${params.jobId}`;
+    const hash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          ...params,
+          projectSessionId: params.projectSessionId ?? this.projects.currentSessionId(),
+        }),
+      )
+      .digest('hex');
+    const current = this.completions.get(key);
+    if (current) {
+      if (current.hash !== hash)
+        throw new Error('Image completion has different output for an active attempt.');
+      return current.work;
+    }
+    const controller = new AbortController();
+    this.downloadControllers.set(params.jobId, controller);
+    const work = this.completeOwned(params, controller);
+    this.completions.set(key, { hash, work });
+    try {
+      return await work;
+    } finally {
+      if (this.completions.get(key)?.work === work) this.completions.delete(key);
+      if (this.downloadControllers.get(params.jobId) === controller)
+        this.downloadControllers.delete(params.jobId);
+    }
+  }
+
+  private async completeOwned(
+    params: ImageGenerationCompleteParams,
+    controller: AbortController,
+  ): Promise<ImageGenerationJobInfo> {
     const projectSessionId = params.projectSessionId ?? this.projects.currentSessionId();
     const projectSession = this.assertProjectSession(projectSessionId);
     const job = this.projects.access(false, (database, project) => {
@@ -171,7 +211,10 @@ export class ImageGenerationService {
         throw new Error('Generation job was not found.');
       return found;
     });
-    if (job.status !== 'running') return this.get(job.id);
+    if (job.status !== 'running') {
+      this.discardProviderOutput(params.providerBody);
+      return this.get(job.id);
+    }
     const outputError =
       params.providerBody && typeof params.providerBody === 'object'
         ? (params.providerBody as Record<string, unknown>).nativeImageOutputError
@@ -191,10 +234,28 @@ export class ImageGenerationService {
     }
     let images: DownloadedImage[];
     let sources: ImageSource[] = [];
+    this.projects.access(true, (database) => {
+      const repositories = createRepositories(database),
+        current = repositories.jobs.get(job.id);
+      if (current?.status === 'running')
+        repositories.jobs.save({
+          ...current,
+          mediaState: 'downloading',
+          updatedAt: new Date().toISOString(),
+        });
+    });
     try {
       sources = extractImageSources(params.providerBody);
-      images = [];
-      for (const source of sources) images.push(await downloadImage(source));
+      images = await mapConcurrent(sources, 2, (source) =>
+        this.capacity.run('download', projectSession.id, controller.signal, async () => {
+          try {
+            return await downloadImage(source, controller.signal);
+          } catch (error) {
+            controller.abort(error);
+            throw error;
+          }
+        }),
+      );
     } catch (error) {
       if (this.projects.current() !== projectSession)
         throw new Error('Project session changed during generation.');
@@ -384,6 +445,7 @@ export class ImageGenerationService {
 
   cancel(jobId: string, projectSessionId?: string): ImageGenerationJobInfo {
     this.assertProjectSession(projectSessionId);
+    this.downloadControllers.get(jobId)?.abort(new Error('Image task cancelled.'));
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
@@ -422,7 +484,17 @@ export class ImageGenerationService {
   }
 
   cancelAll(): number {
+    for (const controller of this.downloadControllers.values())
+      controller.abort(new Error('Project image downloads stopped.'));
     return this.finishActiveJobs('cancelled');
+  }
+
+  discardProviderOutput(body: unknown): void {
+    try {
+      cleanupNativeImageSources(extractImageSources(body));
+    } catch {
+      /* Extraction already cleans validated native outputs on malformed results. */
+    }
   }
 
   recoverInterrupted(): number {
@@ -436,6 +508,19 @@ export class ImageGenerationService {
       if (!job || job.projectId !== project.id) throw new Error('Generation job was not found.');
       const assets = repositories.assets.listByProject(project.id);
       return this.toInfo(job, assets, repositories.generationResults.listByJob(job.id));
+    });
+  }
+
+  list(): ImageGenerationJobInfo[] {
+    return this.projects.access(false, (database, project) => {
+      const repositories = createRepositories(database),
+        assets = repositories.assets.listByProject(project.id);
+      return repositories.jobs
+        .listByProject(project.id)
+        .filter((job) => job.adapterKey.includes('TO_IMAGE:'))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+        .slice(0, 50)
+        .map((job) => this.toInfo(job, assets, repositories.generationResults.listByJob(job.id)));
     });
   }
 
@@ -833,7 +918,15 @@ export class ImageGenerationService {
               .get(assetId) as { count: number }
           ).count,
         ) +
-        new DubbingRepository(database, project.id).countVideoReferences(assetId);
+        new DubbingRepository(database, project.id).countVideoReferences(assetId) +
+        (
+          database
+            .prepare(
+              `SELECT count(DISTINCT c.shot_id) AS count FROM shot_continuity c,
+          json_tree(c.binding_json) j WHERE c.project_id=? AND j.type='text' AND j.value=?`,
+            )
+            .get(project.id, assetId) as { count: number }
+        ).count;
       if (referenceCount > 0 && !confirm) {
         throw new Error(`Asset is referenced by ${referenceCount} production draft(s).`);
       }
@@ -893,6 +986,15 @@ export class ImageGenerationService {
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       if (!asset.deletedAt || !asset.trashRelativePath)
         throw new Error('Only trashed assets can be permanently deleted.');
+      if (
+        database
+          .prepare(
+            `SELECT 1 FROM shot_continuity c,json_tree(c.binding_json) j
+        WHERE c.project_id=? AND j.type='text' AND j.value=? LIMIT 1`,
+          )
+          .get(project.id, assetId)
+      )
+        throw new Error('素材仍用于镜头衔接，请先解除衔接设置。');
       if (
         database
           .prepare('SELECT 1 FROM scene_character_bindings WHERE image_asset_id=? LIMIT 1')
@@ -1360,7 +1462,8 @@ function cleanupNativeImageSources(sources: readonly ImageSource[]): void {
   }
 }
 
-async function downloadImage(source: ImageSource): Promise<DownloadedImage> {
+async function downloadImage(source: ImageSource, signal?: AbortSignal): Promise<DownloadedImage> {
+  signal?.throwIfAborted();
   if (source.kind === 'native-file') {
     try {
       return validatedDownloadedImage(readFileSync(source.path), contentTypeFor(source.path));
@@ -1385,7 +1488,7 @@ async function downloadImage(source: ImageSource): Promise<DownloadedImage> {
   try {
     return await withNetworkResponse(
       source.value,
-      { signal: controller.signal },
+      { signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal },
       async (response, read) => {
         receivedResponse = true;
         if (!response.ok)

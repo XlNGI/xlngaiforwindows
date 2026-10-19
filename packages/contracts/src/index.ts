@@ -10,13 +10,28 @@ export * from './dubbing.js';
 export * from './voice-reference.js';
 export * from './official-video-endpoint.js';
 import type { VoiceReferenceWorkerMethodMap } from './voice-reference.js';
+import type { TaskScheduleWorkerMethodMap } from './task-schedule.js';
+import type { ProjectRuntimeScope, ProjectRuntimeWorkerMethodMap } from './project-runtime.js';
+export * from './project-runtime.js';
+import type { NovelBatchWorkerMethodMap } from './novel-batch.js';
+export * from './novel-batch.js';
+import type { FileTaskWorkerMethodMap } from './file-tasks.js';
+export * from './file-tasks.js';
+export * from './task-schedule.js';
 export * from './production.js';
+export * from './production-schema.js';
+export * from './production-inputs.js';
+export * from './shot-continuity.js';
+import type { ShotContinuityWorkerMethodMap } from './shot-continuity.js';
 import type {
   ProductionReadResult,
   ProductionCompileParams,
   ProductionCompileResult,
   ProductionTarget,
   ProductionSource,
+  ProductionInstruction,
+  ProductionDefaultsInfo,
+  ProductionDefaults,
 } from './production.js';
 
 export const IPC_PROTOCOL_VERSION = 1 as const;
@@ -26,7 +41,10 @@ export {
   officialVideoAudioContracts,
   officialImageContracts,
   mediaModelBindings,
+  currentMediaModelBinding,
+  isWanMediaAdapter,
   adapterBindsCatalogModel,
+  supportsProductionAudioUpload,
 } from './official-media-contracts.js';
 
 export interface HealthResult {
@@ -429,6 +447,8 @@ export interface ModelBinding {
   compatibility: ModelBindingCompatibility;
   capabilitiesOverride?: Partial<ModelContractCapabilities>;
   transportOverride?: Partial<ContractTransport>;
+  /** Channel input transport; independent of the model's audio semantics. */
+  inputTransport?: { audio: 'upload' | 'url-only' };
   status: ModelCatalogStatus;
 }
 
@@ -1580,6 +1600,7 @@ export interface AgentResearchSourceInfo {
 }
 
 export interface AgentTaskDetail {
+  chapterBatch?: { batchId: string; role: 'parent' | 'child' };
   task: AgentTaskInfo;
   productionUpdated?: boolean;
   target?: AgentTaskTargetInfo;
@@ -1681,6 +1702,7 @@ export interface TaskLogItem {
   inputTokens?: number;
   outputTokens?: number;
   estimatedCost?: string;
+  scheduling?: { state: string; waitReason?: string; revision: number };
 }
 
 export type TaskLogKind = TaskLogItem['kind'];
@@ -1860,6 +1882,7 @@ export interface AgentChangeSetItemDraft {
   /** LLM-resolved scene prompt and complete cast, applied together after review. */
   videoPrompt?: string;
   characterDocumentIds?: string[];
+  instruction?: ProductionInstruction;
   title: string;
   shotStatus?: string;
   /** Shot prompt for `shot` items; applied to `shots.prompt` when approved. */
@@ -1983,6 +2006,21 @@ export interface ConversationModelPreferenceSetParams {
 export interface ConversationModelPreferenceClearParams {
   conversationId: string;
   capability: ConversationModelPreferenceCapability;
+}
+
+/** Editable instructions automatically attached to every request in one conversation. */
+export interface ConversationPromptTemplateInfo {
+  conversationId: string;
+  content: string;
+  rowVersion: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ConversationPromptTemplateSaveParams {
+  conversationId: string;
+  content: string;
+  expectedRowVersion: number;
 }
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -2110,6 +2148,8 @@ export interface LibrarySearchResult {
   resultCount: number;
   truncated: boolean;
   nextOffset?: number;
+  /** Guidance for correcting an empty query/filter combination; never source evidence. */
+  guidance?: string;
   sources: LibrarySearchSource[];
 }
 
@@ -2306,6 +2346,7 @@ export interface LlmInputAttachment {
 }
 
 export interface LlmGenerationPrepareParams extends ContextPreviewParams {
+  taskExecution?: 'ordered' | 'parallel';
   prompt: string;
   providerProfileId: string;
   modelId: string;
@@ -2621,6 +2662,8 @@ export interface UnifiedAgentModelCandidate {
 }
 
 export interface UnifiedAgentRunParams {
+  /** Internal batch jobs may pin a dependency; ordinary user messages leave this unset so the Agent routes them. */
+  taskExecution?: 'ordered' | 'parallel';
   conversationId: string;
   prompt: string;
   attachments?: LlmInputAttachment[];
@@ -3616,6 +3659,7 @@ export interface ProjectTaskSubscriptionParams {
 }
 
 export interface ProjectTaskSnapshot {
+  imageJobs?: ImageGenerationJobInfo[];
   projectId: string;
   projectSessionId: string;
   revision: number;
@@ -3808,7 +3852,15 @@ export interface AssetSourceInfo {
   sourceKind?: 'generation' | 'dubbing';
 }
 
-export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceWorkerMethodMap {
+export interface WorkerMethodMap
+  extends
+    DubbingWorkerMethodMap,
+    VoiceReferenceWorkerMethodMap,
+    TaskScheduleWorkerMethodMap,
+    ProjectRuntimeWorkerMethodMap,
+    NovelBatchWorkerMethodMap,
+    ShotContinuityWorkerMethodMap,
+    FileTaskWorkerMethodMap {
   'scene.media.resolve': { params: SceneMediaResolveParams; result: SceneMediaResolveResult };
   'asset.thumbnail': { params: AssetMediaSourceParams; result: AssetMediaSourceInfo };
   health: { params: Record<string, never>; result: HealthResult };
@@ -4050,6 +4102,18 @@ export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceW
     params: ConversationRuntimeGetParams;
     result: ConversationRuntimeGetResult;
   };
+  'conversation.runtime.list': {
+    params: Record<string, never>;
+    result: Array<{
+      identity: LlmGenerationIdentity;
+      taskId: string;
+      generation: LlmGenerationInfo;
+    }>;
+  };
+  'conversation.runtime.supplement': {
+    params: { generationId: string; content: string; idempotencyKey: string };
+    result: ChatMessageInfo;
+  };
   'conversation.runtime.confirm': {
     params: ConversationRuntimeConfirmParams;
     result: ConversationRuntimeConfirmResult;
@@ -4095,6 +4159,11 @@ export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceW
   'scene.list': { params: Record<string, never>; result: SceneInfo[] };
   'production.read': { params: { target: ProductionTarget }; result: ProductionReadResult };
   'production.compile': { params: ProductionCompileParams; result: ProductionCompileResult };
+  'production.defaults.get': { params: Record<string, never>; result: ProductionDefaultsInfo };
+  'production.defaults.save': {
+    params: { expectedRowVersion: number; settings: ProductionDefaults };
+    result: ProductionDefaultsInfo;
+  };
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
   'shot.save': { params: ShotSaveParams; result: ShotInfo };
@@ -4132,6 +4201,14 @@ export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceW
   'conversation.modelPreference.clear': {
     params: ConversationModelPreferenceClearParams;
     result: { cleared: boolean };
+  };
+  'conversation.promptTemplate.get': {
+    params: { conversationId: string };
+    result: ConversationPromptTemplateInfo;
+  };
+  'conversation.promptTemplate.save': {
+    params: ConversationPromptTemplateSaveParams;
+    result: ConversationPromptTemplateInfo;
   };
   'chat.message.list': { params: ChatMessageListParams; result: ChatMessagePage };
   'chat.message.save': { params: ChatMessageSaveParams; result: ChatMessageInfo };
@@ -4291,6 +4368,7 @@ export interface WorkerRequest<M extends WorkerMethod = WorkerMethod> {
   protocolVersion: typeof IPC_PROTOCOL_VERSION;
   method: M;
   params: WorkerMethodMap[M]['params'];
+  scope?: ProjectRuntimeScope;
 }
 
 export interface WorkerError {

@@ -1,18 +1,10 @@
+import { mkdir, open, readFile, rename, rm, lstat } from 'node:fs/promises';
+import { ExecutionPool } from './execution-pool.js';
+import { assertProjectTaskAdmission } from './task-admission.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import {
-  existsSync,
-  fstatSync,
-  openSync,
-  closeSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, fstatSync, openSync, closeSync, lstatSync, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type Database from 'better-sqlite3';
 import type {
   NovelMarkdownExportFormat,
@@ -182,9 +174,14 @@ function exportInfo(
 }
 
 export class MarkdownExportService {
+  private readonly running = new Map<
+    string,
+    { controller: AbortController; completion: Promise<void> }
+  >();
   constructor(
     private readonly projects: ProjectService,
     private readonly openDirectory: (path: string) => void | Promise<void> = openExportDirectory,
+    private readonly capacity = new ExecutionPool(),
   ) {}
 
   async reveal(params: { jobId: string }): Promise<PathResult> {
@@ -225,7 +222,7 @@ export class MarkdownExportService {
           .prepare(
             `SELECT id, export_format, package_relative_path, staging_relative_path
          FROM markdown_export_jobs
-         WHERE project_id = ? AND status IN ('writing', 'verifying')`,
+         WHERE project_id = ? AND status IN ('queued','writing', 'verifying')`,
           )
           .all(project.id) as Array<{
           id: string;
@@ -382,9 +379,11 @@ export class MarkdownExportService {
     );
   }
 
-  prepare(params: NovelMarkdownExportPrepareParams): NovelMarkdownExportJobInfo {
-    return this.projects.access(true, (database, project) =>
+  start(params: NovelMarkdownExportPrepareParams): NovelMarkdownExportJobInfo {
+    const epoch = this.projects.currentSessionId();
+    const prepared = this.projects.access(true, (database, project) =>
       database.transaction(() => {
+        assertProjectTaskAdmission(database);
         const format = params.exportFormat ?? 'files';
         const rows = this.selectRows(database, project.id, params);
         if (rows.length === 0) {
@@ -457,135 +456,296 @@ export class MarkdownExportService {
           );
         });
 
-        const stagingPath = join(project.rootPath, stagingRelative);
-        const packagePath = join(project.rootPath, packageRelative);
-        try {
-          const exportsPath = join(project.rootPath, 'exports');
-          mkdirSync(exportsPath, { recursive: true });
-          assertNoSymlinkSegments(project.rootPath, 'exports');
-          assertNoSymlinkSegments(project.rootPath, stagingRelative);
-          assertNoSymlinkSegments(project.rootPath, packageRelative);
-          const projectIdentity = fileIdentity(project.rootPath);
-          const exportsIdentity = fileIdentity(exportsPath);
-          if (existsSync(packagePath)) throw new Error('Export package path already exists.');
-          database
-            .prepare(
-              "UPDATE markdown_export_jobs SET status = 'writing', started_at = ? WHERE id = ?",
-            )
-            .run(now, id);
-          mkdirSync(stagingPath, { recursive: true });
-          const manifestItems: Array<Record<string, unknown>> = [];
-          let merged = '';
-          rows.forEach((row, ordinal) => {
-            const relativePath = this.relativePath(row, ordinal, format, mergedFilename);
-            const body = `# ${row.display_label} ${row.chapter_title}\n\n${row.content_markdown.trim()}\n`;
-            if (format === 'files') {
-              const outputPath = join(stagingPath, relativePath);
-              mkdirSync(resolve(outputPath, '..'), { recursive: true });
-              writeFileSync(outputPath, body, { encoding: 'utf8', flag: 'wx' });
-            } else merged += `${body}\n`;
-            const outputHash = hash(body);
-            manifestItems.push({
-              ordinal,
-              chapterId: row.chapter_id,
-              documentId: row.document_id,
-              documentVersionId: row.document_version_id,
-              sourceState: row.source_state,
-              sourceContentHash: row.content_hash ?? hash(row.content_markdown),
-              workTitle: row.work_title,
-              volumeTitle: row.volume_title,
-              position: row.position,
-              displayLabel: row.display_label,
-              chapterTitle: row.chapter_title,
-              outputHash,
-              publicationNo: row.publication_no,
-              documentVersion: row.version_no,
-              relativePath,
-            });
-          });
-          const mergedOutputHash = format === 'merged' ? hash(merged) : undefined;
-          if (format === 'merged')
-            writeFileSync(join(stagingPath, mergedFilename), merged, {
-              encoding: 'utf8',
-              flag: 'wx',
-            });
-          const manifest = JSON.stringify(
-            {
-              version: 1,
-              jobId: id,
-              exportType: params.exportType,
-              exportFormat: format,
-              ...(mergedOutputHash ? { mergedOutputHash } : {}),
-              items: manifestItems,
-            },
-            null,
-            2,
-          );
-          writeFileSync(join(stagingPath, 'manifest.json'), `${manifest}\n`, {
-            encoding: 'utf8',
-            flag: 'wx',
-          });
-          database
-            .prepare("UPDATE markdown_export_jobs SET status = 'verifying' WHERE id = ?")
-            .run(id);
-          itemIds.forEach((itemId, ordinal) => {
-            const item = database
-              .prepare('SELECT relative_path FROM markdown_export_items WHERE id = ?')
-              .get(itemId) as { relative_path: string };
-            const path = join(stagingPath, item.relative_path);
-            if (format === 'files' && !existsSync(path))
-              throw new Error('Export item was not written.');
-            if (format === 'files') assertRegularSingleLinkFile(path);
-            const row = rows[ordinal]!;
-            const output =
-              format === 'files'
-                ? readFileSync(path)
-                : Buffer.from(
-                    `# ${row.display_label} ${row.chapter_title}\n\n${row.content_markdown.trim()}\n`,
-                    'utf8',
-                  );
-            database
-              .prepare(
-                "UPDATE markdown_export_items SET status = 'succeeded', byte_size = ?, output_hash = ? WHERE id = ?",
-              )
-              .run(output.byteLength, hash(output.toString('utf8')), itemId);
-          });
-          const manifestHash = hash(manifest);
-          writeFileSync(join(stagingPath, 'manifest.sha256'), `${manifestHash}\n`, {
-            encoding: 'utf8',
-            flag: 'wx',
-          });
-          assertSameIdentity(project.rootPath, projectIdentity);
-          assertSameIdentity(exportsPath, exportsIdentity);
-          assertNoSymlinkSegments(project.rootPath, stagingRelative);
-          renameSync(stagingPath, packagePath);
-          assertSameIdentity(project.rootPath, projectIdentity);
-          assertSameIdentity(exportsPath, exportsIdentity);
-          assertNoSymlinkSegments(project.rootPath, packageRelative);
-          database
-            .prepare(
-              "UPDATE markdown_export_jobs SET status = 'succeeded', manifest_hash = ?, completed_at = ? WHERE id = ?",
-            )
-            .run(manifestHash, new Date().toISOString(), id);
-        } catch (error) {
-          rmSync(stagingPath, { recursive: true, force: true });
-          database
-            .prepare(
-              "UPDATE markdown_export_jobs SET status = 'failed', error_code = 'EXPORT_FAILED', error_message = ?, completed_at = ? WHERE id = ?",
-            )
-            .run(
-              error instanceof Error ? error.message.slice(0, 500) : 'Export failed.',
-              new Date().toISOString(),
-              id,
-            );
-          throw error;
-        }
-        return exportInfo(
-          database.prepare('SELECT * FROM markdown_export_jobs WHERE id = ?').get(id) as never,
-          project.rootPath,
-        );
+        return {
+          id,
+          rows,
+          itemIds,
+          format,
+          mergedFilename,
+          stagingRelative,
+          packageRelative,
+          root: project.rootPath,
+          projectId: project.id,
+          exportType: params.exportType,
+        };
       })(),
     );
+    const controller = new AbortController();
+    const assertCurrent = () => {
+      controller.signal.throwIfAborted();
+      if (this.projects.currentSessionId() !== epoch)
+        throw new Error('Project session changed during Markdown export.');
+    };
+    const completion = this.capacity
+      .run('file-io', prepared.projectId, controller.signal, () =>
+        this.write(prepared, assertCurrent),
+      )
+      .catch((error: unknown) => {
+        if (this.projects.currentSessionId() !== epoch) return;
+        this.projects.access(true, (database) =>
+          database.transaction(() => {
+            const message = error instanceof Error ? error.message.slice(0, 500) : 'Export failed.';
+            database
+              .prepare(
+                "UPDATE markdown_export_jobs SET status=?,error_code=?,error_message=?,completed_at=? WHERE id=? AND status IN('queued','writing','verifying')",
+              )
+              .run(
+                controller.signal.aborted ? 'cancelled' : 'failed',
+                controller.signal.aborted ? 'EXPORT_CANCELLED' : 'EXPORT_FAILED',
+                message,
+                new Date().toISOString(),
+                prepared.id,
+              );
+            database
+              .prepare(
+                "UPDATE markdown_export_items SET status='failed',error_code=?,error_message=? WHERE job_id=? AND status IN('queued','writing','verifying')",
+              )
+              .run(
+                controller.signal.aborted ? 'EXPORT_CANCELLED' : 'EXPORT_FAILED',
+                message,
+                prepared.id,
+              );
+          })(),
+        );
+      })
+      .finally(() => {
+        if (this.running.get(prepared.id)?.controller === controller)
+          this.running.delete(prepared.id);
+      });
+    this.running.set(prepared.id, { controller, completion });
+    return this.get(prepared.id);
+  }
+
+  async prepare(params: NovelMarkdownExportPrepareParams): Promise<NovelMarkdownExportJobInfo> {
+    const job = this.start(params);
+    await this.wait(job.id);
+    const result = this.get(job.id);
+    if (result.status !== 'succeeded')
+      throw new Error(result.errorMessage ?? 'Markdown export failed.');
+    return result;
+  }
+  get(id: string): NovelMarkdownExportJobInfo {
+    return this.projects.access(false, (database, project) => {
+      const row = database
+        .prepare('SELECT * FROM markdown_export_jobs WHERE id=? AND project_id=?')
+        .get(id, project.id);
+      if (!row) throw new Error('Markdown export was not found in this project.');
+      return exportInfo(row as never, project.rootPath);
+    });
+  }
+  list(): NovelMarkdownExportJobInfo[] {
+    return this.projects.access(false, (database, project) =>
+      database
+        .prepare(
+          'SELECT * FROM markdown_export_jobs WHERE project_id=? ORDER BY created_at DESC,id DESC LIMIT 100',
+        )
+        .all(project.id)
+        .map((row) => exportInfo(row as never, project.rootPath)),
+    );
+  }
+  async wait(id: string): Promise<void> {
+    await this.running.get(id)?.completion;
+  }
+  async cancel(id: string): Promise<NovelMarkdownExportJobInfo> {
+    this.get(id);
+    const entry = this.running.get(id);
+    if (entry) {
+      entry.controller.abort(new Error('Markdown export cancelled.'));
+      await entry.completion;
+    }
+    return this.get(id);
+  }
+  async stop(): Promise<void> {
+    for (const entry of this.running.values())
+      entry.controller.abort(new Error('Project export stopped.'));
+    await Promise.allSettled([...this.running.values()].map((entry) => entry.completion));
+  }
+
+  private async write(
+    prepared: {
+      id: string;
+      rows: ExportRow[];
+      itemIds: string[];
+      format: NovelMarkdownExportFormat;
+      mergedFilename: string;
+      stagingRelative: string;
+      packageRelative: string;
+      root: string;
+      projectId: string;
+      exportType: NovelMarkdownExportJobInfo['exportType'];
+    },
+    assertCurrent: () => void,
+  ): Promise<void> {
+    const { id, rows, itemIds, format, mergedFilename, stagingRelative, packageRelative, root } =
+      prepared;
+    const stagingPath = join(root, stagingRelative),
+      packagePath = join(root, packageRelative),
+      exportsPath = join(root, 'exports');
+    let ownedStaging = false,
+      published = false;
+    let stagingIdentity: FileIdentity | undefined;
+    try {
+      assertCurrent();
+      await mkdir(exportsPath, { recursive: true });
+      assertNoSymlinkSegments(root, 'exports');
+      assertNoSymlinkSegments(root, stagingRelative);
+      assertNoSymlinkSegments(root, packageRelative);
+      const projectIdentity = fileIdentity(root),
+        exportsIdentity = fileIdentity(exportsPath);
+      if (existsSync(packagePath) || existsSync(stagingPath))
+        throw new Error('Export package path already exists.');
+      await mkdir(stagingPath);
+      ownedStaging = true;
+      stagingIdentity = fileIdentity(stagingPath);
+      this.projects.access(true, (database) =>
+        database
+          .prepare(
+            "UPDATE markdown_export_jobs SET status='writing',started_at=? WHERE id=? AND status='queued'",
+          )
+          .run(new Date().toISOString(), id),
+      );
+      const manifestItems: Array<Record<string, unknown>> = [];
+      const verified: Array<{ id: string; bytes: number; hash: string }> = [];
+      const mergedHash = createHash('sha256');
+      const mergedFile =
+        format === 'merged' ? await open(join(stagingPath, mergedFilename), 'wx') : undefined;
+      try {
+        for (const [ordinal, row] of rows.entries()) {
+          assertCurrent();
+          assertSameIdentity(root, projectIdentity);
+          assertSameIdentity(exportsPath, exportsIdentity);
+          assertSameIdentity(stagingPath, stagingIdentity);
+          const relativePath = this.relativePath(row, ordinal, format, mergedFilename),
+            body = `# ${row.display_label} ${row.chapter_title}\n\n${row.content_markdown.trim()}\n`;
+          const expected = hash(body),
+            outputPath = join(stagingPath, relativePath);
+          if (format === 'files') {
+            await mkdir(dirname(outputPath), { recursive: true });
+            assertNoSymlinkSegments(root, join(stagingRelative, relativePath));
+            const output = await open(outputPath, 'wx');
+            try {
+              await output.writeFile(body, 'utf8');
+            } finally {
+              await output.close();
+            }
+            assertRegularSingleLinkFile(outputPath);
+            const actual = await readFile(outputPath);
+            if (hash(actual.toString('utf8')) !== expected)
+              throw new Error('Export item content verification failed.');
+          } else {
+            await mergedFile!.writeFile(body + '\n', 'utf8');
+            mergedHash.update(body + '\n');
+          }
+          verified.push({ id: itemIds[ordinal]!, bytes: Buffer.byteLength(body), hash: expected });
+          manifestItems.push({
+            ordinal,
+            chapterId: row.chapter_id,
+            documentId: row.document_id,
+            documentVersionId: row.document_version_id,
+            sourceState: row.source_state,
+            sourceContentHash: row.content_hash ?? hash(row.content_markdown),
+            workTitle: row.work_title,
+            volumeTitle: row.volume_title,
+            position: row.position,
+            displayLabel: row.display_label,
+            chapterTitle: row.chapter_title,
+            outputHash: expected,
+            publicationNo: row.publication_no,
+            documentVersion: row.version_no,
+            relativePath,
+          });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } finally {
+        await mergedFile?.close();
+      }
+      const mergedOutputHash = format === 'merged' ? mergedHash.digest('hex') : undefined;
+      if (
+        mergedOutputHash &&
+        hash((await readFile(join(stagingPath, mergedFilename))).toString('utf8')) !==
+          mergedOutputHash
+      )
+        throw new Error('Merged export verification failed.');
+      const manifest = JSON.stringify(
+          {
+            version: 1,
+            jobId: id,
+            exportType: prepared.exportType,
+            exportFormat: format,
+            ...(mergedOutputHash ? { mergedOutputHash } : {}),
+            items: manifestItems,
+          },
+          null,
+          2,
+        ),
+        manifestHash = hash(manifest);
+      const manifestFile = await open(join(stagingPath, 'manifest.json'), 'wx');
+      try {
+        await manifestFile.writeFile(manifest + '\n', 'utf8');
+      } finally {
+        await manifestFile.close();
+      }
+      const hashFile = await open(join(stagingPath, 'manifest.sha256'), 'wx');
+      try {
+        await hashFile.writeFile(manifestHash + '\n', 'utf8');
+      } finally {
+        await hashFile.close();
+      }
+      assertCurrent();
+      this.projects.access(true, (database) =>
+        database.transaction(() => {
+          database.prepare("UPDATE markdown_export_jobs SET status='verifying' WHERE id=?").run(id);
+          for (const item of verified)
+            database
+              .prepare(
+                "UPDATE markdown_export_items SET status='verifying',byte_size=?,output_hash=? WHERE id=?",
+              )
+              .run(item.bytes, item.hash, item.id);
+        })(),
+      );
+      assertCurrent();
+      assertSameIdentity(root, projectIdentity);
+      assertSameIdentity(exportsPath, exportsIdentity);
+      assertNoSymlinkSegments(root, stagingRelative);
+      assertSameIdentity(stagingPath, stagingIdentity);
+      if (existsSync(packagePath)) throw new Error('Export package path already exists.');
+      await rename(stagingPath, packagePath);
+      published = true;
+      assertCurrent();
+      assertSameIdentity(root, projectIdentity);
+      assertSameIdentity(exportsPath, exportsIdentity);
+      assertNoSymlinkSegments(root, packageRelative);
+      assertSameIdentity(packagePath, stagingIdentity);
+      this.projects.access(true, (database) =>
+        database.transaction(() => {
+          database
+            .prepare(
+              "UPDATE markdown_export_jobs SET status='succeeded',manifest_hash=?,completed_at=? WHERE id=? AND status='verifying'",
+            )
+            .run(manifestHash, new Date().toISOString(), id);
+          database
+            .prepare(
+              "UPDATE markdown_export_items SET status='succeeded' WHERE job_id=? AND status='verifying'",
+            )
+            .run(id);
+        })(),
+      );
+    } catch (error) {
+      if (ownedStaging && stagingIdentity) {
+        const owned = published ? packagePath : stagingPath;
+        const actual = await lstat(owned, { bigint: true }).catch(() => undefined);
+        if (
+          actual &&
+          !actual.isSymbolicLink() &&
+          actual.dev === stagingIdentity.dev &&
+          actual.ino === stagingIdentity.ino
+        ) {
+          assertNoSymlinkSegments(root, published ? packageRelative : stagingRelative);
+          await rm(owned, { recursive: true, force: true });
+        }
+      }
+      throw error;
+    }
   }
 
   private selectRows(

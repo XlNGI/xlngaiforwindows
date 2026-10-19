@@ -65,6 +65,7 @@ export function rebuildNovelRagChunks(
     documentVersionId: string;
     contentMarkdown: string;
     now?: string;
+    preparedChunks?: NovelRagChunkDraft[];
   },
 ): NovelRagRebuildResult {
   const chapter = database
@@ -76,7 +77,7 @@ export function rebuildNovelRagChunks(
   if (!chapter) return { chunkCount: 0 };
 
   const now = params.now ?? new Date().toISOString();
-  const chunks = splitNovelRagChunks(params.contentMarkdown);
+  const chunks = params.preparedChunks ?? splitNovelRagChunks(params.contentMarkdown);
   database.prepare('DELETE FROM novel_rag_chunks WHERE chapter_id = ?').run(chapter.id);
   const insert = database.prepare(
     `INSERT INTO novel_rag_chunks

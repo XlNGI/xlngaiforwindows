@@ -63,6 +63,11 @@ export interface DetachedConversationSnapshot {
   conversation?: ConversationInfo;
   messages: ChatMessageInfo[];
   composer: string;
+  promptTemplate?: string;
+  promptTemplateBusy?: boolean;
+  promptTemplateLoading?: boolean;
+  promptTemplateError?: string;
+  promptTemplateDirty?: boolean;
   statusMessage: string;
   llmStatus?: LlmStatusResult;
   legacyLlmConfigured: boolean;
@@ -100,6 +105,9 @@ export type DetachedPanelAction =
   | { panelId: 'conversation'; type: 'conversation-research-mode'; mode: AgentResearchMode }
   | { panelId: 'conversation'; type: 'conversation-open-settings' }
   | { panelId: 'conversation'; type: 'conversation-composer'; value: string }
+  | { panelId: 'conversation'; type: 'conversation-prompt-template'; value: string }
+  | { panelId: 'conversation'; type: 'conversation-prompt-template-save' }
+  | { panelId: 'conversation'; type: 'conversation-prompt-template-reload' }
   | { panelId: 'conversation'; type: 'conversation-cancel' }
   | { panelId: 'conversation'; type: 'conversation-send'; value: string };
 

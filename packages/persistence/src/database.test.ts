@@ -59,7 +59,7 @@ describe('project database', () => {
         ALTER TABLE shots ADD COLUMN prompt TEXT CHECK(prompt IS NULL OR length(trim(prompt))<=2000);
         UPDATE shots SET prompt=old_prompt;
         ALTER TABLE shots DROP COLUMN old_prompt;
-        DELETE FROM schema_migrations WHERE version=49;
+        DELETE FROM schema_migrations WHERE version>=49;
         INSERT INTO projects(id,name,created_at,updated_at) VALUES('p48','旧项目','now','now');
         INSERT INTO scenes(id,project_id,title,position,created_at,updated_at) VALUES('scene48','p48','场次',0,'now','now');
         INSERT INTO shots(id,scene_id,title,position,prompt,created_at,updated_at,row_version) VALUES('shot48','scene48','镜头',0,'原始提示词','now','now',4);

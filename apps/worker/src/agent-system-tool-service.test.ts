@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AssetInfo, ProviderModelInfo, ProviderProfileInfo } from '@ai-video/contracts';
 import {
@@ -150,6 +151,136 @@ async function setup() {
 }
 
 describe('AgentSystemToolService', () => {
+  it('lets the model route a new generation to an independent or completed follow-up task', async () => {
+    const { service, identity, project, current } = await setup();
+    const now = new Date().toISOString();
+    const ids = {
+      snapshot: randomUUID(),
+      target: randomUUID(),
+      current: randomUUID(),
+      targetUser: randomUUID(),
+      targetAssistant: randomUUID(),
+      currentUser: randomUUID(),
+      currentAssistant: randomUUID(),
+      task: randomUUID(),
+    };
+    project.access(true, (db, opened) =>
+      db.transaction(() => {
+        for (const id of [ids.snapshot])
+          db.prepare(
+            'INSERT INTO context_snapshots(id,project_id,purpose,content_json,created_at) VALUES(?,?,?,?,?)',
+          ).run(id, opened.id, 'test', '{}', now);
+        db.prepare(
+          'INSERT INTO chat_messages(id,conversation_id,role,content,status,created_at) VALUES(?,?,?,?,?,?)',
+        ).run(ids.targetUser, current.id, 'user', '上一轮任务', 'complete', now);
+        db.prepare(
+          'INSERT INTO chat_messages(id,conversation_id,role,content,status,created_at) VALUES(?,?,?,?,?,?)',
+        ).run(ids.targetAssistant, current.id, 'assistant', '上一轮已完成结果', 'complete', now);
+        db.prepare(
+          'INSERT INTO chat_messages(id,conversation_id,role,content,status,created_at) VALUES(?,?,?,?,?,?)',
+        ).run(ids.currentUser, current.id, 'user', '继续上一轮', 'complete', now);
+        db.prepare(
+          'INSERT INTO chat_messages(id,conversation_id,role,content,status,created_at) VALUES(?,?,?,?,?,?)',
+        ).run(ids.currentAssistant, current.id, 'assistant', '', 'streaming', now);
+        const insertGeneration = db.prepare(
+          `INSERT INTO llm_generations(id,project_id,project_session_id,conversation_id,context_snapshot_id,user_message_id,assistant_message_id,status,execution_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        );
+        insertGeneration.run(
+          ids.target,
+          opened.id,
+          identity.projectSessionId,
+          current.id,
+          ids.snapshot,
+          ids.targetUser,
+          ids.targetAssistant,
+          'complete',
+          'native',
+          now,
+          now,
+        );
+        insertGeneration.run(
+          ids.current,
+          opened.id,
+          identity.projectSessionId,
+          current.id,
+          ids.snapshot,
+          ids.currentUser,
+          ids.currentAssistant,
+          'streaming',
+          'native',
+          now,
+          now,
+        );
+        db.prepare(
+          'INSERT INTO generation_branches(generation_id,branch_id,input_message_id,history_cutoff,excluded_generation_ids_json,execution,dependency_generation_id,created_at) VALUES(?,?,?,?,?,?,?,?)',
+        ).run(ids.target, ids.target, ids.targetUser, 0, '[]', 'legacy', null, now);
+        db.prepare(
+          'INSERT INTO generation_branches(generation_id,branch_id,input_message_id,history_cutoff,excluded_generation_ids_json,execution,dependency_generation_id,created_at) VALUES(?,?,?,?,?,?,?,?)',
+        ).run(ids.current, ids.current, ids.currentUser, 0, '[]', 'legacy', null, now);
+        db.prepare(
+          `INSERT INTO agent_tasks(id,project_id,project_session_id,conversation_id,user_message_id,task_type,scope_type,title,request_snapshot_json,request_hash,context_snapshot_id,status,created_at,started_at,updated_at,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ).run(
+          ids.task,
+          opened.id,
+          identity.projectSessionId,
+          current.id,
+          ids.currentUser,
+          'document-create',
+          'project',
+          'route test',
+          '{}',
+          'route-test',
+          ids.snapshot,
+          'running',
+          now,
+          now,
+          now,
+          'model_running',
+        );
+        db.prepare(
+          'INSERT INTO agent_task_generations(task_id,generation_id,ordinal,purpose,created_at) VALUES(?,?,?,?,?)',
+        ).run(ids.task, ids.current, 0, 'route', now);
+      })(),
+    );
+    const routed = service.execute(
+      'conversation.task.route',
+      {
+        decision: 'follow_up',
+        targetGenerationId: ids.target,
+        rationale: '用户明确要求继续上一轮',
+      },
+      { ...identity, taskId: ids.task, toolCallId: 'route-call' },
+    );
+    expect(routed).toMatchObject({
+      status: 'routed',
+      decision: 'follow_up',
+      targetGenerationId: ids.target,
+    });
+    expect(
+      project.access(false, (db) =>
+        db
+          .prepare(
+            'SELECT execution,dependency_generation_id,dependency_snapshot_json FROM generation_branches WHERE generation_id=?',
+          )
+          .get(ids.current),
+      ),
+    ).toMatchObject({ execution: 'ordered', dependency_generation_id: ids.target });
+    const independent = service.execute(
+      'conversation.task.route',
+      { decision: 'independent', rationale: '新请求是独立工作' },
+      { ...identity, taskId: ids.task, toolCallId: 'route-call-2' },
+    );
+    expect(independent).toMatchObject({ status: 'routed', decision: 'independent' });
+    expect(
+      project.access(false, (db) =>
+        db
+          .prepare(
+            'SELECT execution,dependency_generation_id FROM generation_branches WHERE generation_id=?',
+          )
+          .get(ids.current),
+      ),
+    ).toEqual({ execution: 'parallel', dependency_generation_id: null });
+  });
   it('reads the exact existing scene and its cast on demand without name resolution', async () => {
     const { service, identity, content } = await setup();
     const actor = content.saveDocument({
@@ -162,10 +293,22 @@ describe('AgentSystemToolService', () => {
       videoPrompt: '司机转身，他没有说话。',
       characterBindings: [{ characterDocumentId: actor.id }],
     });
-    expect(service.execute('scene.read', { sceneId: scene.id }, identity)).toEqual({
+    expect(service.execute('production.defaults.get', {}, identity)).toEqual({
+      rowVersion: 0,
+      settings: {},
+    });
+    const result = service.execute('scene.read', { sceneId: scene.id }, identity);
+    expect(result).toMatchObject({
       status: 'read',
       scene,
+      shots: [],
+      production: {
+        target: { kind: 'scene', id: scene.id },
+        rowVersion: scene.rowVersion,
+        issues: [],
+      },
     });
+    expect(JSON.stringify(result)).not.toContain('"token"');
     expect(() => service.execute('scene.read', { sceneId: 'missing' }, identity)).toThrow(
       'current project',
     );

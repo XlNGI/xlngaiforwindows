@@ -71,8 +71,15 @@ export function generationPhaseLabel(phase: GenerationJobEventInfo['phase']): st
 }
 
 export function videoProgressGuidance(
-  job: Pick<VideoGenerationJobInfo, 'status' | 'elapsedMs' | 'request'>,
+  job: Pick<VideoGenerationJobInfo, 'status' | 'mediaState' | 'elapsedMs' | 'request'>,
 ): string {
+  if (job.mediaState === 'submission_unknown')
+    return '生成服务未返回任务编号，暂时无法确认是否接单。已停止自动提交，请先核对 Provider 后台。';
+  if (job.mediaState === 'awaiting_confirmation')
+    return '等待费用确认，确认后才会向生成服务提交任务。';
+  if (job.mediaState === 'draft') return '任务已准备，请确认参数和费用后提交。';
+  if (job.mediaState === 'submitting')
+    return '正在发送生成请求并等待服务返回任务编号，请勿重复提交。';
   switch (job.status) {
     case 'pending':
       return '正在连接生成服务；提交成功后会自动查询进度。';

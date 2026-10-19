@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
 import type {
   AgentProtectedUiHandoff,
   AssetGroupInfo,
@@ -31,6 +33,7 @@ import { compileProjectResourceMap } from './project-resource-map.js';
 import { SceneStructureSubmissionService } from './scene-structure-submission-service.js';
 import { ProductionService } from './production-service.js';
 import type { ProductionTarget } from '@ai-video/contracts';
+import type { NovelBatchService } from './novel-batch-service.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -101,11 +104,13 @@ export class AgentSystemToolService {
     private readonly maintenance?: AgentMaintenanceToolService,
     private readonly structureCompiler?: ProjectStructureCompiler,
     private readonly novels?: AgentNovelToolService,
+    private readonly batches?: Pick<NovelBatchService, 'submit' | 'get' | 'readSource'>,
   ) {}
 
   availableOperations(): SystemAgentToolOperation[] {
     return SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation).filter(
       (name) => {
+        if (name.startsWith('novel.chapter.batch.')) return Boolean(this.batches);
         if (name === 'project.structure.get' || name === 'novel.structure.get')
           return !!this.structureCompiler;
         if (
@@ -135,11 +140,30 @@ export class AgentSystemToolService {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
     switch (operation) {
+      case 'conversation.task.route':
+        return this.routeConversationTask(args, identity);
+      case 'novel.chapter.batch.submit':
+        if (!this.batches) throw unavailable('Chapter batches');
+        return this.batches.submit(args, identity);
+      case 'novel.chapter.batch.source.read':
+        if (!this.batches) throw unavailable('Chapter batch sources');
+        return this.batches.readSource(args, identity);
+      case 'novel.chapter.batch.get':
+        if (!this.batches) throw unavailable('Chapter batches');
+        rejectUnknown(args, ['batchId']);
+        return { ...this.batches.get(requiredString(args.batchId, 'batchId', 128)) };
+      case 'production.defaults.get':
+        rejectUnknown(args, []);
+        return new ProductionService(this.projects).getDefaults() as unknown as Record<
+          string,
+          unknown
+        >;
       case 'production.read':
         rejectUnknown(args, ['target']);
-        return new ProductionService(this.projects).read(
-          args.target as ProductionTarget,
-        ) as unknown as Record<string, unknown>;
+        return {
+          ...new ProductionService(this.projects).read(args.target as ProductionTarget),
+          source: undefined,
+        };
       case 'production.execute': {
         const executing = this.projects.access(false, (db) =>
           db
@@ -162,7 +186,15 @@ export class AgentSystemToolService {
         const sceneId = requiredString(args.sceneId, 'sceneId', 200);
         const scene = this.content.listScenes().find((item) => item.id === sceneId);
         if (!scene) throw new Error('Scene was not found in the current project.');
-        return { status: 'read', scene };
+        return {
+          status: 'read',
+          scene,
+          shots: this.content.listShots(sceneId),
+          production: {
+            ...new ProductionService(this.projects).read({ kind: 'scene', id: sceneId }),
+            source: undefined,
+          },
+        };
       }
       case 'scene.submit_structure':
         return new SceneStructureSubmissionService(this.projects).submit(args, identity);
@@ -244,6 +276,160 @@ export class AgentSystemToolService {
           `Tool ${operation} must use the Worker confirmation workflow.`,
         );
     }
+  }
+
+  private routeConversationTask(
+    args: Record<string, unknown>,
+    identity: AgentSystemToolIdentity,
+  ): Record<string, unknown> {
+    rejectUnknown(args, ['decision', 'targetGenerationId', 'content', 'rationale']);
+    const decision = requiredString(args.decision, 'decision', 32) as
+      'independent' | 'follow_up' | 'supplement';
+    if (!new Set(['independent', 'follow_up', 'supplement']).has(decision))
+      throw new Error('Invalid task route decision.');
+    const targetGenerationId =
+      args.targetGenerationId === undefined
+        ? undefined
+        : requiredString(args.targetGenerationId, 'targetGenerationId', 128);
+    const rationale = requiredString(args.rationale, 'rationale', 1000);
+    const content =
+      args.content === undefined ? undefined : requiredString(args.content, 'content', 10000);
+    if (decision !== 'independent' && !targetGenerationId)
+      throw new Error('A follow-up or supplement decision requires targetGenerationId.');
+    if (decision === 'supplement' && !content)
+      throw new Error('A supplement decision requires content.');
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        if (!identity.taskId) throw new Error('Task routing requires an active Agent task.');
+        const current = database
+          .prepare(
+            `SELECT generations.id,generations.status,generations.conversation_id,
+                branches.execution,branches.dependency_generation_id
+           FROM agent_task_generations links
+           JOIN llm_generations generations ON generations.id=links.generation_id
+           JOIN generation_branches branches ON branches.generation_id=generations.id
+          WHERE links.task_id=? AND generations.project_id=? LIMIT 1`,
+          )
+          .get(identity.taskId, project.id) as
+          | {
+              id: string;
+              status: string;
+              conversation_id: string;
+              execution: string;
+              dependency_generation_id: string | null;
+            }
+          | undefined;
+        if (!current || current.conversation_id !== identity.conversationId)
+          throw new Error('当前任务没有可路由的生成运行。');
+        if (decision === 'independent') {
+          database
+            .prepare(
+              `UPDATE generation_branches SET execution='parallel',dependency_generation_id=NULL,dependency_snapshot_json=NULL WHERE generation_id=?`,
+            )
+            .run(current.id);
+          this.appendRoutingEvent(database, project.id, identity.taskId, '独立执行', rationale);
+          return { status: 'routed', decision, generationId: current.id, rationale };
+        }
+        const target = database
+          .prepare(
+            `SELECT generations.id,generations.status,generations.conversation_id,
+                user_messages.content AS user_content,assistant_messages.content AS assistant_content
+           FROM llm_generations generations
+           JOIN chat_messages user_messages ON user_messages.id=generations.user_message_id
+           JOIN chat_messages assistant_messages ON assistant_messages.id=generations.assistant_message_id
+          WHERE generations.id=? AND generations.project_id=?`,
+          )
+          .get(targetGenerationId, project.id) as
+          | {
+              id: string;
+              status: string;
+              conversation_id: string;
+              user_content: string;
+              assistant_content: string;
+            }
+          | undefined;
+        if (
+          !target ||
+          target.conversation_id !== identity.conversationId ||
+          target.id === current.id
+        )
+          throw new Error('目标任务不存在、属于其他会话，或不能指向当前任务。');
+        if (decision === 'follow_up') {
+          if (target.status !== 'complete')
+            throw new Error('目标任务尚未完成，暂时不能建立有序跟进；请独立执行或补充该任务。');
+          const snapshot = JSON.stringify({
+            generationId: target.id,
+            userMessage: { content: target.user_content },
+            assistantMessage: { content: target.assistant_content },
+          });
+          database
+            .prepare(
+              `UPDATE generation_branches SET execution='ordered',dependency_generation_id=?,dependency_snapshot_json=? WHERE generation_id=?`,
+            )
+            .run(target.id, snapshot, current.id);
+          this.appendRoutingEvent(database, project.id, identity.taskId, '有序跟进', rationale);
+          return {
+            status: 'routed',
+            decision,
+            generationId: current.id,
+            targetGenerationId: target.id,
+            targetSummary: target.assistant_content.slice(0, 4000),
+            rationale,
+          };
+        }
+        const messageId = randomUUID();
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            `INSERT INTO chat_messages(id,conversation_id,role,content,status,created_at) VALUES(?,?,?,?,?,?)`,
+          )
+          .run(messageId, target.conversation_id, 'user', content, 'complete', now);
+        database
+          .prepare(
+            `INSERT INTO generation_supplements(id,generation_id,message_id,content,created_at) VALUES(?,?,?,?,?)`,
+          )
+          .run(randomUUID(), target.id, messageId, content, now);
+        this.appendRoutingEvent(database, project.id, identity.taskId, '补充指定任务', rationale);
+        return {
+          status: 'routed',
+          decision,
+          generationId: current.id,
+          targetGenerationId: target.id,
+          rationale,
+          instruction: '补充已排入目标任务；当前轮停止继续执行工具。',
+        };
+      })(),
+    );
+  }
+
+  private appendRoutingEvent(
+    database: Database.Database,
+    projectId: string,
+    taskId: string,
+    label: string,
+    rationale: string,
+  ): void {
+    const row = database
+      .prepare(
+        'SELECT COALESCE(MAX(sequence),-1)+1 AS sequence FROM agent_task_events WHERE task_id=?',
+      )
+      .get(taskId) as { sequence: number };
+    database
+      .prepare(
+        `INSERT INTO agent_task_events(id,task_id,project_id,sequence,event_type,level,actor_type,summary,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        randomUUID(),
+        taskId,
+        projectId,
+        row.sequence,
+        'agent.task.routed',
+        'info',
+        'agent',
+        `LLM选择${label}`,
+        JSON.stringify({ label, rationale }),
+        new Date().toISOString(),
+      );
   }
 
   prepareConfirmation(

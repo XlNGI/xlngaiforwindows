@@ -24,6 +24,7 @@ import {
   migrateDatabase,
   openProjectDatabase,
 } from '@ai-video/persistence';
+import { exportProjectSnapshot } from './project-export.js';
 
 const PROJECT_DIRECTORIES = [
   'assets/images',
@@ -178,6 +179,7 @@ function releaseLock(session: ProjectSession): void {
 
 export class ProjectService {
   private session?: ProjectSession;
+  private containerGuard?: () => void;
   private readonly nativeBinding?: object;
   private readonly recentProjectsPath: string;
 
@@ -304,11 +306,15 @@ export class ProjectService {
     if (!this.session) return;
     const session = this.session;
     this.session = undefined;
+    this.containerGuard = undefined;
     try {
       if (session.project.mode === 'read-write') checkpoint(session.database);
-      session.database.close();
     } finally {
-      releaseLock(session);
+      try {
+        session.database.close();
+      } finally {
+        releaseLock(session);
+      }
     }
   }
 
@@ -318,6 +324,10 @@ export class ProjectService {
 
   currentSessionId(): string | undefined {
     return this.session?.id;
+  }
+
+  setContainerGuard(guard: () => void): void {
+    this.containerGuard = guard;
   }
 
   access<T>(
@@ -333,7 +343,8 @@ export class ProjectService {
     return checkIntegrity(this.session.database);
   }
 
-  async backup(destinationPath?: string): Promise<string> {
+  async backup(destinationPath?: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const session = this.requireWritableSession();
     const sessionId = session.id;
     checkpoint(session.database);
@@ -344,15 +355,28 @@ export class ProjectService {
     if (!isInside(session.project.rootPath, destination)) {
       throw new Error('Backup destination must stay inside the project directory.');
     }
+    if (existsSync(destination)) throw new Error('Backup destination already exists.');
     mkdirSync(dirname(destination), { recursive: true });
-    await session.database.backup(destination);
+    try {
+      await session.database.backup(destination, {
+        progress: () => {
+          signal?.throwIfAborted();
+          if (this.session !== session) throw new Error('Project session changed during backup.');
+          return 64;
+        },
+      });
+    } catch (error) {
+      rmSync(destination, { force: true });
+      throw error;
+    }
     if (this.session?.id !== sessionId) {
       throw new Error('Project session changed during backup.');
     }
     return destination;
   }
 
-  async exportProject(destinationRoot: string): Promise<string> {
+  async exportProject(destinationRoot: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const session = this.requireWritableSession();
     const destination = ensureRootPath(destinationRoot);
     if (
@@ -364,16 +388,23 @@ export class ProjectService {
     if (existsSync(destination) && readdirSync(destination).length > 0) {
       throw new Error('Export destination must be empty.');
     }
-    mkdirSync(destination, { recursive: true });
-    for (const directory of PROJECT_DIRECTORIES)
-      mkdirSync(join(destination, directory), { recursive: true });
     checkpoint(session.database);
-    await session.database.backup(join(destination, DATABASE_NAME));
-    for (const directory of ['assets', 'exports'] as const) {
-      const source = join(session.project.rootPath, directory);
-      if (existsSync(source)) cpSync(source, join(destination, directory), { recursive: true });
-    }
-    return destination;
+    return exportProjectSnapshot({
+      root: session.project.rootPath,
+      destination,
+      nativeBinding: this.nativeBinding,
+      backup: (path) =>
+        session.database.backup(path, {
+          progress: () => {
+            signal?.throwIfAborted();
+            return 64;
+          },
+        }),
+      assertCurrent: () => {
+        signal?.throwIfAborted();
+        if (this.session !== session) throw new Error('Project session changed during export.');
+      },
+    });
   }
 
   restore(backupPath: string, destinationRoot: string): OpenProject {
@@ -437,6 +468,7 @@ export class ProjectService {
 
   private requireSession(): ProjectSession {
     if (!this.session) throw new Error('No project is open.');
+    this.containerGuard?.();
     return this.session;
   }
 

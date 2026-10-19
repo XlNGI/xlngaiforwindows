@@ -17,6 +17,7 @@ import {
 } from './dev-http-security.js';
 import {
   configurePiConversationRuntime,
+  bindWorkerRequest,
   handleRequest,
   parseRequest,
   recordQueueWait,
@@ -24,6 +25,7 @@ import {
 } from './handler.js';
 import { JsonLineWriter, NativeProviderBridge } from './native-provider-bridge.js';
 import { RequestScheduler } from './request-scheduler.js';
+import { writeWorkerResponse } from './worker-response-writer.js';
 
 const requestScheduler = new RequestScheduler({
   onQueueWait: (method, waitMs) => recordQueueWait(method, waitMs),
@@ -72,8 +74,10 @@ function startStdio(): void {
   const writer = new JsonLineWriter(process.stdout);
   const bridge = new NativeProviderBridge({ send: (envelope) => writer.write(envelope) });
   configurePiConversationRuntime(bridge);
-  const writeResponse = (response: unknown): void => {
-    void writer.write(response).catch((error) => recordWorkerError('ipc.write', error));
+  const writeResponse = (response: { id: string }): void => {
+    void writeWorkerResponse(writer, response).catch((error) =>
+      recordWorkerError('ipc.write', error),
+    );
   };
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', (line) => {
@@ -103,10 +107,11 @@ function startStdio(): void {
         return;
       }
       const parsed = parseRequest(value);
+      const bound = 'ok' in parsed ? undefined : bindWorkerRequest(parsed);
       writeResponse(
         'ok' in parsed
           ? parsed
-          : await requestScheduler.run(parsed.method, () => handleRequest(parsed)),
+          : await requestScheduler.run(parsed.method, bound!.run, bound!.queueKey),
       );
     })().catch((error) => {
       recordWorkerError('ipc.request', error);
@@ -119,7 +124,8 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
   const developmentToken = secureDevelopmentMode ? createDevHttpToken() : undefined;
   let developmentTokenPath: string | undefined;
   const server = createServer((request, response) => {
-    const mediaMatch = request.url?.match(/^\/media\/(audio\/)?([^/?#]+)(\?thumbnail=1)?$/);
+    const mediaUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
+    const mediaMatch = mediaUrl.pathname.match(/^\/media\/(audio\/)?([^/?#]+)$/);
     if (request.method === 'GET' && mediaMatch && developmentToken) {
       const authorization = authorizeDevHttpMediaRequest(
         {
@@ -141,7 +147,7 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
       }
       const mediaMethod = mediaMatch[1]
         ? 'audio.mediaSource'
-        : mediaMatch[3]
+        : mediaUrl.searchParams.get('thumbnail') === '1'
           ? 'asset.thumbnail'
           : 'asset.mediaSource';
       void requestScheduler
@@ -151,6 +157,15 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
             protocolVersion: IPC_PROTOCOL_VERSION,
             method: mediaMethod,
             params: mediaMatch[1] ? { audioId: assetId } : { assetId },
+            ...(mediaUrl.searchParams.has('projectId') ||
+            mediaUrl.searchParams.has('projectSessionId')
+              ? {
+                  scope: {
+                    projectId: mediaUrl.searchParams.get('projectId') ?? '',
+                    projectSessionId: mediaUrl.searchParams.get('projectSessionId') ?? '',
+                  },
+                }
+              : {}),
           });
           if (!result.ok) {
             response.writeHead(404).end();
@@ -211,10 +226,11 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
           return;
         }
         const parsed = parseRequest(value);
+        const bound = 'ok' in parsed ? undefined : bindWorkerRequest(parsed);
         const result =
           'ok' in parsed
             ? parsed
-            : await requestScheduler.run(parsed.method, () => handleRequest(parsed));
+            : await requestScheduler.run(parsed.method, bound!.run, bound!.queueKey);
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(result));
       })().catch((error) => {

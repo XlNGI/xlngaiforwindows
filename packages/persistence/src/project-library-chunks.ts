@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import { splitNovelRagChunks } from './novel-rag-chunks.js';
+import { splitNovelRagChunks, type NovelRagChunkDraft } from './novel-rag-chunks.js';
+import { taskLibraryVisibility } from './task-history.js';
 import {
   parseProjectStructure,
   type ProjectStructureKind,
@@ -104,6 +105,7 @@ export interface ProjectStructureSearchPage {
 }
 
 export interface LibrarySearchQuery {
+  generationId?: string;
   projectId: string;
   query: string;
   sourceTypes?: readonly string[];
@@ -116,6 +118,7 @@ export interface LibrarySearchQuery {
 }
 
 export interface ProjectStructureSearchQuery {
+  generationId?: string;
   projectId: string;
   query?: string;
   sourceTypes?: readonly string[];
@@ -130,6 +133,7 @@ export interface ProjectStructureSearchQuery {
 }
 
 interface LibraryChunkWrite {
+  preparedChunks?: NovelRagChunkDraft[];
   sourceType: LibraryChunkSourceType;
   sourceId: string;
   documentId?: string;
@@ -246,6 +250,7 @@ export function rebuildLibraryChunksForDocument(
   projectId: string,
   documentId: string,
   now = new Date().toISOString(),
+  preparedChunks?: NovelRagChunkDraft[],
 ): number {
   const document = database
     .prepare(
@@ -305,6 +310,7 @@ export function rebuildLibraryChunksForDocument(
           title: source.title,
           content: version.content_markdown,
           structurePath: source.structurePath,
+          preparedChunks,
         },
       ],
       now,
@@ -674,6 +680,10 @@ export function searchProjectStructureNodesPage(
     'chunks.version_id IS nodes.version_id',
   ];
   const chunkValues: unknown[] = [];
+  if (params.generationId) {
+    chunkFilters.push(taskLibraryVisibility());
+    chunkValues.push(params.generationId);
+  }
   if (params.status && params.status !== 'any') {
     chunkFilters.push('chunks.status = ?');
     chunkValues.push(params.status);
@@ -841,7 +851,7 @@ function insertLibraryWrites(
   let count = 0;
   for (const write of writes) {
     writeProjectStructureNodes(database, projectId, write, now);
-    const pieces = splitLibraryContent(write.content);
+    const pieces = write.preparedChunks ?? splitLibraryContent(write.content);
     for (const piece of pieces) {
       insert.run(
         randomUUID(),
@@ -1237,6 +1247,10 @@ function* loadSearchCandidates(
 ): Generator<LibraryChunkRow> {
   const filters = ['chunks.project_id = ?'];
   const values: unknown[] = [params.projectId];
+  if (params.generationId) {
+    filters.push(taskLibraryVisibility());
+    values.push(params.generationId);
+  }
   if (params.sourceTypes && params.sourceTypes.length > 0) {
     filters.push(`chunks.source_type IN (${params.sourceTypes.map(() => '?').join(', ')})`);
     values.push(...params.sourceTypes);

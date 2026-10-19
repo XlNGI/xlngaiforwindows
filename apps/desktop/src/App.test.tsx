@@ -10,6 +10,7 @@ import {
   App,
   buildAgentAttachments,
   collectReferenceImageInputs,
+  composeConversationPrompt,
   composeImageGenerationPrompt,
   inferAgentCapability,
   mergeGenerationMessage,
@@ -17,6 +18,7 @@ import {
   resolveAgentRunModelSelection,
 } from './App';
 import { callWorker } from './worker-client';
+import { selectWorkerScope } from './worker-scope';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readMarkdownDocument } from './markdown-import-client';
 
@@ -27,6 +29,15 @@ const windowApi = vi.hoisted(() => ({
   onResized: vi.fn().mockResolvedValue(() => undefined),
   toggleMaximize: vi.fn().mockResolvedValue(undefined),
 }));
+
+describe('composeConversationPrompt', () => {
+  it('attaches the editable conversation contract once and preserves an empty template', () => {
+    expect(composeConversationPrompt('写一场雨夜追逐', '固定 1990 年代、冷色胶片风格')).toBe(
+      '【本会话要求约束】\n固定 1990 年代、冷色胶片风格\n\n【用户本次请求】\n写一场雨夜追逐',
+    );
+    expect(composeConversationPrompt('  写一场戏  ', '  ')).toBe('  写一场戏  ');
+  });
+});
 
 describe('inferAgentCapability', () => {
   it('treats prompt rewriting about video as a text Agent task', () => {
@@ -257,6 +268,8 @@ describe('App', () => {
       updatedAt: 'now',
     };
     vi.mocked(callWorker).mockImplementation(((method: string, params: unknown) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
       if (method === sendMethod) return response;
       if (method === 'project.current')
         return Promise.resolve({
@@ -336,35 +349,45 @@ describe('App', () => {
             status: 'started',
             capability: 'text',
             generation,
-            stream: { projectId: conversation.projectId },
+            stream: {
+              projectId: conversation.projectId,
+              conversationId: conversation.id,
+              generationId: generation.generationId,
+              projectSessionId: 'session',
+              attemptId: 'attempt',
+            },
           };
   }
 
   beforeEach(() => {
     cleanup();
+    selectWorkerScope(undefined);
     vi.clearAllMocks();
     window.localStorage.clear();
+    window.sessionStorage.clear();
     vi.mocked(callWorker).mockImplementation((method: string) =>
       Promise.resolve(
-        method === 'health'
-          ? {
-              protocolVersion: 1,
-              workerVersion: '0.1.0',
-              nodeVersion: 'v22.0.0',
-              platform: 'win32',
-              arch: 'x64',
-              pid: 123,
-            }
-          : method === 'sqlite.probe'
+        method === 'conversation.promptTemplate.get'
+          ? { conversationId: 'conversation', content: '', rowVersion: 1 }
+          : method === 'health'
             ? {
-                databasePath: 'probe.sqlite',
-                sqliteVersion: '3.50.0',
-                journalMode: 'wal',
-                writeVerified: true,
+                protocolVersion: 1,
+                workerVersion: '0.1.0',
+                nodeVersion: 'v22.0.0',
+                platform: 'win32',
+                arch: 'x64',
+                pid: 123,
               }
-            : method === 'project.recent'
-              ? []
-              : null,
+            : method === 'sqlite.probe'
+              ? {
+                  databasePath: 'probe.sqlite',
+                  sqliteVersion: '3.50.0',
+                  journalMode: 'wal',
+                  writeVerified: true,
+                }
+              : method === 'project.recent'
+                ? []
+                : null,
       ),
     );
     Object.defineProperty(window, '__TAURI_INTERNALS__', {
@@ -483,6 +506,12 @@ describe('App', () => {
         uiSchema: { fields: [] },
       };
       vi.mocked(callWorker).mockImplementation(((method: string, params: unknown) => {
+        if (method === 'conversation.promptTemplate.get')
+          return Promise.resolve({
+            conversationId: 'conversation',
+            content: '固定清晨与冷色风格',
+            rowVersion: 1,
+          });
         if (method === 'agent.run' && ++runs === 1)
           return Promise.resolve({
             status: 'needs_parameters',
@@ -513,13 +542,72 @@ describe('App', () => {
         .mocked(callWorker)
         .mock.calls.filter(([method]) => method === 'agent.run');
       expect(submitted[1]?.[1]).toHaveProperty('prompt');
-      expect((submitted[1]?.[1] as { prompt: string }).prompt).toContain('[附件：参考资料.bin]');
+      for (const [, params] of submitted) {
+        const prompt = (params as { prompt: string }).prompt;
+        expect(prompt.split('【本会话要求约束】')).toHaveLength(2);
+        expect(prompt.split('[附件：参考资料.bin]')).toHaveLength(2);
+        expect(prompt).toContain('固定清晨与冷色风格');
+      }
       if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
       await act(async () => {
         resolveRequest(accepted);
         await response;
       });
       await waitFor(() => expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : ''));
+    },
+  );
+
+  it.each(['agent.run', 'llm.generate', 'chat.message.save'] as const)(
+    'saves the latest editable requirements before %s receives the composed prompt',
+    async (method) => {
+      const accepted = mockComposerSend(method, Promise.resolve(null));
+      const baseline = vi.mocked(callWorker).getMockImplementation()!;
+      vi.mocked(callWorker).mockImplementation((rpc: string, params: unknown) => {
+        if (rpc === 'conversation.promptTemplate.get')
+          return Promise.resolve({
+            conversationId: 'composer-conversation',
+            content: '旧要求',
+            rowVersion: 4,
+          });
+        if (rpc === 'conversation.promptTemplate.save')
+          return Promise.resolve({
+            conversationId: 'composer-conversation',
+            content: '清晨、冷色风格；逐镜写明时间',
+            rowVersion: 5,
+          });
+        if (rpc === method) return Promise.resolve(accepted);
+        return baseline(rpc as never, params as never);
+      });
+      render(<App />);
+      await screen.findByDisplayValue('输入草稿');
+      if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
+      fireEvent.click(screen.getByText('本会话要求约束'));
+      await waitFor(() => expect(screen.getByLabelText('本会话要求约束')).toHaveValue('旧要求'));
+      fireEvent.change(screen.getByLabelText('本会话要求约束'), {
+        target: { value: '清晨、冷色风格；逐镜写明时间' },
+      });
+      fireEvent.change(screen.getByRole('textbox', { name: '会话消息' }), {
+        target: { value: '编排第一场' },
+      });
+      fireEvent.click(screen.getByTitle('发送消息'));
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith(
+          method,
+          expect.objectContaining({
+            [method === 'chat.message.save' ? 'content' : 'prompt']:
+              '【本会话要求约束】\n清晨、冷色风格；逐镜写明时间\n\n【用户本次请求】\n编排第一场',
+          }),
+        ),
+      );
+      const methods = vi.mocked(callWorker).mock.calls.map(([rpc]) => rpc);
+      expect(methods.indexOf('conversation.promptTemplate.save')).toBeLessThan(
+        methods.indexOf(method),
+      );
+      expect(callWorker).toHaveBeenCalledWith('conversation.promptTemplate.save', {
+        conversationId: 'composer-conversation',
+        content: '清晨、冷色风格；逐镜写明时间',
+        expectedRowVersion: 4,
+      });
     },
   );
 
@@ -590,7 +678,7 @@ describe('App', () => {
     },
     {
       nav: /场次与镜头/,
-      heading: '镜头工作区',
+      heading: '场次与镜头',
       close: '关闭场次与镜头',
     },
     {
@@ -687,10 +775,22 @@ describe('App', () => {
     };
     let currentProject = firstProject;
     vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list')
+        return Promise.resolve([
+          { project: currentProject, projectSessionId: 'session-b', active: true, state: 'ready' },
+        ]);
+      if (method === 'conversation.runtime.list') return Promise.resolve([]);
       if (method === 'project.current') return Promise.resolve(currentProject);
-      if (method === 'project.open') {
+      if (method === 'project.runtime.attach' || method === 'project.runtime.activate') {
         currentProject = secondProject;
-        return Promise.resolve(currentProject);
+        return Promise.resolve({
+          project: currentProject,
+          projectSessionId: 'session-b',
+          active: true,
+          state: 'ready',
+        });
       }
       if (method === 'asset.list')
         return Promise.resolve([
@@ -804,7 +904,7 @@ describe('App', () => {
     expect(within(manager).getByRole('button', { name: '新建' })).toBeDisabled();
     expect(within(manager).getByRole('button', { name: '打开' })).toBeDisabled();
     expect(callWorker).not.toHaveBeenCalledWith('project.create', expect.anything());
-    expect(callWorker).not.toHaveBeenCalledWith('project.open', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith('project.runtime.attach', expect.anything());
   });
 
   it('selects a project directory with the native folder dialog before opening', async () => {
@@ -824,7 +924,7 @@ describe('App', () => {
     const manager = screen.getByRole('region', { name: '项目管理' });
     fireEvent.click(within(manager).getByRole('button', { name: '打开' }));
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('project.open', {
+      expect(callWorker).toHaveBeenCalledWith('project.runtime.attach', {
         rootPath: 'D:\\Projects\\existing-project',
       }),
     );
@@ -868,6 +968,10 @@ describe('App', () => {
       contentMarkdown: '# 第一章\n\n故事开始。',
     });
     vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -920,7 +1024,10 @@ describe('App', () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '导入 Markdown' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '导入 Markdown' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '导入 Markdown' }));
 
     await waitFor(() =>
       expect(openDialog).toHaveBeenCalledWith({
@@ -1057,6 +1164,10 @@ describe('App', () => {
       updatedAt: 'now',
     };
     vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'project.current')
         return Promise.resolve({
           id: 'project',
@@ -1170,11 +1281,82 @@ describe('App', () => {
     fireEvent.click(sampleButton);
 
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('project.createSample', {
+      expect(callWorker).toHaveBeenCalledWith('project.runtime.createSample', {
         rootPath: 'D:\\Projects\\sample-drama',
         name: '我的短剧',
       }),
     );
+  });
+
+  it('keeps observing the running parent when a newer document is waiting for review', async () => {
+    mockComposerSend('chat.message.save', Promise.resolve(null));
+    const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
+    const active: AgentTaskDetail = {
+      task: {
+        id: 'active-parent',
+        projectId: 'project',
+        conversationId: 'composer-conversation',
+        userMessageId: 'original-user',
+        taskType: 'document-query',
+        scopeType: 'project',
+        title: '正在修订',
+        status: 'running',
+        phase: 'model_running',
+        rowVersion: 1,
+        createdAt: '2026-10-16T12:40:00Z',
+        updatedAt: '2026-10-16T12:40:01Z',
+      },
+      events: [],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+    };
+    const review: AgentTaskDetail = {
+      ...active,
+      task: {
+        ...active.task,
+        id: 'newer-review',
+        status: 'waiting_review',
+        phase: 'waiting_review',
+        updatedAt: '2026-10-16T12:40:02Z',
+      },
+    };
+    let finished = false;
+    let resolveEvents!: (result: unknown) => void;
+    const events = new Promise<unknown>((resolve) => {
+      resolveEvents = resolve;
+    });
+    vi.mocked(callWorker).mockImplementation(((method: string, params: { taskId?: string }) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'agent.task.list') return Promise.resolve([review.task, active.task]);
+      if (method === 'agent.task.get')
+        return Promise.resolve(
+          params.taskId === review.task.id
+            ? review
+            : { ...active, task: { ...active.task, status: finished ? 'completed' : 'running' } },
+        );
+      if (method === 'agent.task.events') return events;
+      return baselineWorker(method as never, params as never);
+    }) as typeof callWorker);
+    render(<App />);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'agent.task.events',
+        expect.objectContaining({ taskId: active.task.id }),
+      ),
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: '会话消息' }), {
+      target: { value: '？' },
+    });
+    expect(screen.getByTitle('上一轮仍在执行')).toBeDisabled();
+    await act(async () => {
+      finished = true;
+      resolveEvents({ task: { ...active.task, status: 'completed' }, events: [], nextSequence: 0 });
+      await events;
+    });
+    await waitFor(() => expect(screen.getByTitle('发送消息')).toBeEnabled());
+    expect(screen.getByRole('textbox', { name: '会话消息' })).toHaveValue('？');
   });
 
   it('opens the settings center with restore controls when no project is open', async () => {
@@ -1249,6 +1431,10 @@ describe('App', () => {
       title: '旧项目会话',
     };
     vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health') {
         return Promise.resolve({
           protocolVersion: 1,
@@ -1421,6 +1607,10 @@ describe('App', () => {
     });
 
     vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health') {
         return Promise.resolve({
           protocolVersion: 1,
@@ -1736,6 +1926,10 @@ describe('App', () => {
     };
 
     vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -2141,7 +2335,15 @@ describe('App', () => {
       expect(await screen.findByRole('button', { name: '生成的庭院' })).toBeInTheDocument();
       expect(await screen.findByRole('button', { name: '庭院远景' })).toBeInTheDocument();
       expect(await screen.findByDisplayValue('清晨的庭院镜头提示词')).toBeInTheDocument();
-      expect(screen.getByLabelText('场次完整视频提示词')).toHaveValue('司机转身，他没有开口。');
+      expect(screen.queryByLabelText('场次完整视频提示词')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: '生成的庭院' }));
+      expect(await screen.findByLabelText('场次完整视频提示词')).toHaveValue(
+        '司机转身，他没有开口。',
+      );
+      expect(screen.queryByLabelText('镜头提示词')).not.toBeInTheDocument();
+      expect(
+        within(screen.getByLabelText('场次与镜头目录')).queryByLabelText('场次绑定场景'),
+      ).not.toBeInTheDocument();
       expect(callWorker).toHaveBeenCalledWith('shot.list', { sceneId: 'applied-scene' });
       expect(screen.getByLabelText('场次绑定场景')).toHaveValue(createdDocument.id);
       expect(screen.getByText(`绑定场景：${createdDocument.title}`)).toBeInTheDocument();
@@ -2229,7 +2431,11 @@ describe('App', () => {
     if (isChapter) {
       expect(await screen.findByLabelText('章节内容')).toHaveValue('Agent 桌面人工测试成功');
       expect(screen.queryByLabelText('文档内容')).not.toBeInTheDocument();
-      expect(callWorker).toHaveBeenCalledWith('agent.task.get', { taskId: prepared.agentTaskId });
+      expect(callWorker).toHaveBeenCalledWith(
+        'agent.task.get',
+        { taskId: prepared.agentTaskId },
+        { projectId: 'project', projectSessionId: 'session' },
+      );
       fireEvent.change(screen.getByLabelText('会话消息'), { target: { value: batchPrompt } });
       const batchCallStart = vi.mocked(callWorker).mock.calls.length;
       fireEvent.click(screen.getByTitle('发送消息'));
@@ -2261,6 +2467,10 @@ describe('App', () => {
 
   it('splits script documents from character and scene prompts', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params: unknown) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -2511,6 +2721,10 @@ describe('App', () => {
 
   it('publishes an edited document in one action without a separate review step', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -2681,6 +2895,10 @@ describe('App', () => {
 
   it('keeps an opened document listed when it does not match the active kind filter', async () => {
     vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -2887,6 +3105,10 @@ describe('App', () => {
       updatedAt: 'now',
     };
     vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -2974,6 +3196,10 @@ describe('App', () => {
 
   it('shows and saves the shot storyboard document in the shot workspace', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -3111,7 +3337,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /场次与镜头/ }));
     fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
     expect(await screen.findByRole('heading', { name: '镜头提示词' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '参考图' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '参考资料' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '分镜说明' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成本镜画面' })).toBeInTheDocument();
     expect(await screen.findByLabelText('分镜标题')).toHaveValue('镜头一分镜');
@@ -3201,6 +3427,10 @@ describe('App', () => {
       updatedAt: 'now',
     };
     vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -3430,6 +3660,10 @@ describe('App', () => {
       updatedAt: 'now',
     };
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -3620,6 +3854,10 @@ describe('App', () => {
       expiresAt: '2999-01-01T00:00:00.000Z',
     };
     vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+        return Promise.resolve([]);
       if (method === 'health')
         return Promise.resolve({
           protocolVersion: 1,
@@ -3745,5 +3983,71 @@ describe('App', () => {
       'media.generation.confirmSubmission',
       expect.anything(),
     );
+  });
+  it('restores this window project after reload even when another window changed the Worker active project', async () => {
+    const projectA = {
+      id: 'window-A',
+      name: 'Window A Project',
+      rootPath: 'D:\\WindowA',
+      mode: 'read-write' as const,
+      schemaVersion: 53,
+      createdAt: 'now',
+      updatedAt: 'now',
+    };
+    const projectB = {
+      ...projectA,
+      id: 'window-B',
+      name: 'Window B Project',
+      rootPath: 'D:\\WindowB',
+    };
+    window.sessionStorage.setItem(
+      'ai-video.project-view',
+      JSON.stringify({ projectId: projectA.id, rootPath: projectA.rootPath }),
+    );
+    const baseline = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'conversation.promptTemplate.get')
+        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+      if (method === 'project.current') return Promise.resolve(projectB);
+      if (method === 'project.runtime.attach')
+        return Promise.resolve({
+          project: projectA,
+          projectSessionId: 'A-epoch',
+          active: false,
+          state: 'ready',
+        });
+      if (method === 'project.runtime.list')
+        return Promise.resolve([
+          { project: projectA, projectSessionId: 'A-epoch', active: false, state: 'ready' },
+          { project: projectB, projectSessionId: 'B-epoch', active: true, state: 'ready' },
+        ]);
+      if (method === 'conversation.list') return Promise.resolve({ items: [] });
+      if (
+        [
+          'document.list',
+          'scene.list',
+          'asset.list',
+          'constraint.list',
+          'provider.profile.list',
+          'conversation.runtime.list',
+        ].includes(method)
+      )
+        return Promise.resolve([]);
+      return baseline(method, params);
+    });
+    render(<App />);
+    await screen.findAllByText(projectA.name);
+    expect(screen.queryByText(projectB.name)).not.toBeInTheDocument();
+    expect(callWorker).toHaveBeenCalledWith('project.runtime.attach', {
+      rootPath: projectA.rootPath,
+      expectedProjectId: projectA.id,
+    });
+    expect(
+      vi
+        .mocked(callWorker)
+        .mock.calls.some(
+          ([method]) => method === 'project.runtime.unload' || method === 'project.close',
+        ),
+    ).toBe(false);
   });
 });

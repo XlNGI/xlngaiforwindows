@@ -1343,6 +1343,13 @@ export class DocumentWorkflowService {
   getTask(params: AgentTaskGetParams): AgentTaskDetail {
     return this.projects.access(false, (database, project) => {
       const task = this.requireTask(database, project, params.taskId);
+      const batch = database
+        .prepare(
+          `SELECT batch.id AS batchId,CASE WHEN batch.parent_task_id=? THEN 'parent' ELSE 'child' END AS role
+        FROM novel_task_batches batch LEFT JOIN novel_batch_children child ON child.batch_id=batch.id
+        WHERE batch.project_id=? AND (batch.parent_task_id=? OR child.task_id=?) LIMIT 1`,
+        )
+        .get(task.id, project.id, task.id, task.id) as AgentTaskDetail['chapterBatch'];
       const targetRow = database
         .prepare(
           `SELECT targets.target_kind, targets.action, targets.chapter_id, targets.document_id,
@@ -1366,17 +1373,18 @@ export class DocumentWorkflowService {
             document_version_id: string | null;
           }
         | undefined;
-      const target: AgentTaskTargetInfo | undefined = targetRow
-        ? {
-            targetKind: targetRow.target_kind,
-            action: targetRow.action,
-            ...(targetRow.chapter_id ? { chapterId: targetRow.chapter_id } : {}),
-            documentId: targetRow.document_id,
-            ...(targetRow.document_version_id
-              ? { documentVersionId: targetRow.document_version_id }
-              : {}),
-          }
-        : undefined;
+      const target: AgentTaskTargetInfo | undefined =
+        targetRow && batch?.role !== 'parent'
+          ? {
+              targetKind: targetRow.target_kind,
+              action: targetRow.action,
+              ...(targetRow.chapter_id ? { chapterId: targetRow.chapter_id } : {}),
+              documentId: targetRow.document_id,
+              ...(targetRow.document_version_id
+                ? { documentVersionId: targetRow.document_version_id }
+                : {}),
+            }
+          : undefined;
       const planRow = database
         .prepare('SELECT * FROM agent_task_plans WHERE task_id = ? AND project_id = ?')
         .get(task.id, project.id) as
@@ -1626,6 +1634,7 @@ export class DocumentWorkflowService {
           )
           .all(project.id, task.id) as NonNullable<AgentTaskDetail['changeSets']>,
         providerSteps,
+        ...(batch ? { chapterBatch: batch } : {}),
         researchSources,
         librarySources: librarySourcesFromToolCalls(database, task.id),
       };
@@ -1721,6 +1730,13 @@ export class DocumentWorkflowService {
             updated_at: string;
           }>)
         : [];
+      const hasScheduling = Boolean(
+        database
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE name='task_schedule_entries' AND type='table'",
+          )
+          .get(),
+      );
       const items: TaskLogItem[] = [
         ...(params.kind === undefined || params.kind === 'dubbing'
           ? new DubbingRepository(database, project.id)
@@ -1765,16 +1781,35 @@ export class DocumentWorkflowService {
           estimatedCost: task.estimated_cost ?? undefined,
         })),
         ...jobs
-          .map((job): TaskLogItem => ({
-            id: `job:${job.id}`,
-            kind: job.adapter_key.split(':')[0]?.endsWith('TO_VIDEO') ? 'video' : 'image',
-            title: job.adapter_key,
-            status: job.status,
-            createdAt: job.created_at,
-            updatedAt: job.updated_at,
-            sourceId: job.id,
-            shotId: job.shot_id ?? undefined,
-          }))
+          .map((job): TaskLogItem => {
+            const scheduling = hasScheduling
+              ? (database
+                  .prepare(
+                    'SELECT schedule_state AS state, wait_reason AS waitReason, row_version AS revision FROM task_schedule_entries WHERE owner_job_id=? AND project_id=?',
+                  )
+                  .get(job.id, project.id) as
+                  { state: string; waitReason: string | null; revision: number } | undefined)
+              : undefined;
+            return {
+              id: `job:${job.id}`,
+              kind: job.adapter_key.split(':')[0]?.endsWith('TO_VIDEO') ? 'video' : 'image',
+              title: job.adapter_key,
+              status: job.status,
+              createdAt: job.created_at,
+              updatedAt: job.updated_at,
+              sourceId: job.id,
+              shotId: job.shot_id ?? undefined,
+              ...(scheduling
+                ? {
+                    scheduling: {
+                      state: scheduling.state,
+                      waitReason: scheduling.waitReason ?? undefined,
+                      revision: scheduling.revision,
+                    },
+                  }
+                : {}),
+            };
+          })
           .filter((item) => !params.kind || item.kind === params.kind),
       ].sort(
         (left, right) =>

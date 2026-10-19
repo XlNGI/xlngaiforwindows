@@ -23,6 +23,7 @@ import { Agent, type AgentContext, type StreamFn } from '@earendil-works/pi-agen
 import type { AssistantMessage, Model, ToolResultMessage } from '@earendil-works/pi-ai';
 import { createPiStreamFunction, NativeProviderBridge } from './native-provider-bridge.js';
 import { DomainToolGateway, type PiToolIdentity } from './domain-tool-gateway.js';
+import { ExecutionPool, type ExecutionLease } from './execution-pool.js';
 import type { GenerationService } from './generation-service.js';
 import { TaskPlanService } from './task-plan-service.js';
 import {
@@ -32,10 +33,12 @@ import {
 } from './agent-provider-tool-gateway.js';
 
 export interface PiConversationRuntimeOptions {
+  capacity?: ExecutionPool;
   generation: Pick<
     GenerationService,
     'runtime' | 'configureAgentTools' | 'observe' | 'complete' | 'failNative' | 'cancel' | 'get'
-  >;
+  > &
+    Partial<Pick<GenerationService, 'waitUntilReady' | 'supplement' | 'consumeSupplements'>>;
   plans: TaskPlanService;
   /** Production uses the NativeProviderBridge; tests may inject a faux Pi stream. */
   bridge?: NativeProviderBridge;
@@ -90,6 +93,17 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 export class PiConversationRuntime implements ConversationRuntime {
   readonly kind = 'pi' as const;
   private readonly active = new Map<string, ActiveRun>();
+  private readonly queued = new Map<
+    string,
+    {
+      identity: LlmGenerationIdentity;
+      taskId: string;
+      controller: AbortController;
+      completion: Promise<void>;
+    }
+  >();
+  private readonly capacity: ExecutionPool;
+  private readonly executionLeases = new Map<string, ExecutionLease>();
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
   private readonly pendingMediaSelections = new Map<string, PendingMediaSelection>();
   private readonly pendingMediaSubmissions = new Map<string, PendingMediaSubmission>();
@@ -97,9 +111,69 @@ export class PiConversationRuntime implements ConversationRuntime {
 
   constructor(private readonly options: PiConversationRuntimeOptions) {
     this.maxTurns = options.maxTurns ?? 24;
+    this.capacity = options.capacity ?? new ExecutionPool();
   }
 
   async start(request: ConversationRuntimeStartRequest): Promise<ConversationRuntimeStartResult> {
+    await Promise.resolve();
+    const identity = request.identity;
+    if (!identity || !request.prompt?.trim())
+      throw new Error('Pi runtime requires a generation identity and prompt.');
+    if (
+      identity.projectId !== request.projectId ||
+      identity.projectSessionId !== request.projectSessionId ||
+      identity.conversationId !== request.conversationId
+    )
+      throw new Error('Pi runtime identity does not match the requested project session.');
+    const existing = this.queued.get(identity.generationId);
+    // Validate the trusted identity before registering any queued observation.
+    this.options.generation.runtime(identity);
+    if (existing) return { runtime: 'pi', taskId: existing.taskId };
+    const controller = new AbortController();
+    const completion = Promise.resolve().then(async () => {
+      try {
+        await this.options.generation.waitUntilReady?.(identity, controller.signal);
+        await this.capacity.run('text', request.projectId, controller.signal, async (lease) => {
+          this.executionLeases.set(identity.generationId, lease);
+          try {
+            await this.startAdmitted(request);
+            await this.active.get(identity.generationId)?.completion;
+          } finally {
+            if (this.executionLeases.get(identity.generationId) === lease)
+              this.executionLeases.delete(identity.generationId);
+          }
+        });
+      } catch (error) {
+        const current = this.options.generation.get(identity.generationId);
+        if (['prepared', 'streaming'].includes(current.status)) {
+          this.options.providerTools?.terminateGeneration(
+            identity.generationId,
+            'failed',
+            error instanceof Error ? error.message : 'Queued task interrupted.',
+          );
+          this.options.generation.failNative({
+            ...identity,
+            content: current.assistantMessage.content,
+            error: error instanceof Error ? error.message : 'Queued task was interrupted.',
+            retryable: true,
+          });
+        }
+      } finally {
+        this.queued.delete(identity.generationId);
+      }
+    });
+    this.queued.set(identity.generationId, {
+      identity,
+      taskId: request.taskId,
+      controller,
+      completion,
+    });
+    return { runtime: 'pi', taskId: request.taskId };
+  }
+
+  private async startAdmitted(
+    request: ConversationRuntimeStartRequest,
+  ): Promise<ConversationRuntimeStartResult> {
     const identity = request.identity;
     const prompt = request.prompt?.trim();
     if (!identity || !prompt) {
@@ -167,9 +241,12 @@ export class PiConversationRuntime implements ConversationRuntime {
         thinkingLevel: 'off',
         tools: plannedWorkflow ? [...gateway!.tools(planningGrants)] : providerGateway!.tools(),
       },
-      toolExecution: plannedWorkflow ? 'parallel' : 'sequential',
+      toolExecution: 'parallel',
       // eslint-disable-next-line @typescript-eslint/require-await
       beforeToolCall: async ({ assistantMessage, toolCall }) => {
+        providerGateway?.freezeProviderResponse(
+          assistantMessage.content.filter((item) => item.type === 'toolCall'),
+        );
         if (planningRound && toolCall.name !== 'task.plan.submit') {
           return {
             block: true,
@@ -195,6 +272,13 @@ export class PiConversationRuntime implements ConversationRuntime {
         return undefined;
       },
       prepareNextTurnWithContext: ({ message, toolResults, context }) => {
+        providerGateway?.finishProviderResponse();
+        const supplements =
+          this.options.generation.consumeSupplements?.(identity.generationId) ?? [];
+        if (supplements.length && !toolResults.length && message.role === 'assistant')
+          providerGateway?.advanceTextTurn(message.responseId, usageFromPi(message));
+        for (const supplement of supplements)
+          agent.steer({ role: 'user', content: supplement.content, timestamp: Date.now() });
         turnCount += 1;
         this.options.onEvent?.({ type: 'turn_started', taskId: request.taskId, turn: turnCount });
         if (turnCount > this.maxTurns) {
@@ -240,7 +324,7 @@ export class PiConversationRuntime implements ConversationRuntime {
                   unifiedAgentInstruction(
                     this.options.generation.runtime(identity).systemInstruction,
                   ),
-                  runtime.context,
+                  this.options.generation.runtime(identity).context,
                 ),
             tools:
               plan?.status === 'succeeded'
@@ -301,8 +385,13 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   cancel(generationId: string): boolean {
+    const queued = this.queued.get(generationId);
+    queued?.controller.abort(new Error('Task cancelled before execution.'));
     const active = this.active.get(generationId);
-    if (!active) return false;
+    if (!active) {
+      if (queued) void this.options.generation.cancel(generationId);
+      return Boolean(queued);
+    }
     active.cancelled = true;
     this.resolvePendingConfirmation(generationId, false);
     this.resolvePendingMediaSelection(generationId, undefined);
@@ -316,18 +405,35 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   async wait(generationId: string): Promise<void> {
-    await this.active.get(generationId)?.completion;
+    await (this.queued.get(generationId)?.completion ?? this.active.get(generationId)?.completion);
+  }
+
+  cancelAll(): void {
+    for (const generationId of new Set([...this.active.keys(), ...this.queued.keys()]))
+      this.cancel(generationId);
+  }
+
+  async drain(): Promise<void> {
+    await Promise.allSettled([...this.queued.values()].map((run) => run.completion));
   }
 
   /** Reattach callers after a Desktop restart without creating a second Agent loop. */
   hasActive(generationId: string): boolean {
-    return this.active.has(generationId);
+    return this.active.has(generationId) || this.queued.has(generationId);
+  }
+
+  list() {
+    return [...this.queued.values()].map((run) => ({
+      identity: { ...run.identity },
+      taskId: run.taskId,
+      generation: this.options.generation.get(run.identity.generationId),
+    }));
   }
 
   get(generationId: string): ConversationRuntimeGetResult {
     const active = this.active.get(generationId);
     return {
-      active: Boolean(active),
+      active: Boolean(active) || this.queued.has(generationId),
       liveActions: active?.liveActions ?? [],
       confirmation: this.pendingConfirmations.get(generationId)?.request,
       mediaSelection: this.pendingMediaSelections.get(generationId)?.request,
@@ -423,17 +529,19 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (this.pendingConfirmations.has(generationId)) {
       return Promise.reject(new Error('Pi runtime already has a pending confirmation.'));
     }
-    return new Promise<boolean>((resolve, reject) => {
-      const expiresIn = Math.min(
-        MAX_TIMER_DELAY_MS,
-        Math.max(0, Date.parse(request.expiresAt) - Date.now()),
-      );
-      const timeout = setTimeout(() => {
-        this.pendingConfirmations.delete(generationId);
-        reject(new Error('Agent confirmation expired before the user responded.'));
-      }, expiresIn);
-      this.pendingConfirmations.set(generationId, { request, resolve, timeout });
-    });
+    const wait = () =>
+      new Promise<boolean>((resolve, reject) => {
+        const expiresIn = Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, Date.parse(request.expiresAt) - Date.now()),
+        );
+        const timeout = setTimeout(() => {
+          this.pendingConfirmations.delete(generationId);
+          reject(new Error('Agent confirmation expired before the user responded.'));
+        }, expiresIn);
+        this.pendingConfirmations.set(generationId, { request, resolve, timeout });
+      });
+    return this.executionLeases.get(generationId)?.suspend(wait) ?? wait();
   }
 
   private resolvePendingConfirmation(generationId: string, approved: boolean): void {
@@ -451,17 +559,19 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (this.pendingMediaSelections.has(generationId)) {
       return Promise.reject(new Error('Pi runtime already has a pending media selection.'));
     }
-    return new Promise<MediaModelSelectionDecision | undefined>((resolve, reject) => {
-      const expiresIn = Math.min(
-        MAX_TIMER_DELAY_MS,
-        Math.max(0, Date.parse(request.expiresAt) - Date.now()),
-      );
-      const timeout = setTimeout(() => {
-        this.pendingMediaSelections.delete(generationId);
-        reject(new Error('Media model selection expired before the user responded.'));
-      }, expiresIn);
-      this.pendingMediaSelections.set(generationId, { request, resolve, timeout });
-    });
+    const wait = () =>
+      new Promise<MediaModelSelectionDecision | undefined>((resolve, reject) => {
+        const expiresIn = Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, Date.parse(request.expiresAt) - Date.now()),
+        );
+        const timeout = setTimeout(() => {
+          this.pendingMediaSelections.delete(generationId);
+          reject(new Error('Media model selection expired before the user responded.'));
+        }, expiresIn);
+        this.pendingMediaSelections.set(generationId, { request, resolve, timeout });
+      });
+    return this.executionLeases.get(generationId)?.suspend(wait) ?? wait();
   }
 
   private resolvePendingMediaSelection(
@@ -482,17 +592,19 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (this.pendingMediaSubmissions.has(generationId)) {
       return Promise.reject(new Error('Pi runtime already has a pending media submission.'));
     }
-    return new Promise<boolean>((resolve, reject) => {
-      const expiresIn = Math.min(
-        MAX_TIMER_DELAY_MS,
-        Math.max(0, Date.parse(request.expiresAt) - Date.now()),
-      );
-      const timeout = setTimeout(() => {
-        this.pendingMediaSubmissions.delete(generationId);
-        reject(new Error('Media submission confirmation expired before the user responded.'));
-      }, expiresIn);
-      this.pendingMediaSubmissions.set(generationId, { request, resolve, timeout });
-    });
+    const wait = () =>
+      new Promise<boolean>((resolve, reject) => {
+        const expiresIn = Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, Date.parse(request.expiresAt) - Date.now()),
+        );
+        const timeout = setTimeout(() => {
+          this.pendingMediaSubmissions.delete(generationId);
+          reject(new Error('Media submission confirmation expired before the user responded.'));
+        }, expiresIn);
+        this.pendingMediaSubmissions.set(generationId, { request, resolve, timeout });
+      });
+    return this.executionLeases.get(generationId)?.suspend(wait) ?? wait();
   }
 
   private resolvePendingMediaSubmission(generationId: string, approved: boolean): void {

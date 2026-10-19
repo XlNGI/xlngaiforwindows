@@ -22,6 +22,8 @@ export interface JsonLineWritable {
   write(chunk: string, callback: (error?: Error | null) => void): boolean;
 }
 
+export class SidecarEnvelopeSizeError extends Error {}
+
 /** Serializes every JSONL write and waits for the underlying stream callback (including backpressure). */
 export class JsonLineWriter {
   private tail = Promise.resolve();
@@ -36,7 +38,9 @@ export class JsonLineWriter {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
     if (Buffer.byteLength(line, 'utf8') > SIDECAR_ENVELOPE_MAX_BYTES) {
-      return Promise.reject(new Error('Sidecar envelope exceeds the 2 MiB limit.'));
+      return Promise.reject(
+        new SidecarEnvelopeSizeError('Sidecar envelope exceeds the 2 MiB limit.'),
+      );
     }
     const pending = this.tail.then(
       () =>

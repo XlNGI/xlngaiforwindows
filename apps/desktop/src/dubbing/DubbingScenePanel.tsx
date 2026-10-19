@@ -10,7 +10,7 @@ import type {
   ProviderProfileInfo,
   WorkerMethodMap,
 } from '@ai-video/contracts';
-import { callWorker } from '../worker-client';
+import { projectWorker } from '../worker-scope';
 import { useDubbingMedia } from './media';
 import './dubbing.css';
 
@@ -90,6 +90,7 @@ function DubbingSceneContent({
   onOpenAsset,
   characterDocumentIds,
 }: Props) {
+  const callWorker = projectWorker();
   const active = useRef(true);
   const loadSequence = useRef(0);
   const [expanded, setExpanded] = useState(false);

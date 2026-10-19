@@ -85,7 +85,7 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
       if (method === 'document.draft.save') return documentDetail('Updated');
-      if (method === 'novel.export.prepare')
+      if (method === 'novel.export.start')
         return { status: 'succeeded', packagePath: 'exports/novel' };
       return {};
     });
@@ -205,17 +205,17 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [chapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare') return exportJob;
+      if (method === 'novel.export.start') return exportJob;
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByText(/Chapter 1 Opening/);
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     expect(screen.getByLabelText('包含草稿')).not.toBeChecked();
-    expect(callWorker).not.toHaveBeenCalledWith('novel.export.prepare', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith('novel.export.start', expect.anything());
     fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('novel.export.prepare', {
+      expect(callWorker).toHaveBeenCalledWith('novel.export.start', {
         exportType: 'work',
         exportFormat: 'files',
       }),
@@ -234,7 +234,7 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [chapter, second];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare') return { ...exportJob, exportFormat: 'merged' };
+      if (method === 'novel.export.start') return { ...exportJob, exportFormat: 'merged' };
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
@@ -250,7 +250,7 @@ describe('NovelWorkspace', () => {
     fireEvent.click(screen.getByLabelText('包含草稿'));
     fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('novel.export.prepare', {
+      expect(callWorker).toHaveBeenCalledWith('novel.export.start', {
         exportType: 'selection',
         chapterIds: ['chapter-2'],
         exportFormat: 'merged',
@@ -299,7 +299,7 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [chapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare') {
+      if (method === 'novel.export.start') {
         if (!(params as { includeDraft?: boolean }).includeDraft)
           return Promise.reject(
             new Error('所选范围没有已发布章节。若要导出草稿，请勾选“包含草稿”。'),
@@ -325,7 +325,7 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [chapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare')
+      if (method === 'novel.export.start')
         return { ...exportJob, status: 'failed', errorMessage: '磁盘空间不足' };
       return {};
     });
@@ -349,7 +349,7 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [chapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare') return pending;
+      if (method === 'novel.export.start') return pending;
       return {};
     });
     const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
@@ -360,7 +360,7 @@ describe('NovelWorkspace', () => {
     expect(screen.getByRole('status')).toHaveTextContent('正在导出');
     fireEvent.click(screen.getByRole('button', { name: '正在导出…' }));
     expect(
-      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'novel.export.prepare'),
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'novel.export.start'),
     ).toHaveLength(1);
     expect(screen.getByLabelText('包含草稿')).toBeDisabled();
     rerender(<NovelWorkspace projectId="project-2" writable />);
@@ -380,7 +380,7 @@ describe('NovelWorkspace', () => {
         return [chapter, { ...chapter, id: 'chapter-2', title: 'Second' }];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.export.prepare') return exportJob;
+      if (method === 'novel.export.start') return exportJob;
       if (method === 'novel.export.reveal') return Promise.reject(new Error('文件夹已被移动'));
       return {};
     });
@@ -439,11 +439,16 @@ describe('NovelWorkspace', () => {
       if (method === 'novel.chapter.list') return [importedChapter];
       if (method === 'novel.volume.list') return [];
       if (method === 'document.get') return documentDetail();
-      if (method === 'novel.import') {
+      if (method === 'file.task.create') {
         return {
-          volume: undefined,
-          chapters: [importedChapter, secondImportedChapter],
-          importedCount: 2,
+          id: 'import-task',
+          kind: 'novel-import',
+          status: 'succeeded',
+          result: {
+            volume: undefined,
+            chapters: [importedChapter, secondImportedChapter],
+            importedCount: 2,
+          },
         };
       }
       return {};
@@ -458,12 +463,16 @@ describe('NovelWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存草稿并切片' }));
 
     await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('novel.import', {
-        volumeTitle: '第一卷',
-        chapters: [
-          { title: '第一章', displayLabel: '第 1 章', contentMarkdown: '雨落在雾港。' },
-          { title: '第二章', displayLabel: '第 2 章', contentMarkdown: '灯塔亮起。' },
-        ],
+      expect(callWorker).toHaveBeenCalledWith('file.task.create', {
+        kind: 'novel-import',
+        idempotencyKey: expect.any(String) as string,
+        input: {
+          volumeTitle: '第一卷',
+          chapters: [
+            { title: '第一章', displayLabel: '第 1 章', contentMarkdown: '雨落在雾港。' },
+            { title: '第二章', displayLabel: '第 2 章', contentMarkdown: '灯塔亮起。' },
+          ],
+        },
       }),
     );
     expect(await screen.findByText('已保存 2 个草稿，并生成 2 个 RAG 切片。')).toBeInTheDocument();

@@ -5,6 +5,11 @@ export interface RequestSchedulerOptions {
 }
 
 const concurrentReadMethods = new Set<WorkerMethod>([
+  'project.runtime.list',
+  'project.runtime.registrations',
+  'task.schedule.list',
+  'task.schedule.get',
+  'task.schedule.events',
   'scene.media.resolve',
   'asset.thumbnail',
   'characterVoice.list',
@@ -44,9 +49,11 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'document.versions',
   'scene.list',
   'production.read',
+  'shot.continuity.get',
   'production.compile',
   'shot.list',
   'conversation.list',
+  'conversation.promptTemplate.get',
   'chat.message.list',
   'context.preview',
   'novel.context.consistencyReport',
@@ -58,6 +65,12 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'task.log.list',
   'generation.job.events.list',
   'conversation.runtime.get',
+  'conversation.runtime.list',
+  'novel.batch.get',
+  'file.task.get',
+  'file.task.list',
+  'novel.export.get',
+  'novel.export.list',
   'llm.status',
   'llm.generation.runtime',
   'llm.generation.get',
@@ -81,6 +94,15 @@ const concurrentReadMethods = new Set<WorkerMethod>([
 ]);
 
 const backgroundMethods = new Set<WorkerMethod>([
+  'shot.continuity.preview',
+  'shot.continuity.confirm',
+  'shot.continuity.prompt.prepare',
+  'file.task.cancel',
+  'novel.export.cancel',
+  'novel.export.prepare',
+  'novel.import',
+  'novel.batch.cancel',
+  'task.schedule.cancel',
   'audio.import',
   'dubbing.job.submit',
   'project.backup',
@@ -101,25 +123,29 @@ export function isSerializedWorkerMethod(method: WorkerMethod): boolean {
 }
 
 export class RequestScheduler {
-  private mutationQueue = Promise.resolve();
+  private readonly mutationQueues = new Map<string, Promise<void>>();
   private readonly onQueueWait?: (method: WorkerMethod, waitMs: number) => void;
 
   constructor(options: RequestSchedulerOptions = {}) {
     this.onQueueWait = options.onQueueWait;
   }
 
-  run<T>(method: WorkerMethod, task: () => Promise<T>): Promise<T> {
+  run<T>(method: WorkerMethod, task: () => Promise<T>, queueKey = 'application'): Promise<T> {
     if (!isSerializedWorkerMethod(method)) return task();
     const queuedAt = performance.now();
     const execute = (): Promise<T> => {
       this.onQueueWait?.(method, performance.now() - queuedAt);
       return task();
     };
-    const result = this.mutationQueue.then(execute, execute);
-    this.mutationQueue = result.then(
+    const result = (this.mutationQueues.get(queueKey) ?? Promise.resolve()).then(execute, execute);
+    const tail = result.then(
       () => undefined,
       () => undefined,
     );
+    this.mutationQueues.set(queueKey, tail);
+    void tail.then(() => {
+      if (this.mutationQueues.get(queueKey) === tail) this.mutationQueues.delete(queueKey);
+    });
     return result;
   }
 }

@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useProjectViewState } from './use-project-view-state';
 import type { AssetInfo, AssetSourceInfo, SceneInfo, ShotInfo } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
 
 export interface UseAssetWorkspaceOptions {
   scenes: SceneInfo[];
@@ -19,10 +19,11 @@ export function useAssetWorkspace({
   setNavigationMode,
   setContentMessage,
 }: UseAssetWorkspaceOptions) {
-  const [assets, setAssets] = useState<AssetInfo[]>([]);
-  const [asset, setAsset] = useState<AssetInfo>();
-  const [assetLibrarySelectedId, setAssetLibrarySelectedId] = useState<string>();
-  const [focusedSource, setFocusedSource] = useState<AssetSourceInfo>();
+  const callWorker = projectWorker();
+  const [assets, setAssets] = useProjectViewState<AssetInfo[]>([]);
+  const [asset, setAsset] = useProjectViewState<AssetInfo>();
+  const [assetLibrarySelectedId, setAssetLibrarySelectedId] = useProjectViewState<string>();
+  const [focusedSource, setFocusedSource] = useProjectViewState<AssetSourceInfo>();
 
   const updateAssets = (nextAssets: AssetInfo[], selectedAssetId?: string) => {
     setAssets(nextAssets);

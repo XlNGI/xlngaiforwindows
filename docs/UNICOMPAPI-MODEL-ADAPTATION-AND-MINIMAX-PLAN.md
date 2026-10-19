@@ -5,6 +5,8 @@
 状态：P0-P4 自动化门禁已通过；真实 UniComp 冒烟待用户凭据复验  
 适用范围：Desktop、Worker、Contracts、Generation Adapters、Provider Native Bridge
 
+2026-10-16 后续补充：用户要求 UniComp 兼容层并追问 Wan 3.0／Prime 音频输入。本次复用官方合同修订，以 Binding 声明网关字段映射，保留旧任务读取，不恢复 per-model 参数工厂或目录白名单。顺序、证据及真实调用边界见 [UniComp 媒体兼容层补齐](./UNICOMP-MEDIA-COMPATIBILITY-IMPLEMENTATION.md)。
+
 > 本文档是后续实施的单一事实来源。已确认决策实施中不得临时改成「按供应商家族 / 按全球同名映射 / 把 UniComp 模型表再抄进代码」方案。
 
 ## 1. 执行状态

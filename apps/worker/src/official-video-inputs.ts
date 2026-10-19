@@ -17,7 +17,7 @@ import type {
   MediaInputReferenceV1,
   VideoGenerationPrepareParams,
 } from '@ai-video/contracts';
-import { officialVideoAudioContracts } from '@ai-video/contracts';
+import { officialVideoAudioContracts, supportsProductionAudioUpload } from '@ai-video/contracts';
 import {
   VoiceReferenceRepository,
   DubbingRepository,
@@ -54,6 +54,17 @@ export function materializeOfficialVideoInputs(
   const replacements = new Map<string, string>();
   function materialize(original: string): string {
     if (replacements.has(original)) return replacements.get(original)!;
+    if (
+      !supportsProductionAudioUpload({
+        provider: adapterParts[1]!,
+        contractId: contract!.contractId,
+        contractRevision: contract!.contractRevision,
+      }) &&
+      /^(character-voice|project-audio):\/\//u.test(original)
+    )
+      throw new Error(
+        'UniComp 声音参考请提供公网音频 URL；当前渠道未接入本地音频上传。也可选择万相官方连接使用本地样本。',
+      );
     let bytes: Buffer;
     let sourcePath: string | undefined;
     let mime: string;
@@ -151,6 +162,8 @@ export function materializeOfficialVideoInputs(
             '.mp4': 'video/mp4',
           } as Record<string, string>
         )[extname(sourcePath).toLowerCase()] ?? '';
+      if (adapterParts[1] === 'unicompapi' && mime === 'video/mp4')
+        throw new Error('UniComp 参考视频请提供公网 URL，当前渠道未接入本地视频上传。');
       if (
         !mime ||
         bytes.length !== asset.sizeBytes ||

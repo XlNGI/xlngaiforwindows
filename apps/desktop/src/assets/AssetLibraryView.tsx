@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   Check,
@@ -27,7 +27,7 @@ import type {
   AssetSourceInfo,
   AssetTagInfo,
 } from '@ai-video/contracts';
-import { callWorker } from '../worker-client';
+import { projectWorker, workerMediaUrl } from '../worker-scope';
 import { ImagePreview } from '../ImagePreview';
 
 type MediaFilter = 'all' | 'image' | 'video';
@@ -52,7 +52,7 @@ function cursorFor(asset: AssetInfo) {
 }
 
 function mediaSrcFor(assetId: string, absolutePath: string): string | undefined {
-  if (!('__TAURI_INTERNALS__' in window)) return `/worker-media/${encodeURIComponent(assetId)}`;
+  if (!('__TAURI_INTERNALS__' in window)) return workerMediaUrl(assetId);
   try {
     return convertFileSrc(absolutePath);
   } catch {
@@ -72,6 +72,7 @@ export function AssetLibraryView({
   taskCompletionRevision = 0,
   onOpenSource,
 }: AssetLibraryViewProps) {
+  const callWorker = projectWorker();
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
   const [showTrash, setShowTrash] = useState(false);
   const [keyword, setKeyword] = useState('');
@@ -117,7 +118,7 @@ export function AssetLibraryView({
   const kind = mediaFilter === 'all' ? undefined : mediaFilter;
   const selected = assets.find((asset) => asset.id === selectedIds.at(-1));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setTagDraft('');
   }, [selected?.id]);
 

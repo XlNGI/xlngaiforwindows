@@ -19,6 +19,7 @@ import type { AppSettingsService } from './app-settings-service.js';
 import { ContentService } from './content-service.js';
 import { DubbingService, type DubbingServiceOptions } from './dubbing-service.js';
 import { FfmpegRuntime } from './ffmpeg-runtime.js';
+import { ExecutionPool } from './execution-pool.js';
 import { NativeProviderRequestError } from './native-provider-bridge.js';
 import { ProjectService } from './project-service.js';
 import { emptyModelCapabilities } from './provider-registry.js';
@@ -878,6 +879,234 @@ describe.runIf(process.platform === 'win32')(
       expect(
         request.mock.calls.filter(([method]) => method === 'provider.dubbing.speech'),
       ).toHaveLength(1);
+    });
+
+    it('runs independent speech requests across projects with two shared slots, preserving frozen voices and cancelling queued work before Native', async () => {
+      const capacity = new ExecutionPool();
+      const releases = new Map<string, () => void>();
+      let active = 0,
+        peak = 0;
+      const request = vi.fn(async (method: string, raw: unknown) => {
+        if (method !== 'provider.dubbing.speech') return { cancelled: true };
+        const params = raw as NativeDubbingSpeechParams;
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise<void>((resolve) => releases.set(params.operationId!, resolve));
+        active -= 1;
+        const output = join(params.projectRoot, params.outputRelativePath);
+        mkdirSync(dirname(output), { recursive: true });
+        await copyFile(mp3, output);
+        return {
+          relativePath: params.outputRelativePath,
+          mime: 'audio/mpeg',
+          sizeBytes: statSync(output).size,
+        };
+      });
+      const a = await setup({ capacity, native: { request } }),
+        b = await setup({ capacity, native: { request } });
+      const ca = a.cue(0, 'Project A speech'),
+        cb = b.cue(0, 'Project B speech'),
+        queuedCue = a.cue(1000, 'Cancel queued speech', 1);
+      const ja = a.service.generateTake({
+        cueId: ca.id,
+        expectedRowVersion: ca.rowVersion,
+        costAcknowledged: true,
+      });
+      const jb = b.service.generateTake({
+        cueId: cb.id,
+        expectedRowVersion: cb.rowVersion,
+        costAcknowledged: true,
+      });
+      await expect.poll(() => releases.size).toBe(2);
+      expect(peak).toBe(2);
+      const waiting = a.service.generateTake({
+        cueId: queuedCue.id,
+        expectedRowVersion: queuedCue.rowVersion,
+        costAcknowledged: true,
+      });
+      await expect.poll(() => a.service.getJob(waiting.id)?.steps?.length).toBe(1);
+      expect(a.service.getJob(waiting.id)?.steps?.[0]?.status).toBe('pending');
+      a.service.cancel(waiting.id);
+      a.service.saveVoice({
+        ...a.voice,
+        voiceId: 'later-voice',
+        expectedRowVersion: a.voice.rowVersion,
+      });
+      releases.get(ja.id)!();
+      releases.get(jb.id)!();
+      await a.job(ja.id);
+      await b.job(jb.id);
+      await a.job(waiting.id, 'cancelled');
+      expect(
+        request.mock.calls.filter(([method]) => method === 'provider.dubbing.speech'),
+      ).toHaveLength(2);
+      expect(
+        request.mock.calls.filter(([method]) => method === 'provider.dubbing.cancel'),
+      ).toHaveLength(0);
+      expect(
+        a.service.scene(a.scene.id).cues.find((cue) => cue.id === ca.id)?.takes?.[0]?.voiceSnapshot
+          ?.voiceId,
+      ).toBe('fixed-voice-one');
+      expect(b.service.scene(b.scene.id).cues.find((cue) => cue.id === cb.id)?.takes).toHaveLength(
+        1,
+      );
+    });
+
+    it('overlaps two lip clips, preserves timeline order after reversed completion, and allows another scene speech while lip polling waits', async () => {
+      const capacity = new ExecutionPool();
+      const polls = new Map<string, () => void>(),
+        operationIds: string[] = [];
+      const compose = vi.spyOn(runtime, 'composeDubbing');
+      let activeFfmpeg = 0,
+        peakFfmpeg = 0;
+      const originalExtract = runtime.extractClip.bind(runtime);
+      vi.spyOn(runtime, 'extractClip').mockImplementation(async (...args) => {
+        activeFfmpeg += 1;
+        peakFfmpeg = Math.max(peakFfmpeg, activeFfmpeg);
+        try {
+          return await originalExtract(...args);
+        } finally {
+          activeFfmpeg -= 1;
+        }
+      });
+      const request = vi.fn(async (method: string, raw: unknown) => {
+        if (method === 'provider.dubbing.submit') {
+          const params = raw as NativeDubbingSubmitParams;
+          operationIds.push(params.operationId!);
+          return { providerTaskId: 'remote-' + params.operationId! };
+        }
+        if (method === 'provider.dubbing.poll') {
+          const params = raw as NativeDubbingPollParams;
+          await new Promise<void>((resolve) => polls.set(params.operationId!, resolve));
+          const output = join(params.projectRoot, params.outputRelativePath);
+          mkdirSync(dirname(output), { recursive: true });
+          await copyFile(lipVideo, output);
+          return { status: 'complete', relativePath: params.outputRelativePath };
+        }
+        if (method === 'provider.dubbing.speech') {
+          const params = raw as NativeDubbingSpeechParams;
+          const output = join(params.projectRoot, params.outputRelativePath);
+          mkdirSync(dirname(output), { recursive: true });
+          await copyFile(mp3, output);
+          return {
+            relativePath: params.outputRelativePath,
+            mime: 'audio/mpeg',
+            sizeBytes: statSync(output).size,
+          };
+        }
+        return { cancelled: true };
+      });
+      const f = await setup({ capacity, native: { request } }),
+        other = await setup({ capacity, native: { request } });
+      const first = await f.importTake(f.cue(0, 'First clip', 0, true)),
+        second = await f.importTake(f.cue(1500, 'Second clip', 1, true));
+      const job = await f.service.submit({
+        sceneId: f.scene.id,
+        sourceVideoAssetId: f.sourceAssetId,
+        mode: 'lipsync',
+        providerProfileId: syncId,
+        model: 'sync-3',
+        costAcknowledged: true,
+        removeSourceAudioAcknowledged: true,
+        budget: { unitPrice: 1, currency: 'USD', maxAmount: 10 },
+      });
+      await expect.poll(() => polls.size, { timeout: 12000 }).toBe(2);
+      expect(new Set(operationIds).size).toBe(2);
+      expect(operationIds).not.toContain(job.id);
+      const otherCue = other.cue(0, 'Speech progresses during lip wait');
+      const speech = other.service.generateTake({
+        cueId: otherCue.id,
+        expectedRowVersion: otherCue.rowVersion,
+        costAcknowledged: true,
+      });
+      await other.job(speech.id);
+      expect(f.service.getJob(job.id)?.status).toBe('running');
+      expect(compose).not.toHaveBeenCalled();
+      const steps = f.service.getJob(job.id)!.steps!.filter((step) => step.kind === 'lipsync');
+      const firstStep = steps.find((step) => step.stepKey === 'lipsync:' + first.cue.id)!,
+        secondStep = steps.find((step) => step.stepKey === 'lipsync:' + second.cue.id)!;
+      polls.get(secondStep.id)!();
+      await expect
+        .poll(
+          () => f.service.getJob(job.id)?.steps?.find((step) => step.id === secondStep.id)?.status,
+        )
+        .toBe('complete');
+      expect(compose).not.toHaveBeenCalled();
+      polls.get(firstStep.id)!();
+      const complete = await f.job(job.id);
+      expect(complete.outputAssetId).toBeDefined();
+      expect(peakFfmpeg).toBe(1);
+      expect(compose.mock.calls[0]?.[2].map((part) => part.startMs)).toEqual([0, 1500]);
+      expect(f.service.scene(f.scene.id).cues.map((cue) => cue.selectedTakeId)).toEqual([
+        first.take!.id,
+        second.take!.id,
+      ]);
+      expect(
+        request.mock.calls.filter(([method]) => method === 'provider.dubbing.submit'),
+      ).toHaveLength(2);
+    });
+
+    it('marks an interrupted parallel lip submission unknown, keeps it out of composition and blocks a charged replay', async () => {
+      const capacity = new ExecutionPool();
+      const pending = new Map<string, (error: Error) => void>();
+      const compose = vi.spyOn(runtime, 'composeDubbing');
+      const request = vi.fn((method: string, raw: unknown): Promise<unknown> => {
+        if (method === 'provider.dubbing.submit') {
+          const params = raw as NativeDubbingSubmitParams;
+          return new Promise((_resolve, reject) => pending.set(params.operationId!, reject));
+        }
+        if (method === 'provider.dubbing.cancel') {
+          const params = raw as { operationId: string };
+          pending.get(params.operationId)?.(
+            new NativeProviderRequestError({
+              code: 'INTERRUPTED',
+              message: 'cancelled transfer',
+              retryable: true,
+            }),
+          );
+          return Promise.resolve({ cancelled: true });
+        }
+        return Promise.resolve({ status: 'pending' });
+      });
+      const f = await setup({ capacity, native: { request } });
+      await f.importTake(f.cue(0, 'First uncertain clip', 0, true));
+      await f.importTake(f.cue(1500, 'Second uncertain clip', 1, true));
+      const params = {
+        sceneId: f.scene.id,
+        sourceVideoAssetId: f.sourceAssetId,
+        mode: 'lipsync' as const,
+        providerProfileId: syncId,
+        model: 'sync-3' as const,
+        costAcknowledged: true,
+        removeSourceAudioAcknowledged: true,
+        budget: { unitPrice: 1, currency: 'USD', maxAmount: 10 },
+      };
+      const job = await f.service.submit(params);
+      await expect.poll(() => pending.size, { timeout: 12000 }).toBe(2);
+      const rejected = [...pending.keys()][0]!;
+      pending.get(rejected)!(
+        new NativeProviderRequestError({
+          code: 'SUBMISSION_UNKNOWN',
+          message: 'response lost after submit',
+          retryable: false,
+        }),
+      );
+      await f.job(job.id, 'submission_unknown');
+      expect(compose).not.toHaveBeenCalled();
+      await expect
+        .poll(
+          () =>
+            request.mock.calls.filter(([method]) => method === 'provider.dubbing.cancel').length,
+        )
+        .toBe(1);
+      expect(
+        f.service.getJob(job.id)?.steps?.filter((step) => step.status === 'submission_unknown'),
+      ).toHaveLength(2);
+      expect(() => f.service.retry({ jobId: job.id, costAcknowledged: true })).toThrow('未知');
+      expect((await f.service.submit(params)).id).toBe(job.id);
+      expect(
+        request.mock.calls.filter(([method]) => method === 'provider.dubbing.submit'),
+      ).toHaveLength(2);
     });
   },
 );

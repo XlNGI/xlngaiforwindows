@@ -13,6 +13,8 @@ import type {
   ConversationModelPreferenceInfo,
   ConversationModelPreferenceSetParams,
   ConversationModelPreferenceClearParams,
+  ConversationPromptTemplateInfo,
+  ConversationPromptTemplateSaveParams,
   ConversationListParams,
   ConversationPage,
   ConversationRestoreParams,
@@ -662,6 +664,115 @@ export class ContentService {
       if (existed) repositories.projects.touch(new Date().toISOString());
       return { cleared: Boolean(existed) };
     });
+  }
+
+  getConversationPromptTemplate(conversationId: string): ConversationPromptTemplateInfo {
+    return this.projects.access(false, (database, project) => {
+      const conversation = createRepositories(database).conversations.get(conversationId);
+      if (!conversation || conversation.projectId !== project.id) {
+        throw new Error('Conversation was not found.');
+      }
+      const row = database
+        .prepare(
+          `SELECT conversation_id, content, row_version, created_at, updated_at
+           FROM conversation_prompt_templates WHERE conversation_id = ?`,
+        )
+        .get(conversationId) as
+        | {
+            conversation_id: string;
+            content: string;
+            row_version: number;
+            created_at: string;
+            updated_at: string;
+          }
+        | undefined;
+      return row
+        ? {
+            conversationId: row.conversation_id,
+            content: row.content,
+            rowVersion: row.row_version,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+          }
+        : { conversationId, content: '', rowVersion: 0 };
+    });
+  }
+
+  saveConversationPromptTemplate(
+    params: ConversationPromptTemplateSaveParams,
+  ): ConversationPromptTemplateInfo {
+    if (typeof params.content !== 'string' || params.content.length > 20_000) {
+      throw new Error('Conversation prompt template must be at most 20000 characters.');
+    }
+    if (!Number.isInteger(params.expectedRowVersion) || params.expectedRowVersion < 0) {
+      throw new Error('Conversation prompt template row version is invalid.');
+    }
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const repositories = createRepositories(database);
+        const conversation = repositories.conversations.get(params.conversationId);
+        if (!conversation || conversation.projectId !== project.id) {
+          throw new Error('Conversation was not found.');
+        }
+        if (conversation.archivedAt) throw new Error('Archived conversations cannot be updated.');
+        const existing = database
+          .prepare(
+            `SELECT conversation_id, content, row_version, created_at, updated_at
+             FROM conversation_prompt_templates WHERE conversation_id = ?`,
+          )
+          .get(conversation.id) as
+          | {
+              conversation_id: string;
+              content: string;
+              row_version: number;
+              created_at: string;
+              updated_at: string;
+            }
+          | undefined;
+        const currentVersion = existing?.row_version ?? 0;
+        if (currentVersion !== params.expectedRowVersion) {
+          throw new Error('CONVERSATION_PROMPT_TEMPLATE_ROW_VERSION_CONFLICT');
+        }
+        const now = new Date().toISOString();
+        const nextVersion = currentVersion + 1;
+        if (existing) {
+          const result = database
+            .prepare(
+              `UPDATE conversation_prompt_templates
+               SET content = ?, row_version = ?, updated_at = ?
+               WHERE conversation_id = ? AND project_id = ? AND row_version = ?`,
+            )
+            .run(
+              params.content,
+              nextVersion,
+              now,
+              conversation.id,
+              project.id,
+              params.expectedRowVersion,
+            );
+          if (result.changes !== 1)
+            throw new Error('CONVERSATION_PROMPT_TEMPLATE_ROW_VERSION_CONFLICT');
+        } else {
+          database
+            .prepare(
+              `INSERT INTO conversation_prompt_templates
+               (conversation_id, project_id, content, row_version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .run(conversation.id, project.id, params.content, nextVersion, now, now);
+        }
+        repositories.conversations.save({ ...conversation, updatedAt: now });
+        repositories.projects.touch(now);
+        project.updatedAt = now;
+        return {
+          conversationId: conversation.id,
+          content: params.content,
+          rowVersion: nextVersion,
+          createdAt: existing?.created_at ?? now,
+          updatedAt: now,
+        };
+      })(),
+    );
   }
 
   listMessages(params: ChatMessageListParams): ChatMessagePage {

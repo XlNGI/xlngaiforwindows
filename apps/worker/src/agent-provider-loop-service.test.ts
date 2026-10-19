@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmProvider } from '@ai-video/llm';
 import { AGENT_TOOL_RESULT_LIMITS, type ProjectStructureResult } from '@ai-video/contracts';
+import type { ProductionInstruction } from '@ai-video/contracts';
 import {
   AgentProviderLoopService,
   inferNovelReference,
@@ -36,6 +37,37 @@ import { createFauxCore, fauxAssistantMessage, fauxToolCall } from '@earendil-wo
 const directories: string[] = [];
 const projects: ProjectService[] = [];
 const settingsServices: AppSettingsService[] = [];
+
+function productionFixture(
+  summary: string,
+  kind: 'scene' | 'shot' = 'scene',
+): ProductionInstruction {
+  return {
+    version: 2,
+    summary,
+    narrative: { purpose: summary },
+    storyTime: { timeOfDay: '清晨' },
+    location: { description: '剧情所在地点' },
+    style: { medium: '二维动画' },
+    subjects: [],
+    visual: {},
+    camera: { framing: '中景' },
+    ...(kind === 'shot'
+      ? {
+          timing: { estimatedDurationSeconds: 3, rationale: '依据本镜动作与自然停顿' },
+          stillFrame: summary,
+        }
+      : {}),
+    beats:
+      kind === 'shot'
+        ? [{ id: 'action', action: summary, characterDocumentIds: [], dialogue: [] }]
+        : [],
+    audio: { mode: 'silent' },
+    generation: {},
+    resources: [],
+    continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
+  };
+}
 
 afterEach(async () => {
   for (const project of projects.splice(0)) project.close();
@@ -510,6 +542,10 @@ describe('AgentProviderLoopService', () => {
       const agent = loop.prepare(prepared.stream, '按刚才商量的保存', undefined, {
         operation: 'document.list',
       });
+      // This scenario also exercises failed proposals and the new on-demand reads.
+      project.access(true, (db) =>
+        db.prepare('UPDATE agent_tasks SET tool_call_limit=32 WHERE id=?').run(agent.taskId),
+      );
       let tools = agent.tools;
       let ordinal = 0;
       const invoke = async (name: string, args: Record<string, unknown>) => {
@@ -563,21 +599,49 @@ describe('AgentProviderLoopService', () => {
         {
           title: '庭院',
           videoPrompt: '他走过院落。',
+          instruction: productionFixture('他走过院落。'),
           characterDocumentIds: [driver.documentId, colleague.documentId],
           sceneDocumentId: courtyard.documentId,
           shots: [
-            { title: '远景', prompt: '清晨的庭院' },
-            { title: '近景', prompt: '门上的霜' },
+            {
+              title: '远景',
+              prompt: '清晨的庭院',
+              instruction: productionFixture('清晨的庭院', 'shot'),
+            },
+            {
+              title: '近景',
+              prompt: '门上的霜',
+              instruction: productionFixture('门上的霜', 'shot'),
+            },
           ],
         },
         {
           title: '书房',
           videoPrompt: '书桌上的信。',
+          instruction: productionFixture('书桌上的信。'),
           characterDocumentIds: [],
           sceneDocumentId: study.documentId,
-          shots: [{ title: '特写', prompt: '桌上的信' }],
+          shots: [
+            {
+              title: '特写',
+              prompt: '桌上的信',
+              instruction: productionFixture('桌上的信', 'shot'),
+            },
+          ],
         },
       ];
+      expect(await invoke('production.defaults.get', {})).toMatchObject({
+        rowVersion: 0,
+        settings: {},
+      });
+      expect(
+        await invoke('scene.submit_structure', {
+          resourceId: 'workspace:shots',
+          resolution: 'resolved',
+          episodeTitle: '缺少详细结构',
+          scenes: [{ ...scenes[0], instruction: undefined }],
+        }),
+      ).toMatchObject({ status: 'rejected' });
       for (const args of [
         { resolution: 'resolved', episodeTitle: '第1集', scenes },
         { resourceId: 'workspace:novel', episodeTitle: '第1集', scenes },
@@ -647,7 +711,12 @@ describe('AgentProviderLoopService', () => {
       );
       expect(parents.find((item) => item.title === '书房')?.sceneDocumentId).toBe(study.documentId);
       const courtyardScene = parents.find((item) => item.title === '庭院')!;
-      expect(courtyardScene.videoPrompt).toBe('他走过院落。');
+      const production = await invoke('production.read', {
+        target: { kind: 'scene', id: courtyardScene.id },
+      });
+      expect(production.compiledPrompt).toContain('清晨的庭院');
+      expect(production.source).toBeUndefined();
+      expect(courtyardScene.videoPrompt).toContain('他走过院落。');
       expect(courtyardScene.characterBindings).toEqual([
         { characterDocumentId: driver.documentId },
         { characterDocumentId: colleague.documentId },
@@ -655,19 +724,19 @@ describe('AgentProviderLoopService', () => {
       expect(await invoke('scene.read', { sceneId: courtyardScene.id })).toMatchObject({
         scene: {
           id: courtyardScene.id,
-          videoPrompt: '他走过院落。',
+          videoPrompt: courtyardScene.videoPrompt,
           characterBindings: courtyardScene.characterBindings,
         },
       });
       expect(
         content
           .listShots(parents.find((item) => item.title === '庭院')!.id)
-          .map((item) => item.prompt),
+          .map((item) => item.prompt?.split('\n')[0]),
       ).toEqual(['清晨的庭院', '门上的霜']);
       expect(
         content
           .listShots(parents.find((item) => item.title === '书房')!.id)
-          .map((item) => item.prompt),
+          .map((item) => item.prompt?.split('\n')[0]),
       ).toEqual(['桌上的信']);
       const revision = {
         resourceId: 'workspace:shots',
@@ -679,6 +748,7 @@ describe('AgentProviderLoopService', () => {
             expectedRowVersion: courtyardScene.rowVersion,
             title: courtyardScene.title,
             videoPrompt: '前同事独自留下。',
+            instruction: productionFixture('前同事独自留下。'),
             sceneDocumentId: study.documentId,
             characterDocumentIds: [colleague.documentId],
             shots: [],
@@ -701,7 +771,6 @@ describe('AgentProviderLoopService', () => {
       ).toBe('applied');
       expect(content.listScenes()).toHaveLength(2);
       expect(content.listScenes().find((item) => item.id === courtyardScene.id)).toMatchObject({
-        videoPrompt: '前同事独自留下。',
         sceneDocumentId: study.documentId,
         characterBindings: [{ characterDocumentId: colleague.documentId }],
       });
@@ -2859,6 +2928,72 @@ describe('AgentProviderLoopService', () => {
     });
   });
 
+  it('returns corrective retrieval guidance and the actual remaining budget to the model', async () => {
+    const { conversation, generations, loop, project, novels } = await setup();
+    const document = new ContentService(project).saveDocument({
+      kind: 'outline',
+      title: '清风',
+      contentMarkdown: '# 旧设定\n应先读取的现有正文',
+    });
+    novels.saveBinding({ documentId: document.id, role: 'work-outline', domainScope: 'novel' });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '修改清风设定',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, '修改清风设定');
+    loop.startProviderStep(prepared.stream);
+    const execute = async (id: string, name: string, args: Record<string, unknown>) => {
+      const result = await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'response',
+        calls: [
+          {
+            id,
+            name,
+            authorizationHandle: agent.tools.find((tool) => tool.name === name)
+              ?.authorizationHandle,
+            argumentsJson: JSON.stringify(args),
+          },
+        ],
+      });
+      return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
+    };
+    const empty = await execute('empty', 'library.search', {
+      query: '清风',
+      sourceTypes: ['document'],
+    });
+    expect(empty).toMatchObject({
+      status: 'searched',
+      resultCount: 0,
+      budget: { searchRemaining: 7, readRemaining: 16 },
+    });
+    expect(empty.guidance).toContain('novel-reference');
+    const invalid = await execute('invalid', 'library.read', { sourceHandle: document.id });
+    expect(invalid).toMatchObject({ status: 'failed', errorCode: 'LIBRARY_HANDLE_INVALID' });
+    expect(invalid.message).toContain('document IDs');
+    const corrected = await execute('corrected', 'library.search', {
+      query: '清风',
+      sourceTypes: ['novel-reference'],
+    });
+    const sources = corrected.sources as Array<{ sourceHandle: string }>;
+    const read = await execute('read', 'library.read', {
+      sourceHandle: sources[0]!.sourceHandle,
+      readMode: 'source',
+    });
+    expect(read).toMatchObject({
+      status: 'read',
+      sourceStatus: 'draft',
+      content: '# 旧设定\n应先读取的现有正文',
+      budget: { searchRemaining: 6, readRemaining: 14 },
+    });
+    const audit = project.access(false, (db) =>
+      db.prepare('SELECT result_summary_json FROM agent_tool_calls').all(),
+    );
+    expect(JSON.stringify(audit)).not.toContain('应先读取的现有正文');
+  });
+
   it('reuses the same library authorization across sequential Provider tool calls', async () => {
     const { conversation, generations, loop, project } = await setup();
     new ContentService(project).saveDocument({
@@ -3867,11 +4002,16 @@ describe('AgentProviderLoopService', () => {
                 title: '旧码头 · 台风前夜',
                 sceneDocumentId: sceneDoc.id,
                 videoPrompt: '林澈站在旧码头。',
+                instruction: productionFixture('林澈站在旧码头。'),
                 characterDocumentIds: [character.id],
                 shots: [
                   {
                     title: '海雾中的码头',
                     prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+                    instruction: productionFixture(
+                      '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+                      'shot',
+                    ),
                   },
                 ],
               },
@@ -3879,15 +4019,29 @@ describe('AgentProviderLoopService', () => {
                 title: '街道',
                 sceneDocumentId: sceneDoc.id,
                 videoPrompt: '雨中的街道。',
+                instruction: productionFixture('雨中的街道。'),
                 characterDocumentIds: [],
-                shots: [{ title: '雨中街道', prompt: '街道上的雨。' }],
+                shots: [
+                  {
+                    title: '雨中街道',
+                    prompt: '街道上的雨。',
+                    instruction: productionFixture('街道上的雨。', 'shot'),
+                  },
+                ],
               },
               {
                 title: '房间',
                 sceneDocumentId: sceneDoc.id,
                 videoPrompt: '房间内的信件。',
+                instruction: productionFixture('房间内的信件。'),
                 characterDocumentIds: [],
-                shots: [{ title: '信件特写', prompt: '桌上的信件。' }],
+                shots: [
+                  {
+                    title: '信件特写',
+                    prompt: '桌上的信件。',
+                    instruction: productionFixture('桌上的信件。', 'shot'),
+                  },
+                ],
               },
             ],
           }),
@@ -3905,7 +4059,6 @@ describe('AgentProviderLoopService', () => {
       {
         entityType: 'shot',
         title: '海雾中的码头',
-        prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
         parentItemOrdinal: 0,
       },
       { entityType: 'scene', title: '街道' },
@@ -3927,9 +4080,9 @@ describe('AgentProviderLoopService', () => {
       expect(content.listShots(parent.id).map((item) => item.title)).toEqual([shotTitle]);
     }
     const scene = content.listScenes()[0]!;
-    expect(content.listShots(scene.id)).toMatchObject([
-      { title: '海雾中的码头', prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。' },
-    ]);
+    expect(content.listShots(scene.id)[0]?.prompt).toContain(
+      '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
+    );
   });
 
   it('feeds an invalid structured character ID back to the model without guessing from prompt names', async () => {
@@ -3964,8 +4117,15 @@ describe('AgentProviderLoopService', () => {
                 title: '场次 01',
                 sceneDocumentId: 'missing-scene-id',
                 videoPrompt: '他转身。',
+                instruction: productionFixture('他转身。'),
                 characterDocumentIds: ['missing-character-id'],
-                shots: [{ title: '镜头 01', prompt: '[角色:不存在的人物] 出现在画面中。' }],
+                shots: [
+                  {
+                    title: '镜头 01',
+                    prompt: '[角色:不存在的人物] 出现在画面中。',
+                    instruction: productionFixture('[角色:不存在的人物] 出现在画面中。', 'shot'),
+                  },
+                ],
               },
             ],
           }),
@@ -4171,11 +4331,16 @@ describe('AgentProviderLoopService', () => {
                 title: '白家三房 · 午后',
                 sceneDocumentId: scenePrompt.id,
                 videoPrompt: '午后的白家三房。',
+                instruction: productionFixture('午后的白家三房。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '屋檐下全景',
                     prompt: '[场景:白家三房] 屋檐下全景，白小弟在学医。',
+                    instruction: productionFixture(
+                      '[场景:白家三房] 屋檐下全景，白小弟在学医。',
+                      'shot',
+                    ),
                   },
                 ],
               },
@@ -4198,9 +4363,9 @@ describe('AgentProviderLoopService', () => {
     });
     expect(applied.status).toBe('applied');
     const scene = content.listScenes()[0]!;
-    expect(content.listShots(scene.id)).toMatchObject([
-      { title: '屋檐下全景', prompt: '[场景:白家三房] 屋檐下全景，白小弟在学医。' },
-    ]);
+    expect(content.listShots(scene.id)[0]?.prompt).toContain(
+      '[场景:白家三房] 屋檐下全景，白小弟在学医。',
+    );
   });
 
   it('creates character and scene documents through document.create_draft documentKind', async () => {

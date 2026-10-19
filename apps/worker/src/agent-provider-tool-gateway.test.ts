@@ -411,3 +411,58 @@ describe('AgentProviderToolGateway', () => {
     expect(worker.terminateGeneration).toHaveBeenCalledWith(identity.generationId, 'failed');
   });
 });
+
+it('freezes one read response, limits actual overlap to four and refreshes definitions once at the barrier', async () => {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let active = 0,
+    peak = 0,
+    started = 0;
+  const next = definition('library.search', 'authoritative-next');
+  const worker = { ...executor({}), refreshTools: vi.fn(() => [next]) };
+  worker.executeTools.mockImplementation(async (params) => {
+    active += 1;
+    started += 1;
+    peak = Math.max(peak, active);
+    await barrier;
+    active -= 1;
+    return {
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'response',
+        outputs: [{ callId: params.calls[0]!.id, output: '{}' }],
+      },
+      tools: [],
+    };
+  });
+  const gateway = new AgentProviderToolGateway(
+    worker,
+    identity,
+    [definition('research.search', 'frozen-handle')],
+    vi.fn(),
+    vi.fn(),
+  );
+  const calls = Array.from({ length: 6 }, (_, index) => ({
+    id: 'call-' + index,
+    name: 'research.search',
+  }));
+  gateway.freezeProviderResponse(calls);
+  for (const call of calls) gateway.captureProviderCall(call.id, 'response');
+  const tool = gateway.tools()[0]!;
+  const results = calls.map((call) => tool.execute(call.id, { title: 'independent query' }));
+  await vi.waitFor(() => expect(started).toBe(4));
+  expect(worker.refreshTools).not.toHaveBeenCalled();
+  release();
+  await Promise.all(results);
+  expect(peak).toBe(4);
+  expect(
+    worker.executeTools.mock.calls.every(
+      ([params]) => params.calls[0]?.authorizationHandle === 'frozen-handle',
+    ),
+  ).toBe(true);
+  gateway.finishProviderResponse();
+  expect(worker.refreshTools).toHaveBeenCalledTimes(1);
+  expect(gateway.currentDefinitions()).toEqual([next]);
+});

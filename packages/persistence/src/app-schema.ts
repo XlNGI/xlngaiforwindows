@@ -1,4 +1,15 @@
-export const CURRENT_APP_SCHEMA_VERSION = 7;
+export const CURRENT_APP_SCHEMA_VERSION = 8;
+
+export const APP_MIGRATION_V8 = `
+CREATE TABLE project_runtime_registrations (
+  project_id TEXT PRIMARY KEY,
+  canonical_path TEXT NOT NULL UNIQUE,
+  directory_identity TEXT NOT NULL,
+  recover_on_startup INTEGER NOT NULL CHECK(recover_on_startup IN (0,1)),
+  last_error TEXT,
+  updated_at TEXT NOT NULL
+);
+`;
 
 export const APP_MIGRATION_V1 = `
 CREATE TABLE app_schema_migrations (

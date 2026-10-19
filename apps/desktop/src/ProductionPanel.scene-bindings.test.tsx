@@ -9,6 +9,7 @@ import type {
 import { ProductionPanel } from './ProductionPanel';
 import { callWorker } from './worker-client';
 import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
+import { officialVideoAudioContracts } from '@ai-video/contracts';
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 afterEach(() => {
@@ -16,6 +17,12 @@ afterEach(() => {
   vi.resetAllMocks();
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
+const mediaSchema = (contractId: string, revision: number) =>
+  (
+    officialVideoAudioContracts.find(
+      (c) => c.contractId === contractId && c.contractRevision === revision,
+    )!.parameterSchema as unknown as AdapterDescriptor['parameterSchema']
+  ).properties.media!;
 const adapter: AdapterDescriptor = {
   key: 'REFERENCE_TO_VIDEO:wan-video:cn.qwen.wan3-0-video:contract-3',
   capability: 'REFERENCE_TO_VIDEO',
@@ -38,7 +45,10 @@ const adapter: AdapterDescriptor = {
     required: [],
     properties: {
       prompt: { type: 'string', title: '提示词' },
-      media: { type: 'array', title: '素材', items: { type: 'object' } },
+      media: {
+        ...mediaSchema('cn.qwen.wan3-0-video', 3),
+        title: '素材',
+      },
       duration: { type: 'integer', title: '时长', default: 5 },
     },
   },
@@ -51,6 +61,13 @@ const drivingAdapter: AdapterDescriptor = {
   apiVersion: 'contract-2',
   contractId: 'cn.qwen.wan2-7-i2v',
   contractRevision: 2,
+  parameterSchema: {
+    ...adapter.parameterSchema,
+    properties: {
+      ...adapter.parameterSchema.properties,
+      media: mediaSchema('cn.qwen.wan2-7-i2v', 2),
+    },
+  },
 };
 const voice = {
   id: 'voice',
@@ -112,8 +129,11 @@ function mock(
           category: 'video',
           providerType: descriptor.provider,
           accessType: 'official',
-          protocol: 'wan-video',
-          baseUrl: 'https://dashscope.aliyuncs.com',
+          protocol: descriptor.provider === 'unicompapi' ? 'openai-chat-completions' : 'wan-video',
+          baseUrl:
+            descriptor.provider === 'unicompapi'
+              ? 'https://unicompapi.com/v1'
+              : 'https://dashscope.aliyuncs.com',
           enabled: true,
           connectionStatus: 'ready',
           createdAt: 'now',
@@ -189,6 +209,181 @@ function mock(
 }
 
 describe('scene production bindings', () => {
+  it('reaches video preparation with the same selected images used to compile a shot', async () => {
+    mock({ ...scene, characterBindings: [] });
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    const inputImages = [
+      { assetId: 'actor-image', role: 'character' as const },
+      { assetId: 'scene-image', role: 'scene' as const },
+    ];
+    const source = {
+      target: { kind: 'shot' as const, id: 'shot' },
+      instructionId: 'instruction',
+      revision: 1,
+      token: 'b'.repeat(64),
+      inputImages,
+    };
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+      if (method !== 'production.compile') return fallback(method as never, params);
+      const matches = JSON.stringify(params.inputImages) === JSON.stringify(inputImages);
+      if (params.expectedToken && !matches)
+        return Promise.reject(new Error('制作来源已变化，请重新适配。'));
+      return Promise.resolve({
+        target: source.target,
+        rowVersion: 1,
+        source: { ...source, token: matches ? source.token : 'a'.repeat(64) },
+        issues: [],
+        parameters: {
+          prompt: '人物雨中独立',
+          duration: 8,
+          media: inputImages.map((image) => ({
+            type: 'reference_image',
+            url: 'project-asset://' + image.assetId,
+          })),
+        },
+      });
+    }) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        shotId="shot"
+        seedImageBindings={inputImages}
+        writable
+      />,
+    );
+    await screen.findByText('已填入制作内容 · 版本 1');
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      ).toBe(true),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(
+        ([method]) => method === 'video.generate.prepare',
+      )![1] as VideoGenerationPrepareParams;
+    expect(prepared.productionSource).toEqual(source);
+    expect(prepared.parameters.media).toEqual(
+      inputImages.map((image) => ({
+        type: 'reference_image',
+        url: 'project-asset://' + image.assetId,
+      })),
+    );
+    expect(screen.queryByText('制作来源已变化，请重新适配。')).not.toBeInTheDocument();
+  });
+  it('shows nonblocking schema notices and does not force stored voice or dialogue inputs into native audio production', async () => {
+    const sceneValue = { ...scene, dialogueAudioId: dialogue.id };
+    mock(sceneValue);
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    const result: ProductionCompileResult = {
+      target: { kind: 'scene', id: scene.id },
+      rowVersion: 1,
+      source: {
+        target: { kind: 'scene', id: scene.id },
+        instructionId: 'native',
+        revision: 1,
+        token: 'a'.repeat(64),
+      },
+      parameters: { prompt: '模型生成雨声及对白', duration: 8 },
+      issues: [],
+      notices: [
+        {
+          code: 'MODEL_PARAMETER_NOT_APPLIED',
+          message: '当前模型没有扩写参数，本次不传入该设置。',
+        },
+      ],
+      instruction: {
+        version: 1,
+        summary: '雨夜对白',
+        subjects: [],
+        visual: {},
+        beats: [],
+        audio: { mode: 'native' },
+        generation: {},
+        resources: [],
+        continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
+      },
+      sceneInputs: {
+        scene: sceneValue,
+        media: {
+          assets: [],
+          voices: [voice],
+          characters: [{ characterDocumentId: 'actor', voice }],
+        },
+        characterNames: { actor: '林澈' },
+      },
+    };
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
+      method === 'production.compile' || method === 'production.read'
+        ? Promise.resolve(result)
+        : fallback(method as never, params)) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        writable
+      />,
+    );
+    expect(await screen.findByLabelText('模型适配说明')).toHaveTextContent('当前模型没有扩写参数');
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).not.toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      ).toBe(true),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(
+        ([method]) => method === 'video.generate.prepare',
+      )![1] as VideoGenerationPrepareParams;
+    expect(JSON.stringify(prepared.parameters)).not.toContain('character-voice://');
+    expect(JSON.stringify(prepared.parameters)).not.toContain('project-audio://');
+    expect(prepared.productionSource).toEqual(result.source);
+  });
+  it('lets a UniComp Wan user enter a public audio reference separately from the audio switch', async () => {
+    const contract = officialVideoAudioContracts.find(
+      (value) => value.contractId === 'cn.qwen.wan3-0-video' && value.contractRevision === 3,
+    )!;
+    const schema = structuredClone(
+      contract.parameterSchema,
+    ) as unknown as AdapterDescriptor['parameterSchema'];
+    schema.$schema = 'https://json-schema.org/draft/2020-12/schema';
+    schema.properties.media!.title = '参考素材';
+    schema.properties.audio!.title = '生成音频';
+    const descriptor: AdapterDescriptor = {
+      ...adapter,
+      key: 'REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3',
+      provider: 'unicompapi',
+      parameterSchema: schema,
+      uiSchema: {
+        fields: [
+          { key: 'media', control: 'structured', group: 'basic', order: 0 },
+          { key: 'audio', control: 'toggle', group: 'basic', order: 1 },
+        ],
+      },
+    };
+    mock({ ...scene, characterBindings: [] }, descriptor);
+    render(<ProductionPanel projectId="project" sceneId="scene" writable />);
+    expect(await screen.findByText(/“生成音频”控制成片是否带声音/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
+    const type = screen.getByLabelText('参考素材 1类型');
+    fireEvent.change(type, { target: { value: '4' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '媒体地址' }), {
+      target: { value: 'https://example.com/voice.wav' },
+    });
+    expect(screen.getByRole('textbox', { name: '媒体地址' })).toHaveValue(
+      'https://example.com/voice.wav',
+    );
+    expect(screen.getByRole('checkbox', { name: '生成音频' })).toBeChecked();
+    expect(screen.queryByText('角色声音参考')).not.toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
+  });
   it('refills current images and bindings together after a structured source changes', async () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
@@ -202,7 +397,10 @@ describe('scene production bindings', () => {
       target: source.target,
       rowVersion: revision,
       source: { ...source, revision, token: String(revision).repeat(64) },
-      parameters: { prompt: `制作版本${revision}` },
+      parameters: {
+        prompt: `制作版本${revision}`,
+        media: [{ type: 'reference_image', url: `project-asset://${image}` }],
+      },
       issues: [],
       sceneInputs: {
         scene: {

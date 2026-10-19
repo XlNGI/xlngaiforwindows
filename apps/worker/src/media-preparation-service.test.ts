@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@ai-video/persistence';
@@ -13,6 +13,7 @@ import { ImageGenerationService } from './image-generation-service.js';
 import { MediaPreparationService, resolveMediaProviderRoute } from './media-preparation-service.js';
 import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
+import { ProductionService } from './production-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
@@ -109,6 +110,131 @@ async function setup(attachments: LlmInputAttachment[] = []) {
 }
 
 describe('MediaPreparationService', () => {
+  it('uses the production source and authored duration when Agent prepares an existing shot', async () => {
+    const f = await setup();
+    const content = new ContentService(f.projectsService);
+    const scene = content.saveScene({ title: '雨夜' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '观察' });
+    const production = new ProductionService(f.projectsService);
+    production.execute({
+      executionKey: 'agent-existing',
+      operations: [
+        {
+          action: 'set_prompt',
+          target: { kind: 'shot', id: shot.id },
+          expectedRowVersion: shot.rowVersion,
+          instruction: {
+            version: 1,
+            summary: '观察雨中的车站',
+            subjects: [],
+            visual: {},
+            beats: [],
+            audio: { mode: 'auto' },
+            generation: { duration: 8 },
+            resources: [],
+            continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
+          },
+        },
+      ],
+    });
+    const context = f.service.selectionContext(
+      'video',
+      { prompt: '观察雨中的车站', shotId: shot.id },
+      f.identity,
+    );
+    const candidate = context.candidates[0]!;
+    const adapter = candidate.adapters.find((a) => a.capability === 'TEXT_TO_VIDEO')!;
+    const draft = f.service.prepareSelected(
+      context,
+      {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: adapter.key,
+        parameters: {},
+      },
+      f.identity,
+    );
+    const row = f.projectsService.access(false, (db) =>
+      db
+        .prepare('SELECT request_json,task_snapshot_json FROM generation_jobs WHERE id=?')
+        .get(draft.draftId),
+    ) as { request_json: string; task_snapshot_json: string };
+    const request = JSON.parse(row.request_json) as { duration: number };
+    const snapshot = JSON.parse(row.task_snapshot_json) as {
+      productionSource: import('@ai-video/contracts').ProductionSource;
+    };
+    expect(request.duration).toBe(8);
+    expect(snapshot.productionSource).toEqual(
+      production.read({ kind: 'shot', id: shot.id }).source,
+    );
+    expect(snapshot.productionSource.target.id).toBe(shot.id);
+  });
+  it('offers UniComp Wan media modes to Agent requests and preserves public audio when mapping images', async () => {
+    const { settings, profile, service, identity, projectsService } = await setup();
+    const model = settings.createManualModel({
+      profileId: profile.id,
+      remoteModelId: 'wan3.0-video',
+      capabilities: {
+        ...settings.listModels(profile.id)[0]!.capabilities,
+        text: false,
+        imageGeneration: false,
+        imageEditing: false,
+        videoGeneration: true,
+      },
+      enabled: true,
+    });
+    const media = [{ type: 'reference_audio', url: 'https://example.com/voice.wav' }];
+    const context = service.selectionContext(
+      'video',
+      {
+        prompt: '使用音频1的音色',
+        parameters: { images: ['https://example.com/actor.png'], media, audio: true },
+      },
+      identity,
+    );
+    const candidate = context.candidates.find((item) => item.modelId === model.id)!;
+    expect(candidate.adapters.map((item) => item.capability)).toEqual(
+      expect.arrayContaining(['IMAGE_TO_VIDEO', 'REFERENCE_TO_VIDEO']),
+    );
+    expect(candidate.adapters.some((item) => item.contractRevision === 1)).toBe(false);
+    const key = 'REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3';
+    const draft = service.prepareSelected(
+      context,
+      { providerProfileId: profile.id, modelId: model.id, adapterKey: key, parameters: {} },
+      identity,
+    );
+    const job = projectsService.access(false, (db) =>
+      createRepositories(db).jobs.get(draft.draftId)!,
+    );
+    const request = JSON.parse(job.requestJson) as Record<string, unknown>;
+    expect(request).not.toHaveProperty('images');
+    expect(request.media).toEqual([
+      { type: 'reference_image', url: 'https://example.com/actor.png' },
+      ...media,
+    ]);
+    expect(job.status).toBe('pending');
+    const videoContext = service.selectionContext(
+      'video',
+      { prompt: '参考该视频', parameters: { video: 'https://example.com/reference.mp4' } },
+      identity,
+    );
+    expect(
+      videoContext.candidates
+        .find((item) => item.modelId === model.id)
+        ?.adapters.map((item) => item.capability),
+    ).toEqual(['REFERENCE_TO_VIDEO']);
+    const videoDraft = service.prepareSelected(
+      videoContext,
+      { providerProfileId: profile.id, modelId: model.id, adapterKey: key, parameters: {} },
+      identity,
+    );
+    const videoJob = projectsService.access(false, (db) =>
+      createRepositories(db).jobs.get(videoDraft.draftId)!,
+    );
+    expect(JSON.parse(videoJob.requestJson)).toMatchObject({
+      media: [{ type: 'reference_video', url: 'https://example.com/reference.mp4' }],
+    });
+  });
   it('prepares HappyHorse with nine references through its official contract without a channel template', async () => {
     const { settings, profile, service, identity, projectsService } = await setup();
     const model = settings.createManualModel({
@@ -396,6 +522,59 @@ describe('MediaPreparationService', () => {
     expect(handle).toBeDefined();
     expect(existsSync(join(nativeRoot, handle!))).toBe(true);
     expect(existsSync(join(projectsService.current()!.rootPath, handle!))).toBe(false);
+  });
+
+  it('materializes a large Desktop asset reference without returning inline bytes over IPC', async () => {
+    const { directory, projectsService, service } = await setup();
+    const nativeRoot = join(directory, 'native-root');
+    vi.stubEnv('AI_VIDEO_MEDIA_INPUT_ROOT', nativeRoot);
+    const bytes = Buffer.alloc(6 * 1024 * 1024);
+    largePngBytes.copy(bytes);
+    const relativePath = 'assets/images/large.png';
+    mkdirSync(join(projectsService.current()!.rootPath, 'assets/images'), { recursive: true });
+    writeFileSync(join(projectsService.current()!.rootPath, relativePath), bytes);
+    projectsService.access(true, (database, project) =>
+      createRepositories(database).assets.save({
+        id: 'large-reference',
+        projectId: project.id,
+        kind: 'generated-image',
+        relativePath,
+        sizeBytes: bytes.length,
+        contentHash: createHash('sha256').update(bytes).digest('hex'),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const job = service.prepareImage({
+      adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+      parameters: {
+        images: ['asset://large-reference'],
+        prompt: 'Restyle',
+        aspect_ratio: '16:9',
+        resolution: '1080p',
+      },
+    });
+    expect(Buffer.byteLength(JSON.stringify(job))).toBeLessThan(16 * 1024);
+    const snapshot = projectsService.access(
+      false,
+      (database) =>
+        JSON.parse(
+          (
+            database
+              .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?')
+              .get(job.id) as { task_snapshot_json: string }
+          ).task_snapshot_json,
+        ) as {
+          parameters: { images: string[] };
+          inputs: Array<{ type: string; assetId?: string; handle?: string }>;
+        },
+    );
+    expect(snapshot.inputs).toContainEqual({ type: 'asset', assetId: 'large-reference' });
+    expect(snapshot.parameters.images[0]).toMatch(/^controlled-file:\/\/cache\/media-inputs\//);
+    const handle = snapshot.inputs.find(
+      (input) => input.type === 'controlled_temporary_file',
+    )?.handle;
+    if (!handle) throw new Error('Expected a controlled media input.');
+    expect(readFileSync(join(nativeRoot, handle)).equals(bytes)).toBe(true);
   });
 
   it('copies Agent asset inputs into controlled files and retains only asset provenance', async () => {

@@ -13,7 +13,7 @@ import {
   openAppDatabase,
   openProjectDatabase,
 } from './index.js';
-import { APP_MIGRATION_V1 } from './app-schema.js';
+import { APP_MIGRATION_V1, CURRENT_APP_SCHEMA_VERSION } from './app-schema.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -34,11 +34,14 @@ describe('app settings database', () => {
     const projectDatabase = openProjectDatabase(join(directory, 'project.sqlite'));
 
     expect(getAppSchemaVersion(appDatabase)).toBe(0);
-    expect(migrateAppDatabase(appDatabase)).toBe(7);
-    expect(checkAppIntegrity(appDatabase)).toMatchObject({ ok: true, schemaVersion: 7 });
+    expect(migrateAppDatabase(appDatabase)).toBe(CURRENT_APP_SCHEMA_VERSION);
+    expect(checkAppIntegrity(appDatabase)).toMatchObject({
+      ok: true,
+      schemaVersion: CURRENT_APP_SCHEMA_VERSION,
+    });
     expect(getSchemaVersion(projectDatabase)).toBe(0);
     expect(migrateDatabase(projectDatabase)).toBe(CURRENT_SCHEMA_VERSION);
-    expect(getAppSchemaVersion(appDatabase)).toBe(7);
+    expect(getAppSchemaVersion(appDatabase)).toBe(CURRENT_APP_SCHEMA_VERSION);
 
     const providerColumns = appDatabase
       .prepare("SELECT name FROM pragma_table_info('provider_profiles')")
@@ -79,7 +82,9 @@ describe('app settings database', () => {
         '2026-08-03T00:00:00.000Z',
       );
 
-    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(7);
+    expect(migrateAppDatabase(database, '2026-08-03T01:00:00.000Z')).toBe(
+      CURRENT_APP_SCHEMA_VERSION,
+    );
     expect(createAppRepositories(database).providerProfiles.list()).toMatchObject([
       { name: 'Existing Vidu', migrationSource: undefined },
     ]);

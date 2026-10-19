@@ -50,6 +50,13 @@ import { runV14Rebuild } from './migration-v14.js';
 import { MIGRATION_V44 } from './migration-v44.js';
 import { MIGRATION_V45 } from './migration-v45.js';
 import { MIGRATION_V46 } from './migration-v46.js';
+import { MIGRATION_V50 } from './migration-v50.js';
+import { MIGRATION_V51 } from './migration-v51.js';
+import { MIGRATION_V52 } from './migration-v52.js';
+import { MIGRATION_V53 } from './migration-v53.js';
+import { MIGRATION_V54 } from './migration-v54.js';
+import { MIGRATION_V55 } from './migration-v55.js';
+import { MIGRATION_V56 } from './migration-v56.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -534,6 +541,68 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(49, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 49) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V50);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(50, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 50) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V51);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(51, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 51) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V52);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(52, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 52) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V53);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(53, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 53) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V54);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(54, now);
+    })();
+  }
+  if (getSchemaVersion(database) === 54) {
+    checkpoint(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V55);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(55, now);
+    })();
+  }
+  if (currentVersion < 56) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V56);
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+        .run(56, now);
     })();
   }
   return getSchemaVersion(database);

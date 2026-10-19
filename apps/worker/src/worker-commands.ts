@@ -21,6 +21,8 @@ import type { PartialArtifactService } from './partial-artifact-service.js';
 import type { SampleProjectService } from './sample-project-service.js';
 import type { UsageService } from './usage-service.js';
 import type { VideoGenerationService } from './video-generation-service.js';
+import type { FileTaskService } from './file-task-service.js';
+import type { ShotContinuityService } from './shot-continuity-service.js';
 import {
   getModelContract,
   listModelBindings,
@@ -45,6 +47,8 @@ export interface InfrastructureCommandServices {
   mediaOrchestrationService: MediaOrchestrationService;
   projectTaskRuntime: ProjectTaskRuntime;
   dubbingService?: DubbingService;
+  fileTaskService?: FileTaskService;
+  shotContinuityService?: ShotContinuityService;
 }
 
 export interface InfrastructureCommandResult {
@@ -58,7 +62,10 @@ function requireString(params: Record<string, unknown>, key: string): string {
   return value;
 }
 
-async function resetRuntime(services: InfrastructureCommandServices): Promise<void> {
+export async function resetRuntime(services: InfrastructureCommandServices): Promise<void> {
+  services.shotContinuityService?.cancelAll();
+  await services.fileTaskService?.stop();
+  await services.markdownExportService.stop();
   services.projectTaskRuntime.stop();
   await services.dubbingService?.cancelAll();
   await services.generationService.cancelAll();
@@ -67,8 +74,9 @@ async function resetRuntime(services: InfrastructureCommandServices): Promise<vo
   services.maintenanceService.resetSession();
 }
 
-function recoverRuntime(services: InfrastructureCommandServices): void {
+export function recoverRuntime(services: InfrastructureCommandServices): void {
   if (services.projectService.current()?.mode !== 'read-write') return;
+  services.fileTaskService?.recover();
   services.partialArtifactService.recoverInterrupted();
   services.generationService.recoverInterrupted();
   services.agentProviderLoopService.recoverInterrupted();
@@ -133,6 +141,17 @@ export async function executeInfrastructureCommand(
       };
     }
     case 'project.backup':
+      if (services.fileTaskService) {
+        const job = services.fileTaskService.create({
+          kind: 'project-backup',
+          destinationPath:
+            typeof params.destinationPath === 'string' ? params.destinationPath : undefined,
+          idempotencyKey: crypto.randomUUID(),
+        });
+        const done = await services.fileTaskService.wait(job.id);
+        if (done.status !== 'succeeded') throw new Error(done.error ?? 'Backup failed.');
+        return { handled: true, result: done.result };
+      }
       return {
         handled: true,
         result: {
@@ -142,6 +161,16 @@ export async function executeInfrastructureCommand(
         },
       };
     case 'project.export':
+      if (services.fileTaskService) {
+        const job = services.fileTaskService.create({
+          kind: 'project-export',
+          destinationRoot: requireString(params, 'destinationRoot'),
+          idempotencyKey: crypto.randomUUID(),
+        });
+        const done = await services.fileTaskService.wait(job.id);
+        if (done.status !== 'succeeded') throw new Error(done.error ?? 'Export failed.');
+        return { handled: true, result: done.result };
+      }
       return {
         handled: true,
         result: {

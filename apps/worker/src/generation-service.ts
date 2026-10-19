@@ -20,22 +20,28 @@ import type {
   NormalizedLlmUsage,
   WorkerGenerationMetric,
 } from '@ai-video/contracts';
-import { toContextManifest, type ProductionContext } from '@ai-video/context';
+import { estimateTokenCount, toContextManifest, type ProductionContext } from '@ai-video/context';
 import type {
   LlmGenerationAttemptRecord,
   LlmGenerationRecord,
   ProjectRecord,
 } from '@ai-video/domain';
 import { LlmProviderError, type LlmProvider } from '@ai-video/llm';
-import { createRepositories, syncLibraryChunksForChatMessage } from '@ai-video/persistence';
+import {
+  captureTaskHistory,
+  createRepositories,
+  syncLibraryChunksForChatMessage,
+} from '@ai-video/persistence';
 import type { ResolvedLlmSelection } from './app-settings-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService, toContextInfo } from './context-service.js';
 import type { NovelContextService } from './novel-context-service.js';
 import { ProjectService } from './project-service.js';
 import { calculateEstimatedCost, normalizeCurrency, normalizeDecimalPrice } from './usage-cost.js';
+import { assertProjectTaskAdmission } from './task-admission.js';
 
 interface GenerationState extends LlmGenerationInfo {
+  supplementContextBase?: string;
   attemptId: string;
   projectId: string;
   projectSessionId: string;
@@ -49,6 +55,7 @@ interface GenerationState extends LlmGenerationInfo {
 }
 
 interface GenerationCreationOptions {
+  taskExecution?: 'ordered' | 'parallel' | 'auto';
   idempotencyKey?: string;
   retryOfGenerationId?: string;
   selectedChapterIds?: string[];
@@ -70,6 +77,13 @@ export interface GenerationServiceOptions {
 
 export interface LlmUsageIndexer {
   indexLlmAttempt(project: ProjectRecord, attempt: LlmGenerationAttemptRecord): void;
+}
+
+export class ConversationBusyError extends Error {
+  constructor() {
+    super('当前会话的上一轮仍在执行，请等待完成或停止生成后再发送。');
+    this.name = 'ConversationBusyError';
+  }
 }
 
 export class GenerationService {
@@ -151,7 +165,7 @@ export class GenerationService {
       selection,
       params.budgetTokens,
       undefined,
-      { idempotencyKey: params.idempotencyKey },
+      { idempotencyKey: params.idempotencyKey, taskExecution: params.taskExecution },
       // Chapter selections are hints for the System Agent, never an implicit
       // full-text context. The resolver must locate and read the requested
       // resources through library tools.
@@ -179,6 +193,304 @@ export class GenerationService {
       throw new Error('LLM generation is no longer available for native streaming.');
     }
     return { ...state.runtimeRequest };
+  }
+
+  discardUncommitted(): void {
+    this.projects.access(false, (database) => {
+      for (const [id, state] of this.generations)
+        if (!database.prepare('SELECT 1 FROM llm_generations WHERE id=?').get(id)) {
+          this.clearFlushTimer(state);
+          this.generations.delete(id);
+        }
+    });
+  }
+
+  private domainDependenciesReady(generationId: string): boolean {
+    const rows = this.projects.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            `
+      SELECT deps.batch_id AS batchId,deps.child_key AS childKey,deps.upstream_key AS upstreamKey,deps.milestone,deps.frozen_version_id AS frozenVersionId,
+        child.task_id AS taskId,upstream.document_id AS documentId,upstream.conflict_artifact_id AS conflictId,
+        generation.status AS generationStatus,task.status AS taskStatus,
+        artifact.document_version_id AS versionId,artifact.disposition
+      FROM novel_batch_children child JOIN novel_batch_dependencies deps ON deps.batch_id=child.batch_id AND deps.child_key=child.child_key
+      JOIN novel_batch_children upstream ON upstream.batch_id=deps.batch_id AND upstream.child_key=deps.upstream_key
+      JOIN llm_generations generation ON generation.id=upstream.generation_id JOIN agent_tasks task ON task.id=upstream.task_id
+      LEFT JOIN agent_task_document_artifacts artifact ON artifact.task_id=upstream.task_id AND artifact.artifact_role='primary'
+      WHERE child.generation_id=?`,
+          )
+          .all(generationId) as Array<{
+          batchId: string;
+          childKey: string;
+          upstreamKey: string;
+          milestone: 'draft' | 'published';
+          frozenVersionId: string | null;
+          taskId: string;
+          documentId: string;
+          conflictId: string | null;
+          generationStatus: string;
+          taskStatus: string;
+          versionId: string | null;
+          disposition: string | null;
+        }>,
+    );
+    for (const row of rows) {
+      if (row.frozenVersionId) continue;
+      if (
+        row.conflictId ||
+        ['failed', 'cancelled'].includes(row.generationStatus) ||
+        ['failed', 'cancelled'].includes(row.taskStatus) ||
+        ['rejected', 'discarded'].includes(row.disposition ?? '')
+      )
+        throw new Error(
+          'A required chapter artifact is unavailable; retry or revise the batch explicitly.',
+        );
+      if (
+        row.generationStatus !== 'complete' ||
+        !row.versionId ||
+        (row.milestone === 'published' && row.disposition !== 'published')
+      )
+        return false;
+    }
+    if (rows.some((row) => !row.frozenVersionId))
+      this.projects.access(true, (database) =>
+        database.transaction(() => {
+          for (const row of rows)
+            if (!row.frozenVersionId) {
+              database
+                .prepare(
+                  'UPDATE novel_batch_dependencies SET frozen_version_id=? WHERE batch_id=? AND child_key=? AND upstream_key=? AND frozen_version_id IS NULL',
+                )
+                .run(row.versionId, row.batchId, row.childKey, row.upstreamKey);
+              database
+                .prepare(
+                  'INSERT OR IGNORE INTO novel_batch_sources(batch_id,task_id,document_id,version_id,milestone) VALUES(?,?,?,?,?)',
+                )
+                .run(row.batchId, row.taskId, row.documentId, row.versionId, row.milestone);
+            }
+        })(),
+      );
+    return true;
+  }
+
+  /** Wait outside all database transactions and execution slots. Never replay a failed prerequisite. */
+  async waitUntilReady(identity: LlmGenerationIdentity, signal: AbortSignal): Promise<void> {
+    for (;;) {
+      signal.throwIfAborted();
+      const state = this.requireNativeState(identity);
+      if (!isActive(state.status)) throw new Error('Queued generation is no longer active.');
+      if (!this.domainDependenciesReady(identity.generationId)) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal.removeEventListener('abort', abort);
+            resolve();
+          }, 250);
+          const abort = () => {
+            clearTimeout(timer);
+            reject(
+              signal.reason instanceof Error ? signal.reason : new Error('Chapter task cancelled.'),
+            );
+          };
+          signal.addEventListener('abort', abort, { once: true });
+        });
+        continue;
+      }
+      const dependency = this.projects.access(
+        false,
+        (database) =>
+          database
+            .prepare(
+              `
+        SELECT parent.id,parent.status,branches.dependency_snapshot_json AS snapshot
+        FROM generation_branches branches JOIN llm_generations parent ON parent.id=branches.dependency_generation_id
+        WHERE branches.generation_id=?`,
+            )
+            .get(identity.generationId) as
+            { id: string; status: string; snapshot: string | null } | undefined,
+      );
+      if (!dependency) return;
+      if (dependency.status === 'complete') {
+        if (!dependency.snapshot) {
+          const parent = this.get(dependency.id);
+          const snapshot = JSON.stringify({
+            generationId: dependency.id,
+            userMessage: parent.userMessage,
+            assistantMessage: parent.assistantMessage,
+          });
+          const segments: Array<{
+            generationId: string;
+            userMessage: ChatMessageInfo;
+            assistantMessage: ChatMessageInfo;
+          }> = [];
+          const visited = new Set<string>();
+          let cursor: string | undefined = dependency.id;
+          while (cursor && !visited.has(cursor) && segments.length < 32) {
+            visited.add(cursor);
+            const current = this.get(cursor);
+            segments.unshift({
+              generationId: cursor,
+              userMessage: current.userMessage,
+              assistantMessage: current.assistantMessage,
+            });
+            cursor = this.projects.access(
+              false,
+              (database) =>
+                (
+                  database
+                    .prepare(
+                      'SELECT dependency_generation_id AS id FROM generation_branches WHERE generation_id=? AND dependency_snapshot_json IS NOT NULL',
+                    )
+                    .get(cursor!) as { id: string | null } | undefined
+                )?.id ?? undefined,
+            );
+          }
+          const text = segments
+            .map(
+              (segment) =>
+                `\n\n[指定跟进任务 ${segment.generationId} 的完成结果]\nuser: ${segment.userMessage.content}\nassistant: ${segment.assistantMessage.content}`,
+            )
+            .join('');
+          const budget =
+            this.projects.access(false, (database) => {
+              const row = createRepositories(database).contextSnapshots.get(state.snapshotId);
+              return row
+                ? (JSON.parse(row.contentJson) as { budgetTokens?: number }).budgetTokens
+                : undefined;
+            }) ?? 24_000;
+          if (
+            !state.runtimeRequest ||
+            estimateTokenCount(
+              state.runtimeRequest.systemInstruction + state.runtimeRequest.context + text,
+            ) > budget
+          )
+            throw new Error('Follow-up result exceeds the frozen context budget.');
+          this.projects.access(true, (database) =>
+            database
+              .prepare(
+                'UPDATE generation_branches SET dependency_snapshot_json=? WHERE generation_id=? AND dependency_snapshot_json IS NULL',
+              )
+              .run(snapshot, identity.generationId),
+          );
+          state.runtimeRequest.context += text;
+        }
+        return;
+      }
+      if (!['prepared', 'streaming'].includes(dependency.status))
+        throw new Error(
+          'The preceding task did not complete; this follow-up requires an explicit retry.',
+        );
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => {
+          clearTimeout(timer);
+          reject(
+            signal.reason instanceof Error ? signal.reason : new Error('Generation cancelled.'),
+          );
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', abort);
+          resolve();
+        }, 50);
+        signal.addEventListener('abort', abort, { once: true });
+      });
+    }
+  }
+
+  supplement(generationId: string, content: string, idempotencyKey: string): ChatMessageInfo {
+    const state = this.generations.get(generationId);
+    if (!state || !isActive(state.status))
+      throw new Error('Target task is no longer accepting input.');
+    this.requireNativeState(identityOf(state));
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const repositories = createRepositories(database);
+        const existing = database
+          .prepare(
+            'SELECT message_id AS id,content,generation_id AS generationId FROM generation_supplements WHERE id=?',
+          )
+          .get(idempotencyKey) as { id: string; content: string; generationId: string } | undefined;
+        if (existing) {
+          if (existing.generationId !== generationId || existing.content !== content)
+            throw new Error('Supplement operation key has different input.');
+          return repositories.chatMessages.get(existing.id)!;
+        }
+        const count = database
+          .prepare('SELECT COUNT(*) AS n FROM generation_supplements WHERE generation_id=?')
+          .get(generationId) as { n: number };
+        if (count.n >= 32) throw new Error('Task supplement queue is full (32).');
+        const total = database
+          .prepare(
+            'SELECT COALESCE(SUM(length(content)),0) AS n FROM generation_supplements WHERE generation_id=?',
+          )
+          .get(generationId) as { n: number };
+        if (state.userMessage.content.length + total.n + content.length + 1000 > 100000)
+          throw new Error('Task supplements exceed the input budget.');
+        const message: ChatMessageInfo = {
+          id: randomUUID(),
+          conversationId: state.conversationId,
+          role: 'user',
+          content,
+          status: 'complete',
+          createdAt: nowIso(),
+        };
+        repositories.chatMessages.save(message);
+        database
+          .prepare(
+            'INSERT INTO generation_supplements(id,generation_id,message_id,content,created_at) VALUES(?,?,?,?,?)',
+          )
+          .run(idempotencyKey, generationId, message.id, content, message.createdAt);
+        syncLibraryChunksForChatMessage(
+          database,
+          project.id,
+          message,
+          repositories.conversations.get(state.conversationId)!,
+          message.createdAt,
+        );
+        return message;
+      })(),
+    );
+  }
+
+  consumeSupplements(generationId: string): Array<{ id: string; content: string }> {
+    const state = this.generations.get(generationId);
+    if (!state?.runtimeRequest || !isActive(state.status)) return [];
+    const rows = this.projects.access(true, (database) =>
+      database.transaction(() => {
+        const rows = database
+          .prepare(
+            'SELECT id,content FROM generation_supplements WHERE generation_id=? AND consumed_at IS NULL ORDER BY rowid',
+          )
+          .all(generationId) as Array<{ id: string; content: string }>;
+        for (const row of rows)
+          database
+            .prepare(
+              'UPDATE generation_supplements SET consumed_at=? WHERE id=? AND consumed_at IS NULL',
+            )
+            .run(nowIso(), row.id);
+        return rows;
+      })(),
+    );
+    if (rows.length) {
+      state.supplementContextBase ??= state.runtimeRequest.context;
+      const nextContext = `${state.supplementContextBase}\n\n[本任务此前已观察的助手输出]\n${state.assistantMessage.content}`;
+      const nextPrompt = `${state.runtimeRequest.prompt}\n\n[用户明确关联到本任务的补充输入]\n${rows.map((row) => row.content).join('\n\n')}`;
+      const budget =
+        this.projects.access(false, (database) => {
+          const snapshot = createRepositories(database).contextSnapshots.get(state.snapshotId);
+          return snapshot
+            ? (JSON.parse(snapshot.contentJson) as { budgetTokens?: number }).budgetTokens
+            : undefined;
+        }) ?? 24000;
+      if (
+        estimateTokenCount(state.runtimeRequest.systemInstruction + nextContext + nextPrompt) >
+        budget
+      )
+        throw new Error('Supplement context exceeds the task budget.');
+      state.runtimeRequest = { ...state.runtimeRequest, context: nextContext, prompt: nextPrompt };
+    }
+    return rows;
   }
 
   configureAgentTools(
@@ -597,10 +909,11 @@ export class GenerationService {
     const projectId = this.projects.current()?.id;
     const projectSessionId = this.projects.currentSessionId();
     if (!projectId || !projectSessionId) throw new Error('No project is open.');
+    const boundary = this.projects.access(false, (database) => captureTaskHistory(database));
     const compiled =
       selectedChapterIds && this.novelContexts
         ? this.novelContexts.compileShortDrama(conversationId, budgetTokens, selectedChapterIds)
-        : this.contexts.compile(conversationId, budgetTokens);
+        : this.contexts.compile(conversationId, budgetTokens, boundary);
     const snapshotId = randomUUID();
     const generationId = randomUUID();
     const attemptId = randomUUID();
@@ -698,6 +1011,20 @@ export class GenerationService {
         throw new Error('Original user message was not found.');
       }
       database.transaction(() => {
+        const active = database
+          .prepare(
+            `SELECT id FROM llm_generations
+             WHERE project_id = ? AND conversation_id = ? AND status IN ('prepared', 'streaming')
+             ORDER BY rowid DESC LIMIT 1`,
+          )
+          .get(project.id, conversationId) as { id: string } | undefined;
+        if (
+          active &&
+          (!options.taskExecution || process.env.AI_VIDEO_CONVERSATION_PARALLEL_ENABLED === '0')
+        ) {
+          throw new ConversationBusyError();
+        }
+        assertProjectTaskAdmission(database);
         repositories.contextSnapshots.save({
           id: snapshotId,
           projectId: project.id,
@@ -724,6 +1051,25 @@ export class GenerationService {
           startedAt,
         );
         repositories.llmGenerations.insert(record);
+        database
+          .prepare(
+            `INSERT INTO generation_branches(generation_id,branch_id,input_message_id,history_cutoff,
+          excluded_generation_ids_json,execution,dependency_generation_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+          )
+          .run(
+            generationId,
+            generationId,
+            userMessage.id,
+            boundary.cutoff,
+            JSON.stringify(boundary.excludedGenerationIds),
+            options.taskExecution === 'ordered'
+              ? 'ordered'
+              : options.taskExecution === 'parallel'
+                ? 'parallel'
+                : 'legacy',
+            options.taskExecution === 'ordered' ? (active?.id ?? null) : null,
+            startedAt,
+          );
         repositories.llmGenerationAttempts.save(attempt);
         repositories.conversations.save({ ...conversation, updatedAt: startedAt });
         repositories.projects.touch(startedAt);
@@ -731,9 +1077,28 @@ export class GenerationService {
       project.updatedAt = startedAt;
     });
     this.generations.set(state.generationId, state);
+    const activeTaskContext = this.projects.access(false, (database, project) => {
+      const rows = database
+        .prepare(
+          `SELECT generations.id,generations.status,substr(messages.content,1,240) AS prompt
+           FROM llm_generations generations
+           JOIN chat_messages messages ON messages.id=generations.user_message_id
+          WHERE generations.project_id=? AND generations.conversation_id=?
+            AND generations.id<>?
+            AND generations.status IN ('prepared','streaming','complete')
+          ORDER BY generations.created_at DESC LIMIT 8`,
+        )
+        .all(project.id, conversationId, generationId) as Array<{
+        id: string;
+        status: string;
+        prompt: string;
+      }>;
+      if (!rows.length) return '';
+      return `\n\n当前会话存在以下活动或最近完成的任务。请由你判断本条消息与它们的关系；需要关联时先调用 conversation.task.route，不能依据界面默认值替用户决定：\n${rows.map((row) => `- generationId=${row.id}；状态=${row.status}；用户请求=${row.prompt}`).join('\n')}\n可选关系：independent（独立执行）、follow_up（继续已完成任务）、supplement（向活动任务补充指令）。若无明确关系，选择 independent。`;
+    });
     return {
       state,
-      systemInstruction: compiled.systemInstruction,
+      systemInstruction: `${compiled.systemInstruction}${activeTaskContext}`,
       context: compiled.rendered,
     };
   }
@@ -1050,14 +1415,14 @@ function withAgentSystemInstruction(systemInstruction: string): string {
 
 function withAgentLibraryInstruction(systemInstruction: string): string {
   if (systemInstruction.includes(AGENT_LIBRARY_INSTRUCTION_MARKER)) return systemInstruction;
-  return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nDo not repeat a successful library.search for the same query.
+  return `${systemInstruction}\n\n${AGENT_LIBRARY_INSTRUCTION_MARKER}\nDo not repeat a successful library.search with the same query and filters; correcting an incorrect sourceTypes filter may reuse the query.
 项目资料按需检索准则：
 1. 项目小说、章节和文档存储在当前项目 SQLite 资料库中，通过 library.search / library.read 获取；它们不是需要用户提供磁盘路径的文件目录。上下文中的资料目录仅为有界预览，可能不完整；未列出不代表不存在。
-2. 根据用户目标和已有证据，自主判断是否检索、查询词、来源类型及需要读取的范围，不按固定关键词机械选择工作流。查找小说章节时，推荐 sourceTypes=["novel-chapter"]，query 保留用户给出的章节号、书名或标题线索；其他资料按实际来源选择。小说页面的章节勾选只是可选快捷入口，不是 Agent 检索的前置条件，不得依赖界面勾选状态或预先注入的章节正文。
+2. 根据用户目标和已有证据，自主判断是否检索、查询词、来源类型及需要读取的范围，不按固定关键词机械选择工作流。查找小说章节时，推荐 sourceTypes=["novel-chapter"]，query 保留用户给出的章节号、书名或标题线索；小说大纲、角色设定和世界观等小说资料的来源为 novel-reference，sourceTypes=["document"] 不包含它们。来源不确定时省略 sourceTypes，或按目录/resourceMap 的真实 sourceType 筛选。小说页面的章节勾选只是可选快捷入口，不是 Agent 检索的前置条件，不得依赖界面勾选状态或预先注入的章节正文。
 结构定位：当用户按章节、场次、镜头或文档层级描述目标时，可先调用 library.search(searchMode="structure", query="*") 浏览结构；用 structurePath 精确收窄路径，或用标题/节点名查询。结构结果只有标题和路径，不是正文证据；随后必须用同一 sourceHandle 调用 library.read，需正文时使用 readMode="source"。
-3. 基于指定章节回答、改编或生成镜头提示词前，必须调用 library.read 取得覆盖目标章节范围的正文证据。不能仅凭目录、标题或搜索摘要推断情节。读取章节可使用 readMode="source"，maxChars 不超过 20000；若 truncated=true 且有 nextOffset，将 nextOffset 作为后续调用的 offset 继续读取同一 sourceHandle，直到所需范围覆盖或工具预算耗尽。
-4. 核心事实、设定、大纲与剧情以 document（项目文档）和 novel-chapter（小说正文/草稿）的实际正文为依据。保留 draft / published 来源标记，不能把草稿当作已发布权威。conversation 是历史聊天记录，仅在目标需要回忆会话时检索。
-5. 不重复相同的成功查询，不盲目变换近义词循环。空结果只表示本次查询未命中，可以根据证据调整查询或来源类型，不能据此断言资料不存在。遵守工具返回的剩余预算与硬限制；预算耗尽时停止检索，不改用自动注入正文作为降级。
+3. 基于指定章节回答、改编或生成镜头提示词前，必须调用 library.read 取得覆盖目标章节范围的正文证据。修订已有文档前也要读取当前正文，不把以前聊天里写过当作已核实当前版本。不能仅凭目录、标题或搜索摘要推断情节。读取章节可使用 readMode="source"，maxChars 不超过 20000；若 truncated=true 且有 nextOffset，将 nextOffset 作为后续调用的 offset 继续读取同一 sourceHandle，直到所需范围覆盖或工具预算耗尽。sourceHandle 只能使用本轮 library.search 返回的真实句柄，文档 ID、版本 ID 和 resourceId 不能代替句柄。
+4. 核心事实、设定、大纲与剧情以 document（项目文档）、novel-reference（小说设定资料）和 novel-chapter（小说正文/草稿）的实际正文为依据。保留 draft / published 来源标记，不能把草稿当作已发布权威。conversation 是历史聊天记录，仅在目标需要回忆会话时检索。
+5. 不重复完全相同查询和筛选条件的已执行检索，不盲目变换近义词循环；修正错误来源筛选时可以保留同一查询词。空结果只表示本次查询未命中，可以根据证据调整查询或来源类型，不能据此断言资料不存在或检索服务失效。遵守工具返回的剩余预算与硬限制；预算耗尽时停止检索，不改用自动注入正文作为降级。
 6. 若正文证据不足以完成用户指定的任务，说明已查到的范围和具体缺口，必要时澄清目标；不得凭常识编造项目剧情，也不得把未读取的范围声称为已完成。`;
 }
 

@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { AssetInfo, AssetMediaSourceInfo } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import type { AssetInfo, AssetMediaSourceInfo, ProjectRuntimeScope } from '@ai-video/contracts';
+import { projectWorker, workerMediaUrl, workerScope } from './worker-scope';
 import { ImagePreview } from './ImagePreview';
 
 type AssetImagePreviewProps =
   { asset: AssetInfo } | { assetId: string; projectId?: string; alt: string };
 
 const pending = new Map<string, Promise<AssetMediaSourceInfo>>();
-function source(projectId: string | undefined, assetId: string, thumbnail: boolean) {
-  const key = `${projectId}:${assetId}:${thumbnail}`;
+function source(
+  projectId: string | undefined,
+  assetId: string,
+  thumbnail: boolean,
+  scope: ProjectRuntimeScope | undefined,
+) {
+  if (projectId && workerScope() && !scope)
+    return Promise.reject(new Error('Project is not attached.'));
+  const key = `${projectId}:${scope?.projectSessionId}:${assetId}:${thumbnail}`;
   let request = pending.get(key);
   if (!request) {
+    const callWorker = projectWorker(scope);
     request = Promise.resolve().then(() =>
       callWorker(thumbnail ? 'asset.thumbnail' : 'asset.mediaSource', { assetId }),
     );
@@ -22,22 +30,31 @@ function source(projectId: string | undefined, assetId: string, thumbnail: boole
       })
       .catch(() => undefined);
   }
-  return request.then((media) =>
-    '__TAURI_INTERNALS__' in window
-      ? convertFileSrc(media.path)
-      : `/worker-media/${encodeURIComponent(assetId)}${thumbnail ? '?thumbnail=1' : ''}`,
-  );
+  return request.then((media) => {
+    if ('__TAURI_INTERNALS__' in window) return convertFileSrc(media.path);
+    const url = scope
+      ? workerMediaUrl(assetId, false, scope)
+      : `/worker-media/${encodeURIComponent(assetId)}`;
+    return thumbnail ? `${url}${url.includes('?') ? '&' : '?'}thumbnail=1` : url;
+  });
 }
 
 export function AssetImagePreview(props: AssetImagePreviewProps) {
   const assetId = 'asset' in props ? props.asset.id : props.assetId;
   const projectId = 'asset' in props ? props.asset.projectId : props.projectId;
+  const scope = workerScope(projectId);
   const name =
     'asset' in props
       ? props.asset.alias?.trim() || props.asset.relativePath.split(/[\\/]/).pop() || '生成图片'
       : props.alt;
   return (
-    <Preview key={`${projectId}:${assetId}`} projectId={projectId} assetId={assetId} name={name} />
+    <Preview
+      key={`${projectId}:${scope?.projectSessionId}:${assetId}`}
+      projectId={projectId}
+      assetId={assetId}
+      name={name}
+      scope={scope}
+    />
   );
 }
 
@@ -45,16 +62,21 @@ function Preview({
   projectId,
   assetId,
   name,
+  scope,
 }: {
   projectId?: string;
   assetId: string;
   name: string;
+  scope?: ProjectRuntimeScope;
 }) {
   const element = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(false);
   const [retry, setRetry] = useState(0);
   const [media, setMedia] = useState<{ src?: string; failed?: boolean }>();
-  const full = useCallback(() => source(projectId, assetId, false), [projectId, assetId]);
+  const full = useCallback(
+    () => source(projectId, assetId, false, scope),
+    [projectId, assetId, scope?.projectId, scope?.projectSessionId],
+  );
   useEffect(() => {
     if (!element.current || typeof IntersectionObserver === 'undefined') {
       setVisible(true);
@@ -76,7 +98,7 @@ function Preview({
     let active = true;
     if (visible) {
       setMedia(undefined);
-      void source(projectId, assetId, true)
+      void source(projectId, assetId, true, scope)
         .then((src) => {
           if (active) setMedia({ src });
         })
@@ -87,7 +109,7 @@ function Preview({
     return () => {
       active = false;
     };
-  }, [projectId, assetId, visible, retry]);
+  }, [projectId, assetId, scope?.projectId, scope?.projectSessionId, visible, retry]);
   return (
     <span ref={element} className="asset-image-preview">
       {media?.src ? (

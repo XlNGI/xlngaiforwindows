@@ -33,6 +33,30 @@ async function setup(name = 'Structure Project') {
 }
 
 describe('ProjectStructureCompiler', () => {
+  it('keeps novel-reference source types consistent before a novel profile exists', async () => {
+    const { project, novel, content, compiler } = await setup();
+    const reference = content.saveDocument({
+      kind: 'outline',
+      title: '小说大纲：清风',
+      contentMarkdown: '# 大纲\n私有正文',
+    });
+    novel.saveBinding({ documentId: reference.id, role: 'work-outline', domainScope: 'novel' });
+    project.access(false, (database, opened) => {
+      const snapshot = compiler.compileFromDatabase(database, opened);
+      expect(snapshot.novel).toBeUndefined();
+      expect(snapshot.sources.find((source) => source.documentId === reference.id)).toMatchObject({
+        type: 'novel-reference',
+        sourceId: reference.id,
+      });
+      expect(
+        compileProjectResourceMap(database, opened).resources.find(
+          (resource) => resource.documentId === reference.id,
+        )?.sourceType,
+      ).toBe('novel-reference');
+      expect(JSON.stringify(snapshot)).not.toContain('私有正文');
+    });
+  });
+
   it('describes the scene page and gives shots their actual scene parent without bodies', async () => {
     const { project } = await setup();
     const content = new ContentService(project);

@@ -43,6 +43,8 @@ import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { NativeProviderRequestError, type NativeProviderBridge } from './native-provider-bridge.js';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
+import { ExecutionPool, mapConcurrent, type ExecutionStage } from './execution-pool.js';
+import { assertProjectTaskAdmission } from './task-admission.js';
 
 const ACTIVE_STATUSES = new Set(['pending', 'running', 'interrupted', 'cancelling']);
 const SPEECH_MODELS = new Set(['speech-2.8-hd', 'speech-2.8-turbo']);
@@ -84,6 +86,7 @@ interface RunningJob {
   done: Promise<void>;
 }
 export interface DubbingServiceOptions {
+  capacity?: ExecutionPool;
   runtime?: FfmpegRuntime;
   native?: Pick<NativeProviderBridge, 'request'>;
   nativeAvailable?: () => boolean;
@@ -247,11 +250,12 @@ function budgetSnapshot(
   };
 }
 
-/** Project-owned fixed sequence. Long work never holds a SQLite transaction. */
+/** Project-owned phases. Each job keeps its frozen inputs and local timeline. */
 export class DubbingService {
   private readonly runtime: FfmpegRuntime;
   private readonly running = new Map<string, RunningJob>();
-  private executionTail = Promise.resolve();
+  private readonly capacity: ExecutionPool;
+  private readonly nativeOperations = new Map<string, Map<string, object>>();
   private revision = 0;
 
   constructor(
@@ -260,6 +264,7 @@ export class DubbingService {
     private readonly options: DubbingServiceOptions = {},
   ) {
     this.runtime = options.runtime ?? new FfmpegRuntime();
+    this.capacity = options.capacity ?? new ExecutionPool();
   }
 
   private access<T>(
@@ -280,6 +285,55 @@ export class DubbingService {
   private assertCurrent(sessionId: string, signal?: AbortSignal): void {
     if (signal?.aborted || this.projects.currentSessionId() !== sessionId)
       throw new DubbingValidationError('CANCELLED', '制作已停止或项目已经切换。');
+  }
+
+  private nativeOperation<T>(
+    stage: ExecutionStage,
+    job: DubbingJobInfo,
+    operationId: string,
+    context: ReturnType<DubbingService['capture']>,
+    signal: AbortSignal,
+    method: Parameters<NativeProviderBridge['request']>[0],
+    params: Record<string, unknown>,
+    beforeSend?: () => void,
+  ): Promise<T> {
+    return this.capacity.run(stage, context.projectId, signal, async () => {
+      this.assertCurrent(context.sessionId, signal);
+      if (job.deadline && Date.now() >= Date.parse(job.deadline))
+        throw new DubbingValidationError('DEADLINE_EXCEEDED', '制作超过等待期限，请重新确认。');
+      beforeSend?.();
+      const token = {},
+        operations = this.nativeOperations.get(job.id) ?? new Map<string, object>();
+      this.nativeOperations.set(job.id, operations);
+      operations.set(operationId, token);
+      const abort = () => {
+        void this.options.native
+          ?.request(
+            'provider.dubbing.cancel',
+            {
+              operationId,
+              ...(typeof params.providerTaskId === 'string'
+                ? { providerTaskId: params.providerTaskId }
+                : {}),
+            },
+            5000,
+          )
+          .catch(() => undefined);
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      try {
+        return (await this.options.native!.request(
+          method,
+          { ...params, operationId },
+          12 * 60_000,
+        )) as T;
+      } finally {
+        signal.removeEventListener('abort', abort);
+        if (operations.get(operationId) === token) operations.delete(operationId);
+        if (!operations.size && this.nativeOperations.get(job.id) === operations)
+          this.nativeOperations.delete(job.id);
+      }
+    });
   }
   private assertSpeakerActive(cue: DubbingCueInfo): void {
     if (!cue.characterDocumentId) return;
@@ -337,7 +391,12 @@ export class DubbingService {
   }
 
   async runtimeInfo() {
-    const info = await this.runtime.availability();
+    const info = await this.capacity.run(
+      'ffmpeg',
+      this.projects.current()?.id ?? 'application',
+      undefined,
+      () => this.runtime.availability(),
+    );
     return {
       available: info.available,
       version: info.version,
@@ -446,7 +505,9 @@ export class DubbingService {
         '音频必须为不超过 20 MiB 的有效文件。',
       );
     const mime = audioMime(path);
-    const probe = await this.runtime.validate(path, signal);
+    const probe = await this.capacity.run('ffmpeg', this.capture().projectId, signal, () =>
+      this.runtime.validate(path, signal),
+    );
     if (
       !probe.hasAudio ||
       probe.hasVideo ||
@@ -576,6 +637,8 @@ export class DubbingService {
           }
           if (input.sourceJobId) {
             const job = repo.getJob(input.sourceJobId)!;
+            if (job.status !== 'running')
+              throw new DubbingValidationError('CANCELLED', '配音任务已不再允许提交结果。');
             repo.updateJob(
               job.id,
               {
@@ -796,7 +859,7 @@ export class DubbingService {
     const context = this.capture();
     const now = new Date().toISOString();
     const inputHash = hash(JSON.stringify(inputSnapshot));
-    return this.access(true, (repo) => {
+    return this.access(true, (repo, database) => {
       const inputs = inputSnapshot as unknown as Partial<SceneInput>;
       for (const item of inputs.cues ?? []) {
         const cue = repo.getCue(item.cue.id);
@@ -822,6 +885,7 @@ export class DubbingService {
               job.status === 'complete'),
         );
       if (existing) return existing;
+      assertProjectTaskAdmission(database);
       const job: DubbingJobInfo = {
         id: randomUUID(),
         projectId: context.projectId,
@@ -898,7 +962,8 @@ export class DubbingService {
         const snapshot = job.inputSnapshot as unknown as SpeechInput;
         return (
           job.kind === 'speech' &&
-          job.status === 'submission_unknown' &&
+          (job.status === 'submission_unknown' ||
+            job.steps?.some((step) => step.status === 'submission_unknown')) &&
           snapshot.cue?.id === cue.id &&
           snapshot.cue?.text === cue.text &&
           snapshot.voice?.versionId === voice.versionId
@@ -1009,7 +1074,9 @@ export class DubbingService {
       return { source, cues: frozen };
     });
     const sourcePath = resolveDubbingFile(context.root, snapshot.source.relativePath);
-    const probe = await this.runtime.probe(sourcePath);
+    const probe = await this.capacity.run('ffmpeg', context.projectId, undefined, () =>
+      this.runtime.probe(sourcePath),
+    );
     this.assertCurrent(context.sessionId);
     if (
       !probe.hasVideo ||
@@ -1064,6 +1131,29 @@ export class DubbingService {
       model: lipCues.length ? 'sync-3' : undefined,
       cues: snapshot.cues,
     };
+    if (lipCues.length) {
+      const unresolved = this.access(false, (repo) =>
+        repo.listJobs(params.sceneId).some((previous) => {
+          const old = previous.inputSnapshot as unknown as Partial<SceneInput>;
+          return (
+            previous.inputHash !== hash(JSON.stringify(input)) &&
+            previous.kind === 'lipsync' &&
+            old.sourceVideoAssetId === snapshot.source.id &&
+            (previous.steps ?? []).some(
+              (step) =>
+                (step.status === 'submission_unknown' ||
+                  (step.status !== 'complete' && Boolean(step.providerTaskId))) &&
+                lipCues.some((item) => step.stepKey === `lipsync:${item.cue.id}`),
+            )
+          );
+        }),
+      );
+      if (unresolved)
+        throw new DubbingValidationError(
+          'SUBMISSION_UNKNOWN',
+          '所选片段已有未完成或待核实的远端任务，请先恢复原任务，勿重复提交。',
+        );
+    }
     const job = this.addJob(
       lipCues.length ? 'lipsync' : 'compose',
       params.sceneId,
@@ -1080,7 +1170,7 @@ export class DubbingService {
     if (this.running.has(job.id) || !ACTIVE_STATUSES.has(job.status)) return;
     const context = this.capture();
     const controller = new AbortController();
-    const done = this.executionTail
+    const done = Promise.resolve()
       .then(async () => {
         this.assertCurrent(context.sessionId, controller.signal);
         if (this.getJob(job.id)?.status === 'cancelled') return;
@@ -1105,11 +1195,10 @@ export class DubbingService {
         });
       })
       .finally(() => {
-        this.running.delete(job.id);
+        if (this.running.get(job.id)?.controller === controller) this.running.delete(job.id);
         this.revision += 1;
       });
     this.running.set(job.id, { controller, sessionId: context.sessionId, done });
-    this.executionTail = done;
   }
 
   private async runSpeech(
@@ -1118,7 +1207,9 @@ export class DubbingService {
     signal: AbortSignal,
   ) {
     const input = job.inputSnapshot as unknown as SpeechInput;
-    const availability = await this.runtime.availability();
+    const availability = await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+      this.runtime.availability(),
+    );
     if (!availability.available)
       throw new DubbingValidationError(
         'MEDIA_RUNTIME_UNAVAILABLE',
@@ -1128,19 +1219,24 @@ export class DubbingService {
     this.validateConnection(input.voice.providerProfileId, 'speech', input.voice.model);
     this.assertSpeakerActive(input.cue);
     const step = this.ensureStep(job, 'speech', 'speech');
-    this.patchStep(step.id, job.id, { status: 'running' });
     const relativePath = posix.join('cache', 'dubbing', job.id, `${randomUUID()}.mp3`);
     const staged = resolveDubbingFile(context.root, relativePath, true);
     mkdirSync(dirname(staged), { recursive: true });
     assertStorageCapacity(dirname(staged), DUBBING_LIMITS.audioMaxBytes);
     let result: NativeDubbingSpeechResult;
+    let submitted = false;
     try {
       if (job.deadline && Date.now() >= Date.parse(job.deadline))
         throw new DubbingValidationError(
           'DEADLINE_EXCEEDED',
           '配音请求未发送：制作已超过等待期限。',
         );
-      result = (await this.options.native!.request(
+      result = await this.nativeOperation<NativeDubbingSpeechResult>(
+        'speech',
+        job,
+        job.id,
+        context,
+        signal,
         'provider.dubbing.speech',
         {
           projectRoot: context.root,
@@ -1154,8 +1250,13 @@ export class DubbingService {
           outputRelativePath: relativePath,
           operationId: job.id,
         },
-        12 * 60_000,
-      )) as NativeDubbingSpeechResult;
+        () => {
+          this.validateConnection(input.voice.providerProfileId, 'speech', input.voice.model);
+          this.assertSpeakerActive(input.cue);
+          this.patchStep(step.id, job.id, { status: 'running' });
+          submitted = true;
+        },
+      );
       this.assertCurrent(context.sessionId, signal);
       if (
         !result ||
@@ -1176,6 +1277,22 @@ export class DubbingService {
       });
       this.patchStep(step.id, job.id, { status: 'complete', resultAudioId: committed.audio.id });
     } catch (error) {
+      if (
+        submitted &&
+        signal.aborted &&
+        this.projects.currentSessionId() === context.sessionId &&
+        !(
+          error instanceof NativeProviderRequestError &&
+          ['REQUEST_NOT_SENT', 'INVALID_PARAMETERS', 'METHOD_NOT_FOUND'].includes(
+            error.hostError.code,
+          )
+        )
+      )
+        this.patchStep(step.id, job.id, {
+          status: 'submission_unknown',
+          errorKind: 'SUBMISSION_UNKNOWN',
+          error: '配音提交中断，结果待核实。',
+        });
       if (this.projects.currentSessionId() === context.sessionId && !signal.aborted) {
         const detail = errorDetails(error);
         const unknown =
@@ -1219,26 +1336,40 @@ export class DubbingService {
     signal: AbortSignal,
   ) {
     const input = job.inputSnapshot as unknown as SceneInput;
+    const staleUnknown = (job.steps ?? []).some(
+      (step) => step.kind === 'lipsync' && step.status === 'submission_unknown',
+    );
+    if (staleUnknown)
+      throw new DubbingValidationError(
+        'SUBMISSION_UNKNOWN',
+        '至少一个片段的提交待核实，禁止自动重发。',
+      );
     const source = resolveDubbingFile(context.root, input.sourceRelativePath);
     if ((await hashFile(source, MAX_VIDEO_BYTES)) !== input.sourceContentHash)
       throw new DubbingValidationError('VIDEO_CHANGED', '源视频内容发生变化。');
-    const parts: Array<{ startMs: number; endMs: number; audioPath: string; videoPath?: string }> =
-      [];
-    for (const item of input.cues) {
-      this.assertCurrent(context.sessionId, signal);
-      const audioPath = resolveDubbingFile(context.root, item.audio.relativePath);
-      if ((await hashFile(audioPath, DUBBING_LIMITS.audioMaxBytes)) !== item.audio.contentHash)
-        throw new DubbingValidationError('AUDIO_CHANGED', '配音文件内容发生变化。');
-      const part = {
-        startMs: item.cue.startMs,
-        endMs: item.endMs,
-        audioPath,
-        videoPath: undefined as string | undefined,
-      };
-      if (job.kind === 'lipsync' && item.cue.lipSync)
-        part.videoPath = await this.runLipClip(job, input, item, context, signal);
-      parts.push(part);
-    }
+    const clipsController = new AbortController();
+    const clipSignal = AbortSignal.any([signal, clipsController.signal]);
+    const parts = await mapConcurrent(input.cues, 2, async (item) => {
+      try {
+        this.assertCurrent(context.sessionId, clipSignal);
+        const audioPath = resolveDubbingFile(context.root, item.audio.relativePath);
+        if ((await hashFile(audioPath, DUBBING_LIMITS.audioMaxBytes)) !== item.audio.contentHash)
+          throw new DubbingValidationError('AUDIO_CHANGED', '配音文件内容发生变化。');
+        const part = {
+          startMs: item.cue.startMs,
+          endMs: item.endMs,
+          audioPath,
+          videoPath: undefined as string | undefined,
+        };
+        if (job.kind === 'lipsync' && item.cue.lipSync)
+          part.videoPath = await this.runLipClip(job, input, item, context, clipSignal);
+
+        return part;
+      } catch (error) {
+        clipsController.abort(error);
+        throw error;
+      }
+    });
     this.assertCurrent(context.sessionId, signal);
     const composeStep = this.ensureStep(job, 'compose', 'compose');
     this.patchStep(composeStep.id, job.id, { status: 'running' });
@@ -1246,9 +1377,23 @@ export class DubbingService {
     const output = resolveDubbingFile(context.root, outputRelative, true);
     mkdirSync(dirname(output), { recursive: true });
     try {
-      await this.runtime.composeDubbing(source, output, parts, signal);
+      for (const item of input.cues)
+        if (
+          (await hashFile(
+            resolveDubbingFile(context.root, item.audio.relativePath),
+            DUBBING_LIMITS.audioMaxBytes,
+          )) !== item.audio.contentHash
+        )
+          throw new DubbingValidationError('AUDIO_CHANGED', '配音在制作期间发生变化，成片未提交。');
+      if ((await hashFile(source, MAX_VIDEO_BYTES)) !== input.sourceContentHash)
+        throw new DubbingValidationError('VIDEO_CHANGED', '源视频在制作期间发生变化，成片未提交。');
+      await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+        this.runtime.composeDubbing(source, output, parts, signal),
+      );
       this.assertCurrent(context.sessionId, signal);
-      const probe = await this.runtime.probe(output, signal);
+      const probe = await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+        this.runtime.probe(output, signal),
+      );
       if (
         !probe.hasAudio ||
         !probe.hasVideo ||
@@ -1381,6 +1526,7 @@ export class DubbingService {
     const audioRelative = posix.join(workRelative, 'input.wav');
     const video = resolveDubbingFile(context.root, videoRelative, true);
     const audio = resolveDubbingFile(context.root, audioRelative, true);
+    let submitStarted = false;
     try {
       if (!step.providerTaskId) {
         if (job.deadline && Date.now() >= Date.parse(job.deadline))
@@ -1388,17 +1534,21 @@ export class DubbingService {
             'DEADLINE_EXCEEDED',
             '制作已超过等待期限，口型请求未发送。',
           );
-        const clip = await this.runtime.extractClip(
-          resolveDubbingFile(context.root, input.sourceRelativePath),
-          video,
-          item.cue.startMs,
-          item.endMs,
-          signal,
+        const clip = await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+          this.runtime.extractClip(
+            resolveDubbingFile(context.root, input.sourceRelativePath),
+            video,
+            item.cue.startMs,
+            item.endMs,
+            signal,
+          ),
         );
-        await this.runtime.convertAudio(
-          resolveDubbingFile(context.root, item.audio.relativePath),
-          audio,
-          signal,
+        await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+          this.runtime.convertAudio(
+            resolveDubbingFile(context.root, item.audio.relativePath),
+            audio,
+            signal,
+          ),
         );
         this.assertCurrent(context.sessionId, signal);
         if (job.deadline && Date.now() >= Date.parse(job.deadline))
@@ -1406,9 +1556,13 @@ export class DubbingService {
             'DEADLINE_EXCEEDED',
             '口型请求未发送：制作已超过等待期限。',
           );
-        this.patchStep(step.id, job.id, { status: 'running' });
         try {
-          const submitted = (await this.options.native!.request(
+          const submitted = await this.nativeOperation<NativeDubbingSubmitResult>(
+            'lip-sync',
+            job,
+            step.id,
+            context,
+            signal,
             'provider.dubbing.submit',
             {
               projectRoot: context.root,
@@ -1424,8 +1578,12 @@ export class DubbingService {
               ),
               operationId: job.id,
             },
-            12 * 60_000,
-          )) as NativeDubbingSubmitResult;
+            () => {
+              this.validateConnection(input.providerProfileId!, 'lipsync', input.model!);
+              step = this.patchStep(step.id, job.id, { status: 'running' });
+              submitStarted = true;
+            },
+          );
           if (
             signal.aborted &&
             this.projects.currentSessionId() === context.sessionId &&
@@ -1466,6 +1624,33 @@ export class DubbingService {
             });
             this.patchJob(job.id, { providerTaskId: error.hostError.providerTaskId });
           }
+          if (
+            signal.aborted &&
+            submitStarted &&
+            !this.access(
+              false,
+              (repo) =>
+                repo.listSteps(job.id).find((entry) => entry.id === step.id)?.providerTaskId,
+            ) &&
+            !(
+              error instanceof NativeProviderRequestError &&
+              ['REQUEST_NOT_SENT', 'INVALID_PARAMETERS', 'METHOD_NOT_FOUND'].includes(
+                error.hostError.code,
+              )
+            )
+          ) {
+            this.patchStep(step.id, job.id, {
+              status: 'submission_unknown',
+              errorKind: 'SUBMISSION_UNKNOWN',
+              error: '口型提交中断，结果待核实，禁止自动重发。',
+            });
+            if (this.getJob(job.id)?.status !== 'cancelled')
+              this.patchJob(job.id, {
+                status: 'submission_unknown',
+                errorKind: 'SUBMISSION_UNKNOWN',
+                error: '至少一个口型片段提交结果未知，需核实后继续。',
+              });
+          }
           this.assertCurrent(context.sessionId, signal);
           const recoverableTaskId =
             error instanceof NativeProviderRequestError
@@ -1504,7 +1689,12 @@ export class DubbingService {
         assertStorageCapacity(directory, MAX_VIDEO_BYTES);
         let observed: NativeDubbingPollResult;
         try {
-          observed = (await this.options.native!.request(
+          observed = await this.nativeOperation<NativeDubbingPollResult>(
+            'lip-sync',
+            job,
+            step.id,
+            context,
+            signal,
             'provider.dubbing.poll',
             {
               projectRoot: context.root,
@@ -1513,8 +1703,7 @@ export class DubbingService {
               outputRelativePath: resultRelative,
               operationId: job.id,
             },
-            12 * 60_000,
-          )) as NativeDubbingPollResult;
+          );
           failures = 0;
         } catch (error) {
           this.assertCurrent(context.sessionId, signal);
@@ -1552,7 +1741,9 @@ export class DubbingService {
           try {
             if (observed.relativePath !== resultRelative)
               throw new DubbingValidationError('INVALID_PROVIDER_OUTPUT', '口型视频结果不完整。');
-            const probe = await this.runtime.validate(resultPath, signal);
+            const probe = await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+              this.runtime.validate(resultPath, signal),
+            );
             if (
               !probe.hasVideo ||
               Math.abs(probe.durationMs - item.audio.durationMs) > 1_000 / (probe.fps ?? 25) + 2
@@ -1608,6 +1799,18 @@ export class DubbingService {
     const job = this.getJob(jobId);
     if (!job) throw new DubbingValidationError('JOB_NOT_FOUND', '制作任务不存在。');
     if (['complete', 'failed', 'cancelled'].includes(job.status)) return job;
+    const activeIds = new Set(this.nativeOperations.get(jobId)?.keys() ?? []);
+    const remoteSteps = this.access(false, (repo) =>
+      repo
+        .listSteps(jobId)
+        .filter(
+          (step) =>
+            step.kind === 'lipsync' &&
+            step.providerTaskId &&
+            step.status !== 'complete' &&
+            step.status !== 'cancelled',
+        ),
+    );
     this.running.get(jobId)?.controller.abort();
     this.access(true, (repo) => {
       for (const step of repo.listSteps(jobId)) {
@@ -1624,13 +1827,15 @@ export class DubbingService {
       errorKind: 'CANCELLED',
       error: '制作已取消；远端已产生的费用仍以供应商为准。',
     });
-    void this.options.native
-      ?.request(
-        'provider.dubbing.cancel',
-        { operationId: jobId, providerTaskId: job.providerTaskId },
-        5_000,
-      )
-      .catch(() => undefined);
+    for (const step of remoteSteps)
+      if (!activeIds.has(step.id))
+        void this.options.native
+          ?.request(
+            'provider.dubbing.cancel',
+            { operationId: step.id, providerTaskId: step.providerTaskId },
+            5000,
+          )
+          .catch(() => undefined);
     return cancelled;
   }
   async cancelAll(): Promise<void> {
@@ -1667,7 +1872,10 @@ export class DubbingService {
         const steps = this.access(false, (repo) => repo.listSteps(job.id));
         if (
           steps.some(
-            (step) => step.status === 'running' && step.kind === 'lipsync' && !step.providerTaskId,
+            (step) =>
+              step.kind === 'lipsync' &&
+              (step.status === 'submission_unknown' ||
+                (step.status === 'running' && !step.providerTaskId)),
           )
         )
           this.patchJob(job.id, {
@@ -1687,6 +1895,8 @@ export class DubbingService {
         '只有已明确失败的任务可以重试；未知提交需先核对。',
       );
     const allSteps = this.access(false, (repo) => repo.listSteps(job.id));
+    if (allSteps.some((step) => step.status === 'submission_unknown'))
+      throw new DubbingValidationError('SUBMISSION_UNKNOWN', '存在待核实片段，禁止重复付费提交。');
     const latest = new Map<string, DubbingJobStepInfo>();
     for (const step of allSteps)
       if (!latest.has(step.stepKey) || latest.get(step.stepKey)!.attempt < step.attempt)

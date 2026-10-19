@@ -13,6 +13,55 @@ import { ChatPanel } from './ChatPanel';
 afterEach(cleanup);
 
 describe('ChatPanel attempt metadata', () => {
+  it('lets the user edit and save the conversation prompt contract', () => {
+    const conversation: ConversationInfo = {
+      id: 'conversation-template',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '约束模板',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    };
+    const onChange = vi.fn();
+    const onSave = vi.fn();
+    render(
+      <ChatPanel
+        scopeType="project"
+        scopeAvailable
+        writable
+        conversations={[conversation]}
+        conversation={conversation}
+        messages={[]}
+        composer=""
+        statusMessage=""
+        promptTemplate="固定时间和风格"
+        onPromptTemplateChange={onChange}
+        onSavePromptTemplate={onSave}
+        legacyLlmConfigured={false}
+        llmProfiles={[]}
+        llmModels={[]}
+        selectedLlmProfileId=""
+        selectedLlmModelId=""
+        onSelectConversation={vi.fn()}
+        onCreateConversation={vi.fn()}
+        onRetryGeneration={vi.fn()}
+        onLlmProfileChange={vi.fn()}
+        onLlmModelChange={vi.fn()}
+        onOpenProviderSettings={vi.fn()}
+        onComposerChange={vi.fn()}
+        onCancelGeneration={vi.fn()}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText('本会话要求约束'));
+    const textarea = screen.getByLabelText('本会话要求约束');
+    expect(textarea).toHaveValue('固定时间和风格');
+    fireEvent.change(textarea, { target: { value: '更新后的风格约束' } });
+    expect(onChange).toHaveBeenCalledWith('更新后的风格约束');
+    fireEvent.click(screen.getByRole('button', { name: '保存会话约束' }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
   it('shows in-conversation tool calls while a task runs', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',

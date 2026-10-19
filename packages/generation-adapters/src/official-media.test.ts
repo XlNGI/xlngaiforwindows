@@ -10,6 +10,45 @@ const key = (mode: string) =>
   `${mode === 't2v' ? 'TEXT_TO_VIDEO' : mode === 'i2v' ? 'IMAGE_TO_VIDEO' : 'REFERENCE_TO_VIDEO'}:unicompapi:cn.happyhorse.1.1.${mode}:contract-1`;
 
 describe('official HappyHorse contracts', () => {
+  it('offers current Wan audio/media contracts while keeping the old adapter available for history', () => {
+    const adapter = getAdapter('REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3')!;
+    expect(adapter).toBeDefined();
+    expect(
+      adapterBindsCatalogModel(adapter, {
+        providerType: 'unicompapi',
+        remoteModelId: 'wan3.0-video',
+      }),
+    ).toBe(true);
+    const old = getAdapter('TEXT_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-1')!;
+    expect(old).toBeDefined();
+    expect(
+      adapterBindsCatalogModel(old, { providerType: 'unicompapi', remoteModelId: 'wan3.0-video' }),
+    ).toBe(false);
+    const parameters = {
+      prompt: '使用音频1的音色',
+      audio: true,
+      media: [{ type: 'reference_audio', url: 'https://example.com/voice.wav' }],
+    };
+    expect(validateAdapterParameters(adapter.key, parameters)).toEqual({ valid: true, errors: [] });
+    expect(
+      validateAdapterParameters(adapter.key, {
+        ...parameters,
+        audio: 'https://example.com/voice.wav',
+      }).valid,
+    ).toBe(false);
+    expect(
+      validateAdapterParameters(adapter.key, {
+        ...parameters,
+        media: [{ type: 'reference_image', url: 'project-asset://image' }, ...parameters.media],
+      }).valid,
+    ).toBe(true);
+    expect(
+      validateAdapterParameters(adapter.key, {
+        ...parameters,
+        media: [{ type: 'first_frame', url: 'https://example.com/first.png' }, ...parameters.media],
+      }).valid,
+    ).toBe(false);
+  });
   it('exposes only officially sourced schemas and exact channel bindings', () => {
     for (const contract of officialVideoContracts) {
       expect(new URL(contract.source.url).hostname).toBe('help.aliyun.com');

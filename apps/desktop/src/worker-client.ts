@@ -6,6 +6,7 @@ import {
   type WorkerMethodMap,
   type WorkerRequest,
   type WorkerResponse,
+  type ProjectRuntimeScope,
 } from '@ai-video/contracts';
 
 export class WorkerClientError extends Error {
@@ -22,12 +23,14 @@ function isTauri(): boolean {
 export async function callWorker<M extends WorkerMethod>(
   method: M,
   params: WorkerMethodMap[M]['params'],
+  scope?: ProjectRuntimeScope,
 ): Promise<WorkerMethodMap[M]['result']> {
   const request: WorkerRequest<M> = {
     id: crypto.randomUUID(),
     protocolVersion: IPC_PROTOCOL_VERSION,
     method,
     params,
+    ...(scope ? { scope } : {}),
   };
 
   const response = isTauri()

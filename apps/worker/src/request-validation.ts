@@ -11,6 +11,11 @@ import type {
   TaskLogKind,
   WorkerMethod,
 } from '@ai-video/contracts';
+import {
+  inspectProductionTargetInstruction,
+  parseProductionDefaults,
+} from '@ai-video/generation-adapters';
+import type { ProductionInstruction } from '@ai-video/contracts';
 
 const MAX_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 200;
@@ -26,6 +31,8 @@ const MAX_RAW_USAGE_BYTES = 64 * 1024;
 const sessionMethods = new Set<WorkerMethod>([
   'production.read',
   'production.compile',
+  'production.defaults.get',
+  'production.defaults.save',
   'scene.save',
   'conversation.list',
   'conversation.create',
@@ -35,6 +42,8 @@ const sessionMethods = new Set<WorkerMethod>([
   'conversation.modelPreference.get',
   'conversation.modelPreference.set',
   'conversation.modelPreference.clear',
+  'conversation.promptTemplate.get',
+  'conversation.promptTemplate.save',
   'chat.message.list',
   'chat.message.save',
   'chat.message.toDocument',
@@ -67,6 +76,14 @@ const sessionMethods = new Set<WorkerMethod>([
   'novel.intent.list',
   'novel.intent.cancel',
   'novel.export.prepare',
+  'novel.export.start',
+  'novel.export.get',
+  'novel.export.list',
+  'novel.export.cancel',
+  'file.task.create',
+  'file.task.get',
+  'file.task.list',
+  'file.task.cancel',
   'novel.export.reveal',
   'agent.partial.list',
   'agent.partial.recover',
@@ -100,6 +117,10 @@ const sessionMethods = new Set<WorkerMethod>([
   'adapter.schema.audit.list',
   'conversation.runtime.start',
   'conversation.runtime.get',
+  'conversation.runtime.list',
+  'conversation.runtime.supplement',
+  'novel.batch.get',
+  'novel.batch.cancel',
   'conversation.runtime.confirm',
   'conversation.runtime.selectMedia',
   'conversation.runtime.confirmMediaSubmission',
@@ -522,6 +543,135 @@ export function validateSessionRequestParams(
   method: WorkerMethod,
   input: unknown,
 ): Record<string, unknown> {
+  if (method.startsWith('shot.continuity.')) {
+    const params = requireObject(input, 'params');
+    const common = ['shotId', 'expectedRowVersion'];
+    const fields: Record<string, string[]> = {
+      'shot.continuity.get': ['shotId'],
+      'shot.continuity.preview': ['shotId', 'videoAssetId', 'timeMs'],
+      'shot.continuity.confirm': [
+        ...common,
+        'videoAssetId',
+        'sourceToken',
+        'timesMs',
+        'anchorTimeMs',
+        'mode',
+        'notes',
+      ],
+      'shot.continuity.clear': common,
+      'shot.continuity.firstFrame': [...common, 'assetId'],
+      'shot.continuity.prompt.prepare': [...common, 'kind', 'providerProfileId', 'modelId'],
+      'shot.continuity.prompt.save': [...common, 'kind', 'prompt'],
+    };
+    if (!fields[method]) throw new RequestValidationError('Unknown continuity method.');
+    rejectUnknown(params, fields[method]);
+    requireId(params, 'shotId');
+    if (fields[method].includes('expectedRowVersion'))
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+    for (const key of ['videoAssetId', 'assetId', 'providerProfileId', 'modelId'])
+      if (fields[method].includes(key)) requireId(params, key);
+    if (method === 'shot.continuity.preview') requireInteger(params, 'timeMs', 0, 7200000);
+    if (method === 'shot.continuity.confirm') {
+      requireString(params, 'sourceToken', 64);
+      if (!/^[a-f0-9]{64}$/u.test(params.sourceToken as string))
+        throw new RequestValidationError('Invalid frame source token.');
+      requireString(params, 'notes', 4000, true);
+      requireEnum(params, 'mode', new Set(['continue', 'reframe']));
+      requireInteger(params, 'anchorTimeMs', 0, 7200000);
+      if (
+        !Array.isArray(params.timesMs) ||
+        !params.timesMs.length ||
+        params.timesMs.length > 4 ||
+        new Set(params.timesMs).size !== params.timesMs.length ||
+        params.timesMs.some(
+          (value) => !Number.isSafeInteger(value) || value < 0 || value > 7200000,
+        ) ||
+        !params.timesMs.includes(params.anchorTimeMs)
+      )
+        throw new RequestValidationError('Select 1–4 unique frame times and an explicit anchor.');
+    }
+    if (fields[method].includes('kind')) requireEnum(params, 'kind', new Set(['image', 'video']));
+    if (method === 'shot.continuity.prompt.save') requireString(params, 'prompt', 20000);
+    return params;
+  }
+  if (method.startsWith('project.runtime.')) {
+    const params = requireObject(input, 'params');
+    if (
+      [
+        'project.runtime.create',
+        'project.runtime.createSample',
+        'project.runtime.restore',
+      ].includes(method)
+    ) {
+      rejectUnknown(
+        params,
+        method === 'project.runtime.restore'
+          ? ['backupPath', 'destinationRoot']
+          : ['rootPath', 'name'],
+      );
+      const pathKey = method === 'project.runtime.restore' ? 'destinationRoot' : 'rootPath';
+      requireString(params, pathKey, 4096);
+      if (method === 'project.runtime.create') requireString(params, 'name', MAX_TITLE_LENGTH);
+      if (method === 'project.runtime.restore') requireString(params, 'backupPath', 4096);
+    } else if (method === 'project.runtime.attach') {
+      rejectUnknown(params, ['rootPath', 'expectedProjectId', 'recoverOnStartup']);
+      if (
+        typeof params.rootPath !== 'string' ||
+        !params.rootPath.trim() ||
+        params.rootPath.length > 4096
+      )
+        throw new RequestValidationError('Project runtime path is invalid.');
+      if (params.expectedProjectId !== undefined) requireId(params, 'expectedProjectId');
+      if (params.recoverOnStartup !== undefined && typeof params.recoverOnStartup !== 'boolean')
+        throw new RequestValidationError('Project recovery choice must be boolean.');
+    } else if (method === 'project.runtime.activate' || method === 'project.runtime.unload') {
+      rejectUnknown(params, ['projectId', 'projectSessionId']);
+      requireId(params, 'projectId');
+      requireId(params, 'projectSessionId');
+    } else rejectUnknown(params, []);
+    return params;
+  }
+  if (method.startsWith('file.task.')) {
+    const params = requireObject(input, 'params');
+    if (method === 'file.task.create') {
+      requireId(params, 'idempotencyKey');
+      requireEnum(params, 'kind', new Set(['project-export', 'project-backup', 'novel-import']));
+      if (params.kind === 'project-export') {
+        rejectUnknown(params, ['idempotencyKey', 'kind', 'destinationRoot']);
+        requireString(params, 'destinationRoot', 4096);
+      } else if (params.kind === 'project-backup') {
+        rejectUnknown(params, ['idempotencyKey', 'kind', 'destinationPath']);
+        optionalString(params, 'destinationPath', 4096);
+      } else {
+        rejectUnknown(params, ['idempotencyKey', 'kind', 'input']);
+        validateSessionRequestParams('novel.import', params.input);
+      }
+    } else if (method === 'file.task.list') rejectUnknown(params, []);
+    else {
+      rejectUnknown(params, ['taskId']);
+      requireId(params, 'taskId');
+    }
+    return params;
+  }
+  if (method.startsWith('task.schedule.')) {
+    const params = requireObject(input, 'params');
+    const control = method === 'task.schedule.create' || method === 'task.schedule.cancel';
+    rejectUnknown(params, [
+      'projectId',
+      ...(control ? ['projectSessionId'] : []),
+      ...(method === 'task.schedule.create'
+        ? ['jobId', 'upstreamTaskIds']
+        : method === 'task.schedule.list'
+          ? []
+          : ['taskId']),
+      ...(method === 'task.schedule.events' ? ['afterSequence'] : []),
+    ]);
+    requireId(params, 'projectId');
+    if (control) requireId(params, 'projectSessionId');
+    if (method !== 'task.schedule.list')
+      requireId(params, method === 'task.schedule.create' ? 'jobId' : 'taskId');
+    return params;
+  }
   if (method === 'scene.media.resolve') {
     const params = requireObject(input, 'params');
     rejectUnknown(params, ['characterDocumentIds', 'assetIds', 'voiceVersionIds']);
@@ -714,6 +864,7 @@ export function validateSessionRequestParams(
       requireId(params, 'intentId');
       break;
     case 'novel.export.prepare':
+    case 'novel.export.start':
       rejectUnknown(params, [
         'exportType',
         'exportFormat',
@@ -742,8 +893,13 @@ export function validateSessionRequestParams(
       }
       break;
     case 'novel.export.reveal':
+    case 'novel.export.get':
+    case 'novel.export.cancel':
       rejectUnknown(params, ['jobId']);
       requireId(params, 'jobId');
+      break;
+    case 'novel.export.list':
+      rejectUnknown(params, []);
       break;
     case 'agent.partial.list':
       rejectUnknown(params, ['includeTerminal']);
@@ -937,6 +1093,16 @@ export function validateSessionRequestParams(
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       break;
+    case 'conversation.promptTemplate.get':
+      rejectUnknown(params, ['conversationId']);
+      requireId(params, 'conversationId');
+      break;
+    case 'conversation.promptTemplate.save':
+      rejectUnknown(params, ['conversationId', 'content', 'expectedRowVersion']);
+      requireId(params, 'conversationId');
+      requireString(params, 'content', 20_000, true);
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
     case 'maintenance.contextSnapshots.cleanup':
       rejectUnknown(params, ['olderThanDays']);
       optionalInteger(params, 'olderThanDays', 1, 3_650);
@@ -980,11 +1146,21 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['messageId']);
       requireId(params, 'messageId');
       break;
+    case 'production.defaults.get':
+      rejectUnknown(params, []);
+      break;
+    case 'production.defaults.save':
+      rejectUnknown(params, ['expectedRowVersion', 'settings']);
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      parseProductionDefaults(params.settings);
+      break;
     case 'production.read':
     case 'production.compile': {
       rejectUnknown(
         params,
-        method === 'production.read' ? ['target'] : ['target', 'adapterKey', 'expectedToken'],
+        method === 'production.read'
+          ? ['target']
+          : ['target', 'adapterKey', 'expectedToken', 'shotIds', 'inputImages'],
       );
       const target = params.target as Record<string, unknown> | undefined;
       if (!target || typeof target !== 'object' || Array.isArray(target))
@@ -993,8 +1169,19 @@ export function validateSessionRequestParams(
       requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
       requireId(target, 'id');
       if (method === 'production.compile') {
+        validateProductionImages(params);
         requireString(params, 'adapterKey', 256);
         optionalString(params, 'expectedToken', 128);
+        if (
+          params.shotIds !== undefined &&
+          (target.kind !== 'scene' ||
+            !Array.isArray(params.shotIds) ||
+            !params.shotIds.length ||
+            params.shotIds.length > 30 ||
+            new Set(params.shotIds).size !== params.shotIds.length ||
+            params.shotIds.some((id) => typeof id !== 'string' || !id.trim() || id.length > 128))
+        )
+          throw new RequestValidationError('场次制作分段镜头列表无效。');
       }
       break;
     }
@@ -1322,6 +1509,7 @@ export function validateSessionRequestParams(
       break;
     case 'agent.run':
       rejectUnknown(params, [
+        'taskExecution',
         'conversationId',
         'prompt',
         'capability',
@@ -1341,6 +1529,7 @@ export function validateSessionRequestParams(
         'novelIntent',
       ]);
       requireId(params, 'conversationId');
+      optionalEnum(params, 'taskExecution', new Set(['ordered', 'parallel']));
       requireString(params, 'prompt', MAX_PROMPT_LENGTH);
       optionalEnum(
         params,
@@ -1465,6 +1654,20 @@ export function validateSessionRequestParams(
     case 'conversation.runtime.get':
       rejectUnknown(params, ['generationId']);
       requireId(params, 'generationId');
+      break;
+    case 'conversation.runtime.list':
+      rejectUnknown(params, []);
+      break;
+    case 'novel.batch.get':
+    case 'novel.batch.cancel':
+      rejectUnknown(params, ['batchId']);
+      requireId(params, 'batchId');
+      break;
+    case 'conversation.runtime.supplement':
+      rejectUnknown(params, ['generationId', 'content', 'idempotencyKey']);
+      requireId(params, 'generationId');
+      requireId(params, 'idempotencyKey');
+      requireString(params, 'content', 20000);
       break;
     case 'conversation.runtime.confirm':
       rejectUnknown(params, ['generationId', 'confirmationToken', 'approved']);
@@ -2181,6 +2384,7 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'shotStatus',
       'videoPrompt',
       'characterDocumentIds',
+      'instruction',
       'prompt',
       'documentKind',
       'contentMarkdown',
@@ -2190,6 +2394,18 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'expectedCurrentVersionId',
     ]);
     requireEnum(item, 'entityType', new Set(['scene', 'shot', 'document']));
+    if (item.instruction !== undefined) {
+      if (item.entityType === 'document')
+        throw new RequestValidationError(
+          'Only scene and shot proposals accept production instructions.',
+        );
+      const issues = inspectProductionTargetInstruction(
+        item.instruction as ProductionInstruction,
+        String(item.entityType),
+      );
+      if (issues.length)
+        throw new RequestValidationError(issues.map((issue) => issue.message).join('\n'));
+    }
     requireEnum(item, 'action', new Set(['create', 'update']));
     optionalId(item, 'targetId');
     optionalId(item, 'parentSceneId');
@@ -2239,7 +2455,17 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
 function validateProductionSource(params: Record<string, unknown>): void {
   if (params.productionSource === undefined) return;
   const source = requireObject(params.productionSource, 'productionSource');
-  rejectUnknown(source, ['target', 'instructionId', 'revision', 'token']);
+  rejectUnknown(source, ['target', 'instructionId', 'revision', 'token', 'shotIds', 'inputImages']);
+  validateProductionImages(source);
+  if (
+    source.shotIds !== undefined &&
+    (!Array.isArray(source.shotIds) ||
+      !source.shotIds.length ||
+      source.shotIds.length > 30 ||
+      new Set(source.shotIds).size !== source.shotIds.length ||
+      source.shotIds.some((id) => typeof id !== 'string' || !id.trim() || id.length > 128))
+  )
+    throw new RequestValidationError('制作分段镜头列表无效。');
   const target = requireObject(source.target, 'productionSource.target');
   rejectUnknown(target, ['kind', 'id']);
   requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
@@ -2249,6 +2475,23 @@ function validateProductionSource(params: Record<string, unknown>): void {
   requireString(source, 'token', 64);
   if (typeof source.token !== 'string' || !/^[a-f0-9]{64}$/u.test(source.token))
     throw new RequestValidationError('制作来源标识无效。');
+}
+
+function validateProductionImages(params: Record<string, unknown>): void {
+  if (params.inputImages === undefined) return;
+  if (!Array.isArray(params.inputImages) || params.inputImages.length > 30)
+    throw new RequestValidationError('制作图片选择无效。');
+  for (const item of params.inputImages) {
+    const image = requireObject(item, '制作图片');
+    rejectUnknown(image, ['assetId', 'role', 'label']);
+    requireId(image, 'assetId');
+    requireEnum(
+      image,
+      'role',
+      new Set(['reference', 'character', 'scene', 'first-frame', 'last-frame']),
+    );
+    optionalString(image, 'label', 200);
+  }
 }
 
 function validateSelectedChapterIds(params: Record<string, unknown>): void {

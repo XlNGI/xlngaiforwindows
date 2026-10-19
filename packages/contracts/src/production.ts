@@ -12,13 +12,78 @@ export interface ProductionFact {
 
 /** Creative content is provider independent. Runtime state never comes from the model. */
 export interface ProductionInstruction {
-  version: 1;
+  version: 1 | 2;
   summary: string;
+  narrative?: { purpose: string; conflict?: string; emotionalProgression?: string };
+  storyTime?: {
+    era?: string;
+    season?: string;
+    storyDay?: string;
+    date?: string;
+    timeOfDay: string;
+    clockTime?: string;
+  };
+  location?: {
+    description: string;
+    interiorExterior?: string;
+    area?: string;
+    weather?: string;
+    geography?: string;
+    layout?: string;
+    state?: string;
+  };
+  style?: {
+    medium?: string;
+    technique?: string;
+    realism?: string;
+    proportions?: string;
+    linework?: string;
+    materials?: string;
+    palette?: string;
+    contrast?: string;
+    texture?: string;
+    referenceDescription?: string;
+  };
+  camera?: {
+    framing?: string;
+    angle?: string;
+    composition?: string;
+    lens?: string;
+    depthOfField?: string;
+    focus?: string;
+    movement?: string;
+    speed?: string;
+    amplitude?: string;
+    startFrame?: string;
+    endFrame?: string;
+    axis?: string;
+  };
+  lightingDesign?: {
+    source?: string;
+    direction?: string;
+    quality?: string;
+    colorTemperature?: string;
+    fill?: string;
+    rim?: string;
+    practicals?: string;
+  };
+  /** Authored from story needs, never stretched to fit a provider duration. */
+  timing?: { estimatedDurationSeconds: number; rationale: string };
+  stillFrame?: string;
+  transition?: { entry?: string; exit?: string; overlapSeconds?: number };
   subjects: Array<{
     documentId: string;
     description?: string;
     wardrobe?: string;
     position?: string;
+    appearance?: string;
+    hairMakeup?: string;
+    expression?: string;
+    gaze?: string;
+    action?: string;
+    props?: string;
+    initialState?: string;
+    endState?: string;
   }>;
   visual: {
     environment?: string;
@@ -44,7 +109,7 @@ export interface ProductionInstruction {
     }>;
   }>;
   audio: {
-    mode: 'silent' | 'native' | 'voice-reference' | 'dialogue-driven';
+    mode: 'auto' | 'silent' | 'native' | 'voice-reference' | 'dialogue-driven';
     ambience?: string;
     music?: string;
     effects?: string;
@@ -64,6 +129,7 @@ export interface ProductionInstruction {
       | 'voice-reference'
       | 'dialogue-audio'
       | 'prop-image'
+      | 'style-image'
       | 'reference-video';
     documentId?: string;
     assetId?: string;
@@ -94,11 +160,26 @@ export interface ProductionIssue {
   message: string;
 }
 
+/** Preserve the business purpose until the selected model assigns an input role. */
+export interface ProductionInputImage {
+  url: string;
+  role?: 'reference' | 'character' | 'scene' | 'first-frame' | 'last-frame';
+  label?: string;
+}
+export interface ProductionImageSelection {
+  assetId: string;
+  role: NonNullable<ProductionInputImage['role']>;
+  label?: string;
+}
+
 export interface ProductionSource {
   target: ProductionTarget;
   instructionId: string;
   revision: number;
   token: string;
+  /** A contiguous production unit; the narrative scene itself stays intact. */
+  shotIds?: string[];
+  inputImages?: ProductionImageSelection[];
 }
 
 export interface ProductionReadResult {
@@ -107,21 +188,61 @@ export interface ProductionReadResult {
   instruction?: ProductionInstruction;
   source?: ProductionSource;
   issues: ProductionIssue[];
+  /** Model-specific preferences that were adapted; never block submission. */
+  notices?: ProductionIssue[];
+  compiledPrompt?: string;
+  timeline?: ProductionTimelineEntry[];
+  estimatedDurationSeconds?: number;
+}
+
+export interface ProductionTimelineEntry {
+  shotId: string;
+  title: string;
+  startSeconds?: number;
+  endSeconds?: number;
+  estimatedDurationSeconds?: number;
+  prompt: string;
+}
+
+export interface ProductionSegment {
+  shotIds: string[];
+  estimatedDurationSeconds: number;
+  requestedDurationSeconds?: number;
+  needsShotRevision?: boolean;
 }
 
 export interface ProductionCompileParams {
   target: ProductionTarget;
   adapterKey: string;
   expectedToken?: string;
+  shotIds?: string[];
+  inputImages?: ProductionImageSelection[];
 }
 
 export interface ProductionCompileResult extends ProductionReadResult {
+  /** Local workflow provenance; never a Provider parameter. */
+  continuity?: import('./shot-continuity.js').ShotContinuityState;
   parameters: AdapterParameters;
+  requestedDurationSeconds?: number;
+  segments?: ProductionSegment[];
   sceneInputs?: {
     scene: SceneInfo;
     media: SceneMediaResolveResult;
     characterNames: Record<string, string>;
   };
+}
+
+export interface ProductionDefaults {
+  style?: ProductionInstruction['style'];
+  visual?: ProductionInstruction['visual'];
+  generation?: Pick<
+    ProductionInstruction['generation'],
+    'ratio' | 'resolution' | 'promptExtend' | 'watermark'
+  >;
+}
+export interface ProductionDefaultsInfo {
+  rowVersion: number;
+  settings: ProductionDefaults;
 }
 
 const text = { type: 'string', minLength: 1, maxLength: 4000 };
@@ -135,6 +256,8 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 });
 const array = (items: unknown, maxItems = 50) => ({ type: 'array', maxItems, items });
 const facts = array(object({ key: id, value: text }, ['key', 'value']));
+const textFields = (keys: string[], required: string[] = []) =>
+  object(Object.fromEntries(keys.map((key) => [key, text])), required);
 export const productionTargetSchema = object(
   { kind: { type: 'string', enum: ['character', 'setting', 'scene', 'shot'] }, id },
   ['kind', 'id'],
@@ -142,10 +265,83 @@ export const productionTargetSchema = object(
 
 export const productionInstructionSchema = object(
   {
-    version: { type: 'integer', const: 1 },
+    version: { type: 'integer', enum: [1, 2] },
     summary: text,
+    narrative: textFields(['purpose', 'conflict', 'emotionalProgression'], ['purpose']),
+    storyTime: textFields(
+      ['era', 'season', 'storyDay', 'date', 'timeOfDay', 'clockTime'],
+      ['timeOfDay'],
+    ),
+    location: textFields(
+      ['description', 'interiorExterior', 'area', 'weather', 'geography', 'layout', 'state'],
+      ['description'],
+    ),
+    style: textFields([
+      'medium',
+      'technique',
+      'realism',
+      'proportions',
+      'linework',
+      'materials',
+      'palette',
+      'contrast',
+      'texture',
+      'referenceDescription',
+    ]),
+    camera: textFields([
+      'framing',
+      'angle',
+      'composition',
+      'lens',
+      'depthOfField',
+      'focus',
+      'movement',
+      'speed',
+      'amplitude',
+      'startFrame',
+      'endFrame',
+      'axis',
+    ]),
+    lightingDesign: textFields([
+      'source',
+      'direction',
+      'quality',
+      'colorTemperature',
+      'fill',
+      'rim',
+      'practicals',
+    ]),
+    timing: object(
+      {
+        estimatedDurationSeconds: { type: 'number', exclusiveMinimum: 0, maximum: 3600 },
+        rationale: text,
+      },
+      ['estimatedDurationSeconds', 'rationale'],
+    ),
+    stillFrame: text,
+    transition: object({
+      entry: text,
+      exit: text,
+      overlapSeconds: { type: 'number', minimum: 0, maximum: 60 },
+    }),
     subjects: array(
-      object({ documentId: id, description: text, wardrobe: text, position: text }, ['documentId']),
+      object(
+        {
+          documentId: id,
+          description: text,
+          wardrobe: text,
+          position: text,
+          appearance: text,
+          hairMakeup: text,
+          expression: text,
+          gaze: text,
+          action: text,
+          props: text,
+          initialState: text,
+          endState: text,
+        },
+        ['documentId'],
+      ),
       30,
     ),
     visual: object(
@@ -180,7 +376,12 @@ export const productionInstructionSchema = object(
     ),
     audio: object(
       {
-        mode: { type: 'string', enum: ['silent', 'native', 'voice-reference', 'dialogue-driven'] },
+        mode: {
+          type: 'string',
+          enum: ['auto', 'silent', 'native', 'voice-reference', 'dialogue-driven'],
+          description:
+            'auto 沿用所选模型默认声音设置；silent 明确无声；native 由模型生成声音。对白文字不等于录音驱动，只有明确使用角色声音样本时选择 voice-reference，明确使用完整对白录音时选择 dialogue-driven。',
+        },
         ambience: text,
         music: text,
         effects: text,
@@ -206,12 +407,17 @@ export const productionInstructionSchema = object(
               'voice-reference',
               'dialogue-audio',
               'prop-image',
+              'style-image',
               'reference-video',
             ],
           },
           documentId: id,
           assetId: id,
-          required: { type: 'boolean' },
+          required: {
+            type: 'boolean',
+            description:
+              '仅对用户明确选用且本次制作不可替换的素材设为 true。出现对白不代表必须提供对白录音；未选用录音时不得自动将其标记为必需素材。',
+          },
           purpose: text,
         },
         ['kind', 'required', 'purpose'],
@@ -240,6 +446,24 @@ export const productionInstructionSchema = object(
     'continuity',
   ],
 );
+
+/** New authoring calls use the detailed version; saved v1 data stays readable. */
+export const detailedProductionInstructionSchema = {
+  ...productionInstructionSchema,
+  required: [...productionInstructionSchema.required, 'narrative'],
+  properties: { ...productionInstructionSchema.properties, version: { type: 'integer', const: 2 } },
+};
+
+export const productionDefaultsSchema = object({
+  style: productionInstructionSchema.properties.style,
+  visual: productionInstructionSchema.properties.visual,
+  generation: object({
+    ratio: { type: 'string', enum: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'] },
+    resolution: text,
+    promptExtend: { type: 'boolean' },
+    watermark: { type: 'boolean' },
+  }),
+});
 
 export const productionExecuteSchema = object(
   {
@@ -304,18 +528,54 @@ export function productionImageReference(
 export function renderProductionInstruction(
   instruction: ProductionInstruction,
   names: Record<string, string> = {},
+  options: { includeAudio?: boolean } = {},
 ): string {
   const name = (documentId: string) => names[documentId] ?? '角色';
   return [
     instruction.summary,
+    instruction.narrative
+      ? `叙事目的：${instruction.narrative.purpose}${instruction.narrative.conflict ? `；冲突：${instruction.narrative.conflict}` : ''}${instruction.narrative.emotionalProgression ? `；情绪变化：${instruction.narrative.emotionalProgression}` : ''}`
+      : undefined,
+    instruction.storyTime
+      ? `故事时间：${Object.values(instruction.storyTime).filter(Boolean).join('，')}`
+      : undefined,
+    instruction.location
+      ? `地点环境：${Object.values(instruction.location).filter(Boolean).join('，')}`
+      : undefined,
+    Object.values(instruction.style ?? {}).some(Boolean)
+      ? `视觉风格：${Object.values(instruction.style!).filter(Boolean).join('，')}`
+      : undefined,
+    instruction.timing
+      ? `剧情预计时长：${instruction.timing.estimatedDurationSeconds}秒；节奏依据：${instruction.timing.rationale}`
+      : undefined,
+    instruction.stillFrame ? `画面定格：${instruction.stillFrame}` : undefined,
     ...instruction.subjects.map((subject) =>
-      [name(subject.documentId), subject.description, subject.wardrobe, subject.position]
+      [
+        name(subject.documentId),
+        subject.description,
+        subject.appearance,
+        subject.wardrobe,
+        subject.hairMakeup,
+        subject.position,
+        subject.expression,
+        subject.gaze,
+        subject.action,
+        subject.props,
+        subject.initialState,
+        subject.endState,
+      ]
         .filter(Boolean)
         .join('，'),
     ),
     ...Object.entries(instruction.visual)
       .filter(([key]) => key !== 'negative')
       .map(([, value]) => value),
+    Object.values(instruction.camera ?? {}).some(Boolean)
+      ? `镜头设计：${Object.values(instruction.camera!).filter(Boolean).join('，')}`
+      : undefined,
+    Object.values(instruction.lightingDesign ?? {}).some(Boolean)
+      ? `灯光设计：${Object.values(instruction.lightingDesign!).filter(Boolean).join('，')}`
+      : undefined,
     ...instruction.beats.map((beat) =>
       [
         beat.startSeconds === undefined ? undefined : `${beat.startSeconds}—${beat.endSeconds}秒`,
@@ -329,15 +589,19 @@ export function renderProductionInstruction(
         .filter(Boolean)
         .join('。'),
     ),
-    instruction.audio.mode === 'silent'
-      ? '无声音。'
-      : [instruction.audio.ambience, instruction.audio.music, instruction.audio.effects]
-          .filter(Boolean)
-          .join('。'),
+    options.includeAudio === false
+      ? undefined
+      : instruction.audio.mode === 'silent'
+        ? '无声音。'
+        : [instruction.audio.ambience, instruction.audio.music, instruction.audio.effects]
+            .filter(Boolean)
+            .join('。'),
     ...instruction.continuity.before.map((fact) => `开始状态：${fact.key}=${fact.value}`),
     ...instruction.continuity.after.map((fact) => `结束状态：${fact.key}=${fact.value}`),
     ...instruction.continuity.locked.map((fact) => `保持不变：${fact.key}=${fact.value}`),
     ...instruction.continuity.constraints,
+    instruction.transition?.entry ? `入镜衔接：${instruction.transition.entry}` : undefined,
+    instruction.transition?.exit ? `出镜衔接：${instruction.transition.exit}` : undefined,
   ]
     .filter(Boolean)
     .join('\n');

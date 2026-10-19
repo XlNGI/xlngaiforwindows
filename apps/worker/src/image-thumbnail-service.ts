@@ -5,6 +5,7 @@ import type { AssetMediaSourceInfo } from '@ai-video/contracts';
 import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
+import type { ExecutionPool } from './execution-pool.js';
 
 /** Two encodes at a time, with in-flight deduplication and a rebuildable content cache. */
 export class ImageThumbnailService {
@@ -12,10 +13,17 @@ export class ImageThumbnailService {
   private pending = new Map<string, Promise<AssetMediaSourceInfo>>();
   private queue: Promise<void>[] = [Promise.resolve(), Promise.resolve()];
   private slot = 0;
+  private readonly controllers = new Set<AbortController>();
   constructor(
     private projects: ProjectService,
     private images: ImageGenerationService,
+    private capacity?: ExecutionPool,
   ) {}
+
+  async stop(): Promise<void> {
+    for (const controller of this.controllers) controller.abort(new Error('Project unloaded.'));
+    await Promise.allSettled([...this.pending.values()]);
+  }
 
   get(assetId: string): Promise<AssetMediaSourceInfo> {
     const project = this.projects.current();
@@ -40,13 +48,19 @@ export class ImageThumbnailService {
     );
     if (existsSync(path)) return Promise.resolve({ assetId, path, contentType: 'image/png' });
     const slot = this.slot++ % this.queue.length;
+    const controller = new AbortController();
+    this.controllers.add(controller);
     const task = this.queue[slot]!.then(async () => {
+      controller.signal.throwIfAborted();
       if (this.projects.currentSessionId() !== session) throw new Error('Project changed.');
       if (!existsSync(path)) {
         const temporary = `${path}.${randomUUID()}.png`;
         mkdirSync(dirname(path), { recursive: true });
         try {
-          await this.runtime.thumbnail(source.path, temporary);
+          const encode = () => this.runtime.thumbnail(source.path, temporary, controller.signal);
+          if (this.capacity)
+            await this.capacity.run('ffmpeg', project.id, controller.signal, encode);
+          else await encode();
           if (this.projects.currentSessionId() !== session) throw new Error('Project changed.');
           renameSync(temporary, path);
         } finally {
@@ -60,7 +74,12 @@ export class ImageThumbnailService {
       () => undefined,
     );
     this.pending.set(key, task);
-    void task.finally(() => this.pending.delete(key)).catch(() => undefined);
+    void task
+      .finally(() => {
+        this.pending.delete(key);
+        this.controllers.delete(controller);
+      })
+      .catch(() => undefined);
     return task;
   }
 }

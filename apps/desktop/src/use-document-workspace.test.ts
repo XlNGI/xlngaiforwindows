@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentDetail } from '@ai-video/contracts';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { callWorker } from './worker-client';
+import { selectWorkerScope } from './worker-scope';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
@@ -165,4 +166,51 @@ describe('useDocumentWorkspace close', () => {
     expect(closeDocumentPanel).not.toHaveBeenCalled();
     expect(result.current.contentMessage).toBe('保存失败');
   });
+});
+
+it('keeps delayed save, follow-up reads and finally bound to the original project after a view switch', async () => {
+  selectWorkerScope({ projectId: 'A', projectSessionId: 'A-epoch' });
+  let finish!: (value: DocumentDetail) => void;
+  const saving = new Promise<DocumentDetail>((resolve) => {
+    finish = resolve;
+  });
+  vi.mocked(callWorker).mockImplementation((method: string) =>
+    method === 'document.draft.save' ? saving : Promise.resolve([]),
+  );
+  const closed = vi.fn();
+  const { result, rerender } = renderHook(() =>
+    useDocumentWorkspace({
+      writable: true,
+      syncDetachedPanel: vi.fn(),
+      openDocumentWorkspace: vi.fn(),
+      closeDocumentPanel: closed,
+    }),
+  );
+  act(() => {
+    result.current.setDocumentTitle('A draft');
+    result.current.setDocumentContent('A text');
+  });
+  let done!: Promise<void>;
+  act(() => {
+    done = result.current.saveAndCloseDocument();
+  });
+  selectWorkerScope({ projectId: 'B', projectSessionId: 'B-epoch' });
+  rerender();
+  act(() => {
+    result.current.setDocumentTitle('B draft');
+    result.current.setContentBusy(true);
+  });
+  await act(async () => {
+    finish(savedDocument);
+    await done;
+  });
+  expect(result.current.documentTitle).toBe('B draft');
+  expect(result.current.contentBusy).toBe(true);
+  expect(closed).not.toHaveBeenCalled();
+  expect(callWorker).toHaveBeenCalledWith(
+    'document.list',
+    {},
+    { projectId: 'A', projectSessionId: 'A-epoch' },
+  );
+  selectWorkerScope(undefined);
 });

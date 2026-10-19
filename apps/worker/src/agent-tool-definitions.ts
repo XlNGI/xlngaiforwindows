@@ -4,13 +4,22 @@ import type {
   AgentToolRiskLevel,
   LlmToolDefinition,
 } from '@ai-video/contracts';
-import { productionExecuteSchema, productionTargetSchema } from '@ai-video/contracts';
+import {
+  productionExecuteSchema,
+  productionTargetSchema,
+  detailedProductionInstructionSchema,
+} from '@ai-video/contracts';
 
 export type SystemAgentToolOperation =
+  | 'conversation.task.route'
   | 'production.execute'
   | 'production.read'
+  | 'production.defaults.get'
   | 'document.submit_draft'
   | 'novel.chapter.write_draft'
+  | 'novel.chapter.batch.submit'
+  | 'novel.chapter.batch.source.read'
+  | 'novel.chapter.batch.get'
   | 'scene.submit_structure'
   | 'scene.read'
   | 'project.get_context'
@@ -226,7 +235,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'novel.episode.submit_structure',
     description:
-      'Submit a short-drama episode structure for review. Resolve scene and cast identities yourself using retrieved project resources; return real sceneDocumentId, all characterDocumentIds and a complete videoPrompt. Names and prompt placeholders never establish relationships.',
+      'Submit a short-drama episode structure for review. Resolve scene and cast identities yourself using retrieved project resources; return real sceneDocumentId, all characterDocumentIds and a complete videoPrompt. Names and prompt placeholders never establish relationships. Read production.defaults.get and use detailed version-2 instructions for the shared scene setup and every shot. Story logic determines scene/shot arrangement; estimate duration afterwards from actions, dialogue and pacing, never fit to a fixed 15 seconds. Every shot needs narrative purpose, timing with rationale, camera, stillFrame, beats/dialogue and continuity. Scene instructions specify storyTime, location, detailed style and output intent. All shots are aggregated into the scene production form.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -240,8 +249,17 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['title', 'sceneDocumentId', 'videoPrompt', 'characterDocumentIds', 'shots'],
+            required: ['title', 'sceneDocumentId', 'instruction', 'characterDocumentIds', 'shots'],
             properties: {
+              instruction: {
+                ...detailedProductionInstructionSchema,
+                required: [
+                  ...detailedProductionInstructionSchema.required,
+                  'storyTime',
+                  'location',
+                  'style',
+                ],
+              },
               title: { type: 'string', minLength: 1, maxLength: 200 },
               sceneDocumentId: {
                 type: ['string', 'null'],
@@ -283,10 +301,31 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
                 items: {
                   type: 'object',
                   additionalProperties: false,
-                  required: ['title', 'prompt'],
+                  required: ['title', 'instruction'],
                   properties: {
                     title: { type: 'string', minLength: 1, maxLength: 200 },
                     prompt: { type: 'string', minLength: 1, maxLength: 20000 },
+                    instruction: {
+                      ...detailedProductionInstructionSchema,
+                      required: [
+                        ...detailedProductionInstructionSchema.required,
+                        'timing',
+                        'camera',
+                        'stillFrame',
+                      ],
+                      properties: {
+                        ...detailedProductionInstructionSchema.properties,
+                        beats: {
+                          ...((
+                            detailedProductionInstructionSchema.properties as Record<
+                              string,
+                              unknown
+                            >
+                          ).beats as Record<string, unknown>),
+                          minItems: 1,
+                        },
+                      },
+                    },
                   },
                 },
               },
@@ -403,6 +442,28 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'conversation.task.route',
+    description:
+      'Decide how the current user request relates to recent or active conversation tasks. Use this before substantive work when the system prompt lists them. Choose independent for a standalone request, follow_up to continue a completed task, or supplement to add a focused instruction to an active task. Never infer this from a UI selector; decide from the user message and task summaries. The Worker validates the target generation, project/session and readiness. If there are no relevant tasks, continue independently without calling this tool.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['decision', 'rationale'],
+      properties: {
+        decision: { type: 'string', enum: ['independent', 'follow_up', 'supplement'] },
+        targetGenerationId: { type: 'string', minLength: 1, maxLength: 128 },
+        content: { type: 'string', minLength: 1, maxLength: 10000 },
+        rationale: { type: 'string', minLength: 1, maxLength: 1000 },
+      },
+    },
+  },
+  {
+    name: 'production.defaults.get',
+    description:
+      'Read current project visual style and output defaults before authoring scenes or shots. Keep the chosen style consistent, arrange scenes by story logic first, estimate shot timing from dialogue/actions/pacing afterwards. Never pad to 15 seconds or a provider limit. No project bodies are auto-injected.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
     name: 'production.read',
     description:
       'Read structured production instructions, target rowVersion, source version and continuity issues on demand. kind=character/setting refers to production documents, scene/shot to the actual scene/shot. Read before updating. No content is automatically injected.',
@@ -416,13 +477,13 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'production.execute',
     description:
-      'Execute a versioned structured production list on existing project objects. First create production documents through document.submit_draft and scenes/shots through scene.submit_structure (respect review); then use their real IDs and current rowVersion. Each set_prompt operation writes its rendered text and immutable instruction atomically, preserving all existing bindings. Include detailed subjects, visual design, beats/camera/dialogue, audio, generation requirements, resource needs and explicit continuity before/after/locked facts and predecessors. Missing resources are needs, never invented IDs. States/results are Worker-owned. executionKey is stable for retries, changed content uses a new key. User selects media model later in the production form; never choose or submit a paid model here. Tool result status=applied confirms local writes only.',
+      'Execute a versioned structured production list on existing project objects. First create production documents through document.submit_draft and scenes/shots through scene.submit_structure (respect review); then use their real IDs and current rowVersion. Each set_prompt operation writes its rendered text and immutable instruction atomically, preserving all existing bindings. Use version 2 for new creative instructions: narrative purpose, storyTime, location, detailed style/lighting, subjects, per-shot timing with story-based rationale and stillFrame, beats/camera/dialogue, audio, output intent, resource needs and explicit continuity before/after/locked facts and predecessors. Missing resources are needs, never invented IDs. States/results are Worker-owned. executionKey is stable for retries, changed content uses a new key. User selects media model later in the production form; never choose or submit a paid model here. Tool result status=applied confirms local writes only.',
     parameters: productionExecuteSchema,
   },
   {
     name: 'scene.read',
     description:
-      'Read an existing scene on demand by its actual ID, including its full videoPrompt, sceneDocumentId, ordered character/media bindings and current rowVersion. Use before revising an existing scene; never infer the current prompt or relationships from its title.',
+      'Read an existing scene on demand by its actual ID, including its shared videoPrompt, ALL ordered shots with their IDs/rowVersions, aggregated production prompt and timeline, sceneDocumentId and character/media bindings. Use before revising an existing scene; never infer the current prompt or relationships from its title.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -433,7 +494,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.submit_structure',
     description:
-      'Resolve scene/cast intent and submit create or update proposals for 场次与镜头. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,videoPrompt,sceneDocumentId,characterDocumentIds,shots}]. For new scenes provide at least one shot with title/prompt. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved proposals require user review; report changeSetId and pending-review state, never claim applied bindings.',
+      'Resolve scene/cast intent and submit create or update proposals for 场次与镜头. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,videoPrompt,sceneDocumentId,characterDocumentIds,shots}]. Read production.defaults.get first. Arrange scene boundaries and shots by narrative logic, conflict, information and emotional progression; never pad or compress to 15 seconds or provider limits. For each new scene include a version-2 instruction with narrative purpose, storyTime (at least timeOfDay), location, detailed style and shared cast/audio/output intent. Provide all ordered shots, each with a version-2 instruction, narrative purpose, timing.estimatedDurationSeconds and rationale derived AFTER planning dialogue/actions/pauses, camera framing and movement, stillFrame, detailed subjects, beats, dialogue, sound, transitions and continuity. Beat seconds are relative to that shot. The system calculates whole-scene time and compiles every shot into the production form. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved proposals require user review; report changeSetId and pending-review state, never claim applied bindings.',
     parameters: {
       ...DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
         .parameters,
@@ -479,6 +540,97 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
           enum: ['work-outline', 'character-bible', 'world-bible', 'timeline', 'style-guide'],
         },
       },
+    },
+  },
+  {
+    name: 'novel.chapter.batch.submit',
+    description:
+      'Create independent, locked chapter-writing tasks from a typed manifest after interpreting the user request. Use the novel workspace resourceId. Each child owns exactly one chapter and a separate generation, using this conversation Agent model. Declare draft versus published dependencies explicitly; dependency keys must refer to earlier entries. Freeze chosen outline/reference document and version IDs; no source bodies are auto-injected. Return accepted task IDs, never claim produced/published content. The parent reply may finish while children run in the background. Do not wait for children while holding the parent Provider loop.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['resourceId', 'executionKey', 'chapters'],
+      properties: {
+        ...RESOURCE_LOCATOR_PROPERTIES,
+        executionKey: { type: 'string', minLength: 1, maxLength: 128 },
+        references: {
+          type: 'array',
+          maxItems: 16,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['documentId', 'versionId', 'milestone'],
+            properties: {
+              documentId: { type: 'string' },
+              versionId: { type: 'string' },
+              milestone: { type: 'string', enum: ['draft', 'published'] },
+            },
+          },
+        },
+        chapters: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 16,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['key', 'title', 'prompt', 'action'],
+            properties: {
+              key: { type: 'string', pattern: '^[a-zA-Z0-9_-]+$', maxLength: 64 },
+              title: { type: 'string', minLength: 1, maxLength: 200 },
+              prompt: { type: 'string', minLength: 1, maxLength: 80000 },
+              action: {
+                type: 'string',
+                enum: ['create_chapter', 'continue_chapter', 'rewrite_chapter'],
+              },
+              chapterId: { type: 'string' },
+              volumeId: { type: 'string' },
+              displayLabel: { type: 'string', maxLength: 80 },
+              expectedChapterRowVersion: { type: 'integer', minimum: 0 },
+              expectedDocumentRowVersion: { type: 'integer', minimum: 0 },
+              baseVersionId: { type: ['string', 'null'] },
+              dependsOn: {
+                type: 'array',
+                maxItems: 16,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['key', 'milestone'],
+                  properties: {
+                    key: { type: 'string' },
+                    milestone: { type: 'string', enum: ['draft', 'published'] },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.batch.source.read',
+    description:
+      'List frozen source versions for this child task, or read one specified version on demand. Sources include explicitly selected outlines and completed prerequisite artifacts. A draft stays labeled draft. Only sources bound to the current child can be read.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        versionId: { type: 'string' },
+        offset: { type: 'integer', minimum: 0 },
+        maxChars: { type: 'integer', minimum: 1, maximum: 20000 },
+      },
+    },
+  },
+  {
+    name: 'novel.chapter.batch.get',
+    description:
+      'Get the status and immutable dependency references of a chapter batch in this project. Submission, draft production and publication are distinct facts.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['batchId'],
+      properties: { batchId: { type: 'string' } },
     },
   },
   {
@@ -1032,6 +1184,8 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
         searchMode: { type: 'string', enum: ['content', 'structure'] },
         sourceTypes: {
           type: 'array',
+          description:
+            'Exact source types from the catalog/resourceMap. document excludes novel-reference (novel outlines, character bibles and world settings). Omit this filter if unsure; an empty filtered result does not mean retrieval is broken.',
           items: {
             type: 'string',
             enum: [
@@ -1087,7 +1241,13 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
       additionalProperties: false,
       required: ['sourceHandle'],
       properties: {
-        sourceHandle: { type: 'string', minLength: 1, maxLength: 128 },
+        sourceHandle: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description:
+            'Use only a sourceHandle returned by library.search in this task. Document IDs, version IDs and resourceIds are not handles.',
+        },
         maxChars: { type: 'integer', minimum: 1, maximum: 20_000 },
         readMode: { type: 'string', enum: ['chunk', 'source'] },
         offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
@@ -1114,6 +1274,7 @@ export type RegisteredAgentToolPolicy = {
 };
 
 export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
+  'conversation.task.route': writePolicy(),
   'adapter.schema.get': readPolicy(),
   'adapter.schema.propose': writePolicy(),
   'adapter.schema.audit.list': readPolicy(),
@@ -1122,8 +1283,12 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'scene.submit_structure': writePolicy(),
   'scene.read': readPolicy(),
   'production.read': readPolicy(),
+  'production.defaults.get': readPolicy(),
   'production.execute': writePolicy(),
   'novel.chapter.write_draft': writePolicy(),
+  'novel.chapter.batch.submit': writePolicy(),
+  'novel.chapter.batch.source.read': readPolicy(),
+  'novel.chapter.batch.get': readPolicy(),
   'document.list': readPolicy(),
   'document.read': readPolicy(),
   'document.update_draft': writePolicy(),

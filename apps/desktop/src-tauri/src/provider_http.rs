@@ -1896,8 +1896,7 @@ mod tests {
         assert_eq!(response.body["data"][0]["id"], "mock-model");
     }
 
-    #[test]
-    fn synchronous_image_submission_can_wait_beyond_the_default_receive_timeout() {
+    fn assert_slow_submission_response(path: &'static str, response_body: &'static str) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock image provider should bind");
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
@@ -1915,11 +1914,9 @@ mod tests {
                     break;
                 }
             }
-            assert!(
-                String::from_utf8_lossy(&bytes).starts_with("POST /v1/images/generations HTTP/1.1")
-            );
+            assert!(String::from_utf8_lossy(&bytes).starts_with(&format!("POST {path} HTTP/1.1")));
             thread::sleep(super::DEFAULT_RECEIVE_TIMEOUT + Duration::from_secs(2));
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}", response_body.len()).as_bytes());
         });
         let response = super::request_json_with_receive_timeout(
             JsonHttpRequest {
@@ -1927,7 +1924,7 @@ mod tests {
                 port,
                 secure: false,
                 method: "POST",
-                path: "/v1/images/generations",
+                path,
                 authorization_scheme: "Bearer",
                 accept: "application/json",
                 secret: "local-image-key",
@@ -1935,14 +1932,27 @@ mod tests {
                 request_body_limit: 1024,
                 response_body_limit: 1024,
             },
-            crate::unicompapi_receive_timeout("POST", "/v1/images/generations"),
+            crate::unicompapi_receive_timeout("POST", path),
         );
         server.join().unwrap();
+        let response = response.expect("paid submission must not time out at 30 seconds");
+        assert_eq!(response.status, 200);
         assert_eq!(
-            response
-                .expect("slow image response must not time out at 30 seconds")
-                .status,
-            200
+            response.body,
+            serde_json::from_str::<serde_json::Value>(response_body).unwrap()
+        );
+    }
+
+    #[test]
+    fn synchronous_image_submission_can_wait_beyond_the_default_receive_timeout() {
+        assert_slow_submission_response("/v1/images/generations", "{}");
+    }
+
+    #[test]
+    fn video_submission_can_wait_beyond_the_default_receive_timeout() {
+        assert_slow_submission_response(
+            "/v1/videos",
+            r#"{"id":"slow-video-task","status":"queued"}"#,
         );
     }
 

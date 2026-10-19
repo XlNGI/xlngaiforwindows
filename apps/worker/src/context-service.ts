@@ -11,7 +11,12 @@ import {
   type ContextSourceInput,
   type ProductionContext,
 } from '@ai-video/context';
-import { createRepositories, listProjectLibraryCatalog } from '@ai-video/persistence';
+import {
+  createRepositories,
+  listProjectLibraryCatalog,
+  taskHistoryMessageIds,
+  type TaskHistoryBoundary,
+} from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { ProjectStructureCompiler, renderProjectStructure } from './structure-compiler.js';
 
@@ -21,7 +26,11 @@ export class ContextService {
     private readonly structureCompiler?: ProjectStructureCompiler,
   ) {}
 
-  compile(conversationId: string, budgetTokens?: number): ProductionContext {
+  compile(
+    conversationId: string,
+    budgetTokens?: number,
+    boundary?: TaskHistoryBoundary,
+  ): ProductionContext {
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
       const conversation = repositories.conversations.get(conversationId);
@@ -68,7 +77,9 @@ export class ContextService {
           priority: 20,
         });
       }
-      const messages = repositories.chatMessages.listPage(conversation.id, 12).reverse();
+      const messages = taskHistoryMessageIds(database, conversation.id, boundary).map((id) =>
+        repositories.chatMessages.get(id)!,
+      );
       if (messages.length > 0) {
         sources.push({
           id: conversation.id,

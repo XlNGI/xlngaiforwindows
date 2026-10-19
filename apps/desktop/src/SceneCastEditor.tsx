@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
 import type {
   AssetInfo,
   AudioFileInfo,
@@ -9,7 +9,7 @@ import type {
   SceneCharacterBindingInfo,
   SceneCharacterMediaInfo,
 } from '@ai-video/contracts';
-import { AssetImagePreview } from './AssetImagePreview';
+import { ReferenceCard } from './ReferenceCard';
 import { useDubbingMedia } from './dubbing/media';
 
 function AudioPreview({ projectId, audioId }: { projectId: string; audioId?: string }) {
@@ -54,6 +54,8 @@ export function SceneCastEditor({
   onChange,
   onDialogueChange,
   onAudioImported,
+  children,
+  actions,
 }: {
   projectId: string;
   characters: SceneCharacterBindingInfo[];
@@ -68,7 +70,10 @@ export function SceneCastEditor({
   onChange: (value: SceneCharacterBindingInfo[]) => void;
   onDialogueChange: (id: string | undefined) => void;
   onAudioImported: (audio: AudioFileInfo) => void;
+  children?: ReactNode;
+  actions?: ReactNode;
 }) {
+  const callWorker = projectWorker();
   const [selected, setSelected] = useState('');
   const [message, setMessage] = useState('');
   const [importing, setImporting] = useState(false);
@@ -125,12 +130,13 @@ export function SceneCastEditor({
       characters.map((item) => (item.characterDocumentId === id ? { ...item, ...patch } : item)),
     );
   return (
-    <section className="scene-material-panel" aria-label="场次角色与音频">
+    <section className="scene-material-panel shot-reference-panel" aria-label="参考资料">
       <div className="scene-prompt-heading">
         <div>
-          <h2>出场角色与声音</h2>
-          <p>默认沿用角色参考资料；可为本场指定图片和声音，或选择不使用。</p>
+          <h2>参考资料</h2>
+          <p>角色与场景统一在此关联；可拖入或选择参考图。角色默认图片和声音可单独调整。</p>
         </div>
+        {actions}
       </div>
       <div className="scene-cast-add">
         <select
@@ -167,7 +173,7 @@ export function SceneCastEditor({
           添加角色
         </button>
       </div>
-      <div className="scene-material-grid">
+      <div className="shot-reference-grid">
         {characters.map((character) => {
           const document = documents.find((item) => item.id === character.characterDocumentId);
           const name = document?.title ?? '角色资料不可用';
@@ -195,31 +201,35 @@ export function SceneCastEditor({
               : inherited?.defaultImage;
           const candidates = [
             ...new Map(
-              [...(inherited?.images ?? []), ...(image ? [image] : [])].map((asset) => [
+              [...(inherited?.images ?? []), ...(image ? [image] : []), ...images].map((asset) => [
                 asset.id,
                 asset,
               ]),
             ).values(),
           ];
           return (
-            <article className="scene-material-card" key={character.characterDocumentId}>
-              <strong>{name}</strong>
-              {document?.lifecycleStatus === 'archived' && <small>角色已归档，请调整绑定。</small>}
-              {image ? (
-                <AssetImagePreview asset={image} />
-              ) : (
-                <div className="scene-material-missing">
-                  {mediaLoading
-                    ? '正在读取参考资料…'
-                    : character.imageDisabled
-                      ? '本场不使用参考图'
-                      : character.imageAssetId
-                        ? '参考图不可用'
-                        : '角色尚无参考图'}
-                </div>
-              )}
-              <label>
-                参考图
+            <ReferenceCard
+              key={character.characterDocumentId}
+              label={`角色参考：${name}`}
+              projectId={projectId}
+              asset={image}
+              writable={writable}
+              onDropAsset={(asset) =>
+                update(character.characterDocumentId, {
+                  imageAssetId: asset.id,
+                  imageDisabled: undefined,
+                })
+              }
+              emptyText={
+                mediaLoading
+                  ? '正在读取参考资料…'
+                  : character.imageDisabled
+                    ? '本场不使用参考图'
+                    : character.imageAssetId
+                      ? '参考图不可用'
+                      : '拖入或下拉选择'
+              }
+              selector={
                 <select
                   aria-label={`${name}角色参考图`}
                   value={character.imageDisabled ? 'none' : (character.imageAssetId ?? 'default')}
@@ -244,7 +254,9 @@ export function SceneCastEditor({
                     </option>
                   ))}
                 </select>
-              </label>
+              }
+            >
+              {document?.lifecycleStatus === 'archived' && <small>角色已归档，请调整绑定。</small>}
               <label>
                 声音样本
                 <select
@@ -299,9 +311,10 @@ export function SceneCastEditor({
               >
                 移除{name}
               </button>
-            </article>
+            </ReferenceCard>
           );
         })}
+        {children}
       </div>
       <label className="scene-dialogue-picker">
         本场完整对白

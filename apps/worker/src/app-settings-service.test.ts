@@ -28,6 +28,83 @@ async function createService() {
 }
 
 describe('AppSettingsService', () => {
+  it('does not re-enable a disabled older channel binding when its revision is upgraded', async () => {
+    const service = await createService();
+    service.setModelBindingEnabled({ bindingId: 'unicomp-wan3.0-video', enabled: false });
+    service.close();
+    const database = openAppDatabase(join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'));
+    database
+      .prepare('DELETE FROM model_bindings WHERE binding_id=?')
+      .run('unicomp-wan3.0-video-media-v3');
+    database.close();
+    const reopened = new AppSettingsService({ appDataDirectory: temporaryDirectories.at(-1)! });
+    try {
+      expect(
+        reopened
+          .listModelBindings(undefined, 'unicompapi')
+          .find((binding) => binding.bindingId === 'unicomp-wan3.0-video-media-v3')?.status,
+      ).toBe('verified');
+    } finally {
+      reopened.setModelBindingEnabled({ bindingId: 'unicomp-wan3.0-video', enabled: true });
+      reopened.setModelBindingEnabled({
+        bindingId: 'unicomp-wan3.0-video-media-v3',
+        enabled: true,
+      });
+      reopened.close();
+    }
+  });
+  it('refreshes a Wan binding revision without enabling disabled models or changing old tasks', async () => {
+    const service = await createService();
+    try {
+      const profile = service.createProfile({
+        name: 'UniComp',
+        category: 'multi',
+        providerType: 'unicompapi',
+        accessType: 'official',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://unicompapi.com/v1',
+      });
+      const model = service.createManualModel({
+        profileId: profile.id,
+        remoteModelId: 'wan3.0-video',
+        capabilities: { ...emptyModelCapabilities(), videoGeneration: true },
+        enabled: false,
+      });
+      const legacy = openAppDatabase(join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'));
+      legacy.prepare('UPDATE provider_models SET contract_revision=1 WHERE id=?').run(model.id);
+      legacy.close();
+      expect(service.listModels(profile.id)[0]).toMatchObject({
+        id: model.id,
+        contractRevision: 3,
+        enabled: false,
+      });
+      const text = service.createManualModel({
+        profileId: profile.id,
+        remoteModelId: 'deepseek-v4-flash',
+        capabilities: { ...emptyModelCapabilities(), text: true },
+        enabled: true,
+      });
+      const corrupted = openAppDatabase(join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'));
+      corrupted
+        .prepare('UPDATE provider_models SET capabilities_json=? WHERE id=?')
+        .run(JSON.stringify({ ...text.capabilities, videoGeneration: true }), text.id);
+      corrupted.close();
+      expect(
+        service.listModels(profile.id).find((item) => item.id === text.id)?.capabilities,
+      ).toMatchObject({ text: true, videoGeneration: false });
+      expect(() =>
+        service.updateModel({
+          profileId: profile.id,
+          modelId: text.id,
+          displayName: text.displayName,
+          capabilities: { ...text.capabilities, videoGeneration: true },
+          enabled: true,
+        }),
+      ).toThrow('cannot exceed');
+    } finally {
+      service.close();
+    }
+  });
   it('preserves an explicitly disabled official media contract across directory reseeding', async () => {
     const service = await createService();
     const contractId = 'cn.happyhorse.1.1.t2v';

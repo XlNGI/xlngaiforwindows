@@ -24,6 +24,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 
 import { callWorker } from './worker-client';
+import { TaskConfirmationQueue, type TaskConfirmation } from './task-confirmations';
+import { selectWorkerScope } from './worker-scope';
 import { coalesceVisibleDelta, streamPreparedLlmGeneration } from './llm-client';
 
 let requiresConfirmation = false;
@@ -250,6 +252,7 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith(
       'llm.generation.complete',
       expect.objectContaining({ content: 'first second', providerResponseId: 'response' }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
   });
 
@@ -295,6 +298,7 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith(
       'llm.generation.complete',
       expect.objectContaining({ providerResponseId: 'response-delayed' }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
   });
 
@@ -353,10 +357,12 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith(
       'agent.generation.executeTools',
       expect.objectContaining({ providerResponseId: 'response-tool' }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
     expect(callWorker).toHaveBeenCalledWith(
       'agent.providerStep.complete',
       expect.objectContaining({ providerResponseId: 'response-final' }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
     expect(states.at(-1)).toMatchObject({ status: 'complete' });
   });
@@ -427,11 +433,15 @@ describe('streamPreparedLlmGeneration', () => {
     await run.completion;
 
     expect(onMediaSelection).toHaveBeenCalledWith(mediaSelection);
-    expect(callWorker).toHaveBeenCalledWith('agent.generation.selectMedia', {
-      ...prepared.stream,
-      selectionToken: mediaSelection.selectionToken,
-      selection: mediaDecision,
-    });
+    expect(callWorker).toHaveBeenCalledWith(
+      'agent.generation.selectMedia',
+      {
+        ...prepared.stream,
+        selectionToken: mediaSelection.selectionToken,
+        selection: mediaDecision,
+      },
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
+    );
   });
 
   it('fails closed after sixteen provider invocations to prevent a tool-call storm', async () => {
@@ -513,7 +523,11 @@ describe('streamPreparedLlmGeneration', () => {
       status: 'complete',
       assistantMessage: { content: 'Native draft' },
     });
-    expect(callWorker).toHaveBeenCalledWith('llm.generation.get', { generationId: 'generation' });
+    expect(callWorker).toHaveBeenCalledWith(
+      'llm.generation.get',
+      { generationId: 'generation' },
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
+    );
     expect(callWorker).not.toHaveBeenCalledWith('agent.generation.executeTools', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('agent.providerStep.complete', expect.anything());
   });
@@ -539,15 +553,23 @@ describe('streamPreparedLlmGeneration', () => {
     await run.cancel();
     await run.completion;
 
-    expect(callWorker).toHaveBeenCalledWith('agent.generation.cancel', {
-      generationId: 'generation',
-    });
+    expect(callWorker).toHaveBeenCalledWith(
+      'agent.generation.cancel',
+      {
+        generationId: 'generation',
+      },
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
+    );
     expect(native.invoke).toHaveBeenCalledWith('agent_runtime_cancel', {
       attemptId: 'attempt',
     });
-    expect(callWorker).toHaveBeenCalledWith('llm.generation.cancel', {
-      generationId: 'generation',
-    });
+    expect(callWorker).toHaveBeenCalledWith(
+      'llm.generation.cancel',
+      {
+        generationId: 'generation',
+      },
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
+    );
     expect(states.at(-1)?.status).toBe('cancelled');
   });
 
@@ -579,6 +601,7 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith(
       'conversation.runtime.start',
       expect.objectContaining({ taskId: 'agent-task', mode: 'document' }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
     expect(states.at(-1)?.status).toBe('complete');
   });
@@ -633,13 +656,18 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith(
       'conversation.runtime.start',
       expect.objectContaining({ taskId: 'agent-task', mode: 'document' }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
     expect(onConfirmation).toHaveBeenCalledWith(confirmation);
-    expect(callWorker).toHaveBeenCalledWith('conversation.runtime.confirm', {
-      generationId: 'generation',
-      confirmationToken: 'pi-confirmation',
-      approved: true,
-    });
+    expect(callWorker).toHaveBeenCalledWith(
+      'conversation.runtime.confirm',
+      {
+        generationId: 'generation',
+        confirmationToken: 'pi-confirmation',
+        approved: true,
+      },
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
+    );
   });
 
   it('returns Pi media selection through its dedicated Worker RPC', async () => {
@@ -672,14 +700,18 @@ describe('streamPreparedLlmGeneration', () => {
     await run.completion;
 
     expect(onMediaSelection).toHaveBeenCalledWith(mediaSelection);
-    expect(callWorker).toHaveBeenCalledWith('conversation.runtime.selectMedia', {
-      generationId: 'generation',
-      selectionToken: mediaSelection.selectionToken,
-      selection: mediaDecision,
-    });
+    expect(callWorker).toHaveBeenCalledWith(
+      'conversation.runtime.selectMedia',
+      {
+        generationId: 'generation',
+        selectionToken: mediaSelection.selectionToken,
+        selection: mediaDecision,
+      },
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
+    );
   });
 
-  it('fails and cancels the Worker-owned Pi runtime when observation disconnects', async () => {
+  it('keeps the Worker-owned Pi runtime running when observation disconnects', async () => {
     const agentPrepared: AgentGenerationPrepareResult = {
       ...prepared,
       agentTaskId: 'agent-task',
@@ -706,12 +738,16 @@ describe('streamPreparedLlmGeneration', () => {
       onDelta() {},
       onState: (next) => states.push(next),
     });
-    await run.completion;
+    await expect(run.completion).rejects.toThrow('Worker response channel closed');
     expect(native.invoke).not.toHaveBeenCalled();
-    expect(callWorker).toHaveBeenCalledWith('agent.generation.cancel', {
-      generationId: 'generation',
-    });
-    expect(states.at(-1)?.status).toBe('failed');
+    expect(
+      vi
+        .mocked(callWorker)
+        .mock.calls.some(
+          ([method]) => method === 'agent.generation.cancel' || method === 'llm.generation.fail',
+        ),
+    ).toBe(false);
+    expect(states).toEqual([]);
   });
 
   it('returns a Native-owned Agent confirmation to the Native runtime without calling the Worker', async () => {
@@ -846,7 +882,84 @@ describe('streamPreparedLlmGeneration', () => {
     expect(callWorker).toHaveBeenCalledWith(
       'agent.generation.confirmTool',
       expect.objectContaining({ confirmationToken: 'one-time-token', approved: true }),
+      { projectId: prepared.stream.projectId, projectSessionId: prepared.stream.projectSessionId },
     );
     expect(native.invoke).toHaveBeenCalledTimes(2);
   });
+});
+
+it('observes two projects concurrently and cancels only the selected identity while another confirmation waits', async () => {
+  const snapshots = new Map<string, string>();
+  let cards: TaskConfirmation[] = [];
+  const queue = new TaskConfirmationQueue((items) => {
+    cards = items;
+  });
+  const starts: string[] = [];
+  const decisions = new Set<string>();
+  vi.mocked(callWorker).mockImplementation(((
+    method: string,
+    params: { generationId?: string; projectId?: string },
+    scope?: { projectId: string; projectSessionId: string },
+  ) => {
+    const id = params.generationId!;
+    if (method === 'conversation.runtime.start') {
+      starts.push(id);
+      snapshots.set(id, 'streaming');
+      return Promise.resolve({ runtime: 'pi' });
+    }
+    if (method === 'conversation.runtime.get')
+      return Promise.resolve({
+        active: true,
+        ...(!decisions.has(id)
+          ? { confirmation: { confirmationToken: id, expiresAt: '2099-01-01', summary: id } }
+          : {}),
+      });
+    if (method === 'conversation.runtime.confirm') {
+      decisions.add(id);
+      snapshots.set(id, 'complete');
+      return Promise.resolve({ accepted: true });
+    }
+    if (method === 'agent.generation.cancel' || method === 'llm.generation.cancel')
+      snapshots.set(id, 'cancelled');
+    expect(scope?.projectId).toBe(id);
+    return Promise.resolve({ ...prepared.generation, generationId: id, status: snapshots.get(id) });
+  }) as typeof callWorker);
+  const create = (id: string) =>
+    streamPreparedLlmGeneration(
+      {
+        ...prepared,
+        agentTaskId: id,
+        runtimeOwner: 'pi',
+        stream: {
+          ...prepared.stream,
+          projectId: id,
+          generationId: id,
+          projectSessionId: id + '-epoch',
+        },
+      } as LlmGenerationPrepareResult,
+      {
+        onDelta() {},
+        onState() {},
+        onConfirmation: (request) => queue.request(id, id, 'tool', request),
+      },
+    );
+  const a = create('A'),
+    b = create('B');
+  selectWorkerScope({ projectId: 'unrelated', projectSessionId: 'unrelated' });
+  await vi.waitFor(() => expect(cards).toHaveLength(2));
+  expect(starts.sort()).toEqual(['A', 'B']);
+  await a.cancel();
+  queue.removeOwner('A');
+  expect(cards[0]?.owner).toBe('B');
+  expect(snapshots.get('B')).toBe('streaming');
+  queue.decide(cards[0]!.key, true);
+  await Promise.all([a.completion, b.completion]);
+  expect(snapshots.get('B')).toBe('complete');
+  expect(
+    vi
+      .mocked(callWorker)
+      .mock.calls.filter(([method]) => method === 'agent.generation.cancel')
+      .map(([, params]) => (params as { generationId: string }).generationId),
+  ).toEqual(['A']);
+  selectWorkerScope(undefined);
 });

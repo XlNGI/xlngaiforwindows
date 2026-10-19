@@ -5,7 +5,7 @@ import type {
   ConversationScopeType,
   ProductionContextInfo,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker, workerScope } from './worker-scope';
 
 export interface UseConversationWorkspaceOptions {
   projectId?: string;
@@ -26,8 +26,9 @@ export function useConversationWorkspace({
   setMessages,
   setContextPreview,
   setChatMessage,
-  onCancelGenerationForConversation,
 }: UseConversationWorkspaceOptions) {
+  const callWorker = projectWorker();
+  const projectSessionId = workerScope(projectId)?.projectSessionId;
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [conversationNextCursor, setConversationNextCursor] = useState<string>();
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
@@ -58,7 +59,7 @@ export function useConversationWorkspace({
         });
         const items = page.items;
         if (!active || requestId !== conversationRequest.current) return;
-        const selected = items[0];
+        const selected = items.find((item) => item.id === conversation?.id) ?? items[0];
         const [messagePage, preview] = selected
           ? await Promise.all([
               callWorker('chat.message.list', { conversationId: selected.id }),
@@ -84,6 +85,7 @@ export function useConversationWorkspace({
     };
   }, [
     projectId,
+    projectSessionId,
     scopeAvailable,
     showArchivedConversations,
     setMessages,
@@ -190,10 +192,6 @@ export function useConversationWorkspace({
     const requestId = ++conversationRequest.current;
     setChatMessage('');
     try {
-      if (onCancelGenerationForConversation) {
-        await onCancelGenerationForConversation(selected.id);
-        if (requestId !== conversationRequest.current) return;
-      }
       const [messagePage, preview] = await Promise.all([
         callWorker('chat.message.list', { conversationId: selected.id }),
         callWorker('context.preview', { conversationId: selected.id }),
