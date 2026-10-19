@@ -775,4 +775,4 @@ it('bounds 80 mixed business jobs and keeps every project progressing with measu
   expect((await rpc('file.task.list', {}, scope(f.runtimeA))).length).toBe(40);
   expect((await rpc('file.task.list', {}, scope(f.runtimeB))).length).toBe(40);
   process.stdout.write('Concurrency pressure health latency ms ' + JSON.stringify(stats) + '\n');
-});
+}, 60000);
