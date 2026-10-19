@@ -27,7 +27,7 @@ describe('project visual defaults', () => {
     fireEvent(details, new Event('toggle'));
     const input = await screen.findByLabelText('画面类型');
     fireEvent.change(input, { target: { value: '水彩动画' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存项目风格' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存默认设置' }));
     await waitFor(() => expect(saved).toHaveBeenCalledOnce());
     expect(callWorker).toHaveBeenCalledWith('production.defaults.save', {
       expectedRowVersion: 2,

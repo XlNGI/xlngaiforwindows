@@ -1,4 +1,13 @@
-import { ExternalLink, Images, LayoutPanelTop, Rows3, SlidersHorizontal, X } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Images,
+  LayoutPanelTop,
+  Rows3,
+  SlidersHorizontal,
+  X,
+} from 'lucide-react';
 import {
   useEffect,
   useMemo,
@@ -90,6 +99,8 @@ export function WorkspaceSurface({
   const suppressTabClickRef = useRef(false);
   const conversationPanelElementRef = useRef<HTMLDivElement>(null);
   const conversationPanelRef = usePanelRef();
+  const productionPanelRef = usePanelRef();
+  const [productionCollapsed, setProductionCollapsed] = useState(false);
   const documentPanel = layout.panels.document;
   const conversationPanel = layout.panels.conversation;
   const assetsPanel = layout.panels.assets;
@@ -152,6 +163,8 @@ export function WorkspaceSurface({
       ),
     [paneOrder, showAssetsDock, showConversationDock, showEditorDock, showProductionPage],
   );
+  const productionCollapsible = showProductionDock && visiblePaneOrder.length > 1;
+  const showProductionCollapsed = productionCollapsible && productionCollapsed;
   const persistedDockLayout = useDefaultLayout({
     id: `${WORKSPACE_DOCK_LAYOUT_ID}:${layout.projectId ?? 'no-project'}${productionOpen ? ':production' : ''}`,
     panelIds: dockedPanelIds,
@@ -159,6 +172,21 @@ export function WorkspaceSurface({
     onlySaveAfterUserInteractions: true,
   });
   const dockDefaultLayout = usableConversationDockLayout(persistedDockLayout.defaultLayout);
+
+  useEffect(() => {
+    if (!showProductionPage) return;
+    const syncCollapsedState = () => {
+      try {
+        setProductionCollapsed(Boolean(productionPanelRef.current?.isCollapsed()));
+      } catch {
+        // The panel registers its constraints after the first render.
+        setProductionCollapsed(false);
+      }
+    };
+    syncCollapsedState();
+    const timer = window.setTimeout(syncCollapsedState, 0);
+    return () => window.clearTimeout(timer);
+  }, [productionPanelRef, showProductionPage, visiblePaneOrder]);
 
   useEffect(() => {
     setPaneOrder(readWorkspacePaneOrder(layout.projectId));
@@ -320,7 +348,33 @@ export function WorkspaceSurface({
     return '生产参数';
   };
 
+  const toggleProduction = () => {
+    const panel = productionPanelRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+    setProductionCollapsed(panel.isCollapsed());
+  };
+
   const renderPaneHeader = (paneId: WorkspacePaneId, index: number) => {
+    if (paneId === 'production' && showProductionCollapsed) {
+      return (
+        <header className="workspace-pane-header">
+          <button
+            type="button"
+            className="workspace-production-restore"
+            title="展开生产参数"
+            aria-label="展开生产参数"
+            aria-expanded={false}
+            onClick={toggleProduction}
+          >
+            <ChevronLeft size={16} />
+            <SlidersHorizontal size={16} />
+            <span>生产参数</span>
+          </button>
+        </header>
+      );
+    }
     const dropBefore = dropIndex === index && draggingPane !== paneId;
     const dropAfter =
       dropIndex === visiblePaneOrder.length && index === visiblePaneOrder.length - 1;
@@ -394,6 +448,17 @@ export function WorkspaceSurface({
               onClick={onCloseDocument}
             >
               <X size={15} />
+            </button>
+          )}
+          {paneId === 'production' && productionCollapsible && (
+            <button
+              type="button"
+              title="收起生产参数"
+              aria-label="收起生产参数"
+              aria-expanded
+              onClick={toggleProduction}
+            >
+              <ChevronRight size={15} />
             </button>
           )}
           {paneId === 'production' && onCloseProduction && (
@@ -481,10 +546,18 @@ export function WorkspaceSurface({
         <Panel
           id="production"
           key="production"
+          panelRef={productionPanelRef}
           defaultSize={showAssetsDock ? '34%' : showConversationDock ? '70%' : '100%'}
           minSize={showProductionDock ? '320px' : '0px'}
+          collapsedSize="44px"
+          collapsible={productionCollapsible}
+          onResize={(size) => {
+            if (size.inPixels > 0) setProductionCollapsed(size.inPixels <= 44.5);
+          }}
         >
-          <section className="workspace-docked-page workspace-production-page">
+          <section
+            className={`workspace-docked-page workspace-production-page${showProductionCollapsed ? ' is-collapsed' : ''}`}
+          >
             {renderPaneHeader(paneId, index)}
             {productionContent}
           </section>

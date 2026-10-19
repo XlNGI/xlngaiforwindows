@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ImagePreview } from './ImagePreview';
+import { imageAssetId, ParameterImagePreview } from './ParameterImagePreview';
 import { useProductionInstructions } from './use-production-instructions';
 import { ProjectProductionDefaults } from './ProjectProductionDefaults';
+import { ParameterHelp } from './ParameterHelp';
 import type { ProductionSegment } from '@ai-video/contracts';
 import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
 import {
@@ -12,7 +13,6 @@ import {
 } from './official-video-parameters';
 import type { CharacterVoiceReferenceInfo, AudioFileInfo } from '@ai-video/contracts';
 import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
-import { AssetImagePreview } from './AssetImagePreview';
 import {
   CircleAlert,
   CircleCheck,
@@ -226,10 +226,6 @@ function cancellationMessage(cancellation?: MediaTaskCancellationOutcome): strin
   return `视频任务已取消，仅停止本地轮询；${reason}，Provider 任务可能仍会继续。`;
 }
 
-function isAssetReference(value: unknown): value is string {
-  return typeof value === 'string' && value.startsWith('asset://') && value.length > 8;
-}
-
 function isVideoCapability(capability: GenerationCapability | undefined): boolean {
   return (
     capability === 'TEXT_TO_VIDEO' ||
@@ -244,13 +240,6 @@ function formatElapsed(elapsedMs: number): string {
   const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
   const minutes = Math.floor(seconds / 60);
   return minutes > 0 ? `${minutes}分${seconds % 60}秒` : `${seconds}秒`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kibibytes = bytes / 1024;
-  if (kibibytes < 1024) return `${kibibytes.toFixed(kibibytes >= 10 ? 0 : 1)} KiB`;
-  return `${(kibibytes / 1024).toFixed(1)} MiB`;
 }
 
 function formatVideoCost(cost: VideoGenerationMetadataInfo['cost'] | undefined): string {
@@ -1282,7 +1271,26 @@ export function ProductionPanel({
 
   const fields = adapter ? schemaDerivedFields(adapter) : [];
   const basicFields = fields.filter((field) => field.group === 'basic');
+  const contentControls = new Set<AdapterUiField['control']>([
+    'textarea',
+    'url-list',
+    'structured',
+  ]);
+  const contentFields = basicFields.filter((field) => contentControls.has(field.control));
+  const outputFields = basicFields.filter((field) => !contentControls.has(field.control));
   const advancedFields = fields.filter((field) => field.group === 'advanced');
+  const renderParameter = (field: AdapterUiField) => (
+    <ParameterField
+      key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter!.key}:${field.key}`}
+      field={field}
+      property={adapter!.parameterSchema.properties[field.key]!}
+      value={parameters[field.key]}
+      required={adapter!.parameterSchema.required.includes(field.key)}
+      error={errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message}
+      onChange={(value) => updateParameter(field.key, value)}
+      projectId={projectId}
+    />
+  );
 
   const draftSaveHint = !writable
     ? '当前项目为只读'
@@ -1346,13 +1354,6 @@ export function ProductionPanel({
       ) : (
         <div className="production-panel-body">
           <div className="production-panel-main">
-            {projectId && (
-              <ProjectProductionDefaults
-                key={`${projectId}:${projectSessionId}`}
-                writable={writable}
-                onSaved={productionInstructions.refreshKeepingEdits}
-              />
-            )}
             <div className="production-config-row">
               <div className="field-group">
                 <label htmlFor="provider-profile">供应商连接</label>
@@ -1424,255 +1425,277 @@ export function ProductionPanel({
 
             {adapter && (
               <>
-                <div className="adapter-meta">
-                  <strong>{adapter.modelLabel}</strong>
-                  <span>
-                    {selectedProfile?.name} · {adapter.providerLabel} · API {adapter.apiVersion}
-                  </span>
+                <div className="parameter-fields production-content-fields">
+                  {contentFields.map(renderParameter)}
+                  {(productionInstructions.result?.source || productionInstructions.error) && (
+                    <details
+                      className="production-adaptation"
+                      aria-label="制作内容适配"
+                      open={Boolean(
+                        productionInstructions.error ||
+                        productionInstructions.result?.issues.length,
+                      )}
+                    >
+                      <summary>制作说明</summary>
+                      <div className="production-adaptation-body">
+                        {Boolean(productionInstructions.result?.notices?.length) && (
+                          <div className="production-notes" role="status" aria-label="模型适配说明">
+                            <ul>
+                              {productionInstructions.result!.notices!.map((notice, index) => (
+                                <li key={`${notice.code}:${index}`}>{notice.message}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {sceneSegments.length > 1 && (
+                          <label className="parameter-field">
+                            本次制作范围
+                            <select
+                              disabled={busy || productionInstructions.loading}
+                              value={
+                                segmentShotIds
+                                  ? String(
+                                      sceneSegments.findIndex(
+                                        (segment) =>
+                                          segment.shotIds.join(',') === segmentShotIds.join(','),
+                                      ),
+                                    )
+                                  : 'full'
+                              }
+                              onChange={(event) =>
+                                setSegmentShotIds(
+                                  event.target.value === 'full'
+                                    ? undefined
+                                    : sceneSegments[Number(event.target.value)]?.shotIds,
+                                )
+                              }
+                            >
+                              <option value="full">完整场次（全部分镜）</option>
+                              {sceneSegments.map((segment, index) => (
+                                <option
+                                  key={index}
+                                  value={index}
+                                  disabled={segment.needsShotRevision}
+                                >
+                                  第 {index + 1} 段 · 剧情预计 {segment.estimatedDurationSeconds} 秒
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                        {segmentShotIds && completeScenePrompt && (
+                          <details>
+                            <summary>查看完整场次方案</summary>
+                            <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                              {completeScenePrompt}
+                            </pre>
+                          </details>
+                        )}
+                        {productionInstructions.result?.estimatedDurationSeconds !== undefined && (
+                          <p>
+                            剧情预计 {productionInstructions.result.estimatedDurationSeconds} 秒
+                            {productionInstructions.result.requestedDurationSeconds !== undefined
+                              ? ` · 模型请求 ${productionInstructions.result.requestedDurationSeconds} 秒`
+                              : ''}
+                          </p>
+                        )}
+                        {Boolean(productionInstructions.result?.timeline?.length) && (
+                          <details>
+                            <summary>
+                              场次分镜时间轴（{productionInstructions.result!.timeline!.length}{' '}
+                              镜头）
+                            </summary>
+                            <ol>
+                              {productionInstructions.result!.timeline!.map((entry) => (
+                                <li key={entry.shotId}>
+                                  {entry.title}：
+                                  {entry.startSeconds === undefined ||
+                                  entry.endSeconds === undefined
+                                    ? '时间待补充'
+                                    : `${entry.startSeconds}—${entry.endSeconds} 秒`}
+                                </li>
+                              ))}
+                            </ol>
+                          </details>
+                        )}
+                        {productionInstructions.result?.issues.some(
+                          (issue) => issue.code === 'SCENE_REQUIRES_SEGMENTS',
+                        ) && (
+                          <section aria-label="场次分段制作建议">
+                            <p>完整场次已保留。以下按现有镜头边界分段；请逐段制作后合成。</p>
+                            <ol>
+                              {productionInstructions.result.segments?.map((segment, index) => (
+                                <li key={index}>
+                                  第 {index + 1} 段：
+                                  {segment.shotIds
+                                    .map(
+                                      (id) =>
+                                        productionInstructions.result?.timeline?.find(
+                                          (entry) => entry.shotId === id,
+                                        )?.title ?? id,
+                                    )
+                                    .join('、')}
+                                  ，剧情预计 {segment.estimatedDurationSeconds} 秒
+                                  {segment.needsShotRevision
+                                    ? '；单镜也超过模型能力，需要更长时长的模型或重新设计镜头。'
+                                    : `，模型请求 ${segment.requestedDurationSeconds} 秒。`}
+                                </li>
+                              ))}
+                            </ol>
+                          </section>
+                        )}
+                        {productionInstructions.overriddenFields.length > 0 && (
+                          <p>已保留修改或保存的参数；重新填入将覆盖这些值。</p>
+                        )}
+                        <div className="production-adaptation-actions">
+                          <p
+                            role={
+                              productionInstructions.error ||
+                              productionInstructions.result?.issues.length
+                                ? 'alert'
+                                : 'status'
+                            }
+                          >
+                            {productionInstructions.error ||
+                              productionInstructions.result?.issues
+                                .map((issue) => issue.message)
+                                .join('；') ||
+                              `已填入制作内容 · 版本 ${productionInstructions.result?.source?.revision}`}
+                          </p>
+                          <button
+                            type="button"
+                            className="button secondary"
+                            disabled={busy || productionInstructions.loading}
+                            onClick={productionInstructions.refill}
+                          >
+                            重新填入制作内容
+                          </button>
+                        </div>
+                      </div>
+                    </details>
+                  )}
                 </div>
-                <div className="parameter-fields">
+                <details className="production-more-settings" open={errors.length > 0}>
+                  <summary>更多设置</summary>
+                  {outputFields.length > 0 && (
+                    <section className="production-output-section" aria-label="输出设置">
+                      <h3>输出设置</h3>
+                      <div className="parameter-fields production-output-fields">
+                        {outputFields.map(renderParameter)}
+                      </div>
+                    </section>
+                  )}
+                  {advancedFields.length > 0 && (
+                    <details
+                      className="advanced-parameters"
+                      open={errors.some((error) =>
+                        advancedFields.some(
+                          (field) => normalizeErrorPath(error.path) === field.key,
+                        ),
+                      )}
+                    >
+                      <summary>专业参数</summary>
+                      <div className="parameter-fields">
+                        {advancedFields.map((field) => (
+                          <ParameterField
+                            key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
+                            field={field}
+                            property={adapter.parameterSchema.properties[field.key]!}
+                            value={parameters[field.key]}
+                            required={adapter.parameterSchema.required.includes(field.key)}
+                            error={
+                              errors.find((item) => normalizeErrorPath(item.path) === field.key)
+                                ?.message
+                            }
+                            onChange={(value) => updateParameter(field.key, value)}
+                            projectId={projectId}
+                          />
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {projectId && (
+                    <ProjectProductionDefaults
+                      key={`${projectId}:${projectSessionId}`}
+                      writable={writable}
+                      onSaved={productionInstructions.refreshKeepingEdits}
+                    />
+                  )}
                   {adapter.provider === 'unicompapi' && isWanMediaAdapter(adapter) && (
-                    <p role="note">
+                    <p className="production-settings-note" role="note">
                       “生成音频”控制成片是否带声音。指定声音参考时，在“参考素材”中添加“参考音频”，填写公网音频地址；本地声音样本请使用万相官方连接。
                     </p>
                   )}
-                  {(productionInstructions.result?.source || productionInstructions.error) && (
-                    <section aria-label="制作内容适配">
-                      {Boolean(productionInstructions.result?.notices?.length) && (
-                        <div role="status" aria-label="模型适配说明">
-                          <ul>
-                            {productionInstructions.result!.notices!.map((notice, index) => (
-                              <li key={`${notice.code}:${index}`}>{notice.message}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      {sceneSegments.length > 1 && (
-                        <label className="parameter-field">
-                          本次制作范围
-                          <select
-                            disabled={busy || productionInstructions.loading}
-                            value={
-                              segmentShotIds
-                                ? String(
-                                    sceneSegments.findIndex(
-                                      (segment) =>
-                                        segment.shotIds.join(',') === segmentShotIds.join(','),
-                                    ),
-                                  )
-                                : 'full'
+                </details>
+
+                {isOfficialVoiceVideo(adapter) &&
+                  (productionAudioSupport(adapter).dialogueDriven ||
+                    voiceReferences.length > 0) && (
+                    <section className="parameter-fields production-audio-inputs">
+                      <h3>
+                        {productionAudioSupport(adapter).dialogueDriven
+                          ? '完整对白驱动'
+                          : '角色声音参考'}
+                      </h3>
+                      {productionAudioSupport(adapter).dialogueDriven ? (
+                        <>
+                          <p>
+                            万相 2.7
+                            使用完整对白录音驱动画面。音频中的台词会保留，请勿把它当作生成新台词的声音样本。
+                          </p>
+                          <button
+                            type="button"
+                            className="button secondary"
+                            disabled={
+                              !writable || busy || sceneInputsLoading || Boolean(sceneInputsError)
                             }
-                            onChange={(event) =>
-                              setSegmentShotIds(
-                                event.target.value === 'full'
-                                  ? undefined
-                                  : sceneSegments[Number(event.target.value)]?.shotIds,
-                              )
-                            }
+                            onClick={() => void importDrivingAudio()}
                           >
-                            <option value="full">完整场次（全部分镜）</option>
-                            {sceneSegments.map((segment, index) => (
-                              <option
-                                key={index}
-                                value={index}
-                                disabled={segment.needsShotRevision}
-                              >
-                                第 {index + 1} 段 · 剧情预计 {segment.estimatedDurationSeconds} 秒
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                            {dialogueAudio ? '更换完整对白' : '导入完整对白'}
+                          </button>
+                          {dialogueAudio && (
+                            <p>
+                              {dialogueAudio.name} · {(dialogueAudio.durationMs / 1000).toFixed(1)}{' '}
+                              秒
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <p>
+                            场次选用的声音版本会预先选中，图片与声音按实际提交顺序编号。声音版本变化后需回场次重新选择。
+                          </p>
+                          {voiceReferences.length === 0 ? (
+                            <p>请先在“角色与场景”的角色资料中导入声音样本。</p>
+                          ) : (
+                            voiceReferences.map((voice) => (
+                              <label key={voice.id}>
+                                <input
+                                  type="checkbox"
+                                  disabled={!writable || busy}
+                                  checked={selectedVoiceIds.includes(voice.characterDocumentId)}
+                                  onChange={(event) =>
+                                    setSelectedVoiceIds((current) =>
+                                      event.target.checked
+                                        ? [...current, voice.characterDocumentId]
+                                        : current.filter((id) => id !== voice.characterDocumentId),
+                                    )
+                                  }
+                                />
+                                {voice.characterName} · 声音版本 {voice.revision} ·{' '}
+                                {(voice.durationMs / 1000).toFixed(1)} 秒
+                              </label>
+                            ))
+                          )}
+                        </>
                       )}
-                      {segmentShotIds && completeScenePrompt && (
-                        <details>
-                          <summary>查看完整场次方案</summary>
-                          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                            {completeScenePrompt}
-                          </pre>
-                        </details>
-                      )}
-                      {productionInstructions.result?.estimatedDurationSeconds !== undefined && (
-                        <p>
-                          剧情预计 {productionInstructions.result.estimatedDurationSeconds} 秒
-                          {productionInstructions.result.requestedDurationSeconds !== undefined
-                            ? ` · 模型请求 ${productionInstructions.result.requestedDurationSeconds} 秒`
-                            : ''}
-                          。镜头节奏按剧情安排。
-                        </p>
-                      )}
-                      {Boolean(productionInstructions.result?.timeline?.length) && (
-                        <details>
-                          <summary>
-                            场次分镜时间轴（{productionInstructions.result!.timeline!.length} 镜头）
-                          </summary>
-                          <ol>
-                            {productionInstructions.result!.timeline!.map((entry) => (
-                              <li key={entry.shotId}>
-                                {entry.title}：
-                                {entry.startSeconds === undefined || entry.endSeconds === undefined
-                                  ? '时间待补充'
-                                  : `${entry.startSeconds}—${entry.endSeconds} 秒`}
-                              </li>
-                            ))}
-                          </ol>
-                        </details>
-                      )}
-                      {productionInstructions.result?.issues.some(
-                        (issue) => issue.code === 'SCENE_REQUIRES_SEGMENTS',
-                      ) && (
-                        <section aria-label="场次分段制作建议">
-                          <p>完整场次已保留。以下按现有镜头边界分段；请逐段制作后合成。</p>
-                          <ol>
-                            {productionInstructions.result.segments?.map((segment, index) => (
-                              <li key={index}>
-                                第 {index + 1} 段：
-                                {segment.shotIds
-                                  .map(
-                                    (id) =>
-                                      productionInstructions.result?.timeline?.find(
-                                        (entry) => entry.shotId === id,
-                                      )?.title ?? id,
-                                  )
-                                  .join('、')}
-                                ，剧情预计 {segment.estimatedDurationSeconds} 秒
-                                {segment.needsShotRevision
-                                  ? '；单镜也超过模型能力，需要更长时长的模型或重新设计镜头。'
-                                  : `，模型请求 ${segment.requestedDurationSeconds} 秒。`}
-                              </li>
-                            ))}
-                          </ol>
-                        </section>
-                      )}
-                      {productionInstructions.overriddenFields.length > 0 && (
-                        <p>已保留你修改或保存的表单值；重新填入会替换这些值。</p>
-                      )}
-                      <p
-                        role={
-                          productionInstructions.error ||
-                          productionInstructions.result?.issues.length
-                            ? 'alert'
-                            : 'status'
-                        }
-                      >
-                        {productionInstructions.error ||
-                          productionInstructions.result?.issues
-                            .map((issue) => issue.message)
-                            .join('；') ||
-                          `已填入制作内容 · 版本 ${productionInstructions.result?.source?.revision}`}
-                      </p>
-                      <button
-                        type="button"
-                        className="button secondary"
-                        disabled={busy || productionInstructions.loading}
-                        onClick={productionInstructions.refill}
-                      >
-                        重新填入制作内容
-                      </button>
                     </section>
                   )}
-                  {basicFields.map((field) => (
-                    <ParameterField
-                      key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
-                      field={field}
-                      property={adapter.parameterSchema.properties[field.key]!}
-                      value={parameters[field.key]}
-                      required={adapter.parameterSchema.required.includes(field.key)}
-                      error={
-                        errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message
-                      }
-                      onChange={(value) => updateParameter(field.key, value)}
-                      projectId={projectId}
-                    />
-                  ))}
-                </div>
-                {advancedFields.length > 0 && (
-                  <details className="advanced-parameters">
-                    <summary>专业参数</summary>
-                    <div className="parameter-fields">
-                      {advancedFields.map((field) => (
-                        <ParameterField
-                          key={`${projectId ?? 'no-project'}:${shotId ?? 'no-shot'}:${adapter.key}:${field.key}`}
-                          field={field}
-                          property={adapter.parameterSchema.properties[field.key]!}
-                          value={parameters[field.key]}
-                          required={adapter.parameterSchema.required.includes(field.key)}
-                          error={
-                            errors.find((item) => normalizeErrorPath(item.path) === field.key)
-                              ?.message
-                          }
-                          onChange={(value) => updateParameter(field.key, value)}
-                          projectId={projectId}
-                        />
-                      ))}
-                    </div>
-                  </details>
-                )}
-
-                {isOfficialVoiceVideo(adapter) && (
-                  <section className="parameter-fields">
-                    <h3>
-                      {productionAudioSupport(adapter).dialogueDriven
-                        ? '完整对白驱动'
-                        : '角色声音参考'}
-                    </h3>
-                    {productionAudioSupport(adapter).dialogueDriven ? (
-                      <>
-                        <p>
-                          万相 2.7
-                          使用完整对白录音驱动画面。音频中的台词会保留，请勿把它当作生成新台词的声音样本。
-                        </p>
-                        <button
-                          type="button"
-                          className="button secondary"
-                          disabled={
-                            !writable || busy || sceneInputsLoading || Boolean(sceneInputsError)
-                          }
-                          onClick={() => void importDrivingAudio()}
-                        >
-                          {dialogueAudio ? '更换完整对白' : '导入完整对白'}
-                        </button>
-                        {dialogueAudio && (
-                          <p>
-                            {dialogueAudio.name} · {(dialogueAudio.durationMs / 1000).toFixed(1)} 秒
-                          </p>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <p>
-                          场次选用的声音版本会预先选中，图片与声音按实际提交顺序编号。声音版本变化后需回场次重新选择。
-                        </p>
-                        {voiceReferences.length === 0 ? (
-                          <p>请先在“角色与场景”的角色资料中导入声音样本。</p>
-                        ) : (
-                          voiceReferences.map((voice) => (
-                            <label key={voice.id}>
-                              <input
-                                type="checkbox"
-                                disabled={!writable || busy}
-                                checked={selectedVoiceIds.includes(voice.characterDocumentId)}
-                                onChange={(event) =>
-                                  setSelectedVoiceIds((current) =>
-                                    event.target.checked
-                                      ? [...current, voice.characterDocumentId]
-                                      : current.filter((id) => id !== voice.characterDocumentId),
-                                  )
-                                }
-                              />
-                              {voice.characterName} · 声音版本 {voice.revision} ·{' '}
-                              {(voice.durationMs / 1000).toFixed(1)} 秒
-                            </label>
-                          ))
-                        )}
-                      </>
-                    )}
-                  </section>
-                )}
 
                 <div className="draft-actions">
                   <div className="draft-action-row">
                     <button
-                      className="button primary"
+                      className="button secondary"
                       type="button"
                       onClick={() => void saveDraft()}
                       disabled={!writable || busy}
@@ -1777,7 +1800,7 @@ export function ProductionPanel({
                     <span className="production-status-message">{generationStatus}</span>
                   )}
                 </div>
-                {isVideoCapability(adapter.capability) && (
+                {isVideoCapability(adapter.capability) && videoJobs.length > 0 && (
                   <section className="video-task-center" aria-label="视频任务">
                     <header>
                       <strong>视频任务</strong>
@@ -1876,9 +1899,6 @@ export function ProductionPanel({
                         </div>
                       );
                     })}
-                    {videoJobs.length === 0 && (
-                      <span className="video-task-empty">暂无视频任务</span>
-                    )}
                   </section>
                 )}
               </>
@@ -1919,7 +1939,7 @@ function ParameterField({
       {required && <span aria-label="必填">*</span>}
     </label>
   );
-  const description = property.description ? <small>{property.description}</small> : null;
+  const description = <ParameterHelp description={property.description} label={property.title} />;
 
   if (field.control === 'structured')
     return (
@@ -1930,9 +1950,10 @@ function ParameterField({
           onChange={onChange}
           label={property.title}
           path={inputId}
+          projectId={projectId}
         />
         {description}
-        {error && <small>{error}</small>}
+        {error && <small className="parameter-error">{error}</small>}
       </div>
     );
 
@@ -1949,7 +1970,7 @@ function ParameterField({
           <span>{property.title}</span>
         </label>
         {description}
-        {error && <small>{error}</small>}
+        {error && <small className="parameter-error">{error}</small>}
       </div>
     );
   }
@@ -1964,10 +1985,8 @@ function ParameterField({
       (_, index) => currentItems[index] ?? '',
     );
     const commitItems = (next: string[]) => {
-      let length = next.length;
-      while (length > minimumRows && !next[length - 1]) length -= 1;
       setSelectionError('');
-      onChange(next.slice(0, length));
+      onChange(next);
     };
     const chooseLocalFile = async (file: File | undefined, index: number) => {
       if (!file) return;
@@ -2050,7 +2069,20 @@ function ParameterField({
         }}
         onDrop={(event) => void dropAssets(event)}
       >
-        {label}
+        <div className="parameter-field-heading">
+          {label}
+          {(property.maxItems === undefined || items.length < property.maxItems) && (
+            <button
+              className="button secondary url-list-add"
+              type="button"
+              title="添加图片输入"
+              onClick={() => commitItems([...items, ''])}
+            >
+              <Plus size={14} />
+              添加图片
+            </button>
+          )}
+        </div>
         {description}
         <div className="url-list">
           {items.map((item, index) => {
@@ -2059,29 +2091,24 @@ function ParameterField({
             const orderedRole = property.minItems === 2 && property.maxItems === 2;
             const rowLabel = orderedRole ? (index === 0 ? '首帧' : '尾帧') : undefined;
             const fileInputId = `${inputId}-file-${index}`;
-            const assetId = isAssetReference(item) ? item.slice(8) : undefined;
+            const assetId = imageAssetId(item);
             const hasImage = isLocalImageDataUrl(item) || Boolean(assetId);
             const imageName = assetId ? '素材库图片' : (localFile?.name ?? '本地图片');
             const previewLabel = `${rowLabel ?? property.title}：${imageName}`;
             return (
-              <div className="url-list-item" key={`${field.key}-${index}`}>
+              <div
+                className={`url-list-item ${hasImage ? 'is-image' : 'is-url'}`}
+                key={`${field.key}-${index}`}
+              >
                 {rowLabel && <span className="url-row-role">{rowLabel}</span>}
                 <div className={`url-row${hasImage ? ' has-image' : ''}`}>
                   {hasImage ? (
                     <div className="local-image-value" id={index === 0 ? inputId : undefined}>
-                      {assetId ? (
-                        <AssetImagePreview
-                          assetId={assetId}
-                          projectId={projectId}
-                          alt={previewLabel}
-                        />
-                      ) : (
-                        <ImagePreview src={item} alt={previewLabel} />
-                      )}
-                      <span>
-                        <strong title={imageName}>{imageName}</strong>
-                        {localFile && <small>{formatBytes(localFile.size)}</small>}
-                      </span>
+                      <ParameterImagePreview
+                        value={item}
+                        projectId={projectId}
+                        label={previewLabel}
+                      />
                     </div>
                   ) : (
                     <input
@@ -2102,75 +2129,69 @@ function ParameterField({
                       }}
                     />
                   )}
-                  <label
-                    className="icon-button subtle file-picker-button"
-                    htmlFor={fileInputId}
-                    title={item ? '替换为本地图片' : '选择本地图片'}
-                  >
-                    <ImagePlus size={14} />
-                    <input
-                      id={fileInputId}
-                      className="url-file-input"
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp,.jpg,.jpeg,.png,.webp"
-                      aria-label={`为${rowLabel ?? property.title}选择本地图片`}
-                      onChange={(event) => {
-                        const file = event.currentTarget.files?.[0];
-                        event.currentTarget.value = '';
-                        void chooseLocalFile(file, index);
-                      }}
-                    />
-                  </label>
-                  <button
-                    className="icon-button subtle"
-                    type="button"
-                    title="上移"
-                    onClick={() => moveItem(index, -1)}
-                    disabled={index === 0}
-                  >
-                    <ChevronUp size={13} />
-                  </button>
-                  <button
-                    className="icon-button subtle"
-                    type="button"
-                    title="下移"
-                    onClick={() => moveItem(index, 1)}
-                    disabled={index >= items.length - 1}
-                  >
-                    <ChevronDown size={13} />
-                  </button>
-                  <button
-                    className="icon-button subtle"
-                    type="button"
-                    title={item ? '清除此图片输入' : '移除此输入行'}
-                    onClick={() => clearItem(index)}
-                    disabled={!item && items.length <= minimumRows}
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                  <div className="url-row-actions">
+                    <label
+                      className="icon-button subtle file-picker-button"
+                      htmlFor={fileInputId}
+                      title={item ? '替换为本地图片' : '选择本地图片'}
+                    >
+                      <ImagePlus size={14} />
+                      <input
+                        id={fileInputId}
+                        className="url-file-input"
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,.jpg,.jpeg,.png,.webp"
+                        aria-label={`为${rowLabel ?? property.title}选择本地图片`}
+                        onChange={(event) => {
+                          const file = event.currentTarget.files?.[0];
+                          event.currentTarget.value = '';
+                          void chooseLocalFile(file, index);
+                        }}
+                      />
+                    </label>
+                    <button
+                      className="icon-button subtle"
+                      type="button"
+                      title="上移"
+                      onClick={() => moveItem(index, -1)}
+                      disabled={index === 0}
+                    >
+                      <ChevronUp size={13} />
+                    </button>
+                    <button
+                      className="icon-button subtle"
+                      type="button"
+                      title="下移"
+                      onClick={() => moveItem(index, 1)}
+                      disabled={index >= items.length - 1}
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                    <button
+                      className="icon-button subtle"
+                      type="button"
+                      title={item ? '清除此图片输入' : '移除此输入行'}
+                      onClick={() => clearItem(index)}
+                      disabled={!item && items.length <= minimumRows}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
           })}
-          {(property.maxItems === undefined || items.length < property.maxItems) && (
-            <button
-              className="icon-button subtle"
-              type="button"
-              title="添加图片输入"
-              onClick={() => commitItems([...items, ''])}
-            >
-              <Plus size={14} />
-            </button>
-          )}
         </div>
-        {visibleError && <small>{visibleError}</small>}
+        {visibleError && <small className="parameter-error">{visibleError}</small>}
       </div>
     );
   }
 
   const enumValues = property.enum ?? [];
   return (
-    <div className={`parameter-field ${error ? 'invalid' : ''}`}>
+    <div
+      className={`parameter-field ${field.control === 'textarea' ? 'prompt-field ' : ''}${error ? 'invalid' : ''}`}
+    >
       {label}
       {description}
       {field.control === 'select' ? (
@@ -2216,7 +2237,7 @@ function ParameterField({
           }
         />
       )}
-      {error && <small>{error}</small>}
+      {error && <small className="parameter-error">{error}</small>}
     </div>
   );
 }

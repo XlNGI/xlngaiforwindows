@@ -159,6 +159,12 @@ function mock(
         },
       ]);
     if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+    if (method === 'asset.thumbnail' || method === 'asset.mediaSource')
+      return Promise.resolve({
+        assetId: params.assetId,
+        path: 'D:/image.png',
+        contentType: 'image/png',
+      });
     if (method === 'scene.list')
       return Promise.resolve([sceneValue, { ...sceneValue, id: 'next-scene' }]);
     if (method === 'scene.save')
@@ -254,6 +260,8 @@ describe('scene production bindings', () => {
       />,
     );
     await screen.findByText('已填入制作内容 · 版本 1');
+    expect(await screen.findAllByRole('img')).toHaveLength(2);
+    expect(screen.queryByDisplayValue(/project-asset:\/\//)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
     await waitFor(() =>
       expect(
@@ -380,6 +388,7 @@ describe('scene production bindings', () => {
     expect(screen.getByRole('textbox', { name: '媒体地址' })).toHaveValue(
       'https://example.com/voice.wav',
     );
+    fireEvent.click(screen.getByText('更多设置'));
     expect(screen.getByRole('checkbox', { name: '生成音频' })).toBeChecked();
     expect(screen.queryByText('角色声音参考')).not.toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
@@ -431,7 +440,7 @@ describe('scene production bindings', () => {
     await screen.findByText(/已填入制作内容 · 版本 1/);
     latest = result('new-image', 2);
     window.dispatchEvent(new Event('production-source-updated'));
-    await screen.findByText(/来源内容或素材绑定已更新/);
+    expect(await screen.findByText(/来源内容或素材绑定已更新/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '重新填入制作内容' }));
     await screen.findByText(/已填入制作内容 · 版本 2/);
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));

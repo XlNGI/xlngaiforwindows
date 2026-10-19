@@ -43,7 +43,7 @@ export function ProjectProductionDefaults({
         if (active) setValue(next ?? { rowVersion: 0, settings: {} });
       })
       .catch((error: unknown) => {
-        if (active) setMessage(error instanceof Error ? error.message : '项目风格读取失败。');
+        if (active) setMessage(error instanceof Error ? error.message : '项目默认设置读取失败。');
       });
     return () => {
       active = false;
@@ -62,18 +62,22 @@ export function ProjectProductionDefaults({
       });
       if (!alive.current) return;
       setValue(next);
-      setMessage('项目风格与输出默认值已保存。');
+      setMessage('项目默认设置已保存。');
       onSaved();
     } catch (error) {
-      if (alive.current) setMessage(error instanceof Error ? error.message : '项目风格保存失败。');
+      if (alive.current)
+        setMessage(error instanceof Error ? error.message : '项目默认设置保存失败。');
     } finally {
       if (alive.current) setBusy(false);
     }
   };
   return (
-    <details onToggle={(event) => setOpened(event.currentTarget.open)}>
-      <summary>项目统一视觉风格与输出默认值</summary>
-      <p>角色、场景、场次和分镜默认沿用，具体制作要求可覆盖。时长由剧情推导。</p>
+    <details
+      className="project-production-defaults"
+      onToggle={(event) => setOpened(event.currentTarget.open)}
+    >
+      <summary>项目统一风格与输出默认值</summary>
+      <p>角色、场景、场次和分镜默认沿用；单次制作可以覆盖。时长按剧情自动计算。</p>
       <button
         type="button"
         className="button secondary"
@@ -84,7 +88,7 @@ export function ProjectProductionDefaults({
           setRefresh((value) => value + 1);
         }}
       >
-        重新读取项目风格
+        重新读取默认设置
       </button>
       {value && (
         <fieldset disabled={!writable || busy}>
@@ -133,7 +137,7 @@ export function ProjectProductionDefaults({
             />
           </label>
           <button type="button" className="button secondary" onClick={() => void save()}>
-            保存项目风格
+            保存默认设置
           </button>
         </fieldset>
       )}

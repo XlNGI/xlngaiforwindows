@@ -6,6 +6,7 @@ import { WorkspaceSurface } from './WorkspaceSurface';
 
 interface WorkspaceFixtureProps {
   productionOpen?: boolean;
+  productionContent?: ReactNode;
   documentActive?: boolean;
   editorTitle?: string;
   detachedPanels?: Partial<Record<'document' | 'conversation', string>>;
@@ -16,6 +17,7 @@ interface WorkspaceFixtureProps {
 
 function WorkspaceFixture({
   productionOpen = false,
+  productionContent = <div>生产内容</div>,
   documentActive = true,
   editorTitle,
   detachedPanels = {},
@@ -46,7 +48,7 @@ function WorkspaceFixture({
         dispatch={dispatch}
         documentTitle="文档"
         conversationContent={<div>会话内容</div>}
-        productionContent={<div>生产内容</div>}
+        productionContent={productionContent}
         assetsContent={<input aria-label="素材搜索" defaultValue="" />}
         productionOpen={productionOpen}
         documentActive={documentActive}
@@ -398,6 +400,27 @@ describe('WorkspaceSurface', () => {
 
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
+  });
+
+  it('collapses and reopens the production pane from its header', () => {
+    const { container } = render(
+      <WorkspaceFixture
+        productionOpen
+        productionContent={<input aria-label="制作提示词" defaultValue="原始提示词" />}
+      />,
+    );
+    const productionPage = container.querySelector('.workspace-production-page')!;
+    const prompt = screen.getByLabelText('制作提示词');
+    fireEvent.change(prompt, { target: { value: '未保存的制作提示词' } });
+
+    fireEvent.click(screen.getByRole('button', { name: '收起生产参数' }));
+    expect(productionPage).toHaveClass('is-collapsed');
+    expect(screen.getByRole('button', { name: '展开生产参数' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '展开生产参数' }));
+    expect(productionPage).not.toHaveClass('is-collapsed');
+    expect(screen.getByLabelText('制作提示词')).toBe(prompt);
+    expect(prompt).toHaveValue('未保存的制作提示词');
   });
 
   it('reorders pages by dragging a page tab', async () => {

@@ -661,6 +661,7 @@ describe('ProductionPanel', () => {
   beforeEach(() => {
     cleanup();
     vi.resetAllMocks();
+    window.localStorage.clear();
     Object.defineProperty(window, 'confirm', {
       configurable: true,
       value: confirmDialog,
@@ -749,7 +750,14 @@ describe('ProductionPanel', () => {
     render(<ProductionPanel shotId="shot" writable />);
     const prompt = await screen.findByLabelText(/画面提示词/);
     expect(screen.getByLabelText('供应商连接')).toHaveValue(providerProfile.id);
-    expect(screen.getByLabelText('分辨率*')).toBeInTheDocument();
+    const resolution = screen.getByLabelText('分辨率*');
+    expect(prompt).toBeVisible();
+    expect(resolution).not.toBeVisible();
+    fireEvent.click(screen.getByText('更多设置'));
+    expect(resolution).toBeVisible();
+    fireEvent.change(resolution, { target: { value: '2K' } });
+    fireEvent.click(screen.getByText('更多设置'));
+    expect(resolution).not.toBeVisible();
     expect(screen.getByText('专业参数')).toBeInTheDocument();
 
     fireEvent.change(prompt, { target: { value: '电影画面' } });
@@ -761,7 +769,7 @@ describe('ProductionPanel', () => {
         adapterKey: descriptor.key,
         providerProfileId: providerProfile.id,
         modelId: 'viduq2',
-        parameters: { prompt: '电影画面', resolution: '1080p' },
+        parameters: { prompt: '电影画面', resolution: '2K' },
       }),
     );
     expect(await screen.findByText(/草稿已保存/)).toBeInTheDocument();
@@ -997,7 +1005,8 @@ describe('ProductionPanel', () => {
         apiVersion: 'v1',
       }),
     );
-    expect(await screen.findByText('UniCompAPI A · UniCompAPI · API v1')).toBeInTheDocument();
+    expect(await screen.findByLabelText(/画面提示词/)).toBeInTheDocument();
+    expect(screen.queryByText('模型详情')).not.toBeInTheDocument();
   });
 
   it('refreshes provider connections after settings changes without remounting', async () => {
@@ -1095,7 +1104,7 @@ describe('ProductionPanel', () => {
         ['Vidu Q2', 'Vidu Q2'],
       ),
     );
-    expect(await screen.findByText(`${providerProfile.name} · Vidu · API v2`)).toBeInTheDocument();
+    expect(model).toHaveValue(`21111111-1111-4111-8111-111111111112::${descriptor.key}`);
 
     const v3OptionKey = '21111111-1111-4111-8111-111111111112::' + v3.key;
     fireEvent.change(model, { target: { value: v3OptionKey } });
@@ -1109,7 +1118,7 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(model).toHaveValue(v3OptionKey);
-    expect(await screen.findByText(`${providerProfile.name} · Vidu · API v3`)).toBeInTheDocument();
+    expect(screen.queryByText('模型详情')).not.toBeInTheDocument();
   });
 
   it('keeps production parameters free of the result preview and full asset list', async () => {
@@ -1547,8 +1556,8 @@ describe('ProductionPanel', () => {
         getData: (type: string) => (type === 'application/x-ai-video-asset+json' ? payload : ''),
       },
     });
-    expect(await screen.findAllByText('素材库图片')).toHaveLength(2);
     const startPreview = await screen.findByRole('button', { name: '放大查看首帧：素材库图片' });
+    expect(screen.queryByText('素材库图片')).not.toBeInTheDocument();
     expect(within(startPreview).getByRole('img')).toHaveAttribute(
       'src',
       '/worker-media/asset-start?thumbnail=1',
@@ -1588,6 +1597,80 @@ describe('ProductionPanel', () => {
     ).toHaveLength(0);
   });
 
+  it('previews project asset references and preserves their values when reordering and saving', async () => {
+    mockWorker((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      if (method === 'generation.draft.save') return Promise.resolve(params);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        seedImages={['project-asset://asset-start', 'project-asset://asset-end']}
+      />,
+    );
+    const start = await screen.findByRole('button', { name: '放大查看首帧：素材库图片' });
+    expect(within(start).getByRole('img')).toHaveAttribute(
+      'src',
+      '/worker-media/asset-start?thumbnail=1',
+    );
+    expect(screen.queryByDisplayValue(/project-asset:\/\//)).not.toBeInTheDocument();
+    fireEvent.click(within(start.closest('.url-list-item')!).getByRole('button', { name: '下移' }));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('button', { name: '放大查看首帧：素材库图片' })).getByRole('img'),
+      ).toHaveAttribute('src', '/worker-media/asset-end?thumbnail=1'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+    await waitFor(() => {
+      const saved = vi
+        .mocked(callWorker)
+        .mock.calls.find(([method]) => method === 'generation.draft.save');
+      expect(saved?.[1]).toMatchObject({
+        parameters: { images: ['project-asset://asset-end', 'project-asset://asset-start'] },
+      });
+    });
+  });
+
+  it('keeps an explicitly added image input until it is filled or removed', async () => {
+    const gallery = structuredClone(videoDescriptor);
+    gallery.parameterSchema.properties.images!.minItems = 1;
+    gallery.parameterSchema.properties.images!.maxItems = 4;
+    mockWorker((method) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ ...videoCatalog, adapters: [gallery] });
+      if (method === 'adapter.resolve') return Promise.resolve(gallery);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        seedImages={['project-asset://asset-start']}
+      />,
+    );
+    await screen.findByRole('img');
+    fireEvent.click(screen.getByRole('button', { name: '添加图片' }));
+    const extraImage = screen.getByRole('textbox');
+    expect(extraImage).toHaveValue('');
+    fireEvent.change(extraImage, { target: { value: 'https://example.invalid/extra.png' } });
+    expect(extraImage).toHaveValue('https://example.invalid/extra.png');
+    fireEvent.click(
+      within(extraImage.closest('.url-list-item')!).getByRole('button', { name: '清除此图片输入' }),
+    );
+    expect(extraImage).not.toBeInTheDocument();
+    expect(screen.getByRole('img')).toBeInTheDocument();
+  });
+
   it('previews and reorders local start and end frames and submits Data URLs once', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -1610,11 +1693,13 @@ describe('ProductionPanel', () => {
     fireEvent.change(await screen.findByLabelText('为首帧选择本地图片'), {
       target: { files: [new File([png], 'start.png', { type: 'image/png' })] },
     });
-    expect(await screen.findByText('start.png')).toBeInTheDocument();
+    await screen.findByRole('button', { name: '放大查看首帧：start.png' });
     fireEvent.change(screen.getByLabelText('为尾帧选择本地图片'), {
       target: { files: [new File([jpeg], 'end.jpg', { type: 'image/jpeg' })] },
     });
-    expect(await screen.findByText('end.jpg')).toBeInTheDocument();
+    await screen.findByRole('button', { name: '放大查看尾帧：end.jpg' });
+    expect(screen.queryByText('start.png')).not.toBeInTheDocument();
+    expect(screen.queryByText('end.jpg')).not.toBeInTheDocument();
 
     const startPreview = screen.getByRole('button', { name: '放大查看首帧：start.png' });
     const startSource = within(startPreview).getByRole('img').getAttribute('src');
@@ -1633,8 +1718,6 @@ describe('ProductionPanel', () => {
     const reorderedEnd = screen.getByRole('button', { name: '放大查看尾帧：start.png' });
     expect(within(reorderedStart).getByRole('img')).toHaveAttribute('src', endSource);
     expect(within(reorderedEnd).getByRole('img')).toHaveAttribute('src', startSource);
-    expect(reorderedStart.closest('.url-list-item')).toHaveTextContent('end.jpg');
-    expect(reorderedEnd.closest('.url-list-item')).toHaveTextContent('start.png');
     fireEvent.click(reorderedStart);
     expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute('src', endSource);
     fireEvent.click(screen.getByRole('button', { name: '关闭图片预览' }));
@@ -1768,7 +1851,7 @@ describe('ProductionPanel', () => {
     fireEvent.change(await screen.findByLabelText('为首帧选择本地图片'), {
       target: { files: [new File([png], 'start.png', { type: 'image/png' })] },
     });
-    expect(await screen.findByText('start.png')).toBeInTheDocument();
+    await screen.findByRole('button', { name: '放大查看首帧：start.png' });
 
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
 
