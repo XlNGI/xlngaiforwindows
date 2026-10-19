@@ -12,7 +12,7 @@
     "dev:worker": "pnpm --filter @ai-video/worker dev",
     "dev:desktop": "pnpm --filter @ai-video/desktop tauri:dev",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm media:prepare && pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm -r --if-present test",
+    "test": "pnpm media:prepare && pnpm --filter @ai-video/contracts build && pnpm --filter @ai-video/domain build && pnpm --filter @ai-video/context build && pnpm --filter @ai-video/llm build && pnpm --filter @ai-video/generation-adapters build && pnpm --filter @ai-video/persistence build && pnpm -r --workspace-concurrency=1 --if-present test --maxWorkers=2 --minWorkers=1",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
