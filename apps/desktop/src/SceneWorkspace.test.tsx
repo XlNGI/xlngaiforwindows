@@ -98,7 +98,7 @@ describe('scene cast bindings', () => {
               assets: available ? [image] : [],
               voices: available ? [voice] : [],
             }
-          : method === 'asset.mediaSource'
+          : method === 'asset.thumbnail' || method === 'asset.mediaSource'
             ? { assetId: image.id, path: 'D:/late.png', contentType: 'image/png' }
             : method === 'audio.mediaSource'
               ? { path: 'D:/sample.wav' }
@@ -123,7 +123,7 @@ describe('scene cast bindings', () => {
     );
     expect(await screen.findByRole('img', { name: 'late.png' })).toHaveAttribute(
       'src',
-      '/worker-media/late-image',
+      '/worker-media/late-image?thumbnail=1',
     );
     expect(callWorker).not.toHaveBeenCalledWith('audio.mediaSource', { audioId: voice.audioId });
     fireEvent.click(screen.getByRole('button', { name: '试听绑定音频' }));

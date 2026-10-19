@@ -48,10 +48,10 @@ describe('CharacterSceneWorkspace', () => {
     );
     expect(await screen.findByRole('img', { name: '庭院全景' })).toHaveAttribute(
       'src',
-      '/worker-media/scene-image',
+      '/worker-media/scene-image?thumbnail=1',
     );
     fireEvent.click(screen.getByRole('button', { name: '放大查看庭院全景' }));
-    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+    expect(await within(screen.getByRole('dialog')).findByRole('img')).toHaveAttribute(
       'src',
       '/worker-media/scene-image',
     );

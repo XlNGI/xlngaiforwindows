@@ -538,6 +538,12 @@ export function validateSessionRequestParams(
     }
     return params;
   }
+  if (method === 'asset.thumbnail') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(params, ['assetId']);
+    requireId(params, 'assetId');
+    return params;
+  }
   if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
   if (method === 'characterVoiceReference.list' || method === 'characterVoiceReference.save') {
     const params = requireObject(input, 'params');

@@ -987,7 +987,7 @@ export function AssetLibraryView({
 
         <div className="asset-library-content">
           <div className="asset-grid" role="listbox" aria-label="素材">
-            {assets.map((asset) => {
+            {assets.map((asset, index) => {
               const isSelected = selectedIds.includes(asset.id);
               const dragItems = isSelected && selectedAssets.length > 1 ? selectedAssets : [asset];
               return (
@@ -995,6 +995,10 @@ export function AssetLibraryView({
                   role="option"
                   tabIndex={0}
                   aria-selected={isSelected}
+                  aria-label={
+                    asset.alias?.trim() ||
+                    `${asset.kind.includes('video') ? '视频' : '图片'}素材 ${index + 1}`
+                  }
                   draggable={!asset.deletedAt && !groupEditor}
                   onDragStart={(event) =>
                     beginDrag(event, dragItems, dragItems.length > 1 ? 'selection' : 'asset')
@@ -1063,24 +1067,30 @@ export function AssetLibraryView({
                       <Image size={30} />
                     )}
                   </div>
-                  <strong title={displayName(asset)} className="opt-card-title">
-                    {displayName(asset)}
-                  </strong>
-                  <div className="asset-card-tags opt-card-tags">
-                    {asset.tags?.slice(0, 2).map((tag) => (
-                      <span key={tag.id} className="opt-tag-mini">
-                        {tag.name}
-                      </span>
-                    ))}
-                    {(asset.tags?.length ?? 0) > 2 && (
-                      <span className="opt-tag-mini">+{asset.tags!.length - 2}</span>
+                  <div className="asset-card-info">
+                    {asset.alias?.trim() && (
+                      <strong title={asset.alias.trim()} className="opt-card-title">
+                        {asset.alias.trim()}
+                      </strong>
                     )}
-                  </div>
-                  <div className="asset-card-footer opt-card-meta-line">
-                    <small>{new Date(asset.createdAt).toLocaleDateString()}</small>
-                    <span className="asset-card-size">
-                      {(asset.sizeBytes / 1024).toFixed(0)} KB
-                    </span>
+                    {!!asset.tags?.length && (
+                      <div className="asset-card-tags opt-card-tags">
+                        {asset.tags.slice(0, 2).map((tag) => (
+                          <span key={tag.id} className="opt-tag-mini">
+                            {tag.name}
+                          </span>
+                        ))}
+                        {asset.tags.length > 2 && (
+                          <span className="opt-tag-mini">+{asset.tags.length - 2}</span>
+                        )}
+                      </div>
+                    )}
+                    <div className="asset-card-footer opt-card-meta-line">
+                      <small>{new Date(asset.createdAt).toLocaleDateString()}</small>
+                      <span className="asset-card-size">
+                        {(asset.sizeBytes / 1024).toFixed(0)} KB
+                      </span>
+                    </div>
                   </div>
                 </div>
               );

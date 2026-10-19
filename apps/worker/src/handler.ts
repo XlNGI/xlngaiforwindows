@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
 import { resolveSceneMedia } from './scene-media-service.js';
 import { ProductionService } from './production-service.js';
+import { ImageThumbnailService } from './image-thumbnail-service.js';
 import type { CharacterVoiceReferenceSaveParams } from '@ai-video/contracts';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
@@ -708,6 +709,7 @@ const methods = new Set<WorkerMethod>([
   'project.task.subscribe',
   'asset.list',
   'scene.media.resolve',
+  'asset.thumbnail',
   'asset.preview',
   'asset.mediaSource',
   'asset.open',
@@ -771,6 +773,7 @@ export function configurePiConversationRuntime(bridge: NativeProviderBridge): vo
 }
 const adapterService = new AdapterService(projectService);
 const imageGenerationService = new ImageGenerationService(projectService);
+const imageThumbnailService = new ImageThumbnailService(projectService, imageGenerationService);
 const videoGenerationService = new VideoGenerationService(
   projectService,
   undefined,
@@ -2243,6 +2246,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = imageGenerationService.assetMediaSource({
             assetId: requireString(params, 'assetId'),
           } satisfies AssetMediaSourceParams);
+          break;
+        case 'asset.thumbnail':
+          result = await imageThumbnailService.get(requireString(params, 'assetId'));
           break;
         case 'asset.open':
           result = imageGenerationService.openAsset({

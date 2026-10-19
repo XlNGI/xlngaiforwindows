@@ -1,6 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IPC_PROTOCOL_VERSION } from '@ai-video/contracts';
 import { SceneCharacterRepository, VoiceReferenceRepository } from '@ai-video/persistence';
@@ -8,6 +10,8 @@ import { ProjectService } from './project-service.js';
 import { ContentService } from './content-service.js';
 import { resolveSceneMedia } from './scene-media-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
+import { ImageThumbnailService } from './image-thumbnail-service.js';
+import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { parseRequest } from './handler.js';
 
 await vi.hoisted(async () => {
@@ -69,8 +73,11 @@ function image(
 }
 
 describe('bounded scene media resolution', () => {
-  it('registers validated scene media RPC methods at the real ingress', () => {
-    for (const [method, params] of [['scene.media.resolve', { characterDocumentIds: [] }]])
+  it('registers validated batch and thumbnail RPC methods at the real ingress', () => {
+    for (const [method, params] of [
+      ['scene.media.resolve', { characterDocumentIds: [] }],
+      ['asset.thumbnail', { assetId: 'image' }],
+    ])
       expect(
         parseRequest({ id: 'rpc', protocolVersion: IPC_PROTOCOL_VERSION, method, params }),
       ).toMatchObject({ method, params });
@@ -158,3 +165,49 @@ describe('bounded scene media resolution', () => {
     expect(resolveSceneMedia(service, inputs).voices).toEqual([]);
   });
 });
+
+it.runIf(process.platform === 'win32')(
+  'encodes small thumbnails once per content hash, serves cached output and leaves originals intact',
+  async () => {
+    const { service, actor, project, directory } = await fixture();
+    const source = join(directory, 'wide.png');
+    execFileSync(
+      resolve('../desktop/src-tauri/resources/ffmpeg/ffmpeg.exe'),
+      [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        'color=c=blue:s=960x360',
+        '-frames:v',
+        '1',
+        '-threads',
+        '1',
+        source,
+      ],
+      { windowsHide: true, timeout: 15000 },
+    );
+    const bytes = await readFile(source);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    for (const id of ['image-one', 'image-two']) {
+      image(service, id, actor.id, hash, bytes.length);
+      await writeFile(join(project.rootPath, `assets/images/${id}.png`), bytes);
+    }
+    const spy = vi.spyOn(FfmpegRuntime.prototype, 'thumbnail');
+    const thumbnails = new ImageThumbnailService(service, new ImageGenerationService(service));
+    const results = await Promise.all([thumbnails.get('image-one'), thumbnails.get('image-two')]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(results[0]?.path).toBe(results[1]?.path);
+    expect(results.map((r) => r.assetId)).toEqual(['image-one', 'image-two']);
+    const small = await readFile(results[0].path);
+    expect([small.readUInt32BE(16), small.readUInt32BE(20)]).toEqual([320, 120]);
+    await thumbnails.get('image-one');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(project.rootPath, 'assets/images/image-one.png'))).toEqual(bytes);
+    service.access(true, (db) =>
+      db.prepare("UPDATE assets SET deleted_at='now' WHERE id='image-one'").run(),
+    );
+    await expect(thumbnails.get('image-one')).rejects.toThrow('unavailable');
+  },
+);

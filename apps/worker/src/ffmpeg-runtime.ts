@@ -324,6 +324,48 @@ export class FfmpegRuntime {
     };
   }
 
+  async thumbnail(input: string, output: string, signal?: AbortSignal): Promise<void> {
+    const path = await localFile(input);
+    const tools = await this.tools();
+    await this.run(
+      tools.ffmpegPath,
+      [
+        '-v',
+        'error',
+        '-nostdin',
+        '-threads',
+        '1',
+        '-filter_threads',
+        '1',
+        '-max_alloc',
+        '67108864',
+        '-protocol_whitelist',
+        'file',
+        '-format_whitelist',
+        'png_pipe,jpeg_pipe,webp_pipe,image2',
+        '-i',
+        path,
+        '-frames:v',
+        '1',
+        '-vf',
+        "scale=w='min(320,iw)':h='min(320,ih)':force_original_aspect_ratio=decrease",
+        '-c:v',
+        'png',
+        '-threads',
+        '1',
+        '-f',
+        'image2',
+        '-y',
+        output,
+      ],
+      dirname(output),
+      signal,
+      10000,
+    );
+    if ((await stat(output)).size > 1024 * 1024)
+      throw new Error('Thumbnail exceeds its size limit.');
+  }
+
   /** Full packet decode used at import/provider-output boundaries. */
   async validate(input: string, signal?: AbortSignal): Promise<MediaProbe> {
     const path = await localFile(input);

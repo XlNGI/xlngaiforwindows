@@ -3810,6 +3810,7 @@ export interface AssetSourceInfo {
 
 export interface WorkerMethodMap extends DubbingWorkerMethodMap, VoiceReferenceWorkerMethodMap {
   'scene.media.resolve': { params: SceneMediaResolveParams; result: SceneMediaResolveResult };
+  'asset.thumbnail': { params: AssetMediaSourceParams; result: AssetMediaSourceInfo };
   health: { params: Record<string, never>; result: HealthResult };
   'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
   'project.create': { params: ProjectCreateParams; result: ProjectInfo };

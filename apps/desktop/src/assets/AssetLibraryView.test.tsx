@@ -448,9 +448,7 @@ describe('AssetLibraryView', () => {
     await waitFor(() =>
       expect(container.querySelector('.asset-inspector-preview video')).toHaveAttribute('controls'),
     );
-    const imageCard = (await screen.findAllByRole('option')).find((item) =>
-      item.textContent?.includes('image.png'),
-    )!;
+    const imageCard = screen.getByRole('option', { name: '图片素材 1' });
     fireEvent.click(imageCard);
     const trigger = await screen.findByRole('button', { name: '放大查看image.png' });
     fireEvent.click(trigger);

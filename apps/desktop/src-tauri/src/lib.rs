@@ -3533,7 +3533,7 @@ async fn worker_request(
 ) -> Result<serde_json::Value, String> {
     let media_source = matches!(
         request.get("method").and_then(serde_json::Value::as_str),
-        Some("asset.mediaSource" | "audio.mediaSource")
+        Some("asset.mediaSource" | "asset.thumbnail" | "audio.mediaSource")
     );
     let worker_app = app.clone();
     let response = tauri::async_runtime::spawn_blocking(move || {
