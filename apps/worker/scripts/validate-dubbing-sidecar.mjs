@@ -19,6 +19,7 @@ const option = (name) => {
 let executable = option('--worker');
 let ffmpegDirectory = option('--ffmpeg');
 let child;
+let childClosed;
 const pending = new Map();
 let stderr = '';
 let stdout = '';
@@ -112,6 +113,7 @@ try {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, AI_VIDEO_APP_DATA_DIR: appData },
   });
+  childClosed = new Promise((resolveResult) => child.once('close', resolveResult));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
@@ -254,7 +256,37 @@ try {
       hash(await readFile(audioSource.path)) === imported.audio.contentHash,
     'Imported audio source/hash failed.',
   );
+  const sample = await request('audio.import', { sourcePath: audioInput, kind: 'reference' });
+  const voiceReference = await request('characterVoiceReference.save', {
+    characterDocumentId: character.id,
+    audioId: sample.audio.id,
+    expectedRowVersion: 0,
+  });
+  const references = await request('characterVoiceReference.list');
+  requireCondition(
+    references.length === 1 &&
+      references[0].versionId === voiceReference.versionId &&
+      references[0].characterDocumentId === character.id &&
+      references[0].audioId === sample.audio.id &&
+      references[0].revision === 1,
+    'Role voice reference import/save/list failed through the packaged RPC entrypoint.',
+  );
   const currentScene = (await request('scene.list')).find((item) => item.id === scene.id);
+  const roleMedia = await request('scene.media.resolve', {
+    characterDocumentIds: [character.id],
+    voiceVersionIds: [voiceReference.versionId],
+  });
+  requireCondition(
+    roleMedia.characters[0]?.voice?.versionId === voiceReference.versionId &&
+      roleMedia.voices[0]?.audioId === sample.audio.id,
+    'Scene role media did not resolve a sample imported after binding the character.',
+  );
+  const disabledPreviewScene = await request('scene.save', {
+    title: '独立媒体禁用验证',
+    characterBindings: [
+      { characterDocumentId: character.id, imageDisabled: true, voiceDisabled: true },
+    ],
+  });
   requireCondition(
     currentScene?.characterBindings?.some((item) => item.characterDocumentId === character.id),
     'Dialogue speaker was not bound to the scene cast.',
@@ -357,6 +389,26 @@ try {
   await request('project.open', { rootPath: exportRoot });
   const integrity = await request('project.integrity');
   requireCondition(integrity.ok, 'Exported project integrity failed.');
+  const exportedReferences = await request('characterVoiceReference.list');
+  const exportedPreviewScene = (await request('scene.list')).find(
+    (item) => item.id === disabledPreviewScene.id,
+  );
+  requireCondition(
+    exportedPreviewScene?.characterBindings?.[0]?.imageDisabled === true &&
+      exportedPreviewScene?.characterBindings?.[0]?.voiceDisabled === true,
+    'Exported project lost explicit scene media disabling.',
+  );
+  requireCondition(
+    exportedReferences.length === 1 &&
+      exportedReferences[0].versionId === voiceReference.versionId &&
+      exportedReferences[0].audioId === sample.audio.id,
+    'Exported project lost its role voice reference.',
+  );
+  const exportedSample = await request('audio.mediaSource', { audioId: sample.audio.id });
+  requireCondition(
+    hash(await readFile(exportedSample.path)) === sample.audio.contentHash,
+    'Exported role voice sample failed playback source/hash verification.',
+  );
   const exportedScene = (await request('scene.list')).find((item) => item.id === scene.id);
   requireCondition(
     exportedScene?.dialogueAudioId === imported.audio.id &&
@@ -382,6 +434,9 @@ try {
         bundledFfmpeg: engine.version,
         schemaVersion: integrity.schemaVersion,
         dedicatedAudioStore: true,
+        characterVoiceReferenceSavedAndExported: true,
+        sceneRoleMediaResolved: true,
+        explicitMediaDisabledPersisted: true,
         confirmedAudioAdopted: true,
         localH264Composition: true,
         sourcePreserved: true,
@@ -397,12 +452,17 @@ try {
   );
 } finally {
   if (child) {
-    const closed = new Promise((resolveResult) => child.once('close', resolveResult));
     child.stdin.end();
-    await Promise.race([closed, new Promise((resolveResult) => setTimeout(resolveResult, 3000))]);
+    await Promise.race([
+      childClosed,
+      new Promise((resolveResult) => setTimeout(resolveResult, 3000)),
+    ]);
     if (child.exitCode === null) {
       child.kill();
-      await Promise.race([closed, new Promise((resolveResult) => setTimeout(resolveResult, 2000))]);
+      await Promise.race([
+        childClosed,
+        new Promise((resolveResult) => setTimeout(resolveResult, 2000)),
+      ]);
     }
   }
   await removeValidationRoot();

@@ -4,6 +4,7 @@ import {
   Archive,
   Bot,
   BookOpen,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -277,10 +278,8 @@ export function ChatPanel({
    */
   const [modelControlsOpen, setModelControlsOpen] = useState(false);
   /**
-   * Rename, archive and restore are infrequent, and they used to sit as three
-   * always-visible icon buttons next to the conversation selector. They now live
-   * behind one overflow trigger so the bar shows only what is used on every turn:
-   * the conversation picker and "new conversation".
+   * Conversation management and archive filters are infrequent. Keep them in
+   * the overflow menu so the bar stays focused on picking and creating chats.
    */
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const conversationMenuRef = useRef<HTMLDivElement>(null);
@@ -404,15 +403,6 @@ export function ChatPanel({
             </option>
           ))}
         </select>
-        <label className="archive-toggle" title="显示已归档会话">
-          <input
-            type="checkbox"
-            checked={showArchivedConversations}
-            onChange={(event) => onShowArchivedConversationsChange?.(event.target.checked)}
-            disabled={!scopeAvailable}
-          />
-          <span>归档</span>
-        </label>
         <button
           className="icon-button"
           type="button"
@@ -476,6 +466,19 @@ export function ChatPanel({
               >
                 <RotateCcw size={14} />
                 <span>恢复会话</span>
+              </button>
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={showArchivedConversations}
+                disabled={!scopeAvailable}
+                onClick={() => {
+                  setConversationMenuOpen(false);
+                  onShowArchivedConversationsChange?.(!showArchivedConversations);
+                }}
+              >
+                <Check size={14} visibility={showArchivedConversations ? 'visible' : 'hidden'} />
+                <span>显示已归档会话</span>
               </button>
               {canLoadMoreConversations && (
                 <button

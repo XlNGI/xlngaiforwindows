@@ -57,7 +57,9 @@ export function VoiceReferencePanel({
       if (active.current) {
         setReference(saved);
         window.dispatchEvent(
-          new CustomEvent('character-voice-reference-updated', { detail: { projectId } }),
+          new CustomEvent('character-voice-reference-updated', {
+            detail: { projectId, characterDocumentId },
+          }),
         );
         setMessage('角色声音样本已保存，制作视频时可选择复用。');
       }

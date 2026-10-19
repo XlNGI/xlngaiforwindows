@@ -145,12 +145,17 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
         response.writeHead(400).end();
         return;
       }
+      const mediaMethod = mediaMatch[1]
+        ? 'audio.mediaSource'
+        : mediaUrl.searchParams.get('thumbnail') === '1'
+          ? 'asset.thumbnail'
+          : 'asset.mediaSource';
       void requestScheduler
-        .run(mediaMatch[1] ? 'audio.mediaSource' : 'asset.mediaSource', async () => {
+        .run(mediaMethod, async () => {
           const result = await handleRequest({
             id: `dev-media:${assetId}`,
             protocolVersion: IPC_PROTOCOL_VERSION,
-            method: mediaMatch[1] ? 'audio.mediaSource' : 'asset.mediaSource',
+            method: mediaMethod,
             params: mediaMatch[1] ? { audioId: assetId } : { assetId },
             ...(mediaUrl.searchParams.has('projectId') ||
             mediaUrl.searchParams.has('projectSessionId')

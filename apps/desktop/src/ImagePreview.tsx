@@ -7,27 +7,57 @@ export function ImagePreview({
   src,
   alt,
   className = '',
+  loadFullSrc,
 }: {
   src: string;
   alt: string;
   className?: string;
+  loadFullSrc?: () => Promise<string>;
 }) {
-  return <ImagePreviewContent key={src} src={src} alt={alt} className={className} />;
+  return (
+    <ImagePreviewContent
+      key={src}
+      src={src}
+      alt={alt}
+      className={className}
+      loadFullSrc={loadFullSrc}
+    />
+  );
 }
 
 function ImagePreviewContent({
   src,
   alt,
   className,
+  loadFullSrc,
 }: {
   src: string;
   alt: string;
   className: string;
+  loadFullSrc?: () => Promise<string>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [fullSrc, setFullSrc] = useState<string>();
+  const [fullError, setFullError] = useState(false);
   const closeButton = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    let active = true;
+    if (expanded && loadFullSrc && !fullSrc) {
+      setFullError(false);
+      void loadFullSrc()
+        .then((value) => {
+          if (active) setFullSrc(value);
+        })
+        .catch(() => {
+          if (active) setFullError(true);
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [expanded, loadFullSrc, fullSrc]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -70,7 +100,14 @@ function ImagePreviewContent({
         {failed ? (
           <span className="image-preview-error">图片暂时无法预览</span>
         ) : (
-          <img src={src} alt={alt} draggable={false} onError={() => setFailed(true)} />
+          <img
+            src={src}
+            alt={alt}
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            onError={() => setFailed(true)}
+          />
         )}
       </button>
       {expanded
@@ -100,7 +137,13 @@ function ImagePreviewContent({
                   </button>
                 </header>
                 <div className="image-preview-stage">
-                  <img src={src} alt={alt} draggable={false} />
+                  {fullError ? (
+                    <span role="status">原图暂时无法读取，请关闭后重试。</span>
+                  ) : loadFullSrc && !fullSrc ? (
+                    <span role="status">正在读取原图…</span>
+                  ) : (
+                    <img src={fullSrc ?? src} alt={alt} draggable={false} />
+                  )}
                 </div>
               </section>
             </div>,

@@ -16,6 +16,14 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - name: Use a canonical Windows temporary directory
+        shell: pwsh
+        run: |
+          $ciTempPath = node -p "require('node:fs').realpathSync(process.env.RUNNER_TEMP)"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the runner temporary directory.' }
+          "TEMP=$ciTempPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$ciTempPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Canonical temporary directory: $ciTempPath"
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies

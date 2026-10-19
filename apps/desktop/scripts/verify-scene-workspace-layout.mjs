@@ -84,7 +84,7 @@ try {
       };
     } else if (request.method === 'asset.list')
       result = request.params.sourceDocumentId ? [data.assets[6]] : [];
-    else if (request.method === 'asset.mediaSource')
+    else if (['asset.thumbnail', 'asset.mediaSource'].includes(request.method))
       result = {
         assetId: request.params.assetId,
         path: 'D:/fixture.png',
@@ -94,6 +94,7 @@ try {
       result = { sceneId: 'scene', cues: [], voices: [], audioFiles: [], jobs: [] };
     else if (request.method === 'dubbing.runtime.get')
       result = { available: true, nativeAvailable: false };
+    else if (request.method === 'shot.continuity.get') result = null;
     else
       assert(
         ['audio.list', 'provider.profile.list'].includes(request.method),
@@ -157,6 +158,26 @@ try {
     assert(layout.scrollHeight > layout.clientHeight, `${label}: missing vertical scroll`);
     report.push({ label, ...layout });
   }
+  async function loadReferencePreviews(count) {
+    await page.waitForFunction(
+      (expected) =>
+        document.querySelectorAll('.shot-reference-slot .asset-image-preview').length === expected,
+      count,
+    );
+    // Previews outside the viewport intentionally wait for intersection before loading.
+    for (const preview of await page.locator('.shot-reference-slot .asset-image-preview').all()) {
+      await preview.scrollIntoViewIfNeeded();
+      await preview.locator('img').waitFor();
+    }
+    await page.waitForFunction(
+      (expected) =>
+        document.querySelectorAll('.shot-reference-slot img').length === expected &&
+        [...document.querySelectorAll('.shot-reference-slot img')].every(
+          (img) => img.complete && img.naturalWidth > 0,
+        ),
+      count,
+    );
+  }
   for (const mode of ['scene', 'shot'])
     for (const cast of [3, 5])
       for (const viewport of [
@@ -170,14 +191,7 @@ try {
         await page.goto(
           `http://127.0.0.1:${address.port}/${basename(fixtureRoot)}/?cast=${cast}&mode=${mode}`,
         );
-        await page.waitForFunction(
-          (count) =>
-            document.querySelectorAll('.shot-reference-slot img').length === count + 1 &&
-            [...document.querySelectorAll('.shot-reference-slot img')].every(
-              (img) => img.complete && img.naturalWidth > 0,
-            ),
-          cast,
-        );
+        await loadReferencePreviews(cast + 1);
         await check(label, mode);
         if (mode === 'scene') {
           await page.getByRole('button', { name: '打开配音', exact: true }).click();
@@ -191,14 +205,7 @@ try {
         }
         await page.getByLabel('选择出场角色', { exact: true }).selectOption(`doc${cast}`);
         await page.getByRole('button', { name: '添加角色', exact: true }).click();
-        await page.waitForFunction(
-          (count) =>
-            document.querySelectorAll('.shot-reference-slot img').length === count + 2 &&
-            [...document.querySelectorAll('.shot-reference-slot img')].every(
-              (img) => img.complete && img.naturalWidth > 0,
-            ),
-          cast,
-        );
+        await loadReferencePreviews(cast + 2);
         await check(`${label}-added-character`, mode);
         if (cast === 3) {
           await page

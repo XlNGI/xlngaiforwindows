@@ -263,7 +263,7 @@ describe('ShotWorkspace', () => {
   it('shows generated shot images inline and opens an enlarged preview', async () => {
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'asset.list') return Promise.resolve([firstFrameAsset]);
-      if (method === 'asset.mediaSource')
+      if (method === 'asset.mediaSource' || method === 'asset.thumbnail')
         return Promise.resolve({
           assetId: firstFrameAsset.id,
           path: 'D:/Project/assets/images/shot.png',
@@ -274,7 +274,7 @@ describe('ShotWorkspace', () => {
     renderWorkspace();
     expect(await screen.findByRole('img', { name: 'shot.png' })).toHaveAttribute(
       'src',
-      '/worker-media/first-frame-asset',
+      '/worker-media/first-frame-asset?thumbnail=1',
     );
     fireEvent.click(screen.getByRole('button', { name: '放大查看shot.png' }));
     expect(screen.getByRole('dialog', { name: '图片预览：shot.png' })).toBeInTheDocument();

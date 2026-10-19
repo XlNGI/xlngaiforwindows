@@ -1,4 +1,14 @@
-import { cp, mkdtemp, rename, rm, symlink, open, readdir, readFile } from 'node:fs/promises';
+import {
+  cp,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  open,
+  readdir,
+  readFile,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -21,6 +31,7 @@ import { NativeProviderBridge } from './native-provider-bridge.js';
 import { AppSettingsService } from './app-settings-service.js';
 import { createAppRepositories, openAppDatabase } from '@ai-video/persistence';
 import { emptyModelCapabilities } from './provider-registry.js';
+import { FfmpegRuntime } from './ffmpeg-runtime.js';
 
 await vi.hoisted(async () => {
   const fs = await import('node:fs');
@@ -50,13 +61,15 @@ async function rpc<M extends WorkerMethod>(
   if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
   return response.result;
 }
-async function fixtures() {
+async function fixtures(prepare?: (project: ProjectService) => void) {
   const base = await mkdtemp(join(tmpdir(), 'project-runtime-integration-'));
   bases.push(base);
   const create = (name: string) => {
     const project = new ProjectService({ recentProjectsPath: join(base, 'recent.json') });
     try {
-      return project.create(join(base, name), name);
+      const info = project.create(join(base, name), name);
+      prepare?.(project);
+      return info;
     } finally {
       project.close();
     }
@@ -68,9 +81,59 @@ async function fixtures() {
   return { base, a, b, runtimeA, runtimeB };
 }
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const runtime of await rpc('project.runtime.list', {}))
     await rpc('project.runtime.unload', scope(runtime));
   for (const base of bases.splice(0)) await rm(base, { recursive: true, force: true });
+});
+
+it('routes thumbnails to their owning runtime and cancels only the unloaded project encode', async () => {
+  const f = await fixtures((service) =>
+    service.access(true, (db, project) => {
+      db.prepare(
+        "INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES('shared-id',?,'character','assets/images/source.png',?,1,'now')",
+      ).run(project.id, 'a'.repeat(64));
+    }),
+  );
+  for (const project of [f.a, f.b])
+    await writeFile(join(project.rootPath, 'assets/images/source.png'), 'source');
+  let aSignal: AbortSignal | undefined;
+  const encode = vi
+    .spyOn(FfmpegRuntime.prototype, 'thumbnail')
+    .mockImplementation(async (input, output, signal) => {
+      if (input.startsWith(f.a.rootPath)) {
+        aSignal = signal;
+        await new Promise<void>((_resolve, reject) =>
+          signal!.addEventListener(
+            'abort',
+            () =>
+              reject(
+                signal!.reason instanceof Error ? signal!.reason : new Error('Project unloaded.'),
+              ),
+            { once: true },
+          ),
+        );
+      } else await writeFile(output, 'B-thumbnail');
+    });
+  const pendingA = rpc('asset.thumbnail', { assetId: 'shared-id' }, scope(f.runtimeA));
+  const cancelledA = expect(pendingA).rejects.toThrow('unloaded');
+  await expect.poll(() => aSignal).toBeDefined();
+  const pendingB = rpc('asset.thumbnail', { assetId: 'shared-id' }, scope(f.runtimeB));
+  // Allow B to reach the shared FFmpeg queue while A owns its only slot.
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(encode).toHaveBeenCalledTimes(1);
+  await rpc('project.runtime.unload', scope(f.runtimeA));
+  await cancelledA;
+  expect(aSignal?.aborted).toBe(true);
+  const resultB = await pendingB;
+  expect(resultB.path.startsWith(f.b.rootPath)).toBe(true);
+  expect(await readFile(resultB.path, 'utf8')).toBe('B-thumbnail');
+  expect(await readdir(join(f.a.rootPath, 'cache/thumbnails'))).toEqual([]);
+  await rpc('asset.thumbnail', { assetId: 'shared-id' }, scope(f.runtimeB));
+  expect(encode).toHaveBeenCalledTimes(2);
+  await expect(
+    rpc('asset.thumbnail', { assetId: 'shared-id' }, scope(f.runtimeA)),
+  ).rejects.toThrow();
 });
 
 describe('multi-project Worker routing', () => {
@@ -712,4 +775,4 @@ it('bounds 80 mixed business jobs and keeps every project progressing with measu
   expect((await rpc('file.task.list', {}, scope(f.runtimeA))).length).toBe(40);
   expect((await rpc('file.task.list', {}, scope(f.runtimeB))).length).toBe(40);
   process.stdout.write('Concurrency pressure health latency ms ' + JSON.stringify(stats) + '\n');
-});
+}, 60000);

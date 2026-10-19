@@ -5916,26 +5916,7 @@ button {
   font-size: calc(11px * var(--ui-font-scale));
 }
 
-.archive-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 30px;
-  padding: 0 6px;
-  color: var(--text-secondary);
-  border: 0;
-  border-radius: 999px;
-  background: var(--input-bg);
-  font-size: calc(11px * var(--ui-font-scale));
-  white-space: nowrap;
-}
-
-.archive-toggle input {
-  margin: 0;
-}
-
-/* Conversation overflow: rename/archive/restore are rare, so they stay hidden
-   until asked for and the bar keeps only the picker and "new conversation". */
+/* Keep conversation management and archive filters in the overflow menu. */
 .conversation-menu {
   position: relative;
   display: flex;
@@ -8376,7 +8357,7 @@ button {
 .asset-library-opt-theme .asset-card {
   min-width: 0;
   display: grid !important;
-  grid-template-rows: auto 40px 26px 28px !important;
+  grid-template-rows: auto 1fr !important;
   background: #1a1e22 !important;
   border: 1px solid #283038 !important;
   border-radius: 8px !important;
@@ -8401,7 +8382,8 @@ button {
 }
 
 .asset-library-opt-theme .asset-thumb {
-  aspect-ratio: 16 / 10 !important;
+  aspect-ratio: 1 !important;
+  min-height: 0;
   background: #0d0f11 !important;
 }
 
@@ -8410,24 +8392,42 @@ button {
   object-fit: contain !important;
 }
 
+.asset-library-opt-theme .asset-card-info {
+  min-width: 0;
+  min-height: 38px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+
+.asset-library-opt-theme .asset-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.asset-library-opt-theme .asset-card:focus-within .opt-card-check {
+  opacity: 1 !important;
+}
+
 .asset-library-opt-theme .opt-card-title {
   min-width: 0;
-  margin: 9px 12px 0 !important;
+  margin: 0 !important;
   color: #f1f5f9 !important;
   font-size: calc(12px * var(--ui-font-scale)) !important;
   font-weight: 600 !important;
   line-height: 17px !important;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  display: block;
   overflow: hidden;
-  white-space: normal !important;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
 }
 
 .asset-library-opt-theme .opt-card-tags {
   min-width: 0;
   min-height: 0 !important;
-  margin: 3px 12px 0 !important;
+  height: auto;
+  margin: 0 !important;
 }
 
 .asset-library-opt-theme .opt-tag-mini {
@@ -8440,7 +8440,7 @@ button {
 
 .asset-library-opt-theme .opt-card-meta-line {
   min-width: 0;
-  margin: 4px 12px 8px !important;
+  margin: auto 0 0 !important;
   color: #64748b !important;
 }
 
@@ -9096,23 +9096,6 @@ button {
     align-items: start;
   }
 
-  .asset-library-opt-theme .asset-card {
-    display: flex !important;
-    flex-direction: column;
-  }
-
-  .asset-library-opt-theme .asset-thumb {
-    flex: 0 0 auto;
-  }
-
-  .asset-library-opt-theme .opt-card-title {
-    height: 34px;
-  }
-
-  .asset-library-opt-theme .opt-card-tags {
-    min-height: 24px !important;
-  }
-
   .asset-library-opt-theme .asset-inspector {
     overflow: visible;
     border-top: 1px solid var(--border-muted) !important;
@@ -9131,6 +9114,21 @@ button {
   border-radius: 8px;
   background: var(--panel-bg);
   cursor: zoom-in;
+}
+
+.asset-image-preview {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+.local-image-value > .asset-image-preview,
+.local-image-value > .asset-image-preview .image-preview-trigger {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+}
+.shot-reference-slot > .asset-image-preview .image-preview-trigger {
+  aspect-ratio: 1;
 }
 .image-preview-trigger:focus-visible {
   outline: 2px solid var(--accent);

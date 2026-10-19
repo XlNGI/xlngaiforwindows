@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
 import { resolveSceneMedia } from './scene-media-service.js';
 import { ProductionService } from './production-service.js';
+import { ImageThumbnailService } from './image-thumbnail-service.js';
 import { ShotContinuityService } from './shot-continuity-service.js';
 import type { CharacterVoiceReferenceSaveParams } from '@ai-video/contracts';
 import { join, resolve } from 'node:path';
@@ -754,6 +755,7 @@ const methods = new Set<WorkerMethod>([
   'task.schedule.cancel',
   'asset.list',
   'scene.media.resolve',
+  'asset.thumbnail',
   'asset.preview',
   'asset.mediaSource',
   'asset.open',
@@ -835,6 +837,11 @@ function createProjectRuntimeServices() {
     projectService,
     undefined,
     undefined,
+    executionPool,
+  );
+  const imageThumbnailService = new ImageThumbnailService(
+    projectService,
+    imageGenerationService,
     executionPool,
   );
   const videoGenerationService = new VideoGenerationService(
@@ -1051,6 +1058,7 @@ function createProjectRuntimeServices() {
     novelBatchService,
     adapterService,
     imageGenerationService,
+    imageThumbnailService,
     videoGenerationService,
     maintenanceService,
     sampleProjectService,
@@ -1072,6 +1080,7 @@ function createProjectRuntimeServices() {
     configureRuntime,
     async stop() {
       shotContinuityService.cancelAll();
+      await imageThumbnailService.stop();
       await fileTaskService.stop();
       await markdownExportService.stop();
       taskScheduleService.cancelAllWaiting();
@@ -1490,6 +1499,7 @@ async function handleRequestCore(
     changeSetService,
     adapterService,
     imageGenerationService,
+    imageThumbnailService,
     videoGenerationService,
     maintenanceService,
     sampleProjectService,
@@ -2814,6 +2824,9 @@ async function handleRequestCore(
           result = imageGenerationService.assetMediaSource({
             assetId: requireString(params, 'assetId'),
           } satisfies AssetMediaSourceParams);
+          break;
+        case 'asset.thumbnail':
+          result = await imageThumbnailService.get(requireString(params, 'assetId'));
           break;
         case 'asset.open':
           result = imageGenerationService.openAsset({

@@ -86,7 +86,7 @@ function mockWorker(
       return Promise.resolve({ target: params.target, rowVersion: 1, parameters: {}, issues: [] });
     if (method === 'provider.profile.list') return Promise.resolve([providerProfile]);
     if (method === 'provider.model.list') return Promise.resolve(providerModels);
-    if (method === 'asset.mediaSource') {
+    if (method === 'asset.mediaSource' || method === 'asset.thumbnail') {
       const assetId = params.assetId as string;
       if (unavailableMediaIds.includes(assetId)) return Promise.reject(new Error('File missing'));
       return Promise.resolve({
@@ -1259,11 +1259,11 @@ describe('ProductionPanel', () => {
     const results = await screen.findByLabelText('本次生成的全部图片');
     expect(await within(results).findByRole('img', { name: 'second.png' })).toHaveAttribute(
       'src',
-      '/worker-media/second-image',
+      '/worker-media/second-image?thumbnail=1',
     );
     expect(within(results).getAllByRole('img')).toHaveLength(2);
     fireEvent.click(within(results).getByRole('button', { name: '放大查看second.png' }));
-    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+    expect(await within(screen.getByRole('dialog')).findByRole('img')).toHaveAttribute(
       'src',
       '/worker-media/second-image',
     );
@@ -1617,13 +1617,13 @@ describe('ProductionPanel', () => {
     const startPreview = await screen.findByRole('button', { name: '放大查看首帧：素材库图片' });
     expect(within(startPreview).getByRole('img')).toHaveAttribute(
       'src',
-      '/worker-media/asset-start',
+      '/worker-media/asset-start?thumbnail=1',
     );
     expect(
       within(screen.getByRole('button', { name: '放大查看尾帧：素材库图片' })).getByRole('img'),
-    ).toHaveAttribute('src', '/worker-media/asset-end');
+    ).toHaveAttribute('src', '/worker-media/asset-end?thumbnail=1');
     fireEvent.click(startPreview);
-    expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+    expect(await within(screen.getByRole('dialog')).findByRole('img')).toHaveAttribute(
       'src',
       '/worker-media/asset-start',
     );

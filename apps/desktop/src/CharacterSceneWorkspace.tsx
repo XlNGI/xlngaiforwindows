@@ -1,9 +1,6 @@
-import { convertFileSrc } from '@tauri-apps/api/core';
-import { Image as ImageIcon, RotateCcw } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import type { AssetInfo, AssetMediaSourceInfo, DocumentKind } from '@ai-video/contracts';
-import { projectWorker, workerMediaUrl } from './worker-scope';
-import { ImagePreview } from './ImagePreview';
+import { RotateCcw } from 'lucide-react';
+import type { AssetInfo, DocumentKind } from '@ai-video/contracts';
+import { AssetImagePreview } from './AssetImagePreview';
 import { VoiceProfilePanel } from './dubbing/VoiceProfilePanel';
 
 export function CharacterSceneWorkspace({
@@ -45,32 +42,6 @@ export function CharacterSceneWorkspace({
   onGenerate: () => void;
   onOpenAsset?: (assetId: string) => void;
 }) {
-  const callWorker = projectWorker();
-  const [mediaById, setMediaById] = useState<Record<string, AssetMediaSourceInfo>>({});
-
-  useEffect(() => {
-    let active = true;
-    void Promise.all(
-      assets.map(async (asset) => {
-        try {
-          return [asset.id, await callWorker('asset.mediaSource', { assetId: asset.id })] as const;
-        } catch {
-          return [asset.id, undefined] as const;
-        }
-      }),
-    ).then((entries) => {
-      if (!active) return;
-      const next: Record<string, AssetMediaSourceInfo> = {};
-      for (const [id, source] of entries) {
-        if (source) next[id] = source;
-      }
-      setMediaById(next);
-    });
-    return () => {
-      active = false;
-    };
-  }, [assets]);
-
   const generateLabel =
     kind === 'scene' ? '\u751f\u6210\u573a\u666f\u56fe' : '\u751f\u6210\u89d2\u8272\u56fe';
 
@@ -168,20 +139,9 @@ export function CharacterSceneWorkspace({
         ) : (
           <ul className="character-scene-gallery-grid">
             {assets.map((asset) => {
-              const source = mediaById[asset.id];
-              const src = source ? mediaSrcFor(asset.id, source.path) : undefined;
-              const name =
-                asset.alias?.trim() || asset.relativePath.split(/[\\/]/).pop() || asset.id;
               return (
                 <li key={asset.id}>
-                  {src ? (
-                    <ImagePreview key={src} src={src} alt={name} />
-                  ) : (
-                    <span className="character-scene-gallery-fallback">
-                      <ImageIcon size={22} />
-                      {name}
-                    </span>
-                  )}
+                  <AssetImagePreview asset={asset} />
                   {onOpenAsset ? (
                     <button
                       className="image-library-link"
@@ -199,13 +159,4 @@ export function CharacterSceneWorkspace({
       </section>
     </div>
   );
-}
-
-function mediaSrcFor(assetId: string, absolutePath: string): string | undefined {
-  if (!('__TAURI_INTERNALS__' in window)) return workerMediaUrl(assetId);
-  try {
-    return convertFileSrc(absolutePath);
-  } catch {
-    return undefined;
-  }
 }

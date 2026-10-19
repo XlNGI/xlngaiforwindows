@@ -489,20 +489,23 @@ describe('project library chunks', () => {
     insertChapter(database, '2020-01-01T00:00:00.000Z', 1, '古老灯塔位于旧码头。');
     insertChapter(database, now, 2, '古老灯塔映出石阶上的雨。');
     const duplicate = database.prepare(
-      `INSERT INTO project_library_chunks
+      `WITH RECURSIVE ordinals(value) AS (
+         VALUES(1)
+         UNION ALL SELECT value + 1 FROM ordinals WHERE value < 5001
+       ), source AS MATERIALIZED (
+         SELECT * FROM project_library_chunks WHERE source_id = 'chapter-2' AND ordinal = 0
+       )
+       INSERT INTO project_library_chunks
        (id, project_id, source_type, source_id, document_id, version_id, status, kind,
         scope_type, scope_id, title, ordinal, start_offset, end_offset, content_text,
         content_hash, character_count, created_at, updated_at)
-       SELECT ?, project_id, source_type, source_id, document_id, version_id, status, kind,
-              scope_type, scope_id, title, ?, start_offset, end_offset, content_text,
+       SELECT 'newer-chunk-' || value, project_id, source_type, source_id, document_id, version_id, status, kind,
+              scope_type, scope_id, title, value, start_offset, end_offset, content_text,
               content_hash, character_count, created_at, updated_at
-       FROM project_library_chunks WHERE source_id = 'chapter-2' AND ordinal = 0`,
+       FROM source CROSS JOIN ordinals`,
     );
-    database.transaction(() => {
-      for (let ordinal = 1; ordinal <= 5001; ordinal += 1) {
-        duplicate.run(`newer-chunk-${ordinal}`, ordinal);
-      }
-    })();
+    // Read the seed once instead of rescanning the growing table for every inserted row.
+    expect(duplicate.run().changes).toBe(5001);
 
     const first = searchProjectLibraryChunksPage(database, {
       projectId: 'project',

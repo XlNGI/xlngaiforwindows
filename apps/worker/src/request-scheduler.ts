@@ -11,6 +11,7 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'task.schedule.get',
   'task.schedule.events',
   'scene.media.resolve',
+  'asset.thumbnail',
   'characterVoice.list',
   'characterVoiceReference.list',
   'audio.list',
