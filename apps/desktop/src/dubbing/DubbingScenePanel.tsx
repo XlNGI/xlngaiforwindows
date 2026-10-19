@@ -337,7 +337,10 @@ function DubbingSceneContent({
   };
   const selectedVideo = videos.find((item) => item.id === videoId);
   return (
-    <section className="dubbing-panel" aria-label="场次配音">
+    <section
+      className={`dubbing-panel scene-dubbing-panel${expanded ? ' is-expanded' : ''}`}
+      aria-label="场次配音"
+    >
       <div className="dubbing-heading">
         <div>
           <h2>场次配音</h2>

@@ -1,5 +1,5 @@
 import { Aperture, ChevronRight, Clapperboard, Plus } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { SceneInfo, ShotInfo } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
 
@@ -73,9 +73,17 @@ function SceneEntry({
   const [loaded, setLoaded] = useState<ShotInfo[]>();
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
+  const titleSelection = useRef(false);
+  const shotsId = useId();
   useEffect(() => {
-    if (selected) setExpanded(true);
-  }, [selected]);
+    if (!selected) return;
+    if (titleSelection.current && !shotId) {
+      titleSelection.current = false;
+      return;
+    }
+    titleSelection.current = false;
+    setExpanded(true);
+  }, [selected, shotId]);
   useEffect(() => {
     if (!expanded || selected) return;
     let active = true;
@@ -101,7 +109,8 @@ function SceneEntry({
           type="button"
           aria-label={`${expanded ? '收起' : '展开'}${scene.title}`}
           aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
+          aria-controls={shotsId}
+          onClick={() => setExpanded((open) => !open)}
         >
           <ChevronRight size={13} />
         </button>
@@ -110,9 +119,14 @@ function SceneEntry({
           type="button"
           title={scene.title}
           aria-current={selected && !shotId ? 'page' : undefined}
+          aria-expanded={expanded}
+          aria-controls={shotsId}
           onClick={() => {
-            setExpanded(true);
-            onSelectScene(scene);
+            setExpanded((open) => !open);
+            if (!selected || shotId) {
+              titleSelection.current = true;
+              onSelectScene(scene);
+            }
           }}
         >
           <Clapperboard size={13} />
@@ -120,7 +134,7 @@ function SceneEntry({
         </button>
       </div>
       {expanded && (
-        <div className="scene-directory-shots" aria-label={`${scene.title}的镜头`}>
+        <div id={shotsId} className="scene-directory-shots" aria-label={`${scene.title}的镜头`}>
           {items?.map((shot) => (
             <button
               key={shot.id}

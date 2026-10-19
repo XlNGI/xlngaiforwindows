@@ -56,6 +56,8 @@ export function SceneCastEditor({
   onAudioImported,
   children,
   actions,
+  scopeNote = '本场绑定供同场镜头共用。图片可拖入或选择。',
+  sceneLabel,
 }: {
   projectId: string;
   characters: SceneCharacterBindingInfo[];
@@ -72,6 +74,8 @@ export function SceneCastEditor({
   onAudioImported: (audio: AudioFileInfo) => void;
   children?: ReactNode;
   actions?: ReactNode;
+  scopeNote?: string;
+  sceneLabel?: string;
 }) {
   const callWorker = projectWorker();
   const [selected, setSelected] = useState('');
@@ -133,8 +137,13 @@ export function SceneCastEditor({
     <section className="scene-material-panel shot-reference-panel" aria-label="参考资料">
       <div className="scene-prompt-heading">
         <div>
-          <h2>参考资料</h2>
-          <p>角色与场景统一在此关联；可拖入或选择参考图。角色默认图片和声音可单独调整。</p>
+          <div className="workspace-section-heading">
+            <h2>角色与场景绑定</h2>
+            <span className="workspace-count">
+              {characters.length} 位角色 · {sceneLabel ? `场景：${sceneLabel}` : '场景未绑定'}
+            </span>
+          </div>
+          <p className="workspace-hint">{scopeNote}</p>
         </div>
         {actions}
       </div>
@@ -243,7 +252,7 @@ export function SceneCastEditor({
                     })
                   }
                 >
-                  <option value="default">使用角色默认参考图</option>
+                  <option value="default">角色默认图</option>
                   <option value="none">不使用参考图</option>
                   {character.imageAssetId && !image && (
                     <option value={character.imageAssetId}>原参考图不可用</option>
@@ -258,7 +267,7 @@ export function SceneCastEditor({
             >
               {document?.lifecycleStatus === 'archived' && <small>角色已归档，请调整绑定。</small>}
               <label>
-                声音样本
+                声音参考
                 <select
                   aria-label={`${name}声音样本`}
                   value={
@@ -276,7 +285,7 @@ export function SceneCastEditor({
                     })
                   }
                 >
-                  <option value="default">使用角色默认声音</option>
+                  <option value="default">角色默认声音</option>
                   <option value="none">不使用声音参考</option>
                   {stale && (
                     <option value={character.voiceReferenceVersionId}>
@@ -293,7 +302,6 @@ export function SceneCastEditor({
               {stale && (
                 <small role="status">声音样本已更新，重新选择后再生成；已保存任务不受影响。</small>
               )}
-              {!voice && !mediaLoading && <small>可在角色资料中导入声音样本。</small>}
               {selectedVoice && (
                 <AudioPreview projectId={projectId} audioId={selectedVoice.audioId} />
               )}
@@ -316,41 +324,44 @@ export function SceneCastEditor({
         })}
         {children}
       </div>
-      <label className="scene-dialogue-picker">
-        本场完整对白
-        <select
-          aria-label="场次完整对白音频"
-          value={dialogueAudioId ?? ''}
-          disabled={!writable}
-          onChange={(event) => onDialogueChange(event.target.value || undefined)}
+      <details className="workspace-extra scene-dialogue-settings" open={Boolean(dialogueAudioId)}>
+        <summary>完整对白{dialogueAudioId ? ' · 已绑定' : ' · 可选'}</summary>
+        <label className="scene-dialogue-picker">
+          本场完整对白
+          <select
+            aria-label="场次完整对白音频"
+            value={dialogueAudioId ?? ''}
+            disabled={!writable}
+            onChange={(event) => onDialogueChange(event.target.value || undefined)}
+          >
+            <option value="">不绑定完整对白</option>
+            {dialogueAudioId && !audios.some((audio) => audio.id === dialogueAudioId) && (
+              <option value={dialogueAudioId}>原对白音频不可用</option>
+            )}
+            {audios
+              .filter(
+                (audio) =>
+                  audio.kind !== 'reference' && !audio.deletedAt && audio.projectId === projectId,
+              )
+              .map((audio) => (
+                <option key={audio.id} value={audio.id}>
+                  {audio.name} · {(audio.durationMs / 1000).toFixed(1)} 秒
+                </option>
+              ))}
+          </select>
+        </label>
+        <button
+          className="button secondary"
+          type="button"
+          disabled={!writable || importing}
+          onClick={() => void importDialogue()}
         >
-          <option value="">不绑定完整对白</option>
-          {dialogueAudioId && !audios.some((audio) => audio.id === dialogueAudioId) && (
-            <option value={dialogueAudioId}>原对白音频不可用</option>
-          )}
-          {audios
-            .filter(
-              (audio) =>
-                audio.kind !== 'reference' && !audio.deletedAt && audio.projectId === projectId,
-            )
-            .map((audio) => (
-              <option key={audio.id} value={audio.id}>
-                {audio.name} · {(audio.durationMs / 1000).toFixed(1)} 秒
-              </option>
-            ))}
-        </select>
-      </label>
-      <button
-        className="button secondary"
-        type="button"
-        disabled={!writable || importing}
-        onClick={() => void importDialogue()}
-      >
-        {importing ? '正在导入…' : '导入完整对白'}
-      </button>
-      {message && <p role="status">{message}</p>}
-      <p>完整对白用于支持音频驱动的模型；声音样本用于参考音色。可在场次配音中导入或制作对白。</p>
-      <AudioPreview projectId={projectId} audioId={dialogueAudioId} />
+          {importing ? '正在导入…' : '导入完整对白'}
+        </button>
+        {message && <p role="status">{message}</p>}
+        <p className="workspace-hint">绑定完整录音，用于音频驱动画面。</p>
+        <AudioPreview projectId={projectId} audioId={dialogueAudioId} />
+      </details>
     </section>
   );
 }

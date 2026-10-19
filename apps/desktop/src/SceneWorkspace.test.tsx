@@ -107,9 +107,10 @@ describe('scene cast bindings', () => {
       />,
     );
     expect(await screen.findByRole('img', { name: 'courtyard.png' })).toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { name: '参考资料' })).toHaveLength(1);
+    expect(screen.getAllByRole('heading', { name: '角色与场景绑定' })).toHaveLength(1);
     expect(screen.getByLabelText('场次绑定场景')).toHaveValue(location.id);
-    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
+    expect(screen.getByText('0 位角色 · 场景：庭院')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
     expect(p.onSave).toHaveBeenCalledWith(
       p.prompt,
       [
@@ -275,9 +276,7 @@ describe('scene cast bindings', () => {
         voiceVersionIds: [],
       }),
     );
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: '让助手关联角色与场景' })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole('button', { name: '助手关联' })).toBeEnabled());
     fireEvent.change(screen.getByLabelText('选择出场角色'), { target: { value: 'actor' } });
     fireEvent.click(screen.getByRole('button', { name: '添加角色' }));
     await waitFor(() => expect(screen.getByLabelText('林澈声音样本')).toHaveValue('default'));
@@ -331,10 +330,10 @@ describe('scene cast bindings', () => {
     mockWorker();
     const p = props();
     render(<SceneWorkspace {...p} prompt="林澈转身，[角色:林澈]看向他。" />);
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: '让助手关联角色与场景' })).toBeEnabled(),
-    );
-    fireEvent.click(screen.getByRole('button', { name: '让助手关联角色与场景' }));
+    expect(screen.getByRole('heading', { name: '场次提示词' })).toBeVisible();
+    expect(screen.getAllByRole('button', { name: '助手关联' })).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole('button', { name: '助手关联' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '助手关联' }));
     expect(p.onRequestBindings).toHaveBeenCalledOnce();
     expect(screen.queryByLabelText('林澈角色参考图')).not.toBeInTheDocument();
     expect(vi.mocked(callWorker).mock.calls.some(([method]) => method === 'asset.list')).toBe(
@@ -378,7 +377,7 @@ describe('scene cast bindings', () => {
     expect(screen.getByLabelText('林澈角色参考图')).toBeDisabled();
     expect(screen.getByLabelText('场次完整对白音频')).toBeDisabled();
     expect(screen.getByRole('button', { name: '移除林澈' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '重新交给助手关联' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '助手关联' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '保存提示词' })).toBeDisabled();
   });
 });

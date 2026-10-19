@@ -228,6 +228,31 @@ describe('NovelWorkspace', () => {
     );
   });
 
+  it('toggles export options from the same button without clearing settings or starting export', async () => {
+    mockWorker((method) => {
+      if (method === 'novel.chapter.list') return [chapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get') return documentDetail();
+      return {};
+    });
+    render(<NovelWorkspace projectId="project-1" writable />);
+    await screen.findByLabelText('章节内容');
+    const toggle = screen.getByRole('button', { name: /导出 Markdown/ });
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByLabelText('导出范围'), { target: { value: 'selection' } });
+    fireEvent.change(screen.getByLabelText('文件组织'), { target: { value: 'merged' } });
+    fireEvent.click(screen.getByLabelText('包含草稿'));
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('region', { name: '小说导出选项' })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByLabelText('导出范围')).toHaveValue('selection');
+    expect(screen.getByLabelText('文件组织')).toHaveValue('merged');
+    expect(screen.getByLabelText('包含草稿')).toBeChecked();
+    expect(callWorker).not.toHaveBeenCalledWith('novel.export.start', expect.anything());
+  });
+
   it('selects chapters without opening them and exports only the selected saved drafts as merged Markdown', async () => {
     const second = { ...chapter, id: 'chapter-2', documentId: 'document-2', title: 'Second' };
     mockWorker((method) => {

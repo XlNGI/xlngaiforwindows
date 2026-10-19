@@ -3135,8 +3135,30 @@ describe('App', () => {
       if (method === 'document.list') return Promise.resolve([character]);
       if (method === 'document.get') return Promise.resolve(character);
       if (method === 'document.versions') return Promise.resolve([]);
-      if (method === 'scene.list') return Promise.resolve([]);
-      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'scene.list')
+        return Promise.resolve([
+          {
+            id: 'bound-scene',
+            projectId: 'project',
+            title: '第1场 · 灯塔',
+            position: 0,
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+            characterBindings: [{ characterDocumentId: character.id }],
+          },
+          {
+            id: 'unbound-scene',
+            projectId: 'project',
+            title: '未关联的场次',
+            position: 1,
+            rowVersion: 1,
+            createdAt: 'now',
+            updatedAt: 'now',
+            characterBindings: [{ characterDocumentId: 'same-name-other-id' }],
+          },
+        ]);
+      if (method === 'asset.list' || method === 'shot.list') return Promise.resolve([]);
       if (method === 'constraint.list')
         return Promise.resolve([
           {
@@ -3183,7 +3205,12 @@ describe('App', () => {
     const { container } = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
     fireEvent.click(await screen.findByText('角色设定'));
-    expect(await screen.findByRole('heading', { name: '提示词' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '角色生图提示词' })).toBeInTheDocument();
+    const sceneBindings = screen.getByRole('region', { name: '场次绑定' });
+    expect(within(sceneBindings).getByRole('button', { name: '第1场 · 灯塔' })).toBeInTheDocument();
+    expect(
+      within(sceneBindings).queryByRole('button', { name: '未关联的场次' }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '已生成图片' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成角色图' })).toBeInTheDocument();
     expect(screen.queryByText('约束条件')).not.toBeInTheDocument();
@@ -3342,7 +3369,8 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /场次与镜头/ }));
     fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
     expect(await screen.findByRole('heading', { name: '镜头提示词' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '参考资料' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '角色与场景绑定' })).toBeInTheDocument();
+    fireEvent.click(screen.getByText('分镜说明 · 已保存'));
     expect(screen.getByRole('heading', { name: '分镜说明' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成本镜画面' })).toBeInTheDocument();
     expect(await screen.findByLabelText('分镜标题')).toHaveValue('镜头一分镜');

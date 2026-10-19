@@ -3982,6 +3982,17 @@ export function App() {
         currentVersionId={document?.currentVersionId}
         message={contentMessage}
         assets={linkedAssets}
+        boundScenes={scenes.filter((item) =>
+          documentKind === 'scene'
+            ? item.sceneDocumentId === document?.id && Boolean(document?.id)
+            : item.characterBindings?.some(
+                (binding) => binding.characterDocumentId === document?.id,
+              ),
+        )}
+        onOpenScene={(id) => {
+          const target = scenes.find((item) => item.id === id);
+          if (target) void selectScene(target);
+        }}
         onTitleChange={setDocumentTitle}
         onKindChange={setDocumentKind}
         onContentChange={setDocumentContent}
@@ -4604,7 +4615,7 @@ export function App() {
                       : '剧本草稿',
                   view === 'characters' ? '角色与场景' : '剧本编辑器',
                   view === 'characters'
-                    ? { compact: true, showImport: false, showNew: false }
+                    ? { compact: true, showImport: false, showNew: false, showHeading: false }
                     : undefined,
                 )}
                 {project ? (

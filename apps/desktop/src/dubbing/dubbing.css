@@ -26,9 +26,6 @@
 .character-scene-workspace.has-voice-profile .character-scene-prompt {
   flex: 0 0 auto;
 }
-.character-scene-workspace.has-voice-profile .character-scene-prompt-editor {
-  min-height: 150px;
-}
 .dubbing-heading,
 .dubbing-actions {
   display: flex;
@@ -173,6 +170,24 @@
 }
 .dubbing-panel .button.secondary {
   display: inline-flex;
+}
+
+.scene-workspace .scene-dubbing-panel:not(.is-expanded) {
+  padding: 12px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+}
+
+.scene-workspace .scene-dubbing-panel:not(.is-expanded) .dubbing-heading p {
+  display: none;
+}
+
+.scene-workspace .scene-dubbing-panel:not(.is-expanded) .dubbing-heading h2 {
+  font-size: calc(11px * var(--ui-font-scale));
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 @media (max-width: 600px) {
   .dubbing-panel {

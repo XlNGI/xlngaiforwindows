@@ -210,7 +210,7 @@ describe('ShotWorkspace', () => {
     });
     expect(await screen.findByRole('img', { name: 'lin.png' })).toBeInTheDocument();
     expect(await screen.findByRole('img', { name: 'other.png' })).toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { name: '参考资料' })).toHaveLength(1);
+    expect(screen.getAllByRole('heading', { name: '角色与场景绑定' })).toHaveLength(1);
     expect(screen.queryByLabelText('角色参考')).not.toBeInTheDocument();
     expect(screen.getByLabelText('场景参考')).toHaveValue(savedImage.id);
     fireEvent.click(screen.getByRole('button', { name: '用参考图生成视频' }));

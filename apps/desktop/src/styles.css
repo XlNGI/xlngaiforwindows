@@ -2519,16 +2519,16 @@ button {
 .character-scene-workspace {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 20px;
   min-height: 0;
   flex: 1;
-  padding: 4px 18px 14px;
-  overflow: hidden;
+  padding: 12px 18px 18px;
+  overflow: auto;
 }
 
 .character-scene-prompt {
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
@@ -2736,12 +2736,12 @@ button {
   scrollbar-gutter: stable;
 }
 
-.character-scene-workspace .character-scene-prompt-editor {
-  min-height: 96px;
-}
-
+.character-scene-workspace .character-scene-prompt-editor,
+.scene-workspace .scene-video-prompt-editor,
 .shot-workspace .shot-prompt-editor {
-  min-height: 110px;
+  flex: none;
+  min-height: 320px;
+  resize: vertical;
 }
 
 .script-workspace .script-document-editor {
@@ -3989,6 +3989,7 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .shot-prompt-heading h2,
@@ -4011,11 +4012,7 @@ button {
 .shot-status {
   color: var(--text-muted);
   font-size: calc(11px * var(--ui-font-scale));
-  white-space: nowrap;
-}
-
-.shot-prompt-editor {
-  min-height: 110px;
+  white-space: normal;
 }
 
 .shot-prompt-actions,
@@ -4027,7 +4024,7 @@ button {
 
 .shot-reference-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
   align-items: start;
   gap: 10px;
 }
@@ -4073,22 +4070,19 @@ button {
   gap: 8px;
 }
 
+.reference-card-controls label,
+.reference-card-controls small {
+  color: var(--text-muted);
+  font-size: calc(10px * var(--ui-font-scale));
+  line-height: 1.5;
+}
+
 .reference-card-controls audio {
   width: 100%;
   min-width: 0;
 }
 .shot-reference-panel {
   container: references / inline-size;
-}
-@container references (max-width: 720px) {
-  .shot-reference-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-@container references (max-width: 440px) {
-  .shot-reference-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 .scene-directory-row {
@@ -4131,8 +4125,9 @@ button {
 }
 
 .reference-card-title {
+  color: var(--text-strong);
   overflow: hidden;
-  font-size: calc(12px * var(--ui-font-scale));
+  font-size: calc(11px * var(--ui-font-scale));
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -9457,8 +9452,9 @@ button {
   min-height: 0;
   overflow: auto;
   align-content: start;
-  gap: 12px;
+  gap: 20px;
   min-width: 0;
+  padding: 14px 18px 18px;
 }
 .scene-workspace .button.secondary {
   display: inline-flex;
@@ -9469,9 +9465,9 @@ button {
 }
 .scene-prompt-panel,
 .scene-material-panel {
-  padding: 16px;
-  border: 1px solid var(--border, #30343a);
-  background: var(--panel, #1d2024);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 .scene-prompt-heading {
   display: flex;
@@ -9479,17 +9475,32 @@ button {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.scene-prompt-heading > :first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.scene-prompt-heading .binding-actions,
+.scene-prompt-heading > .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .scene-prompt-heading h1,
 .scene-prompt-heading h2 {
-  margin: 2px 0 0;
+  margin: 0;
+  font-size: calc(13px * var(--ui-font-scale));
+  font-weight: 600;
 }
 .scene-prompt-heading p {
   margin: 4px 0 0;
-  color: var(--muted, #9ca3af);
+  color: var(--text-muted);
+  font-size: calc(11px * var(--ui-font-scale));
+  line-height: 1.5;
 }
 .scene-video-prompt-editor {
-  min-height: 260px;
   width: 100%;
 }
 .scene-material-grid {
@@ -9524,11 +9535,93 @@ button {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 4px;
 }
 .scene-cast-add select {
   flex: 1;
   min-width: 0;
+}
+
+.workspace-section-heading,
+.binding-actions,
+.bound-scene-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workspace-section-heading h2 {
+  margin: 0;
+  font-size: calc(13px * var(--ui-font-scale));
+  font-weight: 600;
+}
+
+.workspace-count {
+  color: var(--text-muted);
+  font-size: calc(10px * var(--ui-font-scale));
+}
+
+.workspace-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--ui-font-scale));
+  line-height: 1.6;
+}
+
+.character-scene-bindings {
+  display: grid;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.bound-scene-links .button {
+  min-width: 0;
+  max-width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.workspace-extra {
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  font-size: calc(11px * var(--ui-font-scale));
+}
+
+.workspace-extra > summary {
+  padding: 12px 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.workspace-extra[open] > :not(summary) {
+  margin-top: 8px;
+}
+
+.scene-dialogue-settings > .button {
+  margin-top: 10px;
+}
+
+.scene-dialogue-settings .scene-dialogue-picker {
+  margin-top: 0;
+}
+
+.scene-cast-add select,
+.scene-dialogue-picker select {
+  height: 34px;
+  padding: 0 8px;
+  color: var(--text-default);
+  background: var(--input-bg);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  font-size: calc(11px * var(--ui-font-scale));
+}
+
+.scene-dialogue-picker {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--ui-font-scale));
 }
 .scene-material-card {
   min-width: 0;

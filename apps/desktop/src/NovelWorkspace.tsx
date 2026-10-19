@@ -526,10 +526,8 @@ function NovelProjectWorkspace({
           type="button"
           disabled={exportBusy || !projectId || !writable || activeChapters.length === 0}
           aria-expanded={exportOpen}
-          onClick={() => {
-            setExportScope(selectedExportIds.length > 0 ? 'selection' : 'work');
-            setExportOpen(true);
-          }}
+          aria-controls="novel-export-options"
+          onClick={() => setExportOpen((open) => !open)}
         >
           <BookOpen size={13} /> 导出 Markdown
         </button>
@@ -552,7 +550,7 @@ function NovelProjectWorkspace({
         {message && <span className="inline-status">{message}</span>}
       </header>
       {exportOpen && (
-        <section className="novel-export-panel" aria-label="小说导出选项">
+        <section id="novel-export-options" className="novel-export-panel" aria-label="小说导出选项">
           <div className="novel-export-heading">
             <strong>导出 Markdown</strong>
             <button

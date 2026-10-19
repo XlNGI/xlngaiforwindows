@@ -399,8 +399,8 @@ function ShotWorkspaceContent({
           <div>
             <h2 id="shot-prompt-heading">{'\u955c\u5934\u63d0\u793a\u8bcd'}</h2>
           </div>
-          <span className="shot-status">
-            {`${shotTitle} · ${shotStatus} · #${shotPosition + 1}`}
+          <span className="shot-status" title={shotTitle}>
+            {`镜头 ${shotPosition + 1} · ${shotStatus === 'draft' ? '草稿' : shotStatus === 'published' ? '已发布' : shotStatus === 'ready' ? '就绪' : shotStatus}`}
           </span>
         </div>
         <textarea
@@ -447,42 +447,6 @@ function ShotWorkspaceContent({
         </div>
       </section>
       {referenceMessage && <p role="status">{referenceMessage}</p>}
-      {projectId && (
-        <ShotContinuityPanel
-          projectId={projectId}
-          shotId={shotId}
-          writable={writable && !saving}
-          sourceDirty={continuitySourceDirty}
-          revision={continuityRefresh}
-          assets={availableAssets}
-          llm={llm}
-          onChange={(next) => {
-            setContinuity(next);
-            setRefs((current) => {
-              if (!next.binding && !continuity?.binding) return current;
-              const updated = { ...current, firstFrameAssetId: next.binding?.firstFrameAssetId };
-              saveShotReferences(projectId, shotId, updated);
-              return updated;
-            });
-          }}
-          onGenerate={(mode, next) => {
-            const selected = {
-              ...effectiveRefs,
-              continuityRowVersion: next.rowVersion,
-              continuityPrompt:
-                mode === 'image' ? next.binding?.imagePrompt : next.binding?.videoPrompt,
-              firstFrameAssetId: next.binding?.firstFrameAssetId,
-              ...(mode === 'image'
-                ? {
-                    continuityReferenceAssetIds: next.binding?.frames.map((frame) => frame.assetId),
-                  }
-                : {}),
-            };
-            if (mode === 'image') onGenerateImage(selected);
-            else onGenerateVideo(selected);
-          }}
-        />
-      )}
       {characters.length > 0 && castMedia.error && (
         <p role="status">
           {castMedia.error}{' '}
@@ -500,6 +464,16 @@ function ShotWorkspaceContent({
           voices={castMedia.value?.voices ?? []}
           defaults={castMedia.value?.characters ?? []}
           mediaLoading={castMedia.loading}
+          sceneLabel={
+            sceneDocumentId
+              ? (documents.find((item) => item.id === sceneDocumentId)?.title ?? '资料不可用')
+              : undefined
+          }
+          scopeNote={
+            scene
+              ? `沿用「${scene.title}」的角色与场景；修改角色绑定会同步到同场镜头。`
+              : '选择本镜使用的角色、场景与首帧。'
+          }
           audios={audios}
           dialogueAudioId={dialogueAudioId}
           writable={writable && !saving}
@@ -515,7 +489,7 @@ function ShotWorkspaceContent({
               disabled={!writable || saving}
               onClick={() => void saveReferences()}
             >
-              保存参考资料
+              保存绑定
             </button>
           }
         >
@@ -577,45 +551,88 @@ function ShotWorkspaceContent({
           </div>
         </section>
       ) : null}
-      <section className="shot-notes-panel" aria-labelledby="shot-notes-heading">
-        <h2 id="shot-notes-heading">{'\u5206\u955c\u8bf4\u660e'}</h2>
-        <p>
-          {
-            '\u53ef\u9009\u957f\u6587\uff0c\u53ea\u7559\u7ed9\u4eba\u770b\uff0c\u4e0d\u4f1a\u53d1\u7ed9\u751f\u56fe\u6216\u751f\u89c6\u9891\u5382\u5546\u3002'
-          }
-        </p>
-        <label className="title-field">
-          {'\u5206\u955c\u6807\u9898'}
-          <input
-            value={storyboardTitle}
-            onChange={(event) => onStoryboardTitleChange(event.target.value)}
-            placeholder={'\u8f93\u5165\u5206\u955c\u6807\u9898'}
+      {projectId && (
+        <details
+          className="workspace-extra shot-continuity-extra"
+          open={Boolean(continuity?.stale)}
+        >
+          <summary>镜头衔接{continuity?.binding ? ' · 已绑定' : ''}</summary>
+          <ShotContinuityPanel
+            projectId={projectId}
+            shotId={shotId}
+            writable={writable && !saving}
+            sourceDirty={continuitySourceDirty}
+            revision={continuityRefresh}
+            assets={availableAssets}
+            llm={llm}
+            onChange={(next) => {
+              setContinuity(next);
+              setRefs((current) => {
+                if (!next.binding && !continuity?.binding) return current;
+                const updated = { ...current, firstFrameAssetId: next.binding?.firstFrameAssetId };
+                saveShotReferences(projectId, shotId, updated);
+                return updated;
+              });
+            }}
+            onGenerate={(mode, next) => {
+              const selected = {
+                ...effectiveRefs,
+                continuityRowVersion: next.rowVersion,
+                continuityPrompt:
+                  mode === 'image' ? next.binding?.imagePrompt : next.binding?.videoPrompt,
+                firstFrameAssetId: next.binding?.firstFrameAssetId,
+                ...(mode === 'image'
+                  ? {
+                      continuityReferenceAssetIds: next.binding?.frames.map(
+                        (frame) => frame.assetId,
+                      ),
+                    }
+                  : {}),
+              };
+              if (mode === 'image') onGenerateImage(selected);
+              else onGenerateVideo(selected);
+            }}
+          />
+        </details>
+      )}
+      <details className="workspace-extra shot-notes-extra">
+        <summary>分镜说明{hasStoryboard ? ' · 已保存' : ' · 可选'}</summary>
+        <section className="shot-notes-panel" aria-labelledby="shot-notes-heading">
+          <h2 id="shot-notes-heading">{'\u5206\u955c\u8bf4\u660e'}</h2>
+          <p>补充给创作者看的分镜笔记。</p>
+          <label className="title-field">
+            {'\u5206\u955c\u6807\u9898'}
+            <input
+              value={storyboardTitle}
+              onChange={(event) => onStoryboardTitleChange(event.target.value)}
+              placeholder={'\u8f93\u5165\u5206\u955c\u6807\u9898'}
+              readOnly={!writable || storyboardBusy}
+            />
+          </label>
+          <textarea
+            className="markdown-editor"
+            aria-label={'\u5206\u955c\u5185\u5bb9'}
+            value={storyboardContent}
+            onChange={(event) => onStoryboardContentChange(event.target.value)}
+            placeholder={'# \u5206\u955c\n\n1. \u955c\u5934\u63cf\u8ff0\u2026'}
             readOnly={!writable || storyboardBusy}
           />
-        </label>
-        <textarea
-          className="markdown-editor"
-          aria-label={'\u5206\u955c\u5185\u5bb9'}
-          value={storyboardContent}
-          onChange={(event) => onStoryboardContentChange(event.target.value)}
-          placeholder={'# \u5206\u955c\n\n1. \u955c\u5934\u63cf\u8ff0\u2026'}
-          readOnly={!writable || storyboardBusy}
-        />
-        <div className="toolbar-actions">
-          <button
-            className="button primary"
-            type="button"
-            disabled={!writable || storyboardBusy}
-            onClick={onSaveStoryboard}
-          >
-            <Save size={13} />
-            {hasStoryboard ? '\u4fdd\u5b58\u5206\u955c' : '\u65b0\u5efa\u5206\u955c'}
-          </button>
-          {storyboardBusy ? (
-            <span className="inline-status">{'\u4fdd\u5b58\u4e2d\u2026'}</span>
-          ) : null}
-        </div>
-      </section>
+          <div className="toolbar-actions">
+            <button
+              className="button primary"
+              type="button"
+              disabled={!writable || storyboardBusy}
+              onClick={onSaveStoryboard}
+            >
+              <Save size={13} />
+              {hasStoryboard ? '\u4fdd\u5b58\u5206\u955c' : '\u65b0\u5efa\u5206\u955c'}
+            </button>
+            {storyboardBusy ? (
+              <span className="inline-status">{'\u4fdd\u5b58\u4e2d\u2026'}</span>
+            ) : null}
+          </div>
+        </section>
+      </details>
     </div>
   );
 }

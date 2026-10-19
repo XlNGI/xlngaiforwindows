@@ -319,6 +319,12 @@ describe('ModelManagementView', () => {
     fireEvent.click(screen.getByRole('button', { name: /手动添加/ }));
     fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'relay-model' } });
     fireEvent.click(screen.getByRole('checkbox', { name: '文本' }));
+    fireEvent.click(screen.getByRole('button', { name: /手动添加/ }));
+    expect(screen.queryByLabelText('模型 ID')).not.toBeInTheDocument();
+    expect(onCreate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /手动添加/ }));
+    expect(screen.getByLabelText('模型 ID')).toHaveValue('relay-model');
+    expect(screen.getByRole('checkbox', { name: '文本' })).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: '添加模型' }));
 
     await waitFor(() =>

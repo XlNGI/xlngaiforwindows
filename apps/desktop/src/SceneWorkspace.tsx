@@ -197,20 +197,9 @@ function SceneWorkspaceContent({
       <section className="scene-prompt-panel">
         <div className="scene-prompt-heading">
           <div>
-            <span className="eyebrow">场次 · {scene.title}</span>
-            <h1>完整视频提示词</h1>
+            <h2>场次提示词</h2>
           </div>
           <div className="toolbar-actions">
-            <button
-              className="button secondary"
-              type="button"
-              disabled={!writable || !audioLoaded || !prompt.trim() || !onRequestBindings}
-              onClick={() =>
-                onRequestBindings?.(prompt, effectiveBindings, characters, dialogueAudioId)
-              }
-            >
-              让助手关联角色与场景
-            </button>
             <button
               className="button secondary"
               type="button"
@@ -271,6 +260,11 @@ function SceneWorkspaceContent({
           voices={media.value?.voices ?? []}
           defaults={media.value?.characters ?? []}
           mediaLoading={media.loading}
+          sceneLabel={
+            scene.sceneDocumentId
+              ? (documents.find((item) => item.id === scene.sceneDocumentId)?.title ?? '资料不可用')
+              : undefined
+          }
           audios={audios}
           dialogueAudioId={dialogueAudioId}
           writable={writable}
@@ -284,16 +278,27 @@ function SceneWorkspaceContent({
             setAudios((current) => [audio, ...current.filter((item) => item.id !== audio.id)])
           }
           actions={
-            <button
-              className="text-button"
-              type="button"
-              disabled={!writable || !prompt.trim() || !onRequestBindings}
-              onClick={() =>
-                onRequestBindings?.(prompt, effectiveBindings, characters, dialogueAudioId)
-              }
-            >
-              重新交给助手关联
-            </button>
+            <div className="binding-actions">
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!writable || !audioLoaded || !prompt.trim() || !onRequestBindings}
+                title="根据提示词关联角色与场景，审核后生效"
+                onClick={() =>
+                  onRequestBindings?.(prompt, effectiveBindings, characters, dialogueAudioId)
+                }
+              >
+                助手关联
+              </button>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={!writable}
+                onClick={() => onSave(prompt, effectiveBindings, characters, dialogueAudioId)}
+              >
+                保存绑定
+              </button>
+            </div>
           }
         >
           <SceneSettingCard

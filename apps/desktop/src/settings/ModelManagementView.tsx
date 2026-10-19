@@ -169,7 +169,13 @@ export function ModelManagementView({
             <RefreshCw size={14} />
             测试并同步
           </button>
-          <button className="button secondary" type="button" onClick={() => setManualOpen(true)}>
+          <button
+            className="button secondary"
+            type="button"
+            aria-expanded={manualOpen}
+            aria-controls="manual-model-form"
+            onClick={() => setManualOpen((open) => !open)}
+          >
             <Plus size={14} />
             手动添加
           </button>
@@ -177,7 +183,7 @@ export function ModelManagementView({
       </header>
 
       {manualOpen && (
-        <div className="manual-model-form">
+        <div id="manual-model-form" className="manual-model-form">
           <label>
             模型 ID
             <input

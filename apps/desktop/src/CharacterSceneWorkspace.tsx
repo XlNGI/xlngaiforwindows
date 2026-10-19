@@ -22,6 +22,8 @@ export function CharacterSceneWorkspace({
   onRestoreVersion,
   onGenerate,
   onOpenAsset,
+  boundScenes = [],
+  onOpenScene,
 }: {
   projectId?: string;
   documentId?: string;
@@ -41,6 +43,8 @@ export function CharacterSceneWorkspace({
   onRestoreVersion: (versionId: string) => void;
   onGenerate: () => void;
   onOpenAsset?: (assetId: string) => void;
+  boundScenes?: Array<{ id: string; title: string }>;
+  onOpenScene?: (sceneId: string) => void;
 }) {
   const generateLabel =
     kind === 'scene' ? '\u751f\u6210\u573a\u666f\u56fe' : '\u751f\u6210\u89d2\u8272\u56fe';
@@ -51,12 +55,9 @@ export function CharacterSceneWorkspace({
     >
       <section className="character-scene-prompt" aria-labelledby="character-scene-prompt-heading">
         <div className="character-scene-prompt-heading">
-          <h2 id="character-scene-prompt-heading">{'\u63d0\u793a\u8bcd'}</h2>
-          <p>
-            {
-              '\u7528\u4e8e\u751f\u6210\u53ef\u590d\u7528\u7684\u89d2\u8272\u6216\u573a\u666f\u56fe\u7247\uff0c\u4e0d\u4f1a\u76f4\u63a5\u62ff\u53bb\u6587\u751f\u89c6\u9891\u3002'
-            }
-          </p>
+          <h2 id="character-scene-prompt-heading">
+            {kind === 'scene' ? '场景生图提示词' : '角色生图提示词'}
+          </h2>
         </div>
         <div className="character-scene-identity">
           <label className="title-field">
@@ -101,9 +102,73 @@ export function CharacterSceneWorkspace({
           readOnly={!writable}
         />
         {message ? <div className="inline-status">{message}</div> : null}
-        {versions.length > 0 ? (
+      </section>
+      <section className="character-scene-bindings" aria-label="场次绑定">
+        <div className="workspace-section-heading">
+          <h2>场次绑定</h2>
+          <span className="workspace-count">{boundScenes.length} 场</span>
+        </div>
+        {boundScenes.length ? (
+          <div className="bound-scene-links">
+            {boundScenes.map((scene) => (
+              <button
+                key={scene.id}
+                type="button"
+                className="button secondary"
+                disabled={!onOpenScene}
+                onClick={() => onOpenScene?.(scene.id)}
+              >
+                {scene.title}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="workspace-hint">尚未绑定场次，可在“场次与镜头”中关联。</p>
+        )}
+      </section>
+      <section
+        className={`character-scene-gallery${assets.length === 0 ? ' is-empty' : ''}`}
+        aria-labelledby="character-scene-gallery-heading"
+      >
+        <div className="workspace-section-heading">
+          <h2 id="character-scene-gallery-heading">已生成图片</h2>
+          <span className="workspace-count">{assets.length} 张</span>
+        </div>
+        {assets.length === 0 ? (
+          <p className="character-scene-gallery-empty">生成图片后，可绑定到场次和镜头。</p>
+        ) : (
+          <ul className="character-scene-gallery-grid">
+            {assets.map((asset) => (
+              <li key={asset.id}>
+                <AssetImagePreview asset={asset} />
+                {onOpenAsset ? (
+                  <button
+                    className="image-library-link"
+                    type="button"
+                    onClick={() => onOpenAsset(asset.id)}
+                  >
+                    查看素材
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {kind === 'character' && projectId && documentId ? (
+        <details className="workspace-extra">
+          <summary>角色声音</summary>
+          <VoiceProfilePanel
+            projectId={projectId}
+            characterDocumentId={documentId}
+            writable={writable}
+          />
+        </details>
+      ) : null}
+      {versions.length > 0 ? (
+        <details className="workspace-extra">
+          <summary>历史版本 · {versions.length}</summary>
           <div className="version-strip">
-            <span>{'\u5386\u53f2\u7248\u672c'}</span>
             {versions.map((version) => (
               <button
                 type="button"
@@ -116,47 +181,8 @@ export function CharacterSceneWorkspace({
               </button>
             ))}
           </div>
-        ) : null}
-      </section>
-      {kind === 'character' && projectId && documentId ? (
-        <VoiceProfilePanel
-          projectId={projectId}
-          characterDocumentId={documentId}
-          writable={writable}
-        />
+        </details>
       ) : null}
-      <section
-        className={`character-scene-gallery${assets.length === 0 ? ' is-empty' : ''}`}
-        aria-labelledby="character-scene-gallery-heading"
-      >
-        <h2 id="character-scene-gallery-heading">{'\u5df2\u751f\u6210\u56fe\u7247'}</h2>
-        {assets.length === 0 ? (
-          <p className="character-scene-gallery-empty">
-            {
-              '\u8fd8\u6ca1\u6709\u8fd9\u4e2a\u5bf9\u8c61\u7684\u56fe\u7247\u3002\u7528\u4e0a\u9762\u7684\u63d0\u793a\u8bcd\u751f\u6210\u540e\uff0c\u4f1a\u6302\u56de\u8fd9\u4e00\u9875\u3002'
-            }
-          </p>
-        ) : (
-          <ul className="character-scene-gallery-grid">
-            {assets.map((asset) => {
-              return (
-                <li key={asset.id}>
-                  <AssetImagePreview asset={asset} />
-                  {onOpenAsset ? (
-                    <button
-                      className="image-library-link"
-                      type="button"
-                      onClick={() => onOpenAsset(asset.id)}
-                    >
-                      查看素材
-                    </button>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
     </div>
   );
 }

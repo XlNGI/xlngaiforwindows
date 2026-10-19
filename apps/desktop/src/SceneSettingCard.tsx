@@ -122,7 +122,7 @@ export function SceneSettingCard({
           disabled={!writable || busy}
           onChange={(event) => onSelectImage(event.target.value || undefined)}
         >
-          <option value="">{documentId && !canClear ? '使用场景默认参考图' : '未选择'}</option>
+          <option value="">{documentId && !canClear ? '场景默认图' : '未选择'}</option>
           {choices.map((a) => (
             <option key={a.id} value={a.id}>
               {referenceAssetName(a)}
@@ -133,7 +133,7 @@ export function SceneSettingCard({
     >
       {onBind && (
         <label>
-          关联场景
+          绑定场景
           <select
             aria-label="场次绑定场景"
             value={documentId ?? ''}

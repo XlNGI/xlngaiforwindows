@@ -248,10 +248,7 @@ export function ShotContinuityPanel(props: {
   return (
     <section className="shot-continuity-panel" aria-label="镜头衔接">
       <h2>镜头衔接</h2>
-      <p>
-        人工选择上一镜头画面，确认后由 LLM
-        生成下一镜头提示词。首帧约束视频起点，生成后仍需检查衔接。
-      </p>
+      <p>选择上一镜头画面作为首帧，确认后生成衔接提示词。</p>
       {props.sourceDirty && <p role="status">下一镜头内容有未保存修改，请先保存镜头提示词。</p>}
       {!context?.previousShot ? (
         <p>当前镜头没有同场次的上一镜头。</p>
