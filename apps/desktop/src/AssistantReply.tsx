@@ -15,7 +15,6 @@ export const AssistantReply = memo(function AssistantReply({
 }) {
   const latestContent = useRef(content);
   const [displayedContent, setDisplayedContent] = useState(content);
-  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     latestContent.current = content;
@@ -31,14 +30,9 @@ export const AssistantReply = memo(function AssistantReply({
 
   // Completion, cancellation and historical messages show the full snapshot immediately.
   const visibleContent = streaming ? displayedContent : content;
-  useEffect(() => {
-    if (!streaming) return;
-    const list = containerRef.current?.closest('.message-list');
-    if (list) list.scrollTop = list.scrollHeight;
-  }, [visibleContent, streaming]);
 
   return (
-    <div className="assistant-reply" ref={containerRef}>
+    <div className="assistant-reply">
       <ReactMarkdown
         remarkPlugins={markdownPlugins}
         skipHtml

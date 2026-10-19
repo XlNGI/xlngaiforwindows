@@ -6,6 +6,39 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
+import { renderProductionInstruction } from '../../../packages/contracts/dist/index.js';
+
+function productionInstruction(summary, shot = false) {
+  return {
+    version: 2,
+    summary,
+    narrative: { purpose: '展示信件线索' },
+    storyTime: { timeOfDay: '清晨' },
+    location: { description: summary },
+    visual: { style: '写实' },
+    subjects: [],
+    camera: { framing: '中景' },
+    ...(shot
+      ? {
+          stillFrame: summary,
+          timing: { estimatedDurationSeconds: 4, rationale: '停顿后发现线索' },
+        }
+      : {}),
+    beats: shot
+      ? [{ id: 'beat-1', action: '发现线索', dialogue: [], characterDocumentIds: [] }]
+      : [],
+    audio: { mode: 'silent' },
+    generation: {},
+    resources: [],
+    continuity: {
+      predecessors: [],
+      before: [],
+      after: [{ key: 'letter', value: 'visible' }],
+      locked: [],
+      constraints: [],
+    },
+  };
+}
 
 const repository = resolve('.');
 const Database = createRequire(join(repository, 'apps/worker/package.json'))('better-sqlite3');
@@ -302,20 +335,25 @@ try {
         assert.equal(courtyardSetting.status, 'draft_saved');
         assert.equal(studySetting.status, 'draft_saved');
         const sceneStructure = {
+          resolution: 'resolved',
           episodeTitle: '场次可见性验收',
           scenes: [
             {
               title: '庭院',
               sceneDocumentId: courtyardSetting.documentId,
+              characterDocumentIds: [],
+              instruction: productionInstruction('庭院'),
               shots: [
-                { title: '远景', prompt: '清晨的庭院' },
-                { title: '近景', prompt: '门上的霜' },
+                { title: '远景', instruction: productionInstruction('清晨的庭院', true) },
+                { title: '近景', instruction: productionInstruction('门上的霜', true) },
               ],
             },
             {
               title: '书房',
               sceneDocumentId: studySetting.documentId,
-              shots: [{ title: '信件特写', prompt: '桌上的信' }],
+              characterDocumentIds: [],
+              instruction: productionInstruction('书房'),
+              shots: [{ title: '信件特写', instruction: productionInstruction('桌上的信', true) }],
             },
           ],
         };
@@ -329,7 +367,11 @@ try {
           ...sceneStructure,
           resourceId: 'workspace:shots',
         });
-        assert.equal(structureProposal.status, 'scene_structure_proposed');
+        assert.equal(
+          structureProposal.status,
+          'scene_structure_proposed',
+          JSON.stringify(structureProposal),
+        );
         assert.equal(structureProposal.locator.workspace, 'shots');
         assert.equal(structureProposal.locator.changeSetId, structureProposal.changeSetId);
         assert.equal(structureProposal.applied, false);
@@ -373,7 +415,9 @@ try {
           const shots = await request('shot.list', { sceneId: parentScene.id });
           assert.deepEqual(
             shots.map((item) => item.prompt),
-            prompts,
+            prompts.map((prompt) =>
+              renderProductionInstruction(productionInstruction(prompt, true)),
+            ),
           );
         }
         await request('agent.providerStep.start', prepared.stream);

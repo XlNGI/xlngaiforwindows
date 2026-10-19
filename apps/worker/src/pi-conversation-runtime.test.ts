@@ -140,6 +140,7 @@ class FakePlanService {
 
 function fakeGateway(plans: FakePlanService): DomainToolGateway {
   return {
+    assertRepairBudget() {},
     tools(grants: ConversationTaskToolGrant[]) {
       return grants.map((item) => ({
         name: item.tool.name,
@@ -286,6 +287,16 @@ describe('PiConversationRuntime', () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
       fauxAssistantMessage(
+        [
+          fauxToolCall(
+            'tools.load',
+            { names: ['media.image.prepare', 'media.video.prepare'] },
+            { id: 'load' },
+          ),
+        ],
+        { stopReason: 'toolUse', responseId: 'load-response' },
+      ),
+      fauxAssistantMessage(
         [fauxToolCall('media.image.prepare', { prompt: 'Dragon' }, { id: 'image-call' })],
         { stopReason: 'toolUse', responseId: 'response-image' },
       ),
@@ -374,6 +385,16 @@ describe('PiConversationRuntime', () => {
         responseId: `response-${id}`,
       });
     faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall(
+            'tools.load',
+            { names: ['document.create_draft', 'media.image.prepare', 'media.video.prepare'] },
+            { id: 'load' },
+          ),
+        ],
+        { stopReason: 'toolUse', responseId: 'load-response' },
+      ),
       plannedCall('library.search', 'search', { query: '第一章', sourceTypes: ['novel-chapter'] }),
       plannedCall('library.read', 'read', { sourceHandle: 'chapter-source' }),
       plannedCall('media.image.prepare', 'image'),
@@ -464,13 +485,18 @@ describe('PiConversationRuntime', () => {
     const configured = (
       generation.configureAgentTools.mock.calls as unknown as Array<[unknown, LlmToolDefinition[]]>
     ).map(([, tools]) => tools.map((tool) => tool.name));
-    expect(configured[0]).toEqual(definitions.map((tool) => tool.name));
+    expect(configured[0]).toEqual(['library.search', 'library.read', 'tools.load']);
+    expect(configured[1]).toEqual(expect.arrayContaining(definitions.map((tool) => tool.name)));
     expect(generation.complete).toHaveBeenCalled();
   });
 
   it('executes a document tool and refreshes Worker authorizations for the next Pi turn', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall('tools.load', { names: ['document.create_draft'] }, { id: 'load' })],
+        { stopReason: 'toolUse', responseId: 'load-response' },
+      ),
       fauxAssistantMessage(
         [fauxToolCall('document.create_draft', { title: 'Draft' }, { id: 'document-call' })],
         { stopReason: 'toolUse', responseId: 'response-document' },
@@ -530,10 +556,10 @@ describe('PiConversationRuntime', () => {
         ],
       }),
     );
-    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(2);
+    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(3);
     expect(generation.configureAgentTools).toHaveBeenCalledWith(
       identity,
-      [],
+      [expect.objectContaining({ name: 'tools.load' })],
       expect.objectContaining({ protocol: 'openai-responses' }),
     );
     expect(generation.complete).toHaveBeenCalledOnce();
@@ -543,8 +569,16 @@ describe('PiConversationRuntime', () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
       fauxAssistantMessage(
+        [fauxToolCall('tools.load', { names: ['research.search'] }, { id: 'load' })],
+        { stopReason: 'toolUse', responseId: 'load-response' },
+      ),
+      fauxAssistantMessage(
         [fauxToolCall('research.search', { query: 'source' }, { id: 'search-call' })],
         { stopReason: 'toolUse', responseId: 'response-search' },
+      ),
+      fauxAssistantMessage(
+        [fauxToolCall('tools.load', { names: ['research.fetch'] }, { id: 'load-fetch' })],
+        { stopReason: 'toolUse', responseId: 'load-fetch-response' },
       ),
       fauxAssistantMessage(
         [fauxToolCall('research.fetch', { sourceHandle: 'source-1' }, { id: 'fetch-call' })],
@@ -604,13 +638,17 @@ describe('PiConversationRuntime', () => {
       name: 'research.fetch',
       authorizationHandle: 'fetch-authorization',
     });
-    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(3);
+    expect(providerTools.startProviderStep).toHaveBeenCalledTimes(5);
     expect(generation.complete).toHaveBeenCalledOnce();
   });
 
   it('exposes a pending Worker confirmation and resumes Pi only with the matching token', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall('tools.load', { names: ['document.archive'] }, { id: 'load' })],
+        { stopReason: 'toolUse', responseId: 'load-response' },
+      ),
       fauxAssistantMessage(
         [
           { type: 'text', text: 'I will archive the draft.' },
@@ -703,6 +741,10 @@ describe('PiConversationRuntime', () => {
   it('exposes a pending media selection and resumes the same Pi task with the matching token', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall('tools.load', { names: ['media.video.prepare'] }, { id: 'load' })],
+        { stopReason: 'toolUse', responseId: 'load-response' },
+      ),
       fauxAssistantMessage(
         [
           fauxToolCall(

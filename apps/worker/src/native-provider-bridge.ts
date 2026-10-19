@@ -17,6 +17,7 @@ import {
   type ToolCall,
   type Usage,
 } from '@earendil-works/pi-ai';
+import { randomUUID, createHash } from 'node:crypto';
 
 export interface JsonLineWritable {
   write(chunk: string, callback: (error?: Error | null) => void): boolean;
@@ -358,21 +359,71 @@ export type NativeProviderParamsResolver = (
 export function createPiStreamFunction(
   bridge: NativeProviderBridge,
   resolveParams: NativeProviderParamsResolver,
+  observe?: (requestId: string, stage: string, metadata: Record<string, unknown>) => void,
 ): StreamFunction {
   return (model, context, options) => {
     const stream = createAssistantMessageEventStream();
     const message = createAssistantMessage(model);
+    const requestId = randomUUID();
+    observe?.(requestId, 'preparing', {});
     stream.push({ type: 'start', partial: cloneMessage(message) });
     void Promise.resolve()
       .then(() => resolveParams(model, context, options))
       .then((params) => {
+        observe?.(requestId, 'dispatching', {
+          inputHash: createHash('sha256').update(JSON.stringify(params)).digest('hex'),
+          inputBytes: Buffer.byteLength(JSON.stringify(params)),
+          toolCount: params.tools?.length ?? 0,
+          inferenceSettings: params.inferenceSettings ?? {
+            reasoning: 'provider_default',
+            output: 'provider_default',
+          },
+        });
+        let terminalObserved = false;
         bridge.start(
           params,
-          { onEvent: (event) => applyPiEvent(stream, message, event) },
+          {
+            onEvent: (event) => {
+              if (terminalObserved) return;
+              applyPiEvent(stream, message, event);
+              if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+                terminalObserved = true;
+                observe?.(requestId, message.stopReason === 'aborted' ? 'cancelled' : 'failed', {
+                  errorCode:
+                    event.type === 'failed' ? event.error.code : 'INVALID_PROVIDER_RESPONSE',
+                });
+                return;
+              }
+              if (event.type === 'request_progress')
+                observe?.(requestId, event.stage, {
+                  argumentBytes: event.argumentBytes,
+                  toolName: event.toolName,
+                  receivedBytes: event.receivedBytes,
+                  requestBodyHash: event.requestBodyHash,
+                  requestBodyBytes: event.requestBodyBytes,
+                });
+              else if (event.type === 'text_delta' || event.type === 'thinking_delta')
+                observe?.(requestId, event.type === 'text_delta' ? 'visible_text' : 'thinking', {});
+              else if (['complete', 'failed', 'cancelled'].includes(event.type))
+                observe?.(
+                  requestId,
+                  event.type,
+                  event.type === 'complete'
+                    ? { finishReason: event.finishReason }
+                    : event.type === 'failed'
+                      ? { errorCode: event.error.code }
+                      : {},
+                );
+              if (event.type === 'complete') terminalObserved = true;
+            },
+          },
           options?.signal,
         );
       })
-      .catch((error) => finishPiError(stream, message, 'error', errorMessage(error)));
+      .catch((error) => {
+        observe?.(requestId, 'failed', { errorCode: 'BRIDGE_FAILED' });
+        finishPiError(stream, message, 'error', errorMessage(error));
+      });
     return stream;
   };
 }
@@ -382,7 +433,10 @@ function applyPiEvent(
   message: AssistantMessage,
   event: NativeProviderHostEvent,
 ): void {
+  if (message.stopReason === 'error' || message.stopReason === 'aborted') return;
   switch (event.type) {
+    case 'request_progress':
+      return;
     case 'started':
       return;
     case 'text_delta': {
@@ -438,12 +492,24 @@ function applyPiEvent(
       return;
     }
     case 'tool_call_end': {
+      let args: Record<string, unknown>;
+      try {
+        args = parseArguments(event.call.argumentsJson);
+      } catch {
+        finishPiError(
+          stream,
+          message,
+          'error',
+          `INVALID_TOOL_ARGUMENTS: ${event.call.name.slice(0, 128)} returned invalid object JSON (${Buffer.byteLength(event.call.argumentsJson, 'utf8')} bytes). No tool was executed. Retry with smaller staged submissions.`,
+        );
+        return;
+      }
       let index = findToolCall(message, event.call.id);
       const call: ToolCall = {
         type: 'toolCall',
         id: event.call.id,
         name: event.call.name,
-        arguments: parseArguments(event.call.argumentsJson),
+        arguments: args,
       };
       if (index < 0) {
         message.content.push(call);
@@ -471,6 +537,19 @@ function applyPiEvent(
       closeOpenContent(stream, message);
       message.responseId = event.providerResponseId;
       message.rawStopReason = event.finishReason;
+      if (
+        ['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'incomplete'].includes(
+          event.finishReason ?? '',
+        )
+      ) {
+        finishPiError(
+          stream,
+          message,
+          'error',
+          `INCOMPLETE_TOOL_OUTPUT: finishReason=${event.finishReason}. No tool was executed; use smaller staged submissions.`,
+        );
+        return;
+      }
       message.stopReason = message.content.some((content) => content.type === 'toolCall')
         ? 'toolUse'
         : event.finishReason === 'length'
@@ -589,12 +668,9 @@ function findToolCall(message: AssistantMessage, callId: string): number {
 }
 
 function parseArguments(value: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return isRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const parsed: unknown = JSON.parse(value);
+  if (!isRecord(parsed)) throw new Error('Tool arguments must be an object.');
+  return parsed;
 }
 
 function cloneMessage(message: AssistantMessage): AssistantMessage {
@@ -605,6 +681,7 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
   assertNoSensitiveData(params);
   assertExactKeys(params as unknown as Record<string, unknown>, [
     'generationId',
+    'inferenceSettings',
     'attemptId',
     'projectId',
     'projectSessionId',
@@ -621,6 +698,24 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
     'tools',
     'continuation',
   ]);
+  if (params.inferenceSettings) {
+    const settings = params.inferenceSettings;
+    assertExactKeys(settings as unknown as Record<string, unknown>, [
+      'maxOutputTokens',
+      'outputTokenParameter',
+      'reasoning',
+    ]);
+    if (
+      !Number.isSafeInteger(settings.maxOutputTokens) ||
+      settings.maxOutputTokens < 1 ||
+      settings.maxOutputTokens > 131072 ||
+      settings.reasoning !== 'provider_default' ||
+      (params.protocol === 'openai-responses'
+        ? settings.outputTokenParameter !== 'max_output_tokens'
+        : !['max_tokens', 'max_completion_tokens'].includes(settings.outputTokenParameter))
+    )
+      throw new Error('Unsupported inference settings for this protocol.');
+  }
   for (const key of [
     'generationId',
     'attemptId',
@@ -654,6 +749,45 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
   const common = ['type', 'projectSessionId'];
   requireString(value.projectSessionId, 'host.event.event.projectSessionId');
   switch (type) {
+    case 'request_progress':
+      assertExactKeys(value, [
+        ...common,
+        'stage',
+        'argumentBytes',
+        'toolName',
+        'receivedBytes',
+        'requestBodyHash',
+        'requestBodyBytes',
+      ]);
+      if (
+        ![
+          'native_queued',
+          'admitted',
+          'sent',
+          'headers',
+          'first_byte',
+          'receiving',
+          'tool_arguments',
+        ].includes(String(value.stage))
+      )
+        throw new Error('Unknown native request stage.');
+      if (
+        value.requestBodyHash !== undefined &&
+        (typeof value.requestBodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.requestBodyHash))
+      )
+        throw new Error('Invalid request body hash.');
+      for (const field of ['argumentBytes', 'receivedBytes', 'requestBodyBytes'])
+        if (
+          value[field] !== undefined &&
+          (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0)
+        )
+          throw new Error('Invalid progress byte count.');
+      if (
+        value.toolName !== undefined &&
+        (typeof value.toolName !== 'string' || value.toolName.length > 256)
+      )
+        throw new Error('Invalid progress tool name.');
+      break;
     case 'started':
     case 'cancelled':
       assertExactKeys(value, common);
@@ -677,6 +811,9 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
       assertExactKeys(value, [...common, 'call']);
       if (!isRecord(value.call)) throw new Error('tool_call_end.call must be an object.');
       assertExactKeys(value.call, ['id', 'name', 'argumentsJson']);
+      requireString(value.call.id, 'tool_call_end.call.id');
+      requireString(value.call.name, 'tool_call_end.call.name');
+      requireString(value.call.argumentsJson, 'tool_call_end.call.argumentsJson', true);
       break;
     case 'usage':
       assertExactKeys(value, [...common, 'usage']);

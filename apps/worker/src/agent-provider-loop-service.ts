@@ -95,7 +95,7 @@ const DOCUMENT_TOOL_CALL_RESERVE = 1;
 const RESEARCH_SEARCH_CALL_LIMIT = 3;
 const RESEARCH_FETCH_CALL_LIMIT = 8;
 const RESEARCH_STEP_CALL_LIMIT = 8;
-const LIBRARY_STEP_CALL_LIMIT = 6;
+const LIBRARY_BATCH_CALL_LIMIT = 6;
 
 type ResearchOperation = 'research.search' | 'research.fetch';
 type LibraryOperation = 'library.search' | 'library.read';
@@ -2651,8 +2651,8 @@ export class AgentProviderLoopService {
   private executeLibraryTools(
     params: AgentGenerationExecuteToolsParams,
   ): AgentGenerationExecuteToolsResult {
-    if (params.calls.length < 1 || params.calls.length > LIBRARY_STEP_CALL_LIMIT) {
-      throw new Error('A library Provider step must contain between one and eight calls.');
+    if (params.calls.length < 1 || params.calls.length > LIBRARY_BATCH_CALL_LIMIT) {
+      throw new Error('A library Provider batch must contain between one and six calls.');
     }
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -2665,6 +2665,7 @@ export class AgentProviderLoopService {
         const seenIds = new Set<string>();
         const budget = libraryBudget(database, task.id);
         for (const [ordinal, call] of params.calls.entries()) {
+          const callStartedAt = new Date().toISOString();
           if (!isLibraryOperation(call.name)) {
             throw new Error('Only read-only library tools may be parallelized in this step.');
           }
@@ -2685,7 +2686,7 @@ export class AgentProviderLoopService {
           let errorCode: string | null = null;
           let errorMessage: string | null = null;
           if (!canExecute) {
-            const failure = libraryBudgetFailure(call.name);
+            const failure = libraryBudgetFailure(call.name, budget);
             status = 'failed';
             errorCode = failure.error.code;
             errorMessage = failure.error.message;
@@ -2701,6 +2702,7 @@ export class AgentProviderLoopService {
                 errorCode: failure.error.code,
                 message: failure.error.message,
                 retryable: failure.error.retryable,
+                budget: libraryBudget(database, task.id),
               }),
             };
           } else {
@@ -2766,6 +2768,7 @@ export class AgentProviderLoopService {
                   errorCode: code,
                   message,
                   retryable,
+                  budget: libraryBudget(database, task.id),
                 }),
               };
             }
@@ -2797,9 +2800,9 @@ export class AgentProviderLoopService {
               status,
               errorCode,
               errorMessage,
-              now,
-              now,
-              now,
+              callStartedAt,
+              callStartedAt,
+              new Date().toISOString(),
             );
           outputs.push(output);
         }
@@ -3395,6 +3398,117 @@ export class AgentProviderLoopService {
     );
   }
 
+  recordValidationFailure(
+    identity: LlmGenerationIdentity,
+    operation: string,
+    argumentBytes: number,
+    reason: string,
+  ): void {
+    this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        this.requireActiveGeneration(database, project.id, identity);
+        const task = this.requireTask(database, project.id, identity.generationId);
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            `UPDATE agent_tasks SET tool_call_count=tool_call_count+1, updated_at=?, row_version=row_version+1 WHERE id=? AND tool_call_count<tool_call_limit`,
+          )
+          .run(now, task.id);
+        this.appendEvent(
+          database,
+          project.id,
+          task.id,
+          'tool_validation_failed',
+          JSON.stringify({ operation, argumentBytes, reason: reason.slice(0, 1600) }),
+          now,
+        );
+      })(),
+    );
+  }
+
+  recordProviderRequest(
+    identity: LlmGenerationIdentity,
+    requestId: string,
+    stage: string,
+    metadata: Record<string, unknown>,
+  ): void {
+    this.projects.access(true, (database, project) => {
+      if (
+        project.id !== identity.projectId ||
+        this.projects.currentSessionId() !== identity.projectSessionId
+      )
+        return;
+      const owner = database
+        .prepare(
+          `SELECT g.status FROM llm_generations g JOIN llm_generation_attempts a ON a.generation_id=g.id
+        WHERE g.id=? AND a.id=? AND g.project_id=? AND g.project_session_id=? AND g.conversation_id=?`,
+        )
+        .get(
+          identity.generationId,
+          identity.attemptId,
+          identity.projectId,
+          identity.projectSessionId,
+          identity.conversationId,
+        ) as { status: string } | undefined;
+      if (!owner) return;
+      const now = new Date().toISOString();
+      const row = database
+        .prepare(
+          'SELECT stage,metadata_json FROM llm_provider_requests WHERE id=? AND generation_id=? AND attempt_id=?',
+        )
+        .get(requestId, identity.generationId, identity.attemptId) as
+        { stage: string; metadata_json: string } | undefined;
+      if (row && ['complete', 'failed', 'cancelled'].includes(row.stage)) return;
+      if (
+        !['prepared', 'streaming'].includes(owner.status) &&
+        (!row || !['complete', 'failed', 'cancelled'].includes(stage))
+      )
+        return;
+      const previous = JSON.parse(row?.metadata_json ?? '{}') as Record<string, unknown>;
+      const firstSeen = { ...((previous.firstSeen ?? {}) as Record<string, string>) };
+      firstSeen[stage] ??= now;
+      const safe: Record<string, unknown> = { ...previous, firstSeen };
+      for (const key of [
+        'inputHash',
+        'inputBytes',
+        'toolCount',
+        'inferenceSettings',
+        'argumentBytes',
+        'toolName',
+        'receivedBytes',
+        'finishReason',
+        'errorCode',
+        'requestBodyHash',
+        'requestBodyBytes',
+      ])
+        if (metadata[key] !== undefined) safe[key] = metadata[key];
+      const serialized = JSON.stringify(safe);
+      if (serialized.length > 8000) throw new Error('Provider request telemetry exceeds limit.');
+      const terminal = ['complete', 'failed', 'cancelled'].includes(stage) ? now : null;
+      database
+        .prepare(
+          `INSERT INTO llm_provider_requests(id,project_id,generation_id,attempt_id,project_session_id,stage,created_at,updated_at,completed_at,metadata_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET stage=excluded.stage,updated_at=excluded.updated_at,completed_at=excluded.completed_at,metadata_json=excluded.metadata_json
+        WHERE llm_provider_requests.project_id=excluded.project_id
+        AND llm_provider_requests.generation_id=excluded.generation_id
+        AND llm_provider_requests.attempt_id=excluded.attempt_id
+        AND llm_provider_requests.project_session_id=excluded.project_session_id`,
+        )
+        .run(
+          requestId,
+          project.id,
+          identity.generationId,
+          identity.attemptId,
+          identity.projectSessionId,
+          stage,
+          now,
+          now,
+          terminal,
+          serialized,
+        );
+    });
+  }
+
   startProviderStep(identity: LlmGenerationIdentity): void {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -3403,9 +3517,9 @@ export class AgentProviderLoopService {
         if (step.status === 'prepared') {
           database
             .prepare(
-              "UPDATE llm_provider_steps SET status = 'in_flight' WHERE id = ? AND status = 'prepared'",
+              "UPDATE llm_provider_steps SET status = 'in_flight', started_at=? WHERE id = ? AND status = 'prepared'",
             )
-            .run(step.id);
+            .run(new Date().toISOString(), step.id);
         }
         database
           .prepare(
@@ -3531,6 +3645,11 @@ export class AgentProviderLoopService {
           )
           .all(generationId, project.id) as Array<{ id: string }>;
         const detail = errorMessage?.trim() || `Provider generation ${reason}.`;
+        database
+          .prepare(
+            `UPDATE llm_provider_requests SET stage=?,updated_at=?,completed_at=? WHERE generation_id=? AND project_id=? AND completed_at IS NULL`,
+          )
+          .run(reason === 'cancelled' ? 'cancelled' : 'failed', now, now, generationId, project.id);
         for (const task of tasks) {
           const taskStatus = reason === 'cancelled' ? 'cancelled' : 'failed';
           database
@@ -4536,24 +4655,18 @@ function authorizationSpecsForTask(
   ];
   if (!primary.operation.startsWith('adapter.schema')) {
     const library = libraryBudget(database, taskId);
+    // Read-only batches reuse this step's authorization. Its lifetime quota
+    // must cover the remaining task budget, rather than just one batch.
     if (library.taskRemaining > 0 && library.searchRemaining > 0) {
       authorizations.push({
         operation: 'library.search',
-        maxCallUses: Math.min(
-          LIBRARY_STEP_CALL_LIMIT,
-          library.taskRemaining,
-          library.searchRemaining,
-        ),
+        maxCallUses: Math.min(library.taskRemaining, library.searchRemaining),
       });
     }
     if (library.taskRemaining > 0 && library.readRemaining > 0) {
       authorizations.push({
         operation: 'library.read',
-        maxCallUses: Math.min(
-          LIBRARY_STEP_CALL_LIMIT,
-          library.taskRemaining,
-          library.readRemaining,
-        ),
+        maxCallUses: Math.min(library.taskRemaining, library.readRemaining),
       });
     }
   }
@@ -4916,6 +5029,7 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 }
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
+  'scene.structure.stage',
   'conversation.task.route',
   'production.defaults.get',
   'novel.chapter.batch.submit',
@@ -5395,7 +5509,10 @@ function libraryBudget(
   };
 }
 
-function libraryBudgetFailure(operation: LibraryOperation): {
+function libraryBudgetFailure(
+  operation: LibraryOperation,
+  budget: ReturnType<typeof libraryBudget>,
+): {
   ok: false;
   error: { code: string; message: string; retryable: boolean };
 } {
@@ -5404,9 +5521,11 @@ function libraryBudgetFailure(operation: LibraryOperation): {
     error: {
       code: 'LIBRARY_BUDGET_EXCEEDED',
       message:
-        operation === 'library.search'
-          ? 'Library search budget has been exhausted.'
-          : 'Library read budget has been exhausted.',
+        budget.taskRemaining <= 0
+          ? 'The task tool-call budget for library retrieval has been exhausted. One call is reserved for document work. Stop retrieval and report any unread sources.'
+          : operation === 'library.search'
+            ? 'Library search budget has been exhausted.'
+            : 'Library read budget has been exhausted.',
       retryable: false,
     },
   };

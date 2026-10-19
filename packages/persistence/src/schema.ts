@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 56;
+export const CURRENT_SCHEMA_VERSION = 58;
 
 export const MIGRATION_V49 = `
 ALTER TABLE shots RENAME COLUMN prompt TO prompt_v29;

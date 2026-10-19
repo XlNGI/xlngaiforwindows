@@ -177,6 +177,15 @@ export class ChangeSetService {
               'Structured prompt',
               20000,
             );
+            const supplied = item.entityType === 'scene' ? item.videoPrompt : item.prompt;
+            if (
+              supplied !== undefined &&
+              !prompt.includes(supplied.trim()) &&
+              !renderProductionInstruction(item.instruction).includes(supplied.trim())
+            )
+              throw new Error(
+                'PROMPT_INSTRUCTION_CONFLICT: 正文与结构化指令不一致，请只提交结构或执行保留原文的绑定修改。',
+              );
             if (item.entityType === 'scene') item.videoPrompt = prompt;
             else item.prompt = prompt;
           }

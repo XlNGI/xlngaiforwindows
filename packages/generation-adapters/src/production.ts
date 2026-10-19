@@ -3,6 +3,8 @@ import {
   productionExecuteSchema,
   productionInstructionSchema,
   productionDefaultsSchema,
+  sceneProductionInstructionSchema,
+  shotProductionInstructionSchema,
   productionAudioSupport,
   type ProductionDefaults,
   renderProductionInstruction,
@@ -17,6 +19,8 @@ const ajv = new Ajv2020({ allErrors: true, strict: true });
 const validateList = ajv.compile(productionExecuteSchema);
 const validateInstruction = ajv.compile(productionInstructionSchema);
 const validateDefaults = ajv.compile(productionDefaultsSchema);
+const validateScene = ajv.compile(sceneProductionInstructionSchema);
+const validateShot = ajv.compile(shotProductionInstructionSchema);
 export function parseProductionDefaults(input: unknown): ProductionDefaults {
   if (!validateDefaults(input))
     throw new Error(`项目视觉设置无效：${ajv.errorsText(validateDefaults.errors)}`);
@@ -103,6 +107,9 @@ export function inspectProductionTargetInstruction(
 ): ProductionIssue[] {
   const issues = inspectProductionInstruction(instruction);
   if (issues.length || instruction.version !== 2) return issues;
+  const validate = kind === 'scene' ? validateScene : kind === 'shot' ? validateShot : undefined;
+  if (validate && !validate(instruction))
+    issues.push({ code: 'INVALID_INSTRUCTION', message: ajv.errorsText(validate.errors) });
   if (kind === 'scene') {
     if (!instruction.storyTime?.timeOfDay.trim())
       issues.push({ code: 'MISSING_STORY_TIME', message: '场次必须明确故事时段（日夜时间）。' });

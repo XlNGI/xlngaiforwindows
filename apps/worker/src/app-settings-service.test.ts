@@ -6,6 +6,7 @@ import {
   AppSettingsService,
   normalizeBaseUrl,
   ProviderProfileValidationError,
+  resolveDeclaredInferenceSettings,
 } from './app-settings-service.js';
 import { emptyModelCapabilities } from './provider-registry.js';
 import { getAdapter } from '@ai-video/generation-adapters';
@@ -28,6 +29,44 @@ async function createService() {
 }
 
 describe('AppSettingsService', () => {
+  it('uses only verified protocol-compatible output limits and preserves provider defaults otherwise', async () => {
+    const service = await createService();
+    try {
+      const contract = structuredClone(service.getModelContract('cn.minimax.h3', 1)!);
+      contract.status = 'verified';
+      contract.capabilities.maxOutputTokens = 8192;
+      expect(resolveDeclaredInferenceSettings('openai-chat-completions', contract)).toEqual({
+        maxOutputTokens: 8192,
+        outputTokenParameter: 'max_tokens',
+        reasoning: 'provider_default',
+      });
+      expect(resolveDeclaredInferenceSettings('openai-responses', contract)).toBeUndefined();
+      contract.parameterSchema.properties = {
+        max_completion_tokens: { type: 'integer', minimum: 1, maximum: 4096 },
+      };
+      expect(
+        resolveDeclaredInferenceSettings('openai-chat-completions', contract)?.maxOutputTokens,
+      ).toBe(4096);
+      contract.parameterSchema.properties = {
+        max_output_tokens: { type: 'integer', minimum: 1, maximum: 2048 },
+      };
+      expect(resolveDeclaredInferenceSettings('openai-responses', contract)?.maxOutputTokens).toBe(
+        2048,
+      );
+      contract.status = 'revalidation_required';
+      expect(resolveDeclaredInferenceSettings('openai-responses', contract)).toBeUndefined();
+      contract.status = 'verified';
+      contract.parameterSchema.properties = { max_output_tokens: { type: 'string' } };
+      expect(resolveDeclaredInferenceSettings('openai-responses', contract)).toBeUndefined();
+      contract.parameterSchema.properties = {
+        max_output_tokens: { type: 'integer', minimum: 32768 },
+      };
+      expect(resolveDeclaredInferenceSettings('openai-responses', contract)).toBeUndefined();
+      expect(resolveDeclaredInferenceSettings('openai-responses', null)).toBeUndefined();
+    } finally {
+      service.close();
+    }
+  });
   it('does not re-enable a disabled older channel binding when its revision is upgraded', async () => {
     const service = await createService();
     service.setModelBindingEnabled({ bindingId: 'unicomp-wan3.0-video', enabled: false });

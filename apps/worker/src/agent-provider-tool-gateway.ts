@@ -15,9 +15,22 @@ import type {
   MediaSubmissionConfirmationRequest,
 } from '@ai-video/contracts';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { validateToolArguments } from '@earendil-works/pi-ai';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 
 export interface AgentProviderToolExecutor {
+  recordProviderRequest?(
+    identity: LlmGenerationIdentity,
+    requestId: string,
+    stage: string,
+    metadata: Record<string, unknown>,
+  ): void;
+  recordValidationFailure?(
+    identity: LlmGenerationIdentity,
+    operation: string,
+    argumentBytes: number,
+    reason: string,
+  ): void;
   refreshTools?(identity: LlmGenerationIdentity): LlmToolDefinition[];
   advanceTextTurn?(params: AgentProviderStepCompleteParams): LlmToolDefinition[];
   executeTools(
@@ -69,6 +82,8 @@ export class AgentProviderToolGateway {
     updates: LlmToolDefinition[][];
   };
   private activeReads = 0;
+  private validationFailures = 0;
+  private readonly selectedTools = new Set<string>();
   private readonly readWaiters: Array<() => void> = [];
 
   constructor(
@@ -80,6 +95,7 @@ export class AgentProviderToolGateway {
     private readonly requestMediaSubmission: MediaSubmissionRequester = () =>
       Promise.resolve(false),
     private readonly planHooks?: AgentProviderPlanHooks,
+    private readonly lazyTools = false,
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
     this.definitions.forEach((definition) => unifiedAgentToolRegistry.require(definition.name));
@@ -87,22 +103,93 @@ export class AgentProviderToolGateway {
 
   tools(allowedOperations?: readonly string[]): AgentTool[] {
     const allowed = allowedOperations ? new Set(allowedOperations) : undefined;
-    return this.definitions
+    const tools = this.definitions
       .filter(
         (definition) =>
-          !allowed || allowed.has(definition.name) || isLibraryRetrievalOperation(definition.name),
+          (!allowed ||
+            allowed.has(definition.name) ||
+            isLibraryRetrievalOperation(definition.name)) &&
+          this.isLoaded(definition.name),
       )
       .map((definition) => this.tool(definition));
+    if (this.lazyTools) tools.push(this.loaderTool());
+    return tools;
   }
 
   currentDefinitions(allowedOperations?: readonly string[]): LlmToolDefinition[] {
     const allowed = allowedOperations ? new Set(allowedOperations) : undefined;
-    return cloneDefinitions(
+    const definitions = cloneDefinitions(
       this.definitions.filter(
         (definition) =>
-          !allowed || allowed.has(definition.name) || isLibraryRetrievalOperation(definition.name),
+          (!allowed ||
+            allowed.has(definition.name) ||
+            isLibraryRetrievalOperation(definition.name)) &&
+          this.isLoaded(definition.name),
       ),
     );
+    if (this.lazyTools) definitions.push(this.loaderDefinition());
+    return definitions;
+  }
+
+  private isLoaded(name: string): boolean {
+    return (
+      !this.lazyTools ||
+      this.selectedTools.has(name) ||
+      [
+        'conversation.task.route',
+        'project.structure.get',
+        'library.search',
+        'library.read',
+      ].includes(name)
+    );
+  }
+
+  private loaderDefinition(): LlmToolDefinition {
+    return {
+      name: 'tools.load',
+      description: `Choose up to six tools by exact name for the next turn. Replaces the previous selection; authorization remains Worker-owned. Core routing, structure and retrieval stay available. Catalog: ${this.definitions
+        .filter((tool) => !['library.search', 'library.read'].includes(tool.name))
+        .map((tool) => `${tool.name}: ${tool.description.split('.')[0]!.slice(0, 150)}`)
+        .join('; ')}`,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['names'],
+        properties: {
+          names: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 6,
+            uniqueItems: true,
+            items: { type: 'string', enum: this.definitions.map((tool) => tool.name) },
+          },
+        },
+      },
+    };
+  }
+
+  private loaderTool(): AgentTool {
+    return {
+      ...this.loaderDefinition(),
+      label: 'Load tool schemas',
+      executionMode: 'sequential',
+      prepareArguments: (args: unknown) => this.prepareArguments(this.loaderDefinition(), args),
+      execute: (_id: string, args: unknown) => {
+        const names = (args as { names: string[] }).names;
+        if (
+          !Array.isArray(names) ||
+          names.length > 6 ||
+          names.some((name) => !this.hasDefinition(name))
+        )
+          throw new Error('Select at most six authorized tool names from the catalog.');
+        this.selectedTools.clear();
+        names.forEach((name) => this.selectedTools.add(name));
+        return Promise.resolve({
+          content: [{ type: 'text', text: JSON.stringify({ status: 'tools_loaded', names }) }],
+          details: {},
+        });
+      },
+    } as unknown as AgentTool;
   }
 
   hasDefinition(operation: string): boolean {
@@ -110,6 +197,7 @@ export class AgentProviderToolGateway {
   }
 
   freezeProviderResponse(calls: Array<{ id: string; name: string }>): void {
+    if (calls.some((call) => call.name === 'tools.load')) return;
     const key = calls.map((call) => call.id).join(':');
     if (
       this.batch?.key === key ||
@@ -174,6 +262,13 @@ export class AgentProviderToolGateway {
     this.executor.startProviderStep(this.identity);
   }
 
+  assertRepairBudget(): void {
+    if (this.validationFailures >= 3)
+      throw new Error(
+        'TOOL_REPAIR_LIMIT: 参数校验连续修复达到上限（3次），请缩小为分段提交。已保存的草稿仍可继续。',
+      );
+  }
+
   completeProviderStep(
     providerResponseId: string | undefined,
     finishReason: string | undefined,
@@ -202,8 +297,32 @@ export class AgentProviderToolGateway {
       description: definition.description,
       parameters: definition.parameters,
       executionMode: unifiedAgentToolRegistry.executionMode(definition.name),
+      prepareArguments: (args: unknown) => this.prepareArguments(definition, args),
       execute: async (toolCallId, args) => this.execute(toolCallId, definition.name, args),
     } as AgentTool;
+  }
+
+  private prepareArguments(definition: LlmToolDefinition, args: unknown): unknown {
+    try {
+      this.assertRepairBudget();
+      const validated: unknown = validateToolArguments(definition, {
+        type: 'toolCall',
+        id: 'validation',
+        name: definition.name,
+        arguments: args as Record<string, unknown>,
+      });
+      return validated;
+    } catch (error) {
+      this.validationFailures += 1;
+      const reason = boundedValidationError(error);
+      this.executor.recordValidationFailure?.(
+        this.identity,
+        definition.name,
+        Buffer.byteLength(JSON.stringify(args) ?? '', 'utf8'),
+        reason,
+      );
+      throw new Error(reason);
+    }
   }
 
   private liveDefinition(name: string): LlmToolDefinition {
@@ -285,6 +404,7 @@ export class AgentProviderToolGateway {
       if (output === undefined)
         throw new Error('Worker tool continuation omitted the Pi tool result.');
       unifiedAgentToolRegistry.assertResultText(output);
+      this.validationFailures = 0;
       if (stepId && !this.planHooks!.succeed(stepId, definition.name, output)) {
         throw new Error(`Planned operation ${definition.name} did not succeed.`);
       }
@@ -303,6 +423,11 @@ export class AgentProviderToolGateway {
       }
     }
   }
+}
+
+export function boundedValidationError(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Invalid tool arguments.';
+  return message.split('Received arguments:')[0]!.trim().slice(0, 1600);
 }
 
 export function isLibraryRetrievalOperation(operation: string): boolean {

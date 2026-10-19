@@ -164,20 +164,29 @@ async function fixture() {
     });
   };
   const latest = (id: string) => streams.filter((item) => item.params.generationId === id).at(-1)!;
+  const load = async (generationId: string, names: string[]) => {
+    const before = latest(generationId);
+    tool(before, 'tools.load', { names });
+    await expect.poll(() => latest(generationId).id !== before.id).toBe(true);
+    expect(latest(generationId).params.tools?.map((definition) => definition.name)).toEqual(
+      expect.arrayContaining(names),
+    );
+  };
+  await load(parent.stream.generationId, ['novel.chapter.batch.submit']);
   const submit = async (args: Record<string, unknown>) => {
-    tool(streams[0]!, 'novel.chapter.batch.submit', args, 'batch-submit');
+    tool(latest(parent.stream.generationId), 'novel.chapter.batch.submit', args, 'batch-submit');
     await expect
       .poll(
         () =>
           streams.filter((item) => item.params.generationId === parent.stream.generationId).length,
       )
-      .toBe(2);
+      .toBe(3);
     const detail = await rpc('agent.task.get', { taskId: parent.agentTaskId }, runtime);
     if (!detail.chapterBatch)
       throw new Error(JSON.stringify(latest(parent.stream.generationId).params.continuation));
     return rpc('novel.batch.get', { batchId: detail.chapterBatch.batchId }, runtime);
   };
-  return { root, runtime, parent, streams, emit, text, tool, latest, submit };
+  return { root, runtime, parent, streams, emit, text, tool, latest, load, submit };
 }
 
 it('dispatches real novel child tools concurrently, gates draft/published dependencies, and pins explicitly read source versions', async () => {
@@ -230,7 +239,7 @@ it('dispatches real novel child tools concurrently, gates draft/published depend
         f.streams.filter((stream) => stream.params.generationId === f.parent.stream.generationId)
           .length,
     )
-    .toBe(3);
+    .toBe(4);
   expect(
     (await rpc('novel.batch.get', { batchId: batch.batchId }, f.runtime)).children.map(
       (child) => child.taskId,
@@ -267,12 +276,13 @@ it('dispatches real novel child tools concurrently, gates draft/published depend
     },
     f.runtime,
   );
+  await f.load(a!.generationId, ['novel.chapter.batch.source.read', 'novel.chapter.submit_draft']);
   f.tool(f.latest(a!.generationId), 'novel.chapter.batch.source.read', {
     versionId: outline.currentVersionId,
   });
   await expect
     .poll(() => f.streams.filter((stream) => stream.params.generationId === a!.generationId).length)
-    .toBe(2);
+    .toBe(3);
   expect(JSON.stringify(f.latest(a!.generationId).params.continuation)).toContain(
     'Original outline body',
   );
@@ -285,7 +295,7 @@ it('dispatches real novel child tools concurrently, gates draft/published depend
   });
   await expect
     .poll(() => f.streams.filter((stream) => stream.params.generationId === a!.generationId).length)
-    .toBe(3);
+    .toBe(4);
   f.text(f.latest(a!.generationId), 'A draft saved for review.');
   await expect
     .poll(() => f.streams.some((stream) => stream.params.generationId === c!.generationId))
@@ -372,6 +382,7 @@ it('preserves a full conflict candidate and rejects another active task for the 
     },
     f.runtime,
   );
+  await f.load(child.generationId, ['novel.chapter.submit_draft']);
   f.tool(f.latest(child.generationId), 'novel.chapter.submit_draft', {
     title: 'Existing',
     contentMarkdown: 'Complete generated conflict candidate',
@@ -433,6 +444,7 @@ it('preserves a full conflict candidate and rejects another active task for the 
       f.streams.some((stream) => stream.params.generationId === another.stream.generationId),
     )
     .toBe(true);
+  await f.load(another.stream.generationId, ['novel.chapter.batch.submit']);
   f.tool(f.latest(another.stream.generationId), 'novel.chapter.batch.submit', {
     resourceId: 'workspace:novel',
     executionKey: 'same-chapter',
@@ -455,7 +467,7 @@ it('preserves a full conflict candidate and rejects another active task for the 
         f.streams.filter((stream) => stream.params.generationId === another.stream.generationId)
           .length,
     )
-    .toBe(2);
+    .toBe(3);
   expect(JSON.stringify(f.latest(another.stream.generationId).params.continuation)).toContain(
     'active writing task',
   );
@@ -466,7 +478,7 @@ it('preserves a full conflict candidate and rejects another active task for the 
 
 it('rejects cyclic or forward chapter manifests at the real tool entry without allocating placeholders', async () => {
   const f = await fixture();
-  f.tool(f.streams[0]!, 'novel.chapter.batch.submit', {
+  f.tool(f.latest(f.parent.stream.generationId), 'novel.chapter.batch.submit', {
     resourceId: 'workspace:novel',
     executionKey: 'invalid',
     chapters: [
@@ -486,7 +498,7 @@ it('rejects cyclic or forward chapter manifests at the real tool entry without a
         f.streams.filter((stream) => stream.params.generationId === f.parent.stream.generationId)
           .length,
     )
-    .toBe(2);
+    .toBe(3);
   expect(JSON.stringify(f.latest(f.parent.stream.generationId).params.continuation)).toContain(
     'earlier chapter',
   );

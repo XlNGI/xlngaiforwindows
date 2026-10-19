@@ -7,7 +7,8 @@ import type {
 import {
   productionExecuteSchema,
   productionTargetSchema,
-  detailedProductionInstructionSchema,
+  sceneProductionInstructionSchema,
+  shotProductionInstructionSchema,
 } from '@ai-video/contracts';
 
 export type SystemAgentToolOperation =
@@ -21,6 +22,7 @@ export type SystemAgentToolOperation =
   | 'novel.chapter.batch.source.read'
   | 'novel.chapter.batch.get'
   | 'scene.submit_structure'
+  | 'scene.structure.stage'
   | 'scene.read'
   | 'project.get_context'
   | 'project.structure.get'
@@ -235,7 +237,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'novel.episode.submit_structure',
     description:
-      'Submit a short-drama episode structure for review. Resolve scene and cast identities yourself using retrieved project resources; return real sceneDocumentId, all characterDocumentIds and a complete videoPrompt. Names and prompt placeholders never establish relationships. Read production.defaults.get and use detailed version-2 instructions for the shared scene setup and every shot. Story logic determines scene/shot arrangement; estimate duration afterwards from actions, dialogue and pacing, never fit to a fixed 15 seconds. Every shot needs narrative purpose, timing with rationale, camera, stillFrame, beats/dialogue and continuity. Scene instructions specify storyTime, location, detailed style and output intent. All shots are aggregated into the scene production form.',
+      'Submit a short-drama episode structure for review. Resolve scene and cast identities yourself using retrieved project resources; return real sceneDocumentId, all characterDocumentIds. Submit instruction only; prompts are rendered by the system. The combined scene + shot count cannot exceed 100. Names and prompt placeholders never establish relationships. Read production.defaults.get and use detailed version-2 instructions for the shared scene setup and every shot. Story logic determines scene/shot arrangement; estimate duration afterwards from actions, dialogue and pacing, never fit to a fixed 15 seconds. Every shot needs narrative purpose, timing with rationale, camera, stillFrame, beats/dialogue and continuity. Scene instructions specify storyTime, location, detailed style and output intent. All shots are aggregated into the scene production form.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -249,17 +251,12 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['title', 'sceneDocumentId', 'instruction', 'characterDocumentIds', 'shots'],
+            required: ['title', 'sceneDocumentId', 'characterDocumentIds', 'shots'],
+            if: { required: ['sceneId'] },
+            then: { required: ['expectedRowVersion'], properties: { shots: { maxItems: 0 } } },
+            else: { required: ['instruction'], properties: { shots: { minItems: 1 } } },
             properties: {
-              instruction: {
-                ...detailedProductionInstructionSchema,
-                required: [
-                  ...detailedProductionInstructionSchema.required,
-                  'storyTime',
-                  'location',
-                  'style',
-                ],
-              },
+              instruction: sceneProductionInstructionSchema,
               title: { type: 'string', minLength: 1, maxLength: 200 },
               sceneDocumentId: {
                 type: ['string', 'null'],
@@ -305,27 +302,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
                   properties: {
                     title: { type: 'string', minLength: 1, maxLength: 200 },
                     prompt: { type: 'string', minLength: 1, maxLength: 20000 },
-                    instruction: {
-                      ...detailedProductionInstructionSchema,
-                      required: [
-                        ...detailedProductionInstructionSchema.required,
-                        'timing',
-                        'camera',
-                        'stillFrame',
-                      ],
-                      properties: {
-                        ...detailedProductionInstructionSchema.properties,
-                        beats: {
-                          ...((
-                            detailedProductionInstructionSchema.properties as Record<
-                              string,
-                              unknown
-                            >
-                          ).beats as Record<string, unknown>),
-                          minItems: 1,
-                        },
-                      },
-                    },
+                    instruction: shotProductionInstructionSchema,
                   },
                 },
               },
@@ -442,6 +419,67 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'scene.structure.stage',
+    description:
+      'Persist a resumable scene/shot proposal in small parts under one review. begin uses executionKey, episodeTitle and sceneShotCounts (total scenes+shots <=100). put_scene writes one shared setup with real references and instruction, without shots. put_shots writes at most four ordered shots at shotOffset. get returns missing ranges and current rowVersion. finalize validates all parts and creates exactly one changeSet for user review; no scene/shot exists before approval. Use stageId and expectedRowVersion from the latest result; identical retries are idempotent. Stages are scoped to this conversation and survive cancellation/restart.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['operation', 'resourceId'],
+      properties: {
+        operation: { type: 'string', enum: ['begin', 'get', 'put_scene', 'put_shots', 'finalize'] },
+        resourceId: { type: 'string', const: 'workspace:shots' },
+        executionKey: { type: 'string', minLength: 1, maxLength: 128 },
+        episodeTitle: { type: 'string', minLength: 1, maxLength: 200 },
+        sceneShotCounts: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: { type: 'integer', minimum: 1, maximum: 30 },
+        },
+        stageId: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description: 'Omit with get to list resumable stages in this conversation.',
+        },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+        sceneIndex: { type: 'integer', minimum: 0, maximum: 19 },
+        shotOffset: { type: 'integer', minimum: 0, maximum: 29 },
+        scene: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['title', 'sceneDocumentId', 'characterDocumentIds', 'instruction'],
+          properties: {
+            title: { type: 'string', minLength: 1, maxLength: 200 },
+            sceneDocumentId: { type: 'string', minLength: 1, maxLength: 200 },
+            characterDocumentIds: {
+              type: 'array',
+              maxItems: 30,
+              uniqueItems: true,
+              items: { type: 'string', minLength: 1, maxLength: 200 },
+            },
+            instruction: sceneProductionInstructionSchema,
+          },
+        },
+        shots: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 4,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['title', 'instruction'],
+            properties: {
+              title: { type: 'string', minLength: 1, maxLength: 200 },
+              instruction: shotProductionInstructionSchema,
+            },
+          },
+        },
+      },
+    },
+  },
+  {
     name: 'conversation.task.route',
     description:
       'Decide how the current user request relates to recent or active conversation tasks. Use this before substantive work when the system prompt lists them. Choose independent for a standalone request, follow_up to continue a completed task, or supplement to add a focused instruction to an active task. Never infer this from a UI selector; decide from the user message and task summaries. The Worker validates the target generation, project/session and readiness. If there are no relevant tasks, continue independently without calling this tool.',
@@ -450,7 +488,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       additionalProperties: false,
       required: ['decision', 'rationale'],
       properties: {
-        decision: { type: 'string', enum: ['independent', 'follow_up', 'supplement'] },
+        decision: { type: 'string', enum: ['independent', 'follow_up', 'supplement', 'inspect'] },
         targetGenerationId: { type: 'string', minLength: 1, maxLength: 128 },
         content: { type: 'string', minLength: 1, maxLength: 10000 },
         rationale: { type: 'string', minLength: 1, maxLength: 1000 },
@@ -494,7 +532,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.submit_structure',
     description:
-      'Resolve scene/cast intent and submit create or update proposals for 场次与镜头. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,videoPrompt,sceneDocumentId,characterDocumentIds,shots}]. Read production.defaults.get first. Arrange scene boundaries and shots by narrative logic, conflict, information and emotional progression; never pad or compress to 15 seconds or provider limits. For each new scene include a version-2 instruction with narrative purpose, storyTime (at least timeOfDay), location, detailed style and shared cast/audio/output intent. Provide all ordered shots, each with a version-2 instruction, narrative purpose, timing.estimatedDurationSeconds and rationale derived AFTER planning dialogue/actions/pauses, camera framing and movement, stillFrame, detailed subjects, beats, dialogue, sound, transitions and continuity. Beat seconds are relative to that shot. The system calculates whole-scene time and compiles every shot into the production form. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved proposals require user review; report changeSetId and pending-review state, never claim applied bindings.',
+      'Resolve scene/cast intent and submit create or update proposals for 场次与镜头. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,instruction,sceneDocumentId,characterDocumentIds,shots}]. Submit instruction only; do not repeat it as videoPrompt/prompt. At most 100 total scenes + shots per proposal. Use staged submissions for large plans. Read production.defaults.get first. Arrange scene boundaries and shots by narrative logic, conflict, information and emotional progression; never pad or compress to 15 seconds or provider limits. For each new scene include a version-2 instruction with narrative purpose, storyTime (at least timeOfDay), location, detailed style and shared cast/audio/output intent. Provide all ordered shots, each with a version-2 instruction, narrative purpose, timing.estimatedDurationSeconds and rationale derived AFTER planning dialogue/actions/pauses, camera framing and movement, stillFrame, detailed subjects, beats, dialogue, sound, transitions and continuity. Beat seconds are relative to that shot. The system calculates whole-scene time and compiles every shot into the production form. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; omit instruction/videoPrompt for binding-only changes to preserve the current text and instruction; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved proposals require user review; report changeSetId and pending-review state, never claim applied bindings.',
     parameters: {
       ...DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
         .parameters,
@@ -668,6 +706,12 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       type: 'object',
       additionalProperties: false,
       properties: {
+        detail: {
+          type: 'string',
+          enum: ['compact', 'full'],
+          description:
+            'Default compact returns the resource index once. full adds the expanded structure.',
+        },
         includeArchived: { type: 'boolean' },
       },
     },
@@ -1281,6 +1325,7 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'document.create_draft': writePolicy(),
   'document.submit_draft': writePolicy(),
   'scene.submit_structure': writePolicy(),
+  'scene.structure.stage': writePolicy(),
   'scene.read': readPolicy(),
   'production.read': readPolicy(),
   'production.defaults.get': readPolicy(),

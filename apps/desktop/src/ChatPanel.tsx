@@ -156,8 +156,6 @@ interface ChatPanelProps {
   onCancelGeneration: () => void;
   batchRunning?: boolean;
   allowConcurrentTasks?: boolean;
-  runningGenerations?: LlmGenerationInfo[];
-  onSelectGeneration?: (generationId: string) => void;
   onSendMessage: (
     execution?: 'ordered' | 'parallel' | 'supplement',
     targetGenerationId?: string,
@@ -192,8 +190,6 @@ interface ChatPanelProps {
 export function ChatPanel({
   scopeAvailable,
   allowConcurrentTasks = false,
-  runningGenerations = [],
-  onSelectGeneration,
   writable,
   conversations,
   conversation,
@@ -325,6 +321,7 @@ export function ChatPanel({
       ));
   const send = () => onSendMessage();
   const messageListRef = useRef<HTMLDivElement>(null);
+  const followLatestMessageRef = useRef(true);
   /**
    * Paid media submissions never render here. `media-confirmation.tsx` owns that
    * review surface so every paid path shows the same frozen draft; this in-session
@@ -358,11 +355,25 @@ export function ChatPanel({
       : undefined;
 
   useEffect(() => {
-    if (!generationLocked) return;
     const list = messageListRef.current;
     if (!list) return;
-    list.scrollTop = list.scrollHeight;
-  }, [generationLocked, generation?.assistantMessage.content, agentTask, liveAgentActions]);
+    followLatestMessageRef.current = true;
+    const scrollToLatest = () => {
+      if (followLatestMessageRef.current) list.scrollTop = list.scrollHeight;
+    };
+    scrollToLatest();
+    // Replies render buffered chunks independently of the parent generation snapshot.
+    // Keep all content updates behind the same user-controlled follow preference.
+    const contentObserver = new MutationObserver(scrollToLatest);
+    contentObserver.observe(list, { childList: true, characterData: true, subtree: true });
+    const sizeObserver =
+      typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(scrollToLatest);
+    sizeObserver?.observe(list);
+    return () => {
+      contentObserver.disconnect();
+      sizeObserver?.disconnect();
+    };
+  }, [conversation?.id]);
   const protectedHandoff = displayedConfirmation?.protectedUi;
   const confirmationExpired = Boolean(
     displayedConfirmation &&
@@ -530,7 +541,15 @@ export function ChatPanel({
           </details>
         )}
       </div>
-      <div className="message-list" ref={messageListRef}>
+      <div
+        className="message-list"
+        ref={messageListRef}
+        onScroll={(event) => {
+          const list = event.currentTarget;
+          followLatestMessageRef.current =
+            list.scrollHeight - list.clientHeight - list.scrollTop <= 32;
+        }}
+      >
         {canLoadEarlierMessages && (
           <div
             className="load-earlier-container"
@@ -989,24 +1008,6 @@ export function ChatPanel({
             )}
           </div>
         )}
-        {allowConcurrentTasks && runningGenerations.length > 0 && (
-          <div className="task-execution-options">
-            <span>执行方式由 Agent 根据当前消息和活动任务自动判断</span>
-            <div aria-label="当前会话运行任务">
-              {runningGenerations.map((run) => (
-                <button
-                  key={run.generationId}
-                  type="button"
-                  aria-pressed={generation?.generationId === run.generationId}
-                  onClick={() => onSelectGeneration?.(run.generationId)}
-                >
-                  {run.userMessage.content.slice(0, 30)} ·{' '}
-                  {run.status === 'prepared' ? '等待 Agent 调度' : '执行中'}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
         {onPromptTemplateChange && (
           <details className="conversation-prompt-template">
             <summary>
@@ -1404,13 +1405,38 @@ function mergeLiveAgentActions(
 ): AgentActionRow[] {
   const merged = [...rows];
   for (const live of liveActions ?? []) {
-    if (merged.some((row) => row.toolName === live.toolName || row.id === `live:${live.id}`)) {
+    if (
+      merged.some(
+        (row) =>
+          (row.toolName === live.toolName && live.phase !== 'tool_arguments') ||
+          row.id === `live:${live.id}`,
+      )
+    ) {
       continue;
     }
     merged.push({
       id: `live:${live.id}`,
       title: agentToolActionLabel(live.toolName),
       toolName: live.toolName,
+      detail:
+        live.phase === 'tool_arguments'
+          ? `正在生成参数 · ${Math.ceil((live.argumentBytes ?? 0) / 1024)} KB · 最近接收 ${live.lastActivityAt ? new Date(live.lastActivityAt).toLocaleTimeString() : ''}`
+          : live.phase
+            ? (
+                {
+                  native_queued: '等待网络准入',
+                  admitted: '准备发送',
+                  sent: '等待响应',
+                  headers: '已收到响应头',
+                  first_byte: '已收到首字节',
+                  thinking: '模型推理中',
+                  visible_text: '正在回复',
+                  complete: '本轮接收完成',
+                  failed: '本轮请求失败',
+                  cancelled: '已取消',
+                } as Record<string, string>
+              )[live.phase]
+            : undefined,
       status:
         live.status === 'failed'
           ? 'error'

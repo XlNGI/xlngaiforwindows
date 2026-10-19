@@ -381,6 +381,98 @@ describe('createPiStreamFunction', () => {
     maxTokens: 8_192,
   };
 
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'rejects malformed and truncated tool arguments before Pi execution (%s)',
+    async (protocol) => {
+      for (const [argumentsJson, finishReason] of [
+        ['{"scenes":[', 'tool_calls'],
+        ['[]', 'tool_calls'],
+        ['{"scenes":[]}', 'length'],
+      ] as const) {
+        const io = transport();
+        const bridge = new NativeProviderBridge(io.value, () => 'invalid-request');
+        const observe = vi.fn();
+        const stream = createPiStreamFunction(
+          bridge,
+          () => ({ ...params, protocol }),
+          observe,
+        )(model, {
+          messages: [],
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        bridge.handleEnvelope(
+          event('invalid-request', 0, {
+            type: 'tool_call_end',
+            projectSessionId: 'session',
+            call: { id: 'bad', name: 'scene.submit_structure', argumentsJson },
+          }),
+        );
+        bridge.handleEnvelope(
+          event('invalid-request', 1, {
+            type: 'complete',
+            projectSessionId: 'session',
+            finishReason,
+          }),
+        );
+        const events: AssistantMessageEvent[] = [];
+        for await (const item of stream) events.push(item);
+        const last = events.at(-1)!;
+        expect(last).toMatchObject({
+          type: 'error',
+          reason: 'error',
+          error: {
+            stopReason: 'error',
+          },
+        });
+        if (last?.type === 'error')
+          expect(last.error.errorMessage).toContain('No tool was executed');
+        expect(events.some((item) => item.type === 'done')).toBe(false);
+        expect(observe.mock.calls.some((call) => call[1] === 'complete')).toBe(false);
+        expect(observe.mock.calls.some((call) => call[1] === 'failed')).toBe(true);
+      }
+    },
+  );
+
+  it('forwards safe request progress independently of tool execution and passes declared settings', async () => {
+    const io = transport();
+    const observe = vi.fn();
+    const bridge = new NativeProviderBridge(io.value, () => 'progress-request');
+    const inferenceSettings = {
+      maxOutputTokens: 8192,
+      outputTokenParameter: 'max_output_tokens' as const,
+      reasoning: 'provider_default' as const,
+    };
+    const stream = createPiStreamFunction(
+      bridge,
+      () => ({ ...params, inferenceSettings }),
+      observe,
+    )(model, { messages: [] });
+    await Promise.resolve();
+    await Promise.resolve();
+    bridge.handleEnvelope(
+      event('progress-request', 0, {
+        type: 'request_progress',
+        projectSessionId: 'session',
+        stage: 'tool_arguments',
+        toolName: 'scene.structure.stage',
+        argumentBytes: 20000,
+      }),
+    );
+    bridge.handleEnvelope(
+      event('progress-request', 1, { type: 'cancelled', projectSessionId: 'session' }),
+    );
+    const events: AssistantMessageEvent[] = [];
+    for await (const item of stream) events.push(item);
+    expect(observe).toHaveBeenCalledWith(
+      expect.any(String),
+      'tool_arguments',
+      expect.objectContaining({ argumentBytes: 20000 }),
+    );
+    expect(events.some((item) => item.type === 'toolcall_start')).toBe(false);
+    expect(io.sent[0]!.params).toMatchObject({ inferenceSettings });
+  });
+
   it('maps text, thinking, tool, usage, and completion events to Pi', async () => {
     const io = transport();
     const bridge = new NativeProviderBridge(io.value, () => 'pi-request');

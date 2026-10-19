@@ -92,6 +92,7 @@ export class ProviderProfileValidationError extends Error {}
 export class AdapterSchemaValidationError extends Error {}
 
 export interface ResolvedLlmSelection {
+  inferenceSettings?: import('@ai-video/contracts').LlmInferenceSettings;
   providerProfileId: string;
   providerName: string;
   modelId: string;
@@ -103,6 +104,51 @@ export interface ResolvedLlmSelection {
   protocol: 'openai-responses' | 'openai-chat-completions';
   baseUrl: string;
   pricingSnapshot?: LlmPricingSnapshotInfo;
+}
+
+export function resolveDeclaredInferenceSettings(
+  protocol: ResolvedLlmSelection['protocol'],
+  contract: ModelContract | null,
+): ResolvedLlmSelection['inferenceSettings'] {
+  if (!contract || !['verified', 'enabled'].includes(contract.status)) return undefined;
+  const properties = contract.parameterSchema.properties as Record<string, unknown> | undefined;
+  const parameters =
+    protocol === 'openai-responses'
+      ? (['max_output_tokens'] as const)
+      : (['max_completion_tokens', 'max_tokens'] as const);
+  for (const outputTokenParameter of parameters) {
+    const field = properties?.[outputTokenParameter];
+    if (!field || typeof field !== 'object' || Array.isArray(field)) continue;
+    const schema = field as Record<string, unknown>;
+    if (schema.type !== 'integer') continue;
+    const limits = [16384, contract.capabilities.maxOutputTokens, schema.maximum];
+    if (
+      limits.some(
+        (value) =>
+          value !== undefined &&
+          (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1),
+      )
+    )
+      continue;
+    const maxOutputTokens = Math.min(
+      ...limits.filter((value): value is number => typeof value === 'number'),
+    );
+    if (
+      schema.minimum !== undefined &&
+      (typeof schema.minimum !== 'number' || schema.minimum > maxOutputTokens)
+    )
+      continue;
+    if (
+      schema.enum !== undefined ||
+      schema.const !== undefined ||
+      schema.exclusiveMinimum !== undefined ||
+      schema.exclusiveMaximum !== undefined ||
+      schema.multipleOf !== undefined
+    )
+      continue;
+    return { maxOutputTokens, outputTokenParameter, reasoning: 'provider_default' };
+  }
+  return undefined;
 }
 
 export class AppSettingsService {
@@ -867,6 +913,11 @@ export class AppSettingsService {
         'The selected model must support text generation and streaming.',
       );
     }
+    const contract =
+      model.contractId && model.contractRevision
+        ? this.getModelContract(model.contractId, model.contractRevision)
+        : null;
+    const inferenceSettings = resolveDeclaredInferenceSettings(profile.protocol, contract);
     return {
       providerProfileId: profile.id,
       providerName: profile.name,
@@ -879,6 +930,7 @@ export class AppSettingsService {
       protocol: profile.protocol,
       baseUrl: profile.baseUrl,
       pricingSnapshot: toPricingSnapshot(repositories.modelPricing.get(profile.id, model.id)),
+      ...(inferenceSettings ? { inferenceSettings } : {}),
     };
   }
 

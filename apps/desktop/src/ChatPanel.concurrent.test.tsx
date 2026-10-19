@@ -5,7 +5,7 @@ import type { LlmGenerationInfo } from '@ai-video/contracts';
 import { ChatPanel } from './ChatPanel';
 afterEach(cleanup);
 
-it('leaves task relationship routing to the Agent while preserving run selection and cancellation', () => {
+it('allows sending and cancellation during concurrent generation without composer task controls', () => {
   const a: LlmGenerationInfo = {
     generationId: 'A',
     conversationId: 'chat',
@@ -30,14 +30,8 @@ it('leaves task relationship routing to the Agent while preserving run selection
     },
     sources: [],
   };
-  const b = {
-    ...a,
-    generationId: 'B',
-    userMessage: { ...a.userMessage, id: 'input-B', content: 'Task B' },
-  };
   const send = vi.fn(),
-    cancel = vi.fn(),
-    select = vi.fn();
+    cancel = vi.fn();
   const conversation = {
     id: 'chat',
     projectId: 'project',
@@ -62,10 +56,8 @@ it('leaves task relationship routing to the Agent while preserving run selection
     selectedLlmModelId: '',
     generation: a,
     allowConcurrentTasks: true,
-    runningGenerations: [a, b],
     onSendMessage: send,
     onCancelGeneration: cancel,
-    onSelectGeneration: select,
     onComposerChange: vi.fn(),
     onCreateConversation: vi.fn(),
     onSelectConversation: vi.fn(),
@@ -77,9 +69,10 @@ it('leaves task relationship routing to the Agent while preserving run selection
   render(<ChatPanel {...props} />);
   fireEvent.click(screen.getByTitle('发送消息'));
   expect(send).toHaveBeenLastCalledWith();
-  expect(screen.getByText('执行方式由 Agent 根据当前消息和活动任务自动判断')).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: /Task B ·/ }));
-  expect(select).toHaveBeenCalledWith('B');
+  expect(
+    screen.queryByText('执行方式由 Agent 根据当前消息和活动任务自动判断'),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('当前会话运行任务')).not.toBeInTheDocument();
   fireEvent.click(screen.getByTitle('停止生成'));
   expect(cancel).toHaveBeenCalledOnce();
 });
