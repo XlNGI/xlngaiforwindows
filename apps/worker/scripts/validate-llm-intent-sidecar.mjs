@@ -369,20 +369,22 @@ try {
         });
         assert.equal(
           structureProposal.status,
-          'scene_structure_proposed',
+          'scene_structure_saved',
           JSON.stringify(structureProposal),
         );
         assert.equal(structureProposal.locator.workspace, 'shots');
         assert.equal(structureProposal.locator.changeSetId, structureProposal.changeSetId);
-        assert.equal(structureProposal.applied, false);
+        assert.equal(structureProposal.applied, true);
+        assert.equal(structureProposal.reviewRequired, false);
         assert.equal(
           (await request('scene.list')).length,
-          0,
-          'Proposals preserve approval boundary',
+          2,
+          'Generated scenes are immediately available as editable drafts',
         );
         const structureDetail = await request('agent.task.get', { taskId: prepared.agentTaskId });
         assert.equal(structureDetail.changeSets[0].changeSetId, structureProposal.changeSetId);
-        const proposals = await request('agent.changeSet.list', { includeTerminal: false });
+        assert.equal((await request('agent.changeSet.list', { includeTerminal: false })).length, 0);
+        const proposals = await request('agent.changeSet.list', { includeTerminal: true });
         const proposal = proposals.find((item) => item.id === structureProposal.changeSetId);
         assert.deepEqual(
           proposal.items
@@ -390,11 +392,7 @@ try {
             .map((item) => item.parentItemOrdinal),
           [0, 0, 3],
         );
-        const appliedStructure = await request('agent.changeSet.apply', {
-          changeSetId: proposal.id,
-          expectedRowVersion: proposal.rowVersion,
-        });
-        assert.equal(appliedStructure.status, 'applied');
+        assert.equal(proposal.status, 'applied');
         const appliedScenes = await request('scene.list');
         assert.equal(appliedScenes.length, 2);
         assert.equal(

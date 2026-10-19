@@ -471,6 +471,8 @@ describe('PiConversationRuntime', () => {
 
     expect(generation.failNative).not.toHaveBeenCalled();
     expect(systemPrompts[0]).toContain(libraryPolicy);
+    expect(systemPrompts[0]).toContain('already saved as editable drafts');
+    expect(systemPrompts[0]).not.toContain('directory receives entities only after user approval');
     expect(systemPrompts[0]).not.toContain('plan only');
     expect(plans.completed).toBe(false);
     expect(providerTools.executeTools.mock.calls.map(([params]) => params.calls[0]?.id)).toEqual([

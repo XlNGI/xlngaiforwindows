@@ -1,5 +1,7 @@
 # 短剧分集生成实施计划
 
+> 2026-10-19 确认：文档生成后直接保存为可编辑草稿，无需用户确认。场次、镜头和助手生成的角色／场景绑定通过真实 ID、CAS 及事务校验后立即写入目录；用户可随时修改提示词和绑定。旧版尚待批准的内容在可写页面自动保存，版本冲突时保留现有内容并提示重新生成。文档发布仍由用户后期显式操作；历史记录中的场次审批步骤由本条取代。
+
 版本：0.3  
 日期：2026-08-25  
 状态：S1 数据与契约、S2 Worker 业务与上下文、S3 Desktop 交互已完成；场次级视频生产与素材绑定已实现，S4 文档同步与最终验收进行中  
@@ -28,12 +30,12 @@
 - **D2 用户选定章节范围作为任务作用域**：用户在会话中说明章节范围，或由助手检索后请用户确认；确认后的章节 ID 冻结进 Agent 任务，作为本集生成的内容来源。
 - **D3 每集生成两样正式产物**：
   1. 本集整体把控项目文档（草稿 → 用户审阅 → 发布，显示在“项目文档”页）；
-  2. 本集场次/镜头结构 + 每个镜头的提示词（change set 提案 → 用户逐项批准 → 原子写入 `scenes`/`shots`，显示在“场次与镜头”页）。
+  2. 本集场次/镜头结构 + 每个镜头的提示词（Worker 校验 → 自动保存为可编辑草稿 → 原子写入 `scenes`/`shots`，显示在“场次与镜头”页）。
 - **D4 角色与场景按需生成**：角色/场景提示词是整部小说的资料文档（`documents.kind ∈ {character, scene}`），不要求一次性全部生成；用户按需指定章节范围或范围描述后生成。
 - **D5 一致性通过“来源冻结 + 参考链”保证**：源小说读取用户所选章节的当前已保存 RAG 切片并冻结版本；派生文档只读已发布内容，上一步已发布产物作为下一步输入，同时执行结构化引用校验和人工审阅门禁（详见 §10）。
 - **D6 镜头提示词存 `shots.prompt`**：新增列直接保存本集场次对应镜头的提示词，页面可展示/编辑，生产面板可读取。
 - **D8 场次完整视频提示词与素材绑定**：`scenes.video_prompt` 保存可编辑的完整场次视频提示词；`scenes.material_bindings_json` 保存角色、场景、道具等素材引用快照。用户从场次页面进入生产面板，提示词和参考图片自动预填，仍需用户确认后提交。
-- **D7 信任边界**：Agent 只生成草稿/提案，不直接写正式记录；文档发布、change set 批准均由用户执行。
+- **D7 信任边界**：Agent 生成内容直接保存为可编辑草稿，场次和镜头通过真实 ID、CAS 及事务校验后进入目录；用户后期可修改并显式发布文档。
 
 ## 3. 范围与非目标
 
@@ -79,7 +81,7 @@
 ### 5.2 场次/镜头提示词存 `shots.prompt`（D6）
 
 - `shots` 新增 `prompt TEXT` 列（迁移新增，默认 NULL/空）。
-- change set 的 `shot` 类 item 新增 `prompt` 字段；批准应用时写入 `shots.prompt`。
+- change set 的 `shot` 类 item 新增 `prompt` 字段；自动保存时写入 `shots.prompt`。
 - 场次与镜头页：镜头条目展示/编辑 prompt；`ProductionPanel` 后续可用 `shots.prompt` 作为生成参数默认值（可选增强）。
 
 ### 5.3 Agent 工具（新增/扩展）
@@ -87,7 +89,7 @@
 | 工具 | 作用 | 落库 |
 |---|---|---|
 | `novel.episode.submit_draft` | 提交本集整体把控文档草稿 | `documents.kind='plan'` + binding `role='screenplay'`、`domain_scope='short-drama'`（草稿，用户发布） |
-| `novel.episode.submit_structure` | 提交本集场次/镜头 + 镜头提示词 | Worker 自动转换为 `agent_change_set`（scene/shot create 带 prompt），用户批准后原子写入 |
+| `novel.episode.submit_structure` | 提交本集场次/镜头 + 镜头提示词 | Worker 自动转换为 `agent_change_set`（scene/shot create 带 prompt），校验后自动保存为草稿并原子写入 |
 | `novel.reference.submit_draft`（扩展） | 提交角色/场景资料草稿 | 新增 `documentKind` 参数（`character`/`scene`），落库 `documents.kind` 对应值，显示在“角色与场景”页 |
 
 ### 5.4 短剧域上下文编译（新增）
@@ -120,7 +122,7 @@ flowchart LR
   C -->|用户审阅发布| D[短剧域上下文<br/>已发布角色/场景 + 本集把控 + 冻结章节]
   D --> E[novel.episode.submit_structure<br/>场次/镜头 + 提示词]
   E --> F[自动转 agent_change_set]
-  F -->|用户逐项批准| G[原子写入 scenes/shots<br/>shots.prompt]
+  F -->|Worker 校验并自动保存草稿| G[原子写入 scenes/shots<br/>shots.prompt]
   B --> H[novel.reference.submit_draft<br/>documentKind=character/scene]
   H -->|用户审阅发布| D
   G --> I[场次与镜头页<br/>镜头提示词展示/编辑]
@@ -138,7 +140,7 @@ flowchart LR
 5. 模型调用 `novel.episode.submit_draft` → Worker 落“本集整体把控”草稿（kind=plan，binding screenplay）→ 显示在“项目文档”页 → 用户审阅发布；
 6. 用户继续发提示词（如“生成这一集的场次和镜头提示词”）；
 7. 模型调用 `novel.episode.submit_structure` → Worker 校验引用 → 自动生成 change set；
-8. 用户在场次与镜头页的 Agent proposals 面板逐项批准 → 原子写入 `scenes`/`shots`（含 `prompt`）；
+8. Worker 自动保存可编辑草稿，无需用户确认 → 原子写入 `scenes`/`shots`（含 `prompt`）；
 9. 用户选中场次可查看/编辑完整视频提示词，场次中的素材引用自动显示并可手动替换/取消，随后进入 ProductionPanel 生产；镜头页保留单镜头图片/视频修复入口。
 
 ### 7.2 场景 B：按需生成角色/场景
@@ -221,7 +223,7 @@ flowchart LR
 4. **短剧域上下文**：新增 `compileShortDrama`，注入 `shared`+`short-drama` 已发布 binding 文档、约束、冻结章节正文/摘要、相关会话。
 5. **结构化引用**：`[角色:X]`/`[场景:Y]` 占位符 + Worker 引用集合校验（硬保证）。
 6. **一致性体检**：复用 `novel.context.consistencyReport`；新增引用校验错误码与 change set 血缘记录。
-7. **人工门禁**：文档发布、change set 逐项批准（现有 CAS）。
+7. **后期修改与发布**：草稿默认保存；用户后期修改或显式发布文档；自动保存继续校验现有 CAS。
 8. **失效与重生成**：章节变更 → 摘要 stale → 相关 change set 标记“基于旧版本”，提示用户决定是否重新生成，不自动覆盖。
 
 ## 11. Desktop 交互设计
@@ -363,3 +365,9 @@ flowchart LR
 | 2026-10-13 | S3 Desktop 入口调整 | 完成 | 移除小说页“生成本章正文”“生成短剧内容”按钮及章节勾选；更新会话统一入口；Desktop 全量 304 项、typecheck、ESLint、Prettier（修改文件）、`git diff --check` 通过 | 真实 Provider、Windows 人工验收 |
 | 2026-10-13 | 场次级视频生产与素材绑定 | 完成 | Schema v43；场次完整视频提示词与素材绑定持久化；场次页面自动识别角色/场景/道具引用并可替换素材；场次视频接入 ProductionPanel 与确认提交链；Persistence 52 项、Worker 563 项、Desktop 337 项、typecheck、build、lint 通过 | 真实 Provider、Windows 原生窗口与付费提交人工验收 |
 | 2026-08-25 | S4 测试、文档与同步 | 部分完成 | 全仓 `pnpm.cmd test/typecheck/lint/format:check/build`、`git diff --check` 通过；NOVEL 计划 P8 子计划登记；验证记录已写入 | DOCX 同步、真实 Provider、Windows 人工验收 |
+
+## 2026-10-19 自动保存验证
+
+- [x] 自动保存实施完成：生成内容通过 Worker 校验后立即保存为可编辑草稿；移除场次审批面板；旧版待确认内容自动保存；保留后期修改、真实 ID、CAS、事务回滚和审计。
+
+验证完成：全仓共 1,609 项通过（Worker 827、Desktop 504、Persistence 75、Generation Adapters 139、LLM 32、Contracts 24、Context 8）；最终 Pi 系统提示词回归 13 项通过。覆盖两种会话协议、场次与镜头自动保存、绑定修订、分段生成和重复完成、草稿重开与后期编辑、旧方案自动保存、只读及版本冲突回滚。typecheck、lint、format:check、build 和 git diff --check 通过。打包 Worker 离线验证通过，两协议共 8 种入口组合自动保存，providerRequests=0；未启动安装程序或修改用户项目。

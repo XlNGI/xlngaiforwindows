@@ -279,7 +279,7 @@ export class DomainToolGateway {
         if (definition.name === 'novel.episode.submit_structure') {
           const structure = parseStructure(args);
           let nextSceneOrdinal = 0;
-          const changeSet = this.changeSets.create({
+          const changeSet = this.changeSets.saveDraft({
             taskId: this.identity.taskId,
             title: structure.episodeTitle,
             items: structure.scenes.flatMap((scene) => {

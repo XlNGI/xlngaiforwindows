@@ -29,6 +29,77 @@ async function setup(name = 'change-set') {
 }
 
 describe('ChangeSetService', () => {
+  it('saves generated documents, scenes and shots as editable drafts without approval', async () => {
+    const { projects, content, changeSets } = await setup();
+    const saved = changeSets.saveDraft({
+      title: '自动保存',
+      items: [
+        {
+          entityType: 'document',
+          action: 'create',
+          title: '角色',
+          documentKind: 'character',
+          contentMarkdown: '角色草稿',
+        },
+        { entityType: 'scene', action: 'create', title: '庭院' },
+        {
+          entityType: 'shot',
+          action: 'create',
+          title: '远景',
+          parentItemOrdinal: 1,
+          prompt: '清晨庭院',
+        },
+      ],
+    });
+    expect(saved.status).toBe('applied');
+    expect(changeSets.list()).toHaveLength(0);
+    const documentId = saved.items[0]!.appliedEntityId!;
+    const document = content.getDocument(documentId);
+    expect(document.currentVersion?.state).toBe('draft');
+    const scene = content.listScenes()[0]!;
+    const shot = content.listShots(scene.id)[0]!;
+    expect(shot).toMatchObject({ status: 'draft', prompt: '清晨庭院' });
+    content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: shot.title,
+      prompt: '用户后期修改',
+      expectedRowVersion: shot.rowVersion,
+    });
+    const path = projects.access(false, (_db, project) => project.rootPath);
+    projects.close();
+    projects.open(path);
+    expect(content.listShots(scene.id)[0]?.prompt).toBe('用户后期修改');
+    expect(content.getDocument(documentId).currentVersion?.state).toBe('draft');
+  });
+
+  it('rolls back the whole draft save on a stale update without leaving a pending approval', async () => {
+    const { content, changeSets } = await setup();
+    const scene = content.saveScene({ title: '手动保存' });
+    content.saveScene({
+      sceneId: scene.id,
+      title: '最新内容',
+      expectedRowVersion: scene.rowVersion,
+    });
+    expect(() =>
+      changeSets.saveDraft({
+        title: '旧版本生成',
+        items: [
+          { entityType: 'scene', action: 'create', title: '不能部分保存' },
+          {
+            entityType: 'scene',
+            action: 'update',
+            targetId: scene.id,
+            expectedRowVersion: scene.rowVersion,
+            title: '过期内容',
+          },
+        ],
+      }),
+    ).toThrow('DRAFT_SAVE_CONFLICT');
+    expect(content.listScenes().map((item) => item.title)).toEqual(['最新内容']);
+    expect(changeSets.list({ includeTerminal: true })).toHaveLength(0);
+  });
+
   it('reviews LLM scene/cast IDs and follows character defaults, preserving explicit selections on revision', async () => {
     const { projects, content, changeSets } = await setup();
     const setting = content.saveDocument({

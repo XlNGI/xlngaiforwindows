@@ -91,7 +91,7 @@ const plan = {
 };
 
 describe('DomainToolGateway', () => {
-  it('creates multiple reviewable documents and a change set under one task', async () => {
+  it('saves multiple editable documents and scene drafts under one task without approval', async () => {
     const { project, projectId, projectSessionId, conversationId } = await setup();
     const plans = new TaskPlanService(project);
     plans.submitPlanOnly({ taskId: 'task-1', candidate: plan, idempotencyKey: 'pi-plan-task-1' });
@@ -134,13 +134,14 @@ describe('DomainToolGateway', () => {
     });
 
     const changeSets = new ChangeSetService(project);
-    const proposed = changeSets.list({ includeTerminal: false })[0]!;
+    expect(changeSets.list({ includeTerminal: false })).toHaveLength(0);
+    const proposed = changeSets.list({ includeTerminal: true })[0]!;
+    expect(proposed.status).toBe('applied');
     expect(
       proposed.items
         .filter((item) => item.entityType === 'shot')
         .map((item) => item.parentItemOrdinal),
     ).toEqual([0, 2, 4]);
-    changeSets.apply({ changeSetId: proposed.id, expectedRowVersion: proposed.rowVersion });
     const content = new ContentService(project);
     for (const [title, shotTitle] of [
       ['旧码头', '远景'],

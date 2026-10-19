@@ -128,20 +128,40 @@ export class SceneStructureSubmissionService {
           .prepare('UPDATE agent_tasks SET tool_call_limit=32 WHERE id=? AND tool_call_limit<32')
           .run(identity.taskId);
         const parts = JSON.parse(row.scenes_json) as Part[];
-        const describe = () => ({
-          status: row.change_set_id ? 'scene_structure_proposed' : 'scene_structure_staging',
-          stageId: row.id,
-          rowVersion: row.row_version,
-          changeSetId: row.change_set_id,
-          applied: false,
-          reviewRequired: Boolean(row.change_set_id),
-          scenes: parts.map((part, index) => ({
-            index,
-            setupSaved: Boolean(part.scene),
-            expectedShots: part.count,
-            missingShots: part.shots.flatMap((shot, offset) => (shot ? [] : [offset])),
-          })),
-        });
+        const describe = () => {
+          const changes = new ChangeSetService(this.projects);
+          let saved = row.change_set_id ? changes.get(row.change_set_id) : undefined;
+          if (
+            saved &&
+            ['proposed', 'partially_applied'].includes(saved.status) &&
+            saved.items.some((item) => item.status === 'pending')
+          )
+            saved = changes.apply({ changeSetId: saved.id, expectedRowVersion: saved.rowVersion });
+          return {
+            status: saved
+              ? saved.status === 'applied'
+                ? 'scene_structure_saved'
+                : 'scene_structure_conflicted'
+              : 'scene_structure_staging',
+            stageId: row.id,
+            rowVersion: row.row_version,
+            changeSetId: row.change_set_id,
+            applied: saved?.status === 'applied',
+            reviewRequired: false,
+            sceneIds: saved?.items
+              .filter((item) => item.entityType === 'scene' && item.status === 'applied')
+              .map((item) => item.appliedEntityId),
+            shotIds: saved?.items
+              .filter((item) => item.entityType === 'shot' && item.status === 'applied')
+              .map((item) => item.appliedEntityId),
+            scenes: parts.map((part, index) => ({
+              index,
+              setupSaved: Boolean(part.scene),
+              expectedShots: part.count,
+              missingShots: part.shots.flatMap((shot, offset) => (shot ? [] : [offset])),
+            })),
+          };
+        };
         if (args.operation === 'get' || args.operation === 'begin') return describe();
         if (row.change_set_id) {
           if (args.operation === 'finalize') return describe();
@@ -306,24 +326,30 @@ export class SceneStructureSubmissionService {
           for (const shot of scene.shots)
             items.push({ entityType: 'shot', action: 'create', parentItemOrdinal, ...shot });
         }
-        const proposal = new ChangeSetService(this.projects).create({
+        const proposal = new ChangeSetService(this.projects).saveDraft({
           taskId: identity.taskId,
           title: structure.episodeTitle,
           items,
         });
         return {
           version: 1,
-          status: 'scene_structure_proposed',
+          status: 'scene_structure_saved',
           taskId: identity.taskId,
           changeSetId: proposal.id,
           resourceId: 'workspace:shots',
           locator: { ...resource.locator, changeSetId: proposal.id },
           sceneCount: structure.scenes.length,
           shotCount: items.length - structure.scenes.length,
-          reviewRequired: true,
-          applied: false,
+          reviewRequired: false,
+          applied: true,
+          sceneIds: proposal.items
+            .filter((item) => item.entityType === 'scene')
+            .map((item) => item.appliedEntityId),
+          shotIds: proposal.items
+            .filter((item) => item.entityType === 'shot')
+            .map((item) => item.appliedEntityId),
           nextAction:
-            'Review the proposal on 场次与镜头; approval populates the scene/shot directory.',
+            'Saved as editable drafts in 场次与镜头. The user can edit prompts and bindings later.',
         };
       })(),
     );

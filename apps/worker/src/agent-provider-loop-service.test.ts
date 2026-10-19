@@ -539,7 +539,7 @@ describe('AgentProviderLoopService', () => {
   );
 
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
-    'makes ordinary scene submissions discoverable and reviewable through %s',
+    'saves ordinary scene submissions as editable drafts without approval through %s',
     async (protocol) => {
       const { conversation, generations, project, workflow } = await setup(protocol);
       const loop = createSystemLoop(project, workflow);
@@ -699,22 +699,19 @@ describe('AgentProviderLoopService', () => {
         scenes,
       });
       expect(saved).toMatchObject({
-        status: 'scene_structure_proposed',
-        reviewRequired: true,
-        applied: false,
+        status: 'scene_structure_saved',
+        reviewRequired: false,
+        applied: true,
         locator: { workspace: 'shots', changeSetId: saved.changeSetId },
       });
       const content = new ContentService(project);
-      expect(content.listScenes()).toHaveLength(0);
-      const proposal = new ChangeSetService(project).list()[0]!;
+      expect(content.listScenes()).toHaveLength(2);
+      expect(new ChangeSetService(project).list()).toHaveLength(0);
+      const proposal = new ChangeSetService(project).list({ includeTerminal: true })[0]!;
       expect(workflow.getTask({ taskId: agent.taskId }).changeSets).toEqual([
-        expect.objectContaining({ changeSetId: proposal.id, status: 'proposed' }),
+        expect.objectContaining({ changeSetId: proposal.id, status: 'applied' }),
       ]);
-      const applied = new ChangeSetService(project).apply({
-        changeSetId: proposal.id,
-        expectedRowVersion: proposal.rowVersion,
-      });
-      expect(applied.status).toBe('applied');
+      expect(proposal.status).toBe('applied');
       const parents = content.listScenes();
       expect(parents.find((item) => item.title === '庭院')?.sceneDocumentId).toBe(
         courtyard.documentId,
@@ -766,19 +763,12 @@ describe('AgentProviderLoopService', () => {
         ],
       };
       const updated = await invoke('scene.submit_structure', revision);
-      expect(updated).toMatchObject({ status: 'scene_structure_proposed', applied: false });
-      expect(
-        content.listScenes().find((item) => item.id === courtyardScene.id)?.characterBindings,
-      ).toHaveLength(2);
-      const pending = new ChangeSetService(project)
-        .list()
-        .find((item) => item.id === updated.changeSetId)!;
-      expect(
-        new ChangeSetService(project).apply({
-          changeSetId: pending.id,
-          expectedRowVersion: pending.rowVersion,
-        }).status,
-      ).toBe('applied');
+      expect(updated).toMatchObject({
+        status: 'scene_structure_saved',
+        applied: true,
+        reviewRequired: false,
+      });
+      expect(new ChangeSetService(project).list()).toHaveLength(0);
       expect(content.listScenes()).toHaveLength(2);
       expect(content.listScenes().find((item) => item.id === courtyardScene.id)).toMatchObject({
         sceneDocumentId: study.documentId,
@@ -4336,11 +4326,10 @@ describe('AgentProviderLoopService', () => {
         },
       ],
     });
-    expect(result.continuation?.outputs[0]?.output).toContain(
-      'episode_structure_change_set_created',
-    );
+    expect(result.continuation?.outputs[0]?.output).toContain('episode_structure_saved');
     const changeSets = new ChangeSetService(project);
-    const proposed = changeSets.list({ includeTerminal: false });
+    expect(changeSets.list({ includeTerminal: false })).toHaveLength(0);
+    const proposed = changeSets.list({ includeTerminal: true });
     expect(proposed).toHaveLength(1);
     expect(proposed[0]!.items).toMatchObject([
       { entityType: 'scene', title: '旧码头 · 台风前夜' },
@@ -4354,11 +4343,7 @@ describe('AgentProviderLoopService', () => {
       { entityType: 'scene', title: '房间' },
       { entityType: 'shot', title: '信件特写', parentItemOrdinal: 4 },
     ]);
-    const applied = changeSets.apply({
-      changeSetId: proposed[0]!.id,
-      expectedRowVersion: proposed[0]!.rowVersion,
-    });
-    expect(applied.status).toBe('applied');
+    expect(proposed[0]!.status).toBe('applied');
     const content = new ContentService(project);
     for (const [title, shotTitle] of [
       ['街道', '雨中街道'],
@@ -4637,19 +4622,14 @@ describe('AgentProviderLoopService', () => {
         },
       ],
     });
-    expect(result.continuation?.outputs[0]?.output).toContain(
-      'episode_structure_change_set_created',
-    );
+    expect(result.continuation?.outputs[0]?.output).toContain('episode_structure_saved');
 
-    // 5. Approve the change set; prompts must land on shots.
+    // 5. Generated drafts are already saved; prompts must land on shots.
     const changeSets = new ChangeSetService(project);
-    const proposed = changeSets.list({ includeTerminal: false });
+    expect(changeSets.list({ includeTerminal: false })).toHaveLength(0);
+    const proposed = changeSets.list({ includeTerminal: true });
     expect(proposed).toHaveLength(1);
-    const applied = changeSets.apply({
-      changeSetId: proposed[0]!.id,
-      expectedRowVersion: proposed[0]!.rowVersion,
-    });
-    expect(applied.status).toBe('applied');
+    expect(proposed[0]!.status).toBe('applied');
     const scene = content.listScenes()[0]!;
     expect(content.listShots(scene.id)[0]?.prompt).toContain(
       '[场景:白家三房] 屋檐下全景，白小弟在学医。',

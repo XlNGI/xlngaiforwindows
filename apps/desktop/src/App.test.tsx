@@ -1756,7 +1756,6 @@ describe('App', () => {
       batchModelState === 'novel-possessive' ? '生成小说的第四章和第五章' : '生成第四章和第五章';
     const isChapter = firstPrompt === '现在生成小说第一章';
     const isSceneProposal = batchModelState.startsWith('scene-proposal');
-    let sceneProposalApplied = false;
     let sceneProposalGenerated = false;
     let sceneBoundDocumentId: string | null = 'document-created-by-agent';
     let sceneBindingRowVersion = 0;
@@ -1998,7 +1997,7 @@ describe('App', () => {
             {
               changeSetId: sceneProposal.id,
               title: sceneProposal.title,
-              status: 'proposed',
+              status: 'applied',
               createdAt: 'now',
             },
           ],
@@ -2009,34 +2008,23 @@ describe('App', () => {
       }
       if (method === 'agent.changeSet.list' && isSceneProposal)
         return Promise.resolve(
-          sceneProposalGenerated
+          (params as { includeTerminal?: boolean }).includeTerminal && sceneProposalGenerated
             ? [
                 {
                   ...sceneProposal,
-                  id: 'unrelated-proposal',
-                  taskId: 'another-task',
-                  title: '其他任务方案',
+                  status: 'applied',
+                  items: sceneProposal.items.map((item) => ({
+                    ...item,
+                    status: 'applied',
+                    appliedEntityId: item.entityType === 'scene' ? 'applied-scene' : 'applied-shot',
+                  })),
                 },
-                sceneProposal,
               ]
             : [],
         );
-      if (method === 'agent.changeSet.apply' && isSceneProposal) {
-        sceneProposalApplied = true;
-        return Promise.resolve({
-          ...sceneProposal,
-          status: 'applied',
-          rowVersion: 1,
-          items: sceneProposal.items.map((item) => ({
-            ...item,
-            status: 'applied',
-            appliedEntityId: item.entityType === 'scene' ? 'applied-scene' : 'applied-shot',
-          })),
-        });
-      }
       if (method === 'scene.list' && isSceneProposal)
         return Promise.resolve(
-          sceneProposalApplied
+          sceneProposalGenerated
             ? [
                 {
                   id: 'applied-scene',
@@ -2320,21 +2308,12 @@ describe('App', () => {
       ).not.toBeInTheDocument();
     }
     if (isSceneProposal) {
-      const proposalButton = await screen.findByRole('button', { name: /生成的场次方案/ });
-      expect(proposalButton).toHaveAttribute('aria-expanded', 'true');
-      expect(
-        screen
-          .getAllByRole('button', { name: /^场次与镜头/ })
-          .find((item) => item.classList.contains('nav-item')),
-      ).toHaveClass('active');
-      expect(screen.getByRole('button', { name: /其他任务方案/ })).toHaveAttribute(
-        'aria-expanded',
-        'false',
-      );
-      fireEvent.click(screen.getByRole('button', { name: '批准并写入目录' }));
+      expect(screen.queryByRole('button', { name: '批准并写入目录' })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('场次与镜头待审核方案')).not.toBeInTheDocument();
       expect(await screen.findByRole('button', { name: '生成的庭院' })).toBeInTheDocument();
       expect(await screen.findByRole('button', { name: '庭院远景' })).toBeInTheDocument();
       expect(await screen.findByDisplayValue('清晨的庭院镜头提示词')).toBeInTheDocument();
+      expect(callWorker).not.toHaveBeenCalledWith('agent.changeSet.apply', expect.anything());
       expect(screen.queryByLabelText('场次完整视频提示词')).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: '生成的庭院' }));
       expect(await screen.findByLabelText('场次完整视频提示词')).toHaveValue(
@@ -2346,7 +2325,6 @@ describe('App', () => {
       ).not.toBeInTheDocument();
       expect(callWorker).toHaveBeenCalledWith('shot.list', { sceneId: 'applied-scene' });
       expect(screen.getByLabelText('场次绑定场景')).toHaveValue(createdDocument.id);
-      expect(screen.getByText(`绑定场景：${createdDocument.title}`)).toBeInTheDocument();
       fireEvent.change(screen.getByLabelText('场次绑定场景'), { target: { value: '' } });
       await waitFor(() => expect(screen.getByLabelText('场次绑定场景')).toHaveValue(''));
       expect(callWorker).toHaveBeenCalledWith('scene.save', {

@@ -2058,7 +2058,7 @@ export class DocumentWorkflowService {
              result_document_version_id = ?, completed_at = ?, version = version + 1 WHERE id = ?`,
       )
       .run(
-        JSON.stringify({ status: 'draft', reviewRequired: true }),
+        JSON.stringify({ status: 'draft', reviewRequired: false }),
         document.id,
         versionId,
         now,

@@ -159,7 +159,7 @@ async function setup() {
   };
 }
 
-it('resumes staged authoring across a cancelled task and creates one review proposal before applying real IDs', async () => {
+it('resumes staged authoring across a cancelled task and saves one editable draft with real IDs without approval', async () => {
   const f = await setup();
   const first = f.prepare('生成两镜');
   const base = { resourceId: 'workspace:shots' };
@@ -226,17 +226,21 @@ it('resumes staged authoring across a cancelled task and creates one review prop
     stageId,
     expectedRowVersion: state.rowVersion,
   });
-  expect(state.status).toBe('scene_structure_proposed');
-  expect(f.content.listScenes()).toHaveLength(0);
+  expect(state.status).toBe('scene_structure_saved');
+  expect(f.content.listScenes()).toHaveLength(1);
   expect(
     (await second.invoke('scene.structure.stage', { ...base, operation: 'finalize', stageId }))
       .changeSetId,
   ).toBe(state.changeSetId);
   const changes = new ChangeSetService(f.project);
-  expect(changes.list()).toHaveLength(1);
-  changes.apply({ changeSetId: state.changeSetId as string, expectedRowVersion: 0 });
+  expect(changes.list()).toHaveLength(0);
+  expect(changes.list({ includeTerminal: true })).toHaveLength(1);
+  expect(state).toMatchObject({ applied: true, reviewRequired: false });
   expect(f.content.listScenes()).toHaveLength(1);
   expect(f.content.listShots(f.content.listScenes()[0]!.id)).toHaveLength(2);
+  f.loop.startProviderStep(second.prepared.stream);
+  f.loop.completeProviderStep({ ...second.prepared.stream, finishReason: 'stop' });
+  expect(f.workflow.getTask({ taskId: second.agent.taskId }).task.outcome).not.toBe('read-only');
 });
 
 it('shares create/update validation, retains binding text, rejects conflicting text and preflights total/rendered limits', async () => {
@@ -272,9 +276,8 @@ it('shares create/update validation, retains binding text, rejects conflicting t
     });
   }).not.toThrow();
   const result = await run.invoke(tool.name, args);
-  expect(result.status).toBe('scene_structure_proposed');
-  const changes = new ChangeSetService(f.project);
-  changes.apply({ changeSetId: result.changeSetId as string, expectedRowVersion: 0 });
+  expect(result.status).toBe('scene_structure_saved');
+  expect(result).toMatchObject({ applied: true, reviewRequired: false });
   expect(f.content.listScenes()[0]!.videoPrompt).toBe('手写原文标记');
   const shared = {
     title: '新场次',

@@ -77,7 +77,8 @@ describe('ProjectStructureCompiler', () => {
       expect(page).toMatchObject({
         writeTool: 'scene.submit_structure',
       });
-      expect(page?.contentModel).toContain('待审核');
+      expect(page?.contentModel).toContain('自动保存为可编辑草稿');
+      expect(page?.contentModel).toContain('无需用户确认');
       expect(map.resources.find((resource) => resource.id === `shot:${shot.id}`)).toMatchObject({
         parentId: `scene:${scene.id}`,
         locator: {

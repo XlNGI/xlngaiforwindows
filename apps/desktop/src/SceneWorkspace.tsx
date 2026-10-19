@@ -283,7 +283,7 @@ function SceneWorkspaceContent({
                 className="button secondary"
                 type="button"
                 disabled={!writable || !audioLoaded || !prompt.trim() || !onRequestBindings}
-                title="根据提示词关联角色与场景，审核后生效"
+                title="根据提示词关联角色与场景并保存，之后可随时修改"
                 onClick={() =>
                   onRequestBindings?.(prompt, effectiveBindings, characters, dialogueAudioId)
                 }

@@ -135,7 +135,7 @@ export class ProductionService {
                 (subject) => !cast.some((c) => c.characterDocumentId === subject.documentId),
               )
             )
-              throw new Error('制作指令包含未绑定到场次的角色，请先通过场次结构审核建立关系。');
+              throw new Error('制作指令包含未绑定到场次的角色，请先保存场次角色绑定。');
           }
           for (const resource of operation.instruction.resources) {
             if (

@@ -111,6 +111,22 @@ function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
 export class ChangeSetService {
   constructor(private readonly projects: ProjectService) {}
 
+  /** Save generated content immediately, retaining the change set as an audit record. */
+  saveDraft(params: AgentChangeSetCreateParams): AgentChangeSetInfo {
+    return this.projects.access(true, (database) =>
+      database.transaction(() => {
+        const created = this.create(params);
+        const saved = this.apply({
+          changeSetId: created.id,
+          expectedRowVersion: created.rowVersion,
+        });
+        if (saved.status !== 'applied')
+          throw new Error('DRAFT_SAVE_CONFLICT: 内容已变更，请读取最新版本后重试。');
+        return saved;
+      })(),
+    );
+  }
+
   create(params: AgentChangeSetCreateParams): AgentChangeSetInfo {
     if (params.items.length < 1 || params.items.length > 100) {
       throw new Error('A change set must contain between 1 and 100 items.');
@@ -241,6 +257,12 @@ export class ChangeSetService {
         rebuildLibraryChunksForChangeSet(database, project.id, id, now);
         return this.getInTransaction(database, project.id, id);
       })(),
+    );
+  }
+
+  get(changeSetId: string): AgentChangeSetInfo {
+    return this.projects.access(false, (database, project) =>
+      this.getInTransaction(database, project.id, changeSetId),
     );
   }
 

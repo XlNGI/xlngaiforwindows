@@ -233,7 +233,7 @@ export class AgentDraftSubmissionService {
           if (args.documentId === undefined) {
             if (kind === 'storyboard')
               throw new Error(
-                'Standalone storyboard documents are not visible in the scene/shot directory. Use scene.submit_structure with workspace:shots to create reviewable scenes and shots.',
+                'Standalone storyboard documents are not visible in the scene/shot directory. Use scene.submit_structure with workspace:shots to save editable scene and shot drafts without user confirmation.',
               );
             if (resource.kind !== 'workspace')
               throw new Error(
@@ -355,7 +355,7 @@ export class AgentDraftSubmissionService {
                 ...(args.bindingRole !== undefined ? { bindingRole: args.bindingRole } : {}),
               }
             : {}),
-          reviewRequired: true,
+          reviewRequired: false,
         };
       })(),
     );

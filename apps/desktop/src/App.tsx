@@ -100,7 +100,7 @@ import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
 import { TaskLogView } from './TaskLogView';
 import { NovelWorkspace } from './NovelWorkspace';
-import { ChangeSetReviewPanel } from './ChangeSetReviewPanel';
+import { GeneratedDraftSync } from './GeneratedDraftSync';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
 import { ResizableAppLayout } from './workspace/ResizableAppLayout';
@@ -712,7 +712,6 @@ export function App() {
   const activeSceneIdRef = useRef(scene?.id);
   activeSceneIdRef.current = scene?.id;
   const [proposalRefreshRevision, setProposalRefreshRevision] = useState(0);
-  const [focusChangeSetId, setFocusChangeSetId] = useState<string>();
   const [sceneBindingBusy, setSceneBindingBusy] = useState(false);
   const [sceneBindingMessage, setSceneBindingMessage] = useState('');
   const [sceneVideoPrompt, setSceneVideoPrompt] = useState('');
@@ -1417,13 +1416,17 @@ export function App() {
               const nextDocuments = await callWorker('document.list', {});
               if (activeProjectIdRef.current !== projectId) return;
               setDocuments(nextDocuments);
-              setFocusChangeSetId(proposal.changeSetId);
               setProposalRefreshRevision((revision) => revision + 1);
+              if (proposal.status === 'applied')
+                await refreshAppliedStructure(proposal.changeSetId);
+              if (activeProjectIdRef.current !== projectId) return;
               openProjectView('shots');
               setChatMessage(
                 proposal.status === 'proposed' || proposal.status === 'partially_applied'
-                  ? '场次与镜头方案已保存，请在此页审核；批准后进入目录。'
-                  : '场次与镜头方案已保存。',
+                  ? '正在将场次与镜头保存为草稿。'
+                  : proposal.status === 'applied'
+                    ? '场次与镜头已保存为草稿，可随时修改提示词和绑定。'
+                    : '场次与镜头未保存，请读取最新内容后重试。',
               );
               return;
             }
@@ -2344,16 +2347,24 @@ export function App() {
   };
 
   const refreshAppliedStructure = async (
-    changeSet: import('@ai-video/contracts').AgentChangeSetInfo,
+    saved: import('@ai-video/contracts').AgentChangeSetInfo | string,
   ) => {
     const expectedProjectId = project?.id;
     const requestId = ++sceneRequest.current;
+    const changeSet =
+      typeof saved === 'string'
+        ? (await callWorker('agent.changeSet.list', { includeTerminal: true })).find(
+            (item) => item.id === saved,
+          )
+        : saved;
+    if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
+      return;
     const nextScenes = await callWorker('scene.list', {});
     if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
       return;
     setScenes(nextScenes);
     const appliedSceneIds = new Set(
-      changeSet.items
+      (changeSet?.items ?? [])
         .filter((item) => item.entityType === 'scene' && item.status === 'applied')
         .map((item) => item.appliedEntityId),
     );
@@ -2365,7 +2376,7 @@ export function App() {
     if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
       return;
     const appliedShotIds = new Set(
-      changeSet.items
+      (changeSet?.items ?? [])
         .filter((item) => item.entityType === 'shot' && item.status === 'applied')
         .map((item) => item.appliedEntityId),
     );
@@ -4023,7 +4034,7 @@ export function App() {
       />
     );
 
-  const requestSceneBindingReview = async (
+  const requestSceneBindingUpdate = async (
     nextPrompt = sceneVideoPrompt,
     bindings = scene?.materialBindings ?? [],
     characters = scene?.characterBindings ?? [],
@@ -4050,7 +4061,7 @@ export function App() {
       setSceneVideoPrompt(nextPrompt);
     }
     const prompt = [
-      '请理解以下完整视频提示词，为已有场次关联对应场景和全部出场角色。先检索项目角色、场景资料，再调用 scene.submit_structure 返回结构化方案。',
+      '请理解以下完整视频提示词，为已有场次关联对应场景和全部出场角色。先检索项目角色、场景资料，再调用 scene.submit_structure 保存可编辑草稿，无需等待用户批准。',
       '这是修改已有场次：使用 sceneId 和 expectedRowVersion，shots:[]，返回完整 characterDocumentIds 和 sceneDocumentId。保留下面的提示词正文，不创建重复场次。有歧义返回 needs_clarification 反馈，禁止按姓名猜 ID。',
       JSON.stringify({
         sceneId: target.id,
@@ -4761,7 +4772,7 @@ export function App() {
                           writable={writable}
                           onPromptChange={setSceneVideoPrompt}
                           onRequestBindings={(prompt, bindings, characters, dialogueAudioId) =>
-                            void requestSceneBindingReview(
+                            void requestSceneBindingUpdate(
                               prompt,
                               bindings,
                               characters,
@@ -4771,13 +4782,13 @@ export function App() {
                           onSave={(nextPrompt, bindings, characters, dialogueAudioId) =>
                             void (
                               nextPrompt !== (scene.videoPrompt ?? '')
-                                ? requestSceneBindingReview
+                                ? requestSceneBindingUpdate
                                 : saveSceneVideoPrompt
                             )(nextPrompt, bindings, characters, dialogueAudioId)
                           }
                           onGenerateVideo={(bindings, characters, dialogueAudioId) =>
                             void (sceneVideoPrompt !== (scene.videoPrompt ?? '')
-                              ? requestSceneBindingReview(
+                              ? requestSceneBindingUpdate(
                                   sceneVideoPrompt,
                                   bindings,
                                   characters,
@@ -4848,13 +4859,11 @@ export function App() {
                 ) : (
                   <EmptyWorkspace />
                 )}
-                <ChangeSetReviewPanel
+                <GeneratedDraftSync
                   projectId={project?.id}
                   writable={writable}
                   refreshRevision={proposalRefreshRevision}
-                  focusChangeSetId={focusChangeSetId}
-                  onApplied={refreshAppliedStructure}
-                  documents={documents}
+                  onSaved={refreshAppliedStructure}
                 />
               </>
             ) : (

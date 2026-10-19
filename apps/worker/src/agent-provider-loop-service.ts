@@ -2246,7 +2246,7 @@ export class AgentProviderLoopService {
             documentId: document.id,
             documentVersionId: document.currentVersion?.id,
             ...(reference ? { domainScope: 'novel', bindingRole: reference.role } : {}),
-            reviewRequired: true,
+            reviewRequired: false,
           });
           resultSummary = result;
         } else if (call.name === 'novel.episode.submit_draft') {
@@ -2282,7 +2282,7 @@ export class AgentProviderLoopService {
             status: 'episode_draft_submitted',
             documentId: document.id,
             documentVersionId: document.currentVersion.id,
-            reviewRequired: true,
+            reviewRequired: false,
           });
           resultSummary = result;
         } else if (call.name === 'novel.episode.submit_structure') {
@@ -2330,16 +2330,17 @@ export class AgentProviderLoopService {
               });
             }
           }
-          const changeSet = this.changeSets.create({
+          const changeSet = this.changeSets.saveDraft({
             taskId: task.id,
             title: structure.episodeTitle,
             items,
           });
           result = JSON.stringify({
-            status: 'episode_structure_change_set_created',
+            status: 'episode_structure_saved',
             changeSetId: changeSet.id,
             itemCount: changeSet.items.length,
-            reviewRequired: true,
+            reviewRequired: false,
+            applied: true,
           });
           resultSummary = result;
         } else if (
@@ -2385,7 +2386,7 @@ export class AgentProviderLoopService {
               call.name === 'document.update_draft' ? 'draft_updated' : 'novel_draft_submitted',
             documentId: document.id,
             documentVersionId: document.currentVersion?.id,
-            reviewRequired: true,
+            reviewRequired: false,
           });
           resultSummary = result;
         } else if (call.name === 'novel.adaptation.submit_proposal') {
@@ -3600,8 +3601,8 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure', 'production.execute')
-                 AND (tool_name <> 'scene.submit_structure' OR json_extract(result_summary_json,'$.status')='scene_structure_proposed')
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure', 'scene.structure.stage', 'production.execute')
+                 AND (tool_name NOT IN ('scene.submit_structure', 'scene.structure.stage') OR json_extract(result_summary_json,'$.status')='scene_structure_saved')
              ) THEN NULL ELSE 'read-only' END,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
              WHERE id = ? AND status = 'running' AND phase = 'model_running'`,
