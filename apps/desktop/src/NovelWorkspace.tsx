@@ -25,7 +25,8 @@ import type {
   NovelMarkdownExportJobInfo,
   NovelVolumeInfo,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
+import { observeFileTask, observeMarkdownExport } from './file-task-client';
 import { readNovelDocument } from './novel-import-client';
 import { parseNovelSource, type NovelImportChapterDraft } from './novel-import';
 
@@ -105,6 +106,7 @@ function NovelProjectWorkspace({
   onOpenDocument,
   onChapterSelected,
 }: NovelWorkspaceProps) {
+  const callWorker = projectWorker();
   const [chapters, setChapters] = useState<NovelChapterInfo[]>([]);
   const [volumes, setVolumes] = useState<NovelVolumeInfo[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
@@ -117,6 +119,8 @@ function NovelProjectWorkspace({
   const [message, setMessage] = useState('');
   const [conflictDocument, setConflictDocument] = useState<DocumentDetail>();
   const [exportBusy, setExportBusy] = useState(false);
+  const [exportTaskId, setExportTaskId] = useState<string>();
+  const [importTaskId, setImportTaskId] = useState<string>();
   const [exportOpen, setExportOpen] = useState(false);
   const [exportChapterIds, setExportChapterIds] = useState<string[]>([]);
   const [exportScope, setExportScope] = useState<'work' | 'selection'>('work');
@@ -367,12 +371,14 @@ function NovelProjectWorkspace({
     setExportResult(undefined);
     setExportMessage('正在导出…');
     try {
-      const job = await callWorker('novel.export.prepare', {
+      const accepted = await callWorker('novel.export.start', {
         exportType: exportScope,
         exportFormat,
         ...(exportScope === 'selection' ? { chapterIds: selectedExportIds } : {}),
         ...(exportIncludeDraft ? { includeDraft: true } : {}),
       });
+      setExportTaskId(accepted.id);
+      const job = await observeMarkdownExport(accepted, callWorker);
       if (job.status !== 'succeeded') {
         throw new Error(
           job.errorMessage || `导出未完成（${exportStatusLabel(job.status)}），请重试。`,
@@ -388,6 +394,7 @@ function NovelProjectWorkspace({
       setExportMessage(`导出失败：${error instanceof Error ? error.message : '请重试。'}`);
     } finally {
       setExportBusy(false);
+      setExportTaskId(undefined);
     }
   };
 
@@ -442,10 +449,19 @@ function NovelProjectWorkspace({
     if (importPreview.length === 0 || importBusy) return;
     setImportBusy(true);
     try {
-      const result = await callWorker('novel.import', {
-        volumeTitle: importVolumeTitle.trim() || undefined,
-        chapters: importPreview,
+      const accepted = await callWorker('file.task.create', {
+        kind: 'novel-import',
+        idempotencyKey: crypto.randomUUID(),
+        input: {
+          volumeTitle: importVolumeTitle.trim() || undefined,
+          chapters: importPreview,
+        },
       });
+      setImportTaskId(accepted.id);
+      const completed = await observeFileTask(accepted, callWorker, (job) =>
+        setMessage(`小说导入 · ${job.progress}%`),
+      );
+      const result = completed.result as import('@ai-video/contracts').NovelImportResult;
       setImportPreview([]);
       setImportVolumeTitle('');
       const chunkCount = result.chapters.reduce(
@@ -458,6 +474,7 @@ function NovelProjectWorkspace({
       setMessage(reason instanceof Error ? reason.message : '小说导入失败');
     } finally {
       setImportBusy(false);
+      setImportTaskId(undefined);
     }
   };
 
@@ -601,6 +618,19 @@ function NovelProjectWorkspace({
               {exportMessage}
             </div>
           )}
+          {exportTaskId && exportBusy && (
+            <button
+              type="button"
+              onClick={() =>
+                void callWorker('novel.export.cancel', { jobId: exportTaskId }).catch(
+                  (reason: unknown) =>
+                    setExportMessage(reason instanceof Error ? reason.message : '取消失败'),
+                )
+              }
+            >
+              取消此小说导出
+            </button>
+          )}
           {exportResult && (
             <div className="novel-export-result">
               <span className="novel-export-path">{exportResult.packagePath}</span>
@@ -633,6 +663,19 @@ function NovelProjectWorkspace({
               <button type="button" disabled={importBusy} onClick={() => setImportPreview([])}>
                 取消
               </button>
+              {importTaskId && importBusy && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void callWorker('file.task.cancel', { taskId: importTaskId }).catch(
+                      (reason: unknown) =>
+                        setMessage(reason instanceof Error ? reason.message : '取消失败'),
+                    )
+                  }
+                >
+                  取消此小说导入
+                </button>
+              )}
             </div>
           </div>
           <ol>

@@ -19,6 +19,9 @@ import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
+import { TaskScheduleService } from './task-schedule-service.js';
+import { DocumentWorkflowService } from './document-workflow-service.js';
+import { ProjectTaskRuntime } from './project-task-runtime.js';
 
 const roots: string[] = [];
 const projects: ProjectService[] = [];
@@ -29,7 +32,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(scheduled = false, schedulingEnabled = true) {
   const root = await mkdtemp(join(tmpdir(), 'media-orchestration-'));
   roots.push(root);
   const projectsService = new ProjectService({ recentProjectsPath: join(root, 'recent.json') });
@@ -61,6 +64,7 @@ async function setup() {
     listModelPricing: () => [],
   } as unknown as AppSettingsService;
   const adapterLookup: { resolve: typeof getAdapter } = { resolve: getAdapter };
+  const scheduler = new TaskScheduleService(projectsService, { enabled: schedulingEnabled });
   const service = new MediaOrchestrationService(
     projectsService,
     settings,
@@ -70,6 +74,7 @@ async function setup() {
       request,
     } as unknown as NativeProviderBridge,
     (key) => adapterLookup.resolve(key),
+    scheduled ? scheduler : undefined,
   );
   return {
     root,
@@ -83,6 +88,7 @@ async function setup() {
     models,
     adapterLookup,
     settings,
+    scheduler,
   };
 }
 
@@ -162,6 +168,236 @@ function prepareVideo(videos: VideoGenerationService) {
 }
 
 describe('MediaOrchestrationService', () => {
+  it('coalesces duplicate confirmed requests into one execution and one paid submission', async () => {
+    const f = await setup(true);
+    const job = prepareVideo(f.videos);
+    const confirmation = f.service.requestSubmission({ jobId: job.id }).confirmation!;
+    let finish!: (value: unknown) => void;
+    f.request.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const params = {
+      jobId: job.id,
+      confirmationToken: confirmation.confirmationToken,
+      approved: true,
+    };
+    const first = f.service.confirmSubmission(params);
+    const duplicate = f.service.confirmSubmission(params);
+    await expect(
+      f.service.confirmSubmission({ ...params, confirmationToken: 'wrong-token' }),
+    ).rejects.toThrow('confirmation');
+    expect(f.request).toHaveBeenCalledOnce();
+    finish({ status: 200, taskId: 'same-remote-task' });
+    const results = await Promise.all([first, duplicate]);
+    expect(results[0]).toEqual(results[1]);
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+  it('keeps the existing paid submission path when new scheduling is disabled at startup', async () => {
+    const f = await setup(true, false);
+    const job = prepareVideo(f.videos);
+    const confirmation = f.service.requestSubmission({ jobId: job.id }).confirmation!;
+    f.request.mockResolvedValue({ status: 200, taskId: 'legacy-remote' });
+    await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: confirmation.confirmationToken,
+      approved: true,
+    });
+    expect(f.videos.get(job.id).providerTaskId).toBe('legacy-remote');
+    expect(f.scheduler.list()).toEqual([]);
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(() => f.scheduler.register(job.id)).toThrow('disabled');
+  });
+  it('releases a dependent confirmed video only after its upstream output is committed locally', async () => {
+    const f = await setup(true);
+    const upstream = prepareVideo(f.videos);
+    const downstream = prepareVideo(f.videos);
+    f.scheduler.register(upstream.id);
+    f.scheduler.register(downstream.id, [upstream.id]);
+    const directory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+    await mkdir(directory, { recursive: true });
+    const output = join(directory, `schedule-${upstream.id}.mp4`);
+    await writeFile(
+      output,
+      new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0]),
+    );
+    f.request.mockImplementation((method, params) =>
+      Promise.resolve(
+        method === 'provider.media.submit'
+          ? { status: 200, taskId: `remote-${(params as { operationId: string }).operationId}` }
+          : {
+              providerStatus: 200,
+              state: 'succeeded',
+              providerState: 'success',
+              output: { type: 'native_temporary_file', path: output, contentType: 'video/mp4' },
+            },
+      ),
+    );
+    const approve = (jobId: string) => {
+      const confirmation = f.service.requestSubmission({ jobId }).confirmation!;
+      return f.service.confirmSubmission({
+        jobId,
+        confirmationToken: confirmation.confirmationToken,
+        approved: true,
+      });
+    };
+    const waiting = approve(downstream.id);
+    await expect.poll(() => f.scheduler.get(downstream.id).waitReason).toBe('dependency');
+    expect(f.request).not.toHaveBeenCalled();
+    await approve(upstream.id);
+    const runtime = new ProjectTaskRuntime(
+      f.projectsService,
+      f.videos,
+      { request: f.request },
+      { scheduler: f.scheduler },
+    );
+    try {
+      runtime.start();
+      const result = await waiting;
+      expect(result.job.status).toBe('polling');
+      expect(f.videos.get(upstream.id).status).toBe('succeeded');
+      const bindings = f.projectsService.access(
+        false,
+        (db) =>
+          db
+            .prepare(
+              'SELECT asset_id AS assetId, content_hash AS hash FROM task_schedule_artifacts WHERE task_id=?',
+            )
+            .all(downstream.id) as Array<{ assetId: string; hash: string }>,
+      );
+      expect(bindings).toHaveLength(1);
+      expect(bindings[0]!.assetId).toBe(f.videos.get(upstream.id).results[0]!.asset?.id);
+      f.images.deleteAsset(bindings[0]!.assetId);
+      f.images.purgeAsset(bindings[0]!.assetId, true);
+      const history = f.projectsService.access(false, (db) =>
+        db
+          .prepare(
+            'SELECT source_asset_id AS sourceId,asset_id AS assetId FROM task_schedule_artifacts WHERE task_id=?',
+          )
+          .get(downstream.id),
+      );
+      expect(history).toEqual({ sourceId: bindings[0]!.assetId, assetId: null });
+    } finally {
+      runtime.stop();
+      await rm(output, { force: true });
+    }
+  });
+  it('runs two confirmed video submissions concurrently, queues the third and cancels it without sending', async () => {
+    const f = await setup(true);
+    const jobs = Array.from({ length: 3 }, () => prepareVideo(f.videos));
+    const confirmations = jobs.map(
+      (job) => f.service.requestSubmission({ jobId: job.id }).confirmation!,
+    );
+    const pending: Array<(value: unknown) => void> = [];
+    f.request.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          pending.push(resolve);
+        }),
+    );
+    const runs = confirmations.map((confirmation) =>
+      f.service
+        .confirmSubmission({
+          jobId: confirmation.jobId,
+          confirmationToken: confirmation.confirmationToken,
+          approved: true,
+        })
+        .then(
+          (result) => ({ result }),
+          (error: unknown) => ({ error }),
+        ),
+    );
+    await expect.poll(() => pending.length).toBe(2);
+    expect(f.scheduler.get(jobs[2]!.id)).toMatchObject({ waitReason: 'capacity' });
+    const logs = new DocumentWorkflowService(f.projectsService).listTaskLog();
+    expect(logs.items.find((item) => item.sourceId === jobs[2]!.id)?.scheduling?.waitReason).toBe(
+      'capacity',
+    );
+    await f.service.cancel({ jobId: jobs[2]!.id });
+    await expect.poll(() => f.scheduler.get(jobs[2]!.id).domainState).toBe('cancelled');
+    pending[0]!({ status: 200, taskId: 'remote-one' });
+    pending[1]!({ status: 200, taskId: 'remote-two' });
+    await Promise.all(runs);
+    expect(
+      f.request.mock.calls.filter(([method]) => method === 'provider.media.submit'),
+    ).toHaveLength(2);
+    expect(f.videos.get(jobs[0]!.id).providerTaskId).toBe('remote-one');
+    expect(f.videos.get(jobs[1]!.id).providerTaskId).toBe('remote-two');
+    expect(f.scheduler.list()).toHaveLength(3);
+    const events = f.scheduler.events(jobs[0]!.id);
+    expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
+    expect(events.some((event) => event.kind === 'submit.response_received')).toBe(true);
+  });
+
+  it('blocks dependent submissions and rejects self dependencies without invoking a Provider', async () => {
+    const f = await setup(true);
+    const upstream = prepareVideo(f.videos);
+    const downstream = prepareVideo(f.videos);
+    f.scheduler.register(upstream.id);
+    expect(() => f.scheduler.register(downstream.id, [downstream.id])).toThrow(/dependency/i);
+    f.scheduler.register(downstream.id, [upstream.id]);
+    const confirmation = f.service.requestSubmission({ jobId: downstream.id }).confirmation!;
+    const result = f.service
+      .confirmSubmission({
+        jobId: downstream.id,
+        confirmationToken: confirmation.confirmationToken,
+        approved: true,
+      })
+      .catch((error: unknown) => error);
+    await expect.poll(() => f.scheduler.get(downstream.id).waitReason).toBe('dependency');
+    expect(f.request).not.toHaveBeenCalled();
+    f.videos.fail({ jobId: upstream.id, failureKind: 'provider', message: 'upstream failed' });
+    expect(await result).toBeInstanceOf(Error);
+    expect(f.scheduler.get(downstream.id).waitReason).toBe('dependency_failed');
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it('recovers dispatch ownership without replaying an unknown paid submission', async () => {
+    const f = await setup(true);
+    const job = prepareVideo(f.videos);
+    const confirmation = f.service.requestSubmission({ jobId: job.id }).confirmation!;
+    f.request.mockRejectedValue(
+      new NativeProviderRequestError({ code: 'TIMEOUT', message: 'Lost reply', retryable: true }),
+    );
+    await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: confirmation.confirmationToken,
+      approved: true,
+    });
+    expect(f.scheduler.get(job.id).domainState).toBe('submission_unknown');
+    const root = f.project.rootPath;
+    f.projectsService.close();
+    f.projectsService.open(root);
+    f.scheduler.recover();
+    f.service.recoverInterrupted();
+    expect(f.scheduler.get(job.id).domainState).toBe('submission_unknown');
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+
+  it('enforces a persisted queue bound and never grants the same dispatch twice', async () => {
+    const f = await setup(true);
+    const first = prepareVideo(f.videos);
+    f.service.requestSubmission({ jobId: first.id });
+    f.scheduler.register(first.id);
+    const dispatch = f.scheduler.claim(first.id, 'submit')!;
+    expect(dispatch).toBeDefined();
+    expect(f.scheduler.claim(first.id, 'submit')).toBeUndefined();
+    for (let i = 1; i < 32; i++) f.scheduler.register(prepareVideo(f.videos).id);
+    expect(() => f.scheduler.register(prepareVideo(f.videos).id)).toThrow(/queue is full/);
+    const root = f.project.rootPath;
+    f.projectsService.close();
+    f.projectsService.open(root);
+    f.scheduler.recover();
+    expect(f.scheduler.isCurrent(dispatch)).toBe(false);
+    const next = f.scheduler.claim(first.id, 'submit')!;
+    expect(next.id).not.toBe(dispatch.id);
+    f.scheduler.release(dispatch);
+    expect(f.scheduler.isCurrent(next)).toBe(true);
+    f.scheduler.release(next);
+  });
+
   it('rechecks the structured source at paid confirmation and still permits rejecting a stale draft', async () => {
     const { projectsService, images, service, request } = await setup();
     const content = new ContentService(projectsService);
@@ -275,6 +511,7 @@ describe('MediaOrchestrationService', () => {
       confirmationToken: pending.confirmation!.confirmationToken,
       approved: true,
     });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     bridge.handleEnvelope({
       kind: 'host.response',
       requestId: sent[0]!.requestId,
@@ -344,15 +581,29 @@ describe('MediaOrchestrationService', () => {
       confirmationToken: pending.confirmation!.confirmationToken,
       approved: true,
     });
-    expect(images.get(job.id).mediaState).toBe('submitting');
+    await vi.waitFor(() => expect(images.get(job.id).mediaState).toBe('submitting'));
     await service.cancel({ jobId: job.id });
     rejectSubmission(new Error('response timed out'));
     expect((await submission).job).toMatchObject({ status: 'cancelled', mediaState: 'cancelled' });
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it('submits a HappyHorse draft through the existing media boundary and freezes the official contract', async () => {
-    const { profile, models, videos, service, request, projectsService } = await setup();
+  it('waits beyond the default bridge deadline for one HappyHorse submission and freezes its official contract', async () => {
+    const { profile, models, images, videos, settings, projectsService } = await setup();
+    const sent: Array<Extract<SidecarEnvelope, { kind: 'host.request' }>> = [];
+    const bridge = new NativeProviderBridge({
+      send: (envelope) => {
+        sent.push(envelope);
+        return Promise.resolve();
+      },
+    });
+    const service = new MediaOrchestrationService(
+      projectsService,
+      settings,
+      images,
+      videos,
+      bridge,
+    );
     Object.assign(profile, {
       providerType: 'unicompapi',
       protocol: 'openai-chat-completions',
@@ -386,18 +637,34 @@ describe('MediaOrchestrationService', () => {
       providerProfileId,
       modelId: model.id,
     });
-    request.mockResolvedValue({ status: 200, taskId: 'official-task', state: 'PENDING' });
     const pending = service.requestSubmission({ jobId: job.id });
-    const result = await service.confirmSubmission({
-      jobId: job.id,
-      confirmationToken: pending.confirmation!.confirmationToken,
-      approved: true,
-    });
+    vi.useFakeTimers();
+    let result: Awaited<ReturnType<typeof service.confirmSubmission>>;
+    try {
+      const submission = service.confirmSubmission({
+        jobId: job.id,
+        confirmationToken: pending.confirmation!.confirmationToken,
+        approved: true,
+      });
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(videos.get(job.id).mediaState).toBe('submitting');
+      expect(sent).toHaveLength(1);
+      bridge.handleEnvelope({
+        kind: 'host.response',
+        requestId: sent[0]!.requestId,
+        ok: true,
+        result: { status: 200, taskId: 'official-task', state: 'PENDING' },
+      });
+      result = await submission;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(result.job).toMatchObject({ status: 'polling', providerTaskId: 'official-task' });
-    expect(request).toHaveBeenCalledWith(
-      'provider.media.submit',
-      expect.objectContaining({ adapterKey, remoteModelId: 'happyhorse-1.1-t2v', parameters }),
-    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      method: 'provider.media.submit',
+      params: { adapterKey, remoteModelId: 'happyhorse-1.1-t2v', parameters },
+    });
     expect(
       projectsService.access(
         false,
@@ -723,4 +990,72 @@ describe('MediaOrchestrationService', () => {
     expect(service.requestSubmission({ jobId: submitting.id }).confirmation).toBeUndefined();
     expect(request).not.toHaveBeenCalled();
   });
+});
+
+it('shares bounded submit admission for images and video, coalesces one image owner, and revalidates queued confirmation before sending', async () => {
+  const f = await setup(true);
+  const a = prepareImage(f.images),
+    b = prepareImage(f.images),
+    cancelled = prepareVideo(f.videos),
+    expired = prepareImage(f.images);
+  const pending = new Map<string, { resolve(value: unknown): void; reject(reason: Error): void }>();
+  let inFlight = 0,
+    peak = 0;
+  f.request.mockImplementation(
+    (_method, params) =>
+      new Promise((resolve, reject) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        pending.set((params as { operationId: string }).operationId, {
+          resolve: (value) => {
+            inFlight -= 1;
+            resolve(value);
+          },
+          reject: (reason) => {
+            inFlight -= 1;
+            reject(reason);
+          },
+        });
+      }),
+  );
+  const confirmations = new Map(
+    [a, b, cancelled, expired].map((job) => [
+      job.id,
+      f.service.requestSubmission({ jobId: job.id }).confirmation!,
+    ]),
+  );
+  const approve = (id: string) =>
+    f.service.confirmSubmission({
+      jobId: id,
+      confirmationToken: confirmations.get(id)!.confirmationToken,
+      approved: true,
+    });
+  const first = approve(a.id),
+    duplicate = approve(a.id),
+    second = approve(b.id);
+  const cancelQueued = approve(cancelled.id).catch((reason: unknown) => reason),
+    expireQueued = approve(expired.id).catch((reason: unknown) => reason);
+  await vi.waitFor(() => expect(f.request).toHaveBeenCalledTimes(2));
+  expect(peak).toBe(2);
+  await f.service.cancel({ jobId: cancelled.id });
+  f.projectsService.access(true, (database) =>
+    database
+      .prepare('UPDATE generation_jobs SET submission_confirmation_expires_at=? WHERE id=?')
+      .run('2000-01-01T00:00:00.000Z', expired.id),
+  );
+  pending
+    .get(b.id)!
+    .resolve({ status: 200, body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] } });
+  expect((await second).job.status).toBe('succeeded');
+  expect(await expireQueued).toBeInstanceOf(Error);
+  expect(await cancelQueued).toBeInstanceOf(Error);
+  expect(f.request).toHaveBeenCalledTimes(2);
+  pending.get(a.id)!.reject(new Error('Accepted request response was lost'));
+  const [unknown, replayed] = await Promise.all([first, duplicate]);
+  expect(unknown).toEqual(replayed);
+  expect(unknown.job.mediaState).toBe('submission_unknown');
+  expect(f.images.listAssets({})).toHaveLength(1);
+  f.service.recoverInterrupted();
+  expect(f.service.requestSubmission({ jobId: a.id }).confirmation).toBeUndefined();
+  expect(f.request).toHaveBeenCalledTimes(2);
 });

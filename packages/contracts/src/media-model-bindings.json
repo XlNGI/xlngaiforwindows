@@ -10,6 +10,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -23,6 +26,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -36,6 +42,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -49,6 +58,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -62,6 +74,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -75,6 +90,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -88,6 +106,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -101,6 +122,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -114,6 +138,9 @@
     "status": "enabled",
     "capabilitiesOverride": {
       "videoCancellation": false
+    },
+    "inputTransport": {
+      "audio": "url-only"
     }
   },
   {
@@ -124,7 +151,10 @@
     "contractRevision": 1,
     "protocol": "openai-compatible-image",
     "compatibility": "partial",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
   },
   {
     "bindingId": "unicomp-qwen-image-3.0",
@@ -134,7 +164,10 @@
     "contractRevision": 1,
     "protocol": "openai-compatible-image",
     "compatibility": "partial",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
   },
   {
     "bindingId": "unicomp-qwen-image-2.1-pro",
@@ -144,7 +177,10 @@
     "contractRevision": 1,
     "protocol": "openai-compatible-image",
     "compatibility": "partial",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
   },
   {
     "bindingId": "unicomp-qwen-image-2.1-turbo",
@@ -154,7 +190,10 @@
     "contractRevision": 1,
     "protocol": "openai-compatible-image",
     "compatibility": "partial",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
   },
   {
     "bindingId": "wan-video:wan3.0-video",
@@ -164,7 +203,10 @@
     "contractRevision": 3,
     "protocol": "dashscope-video",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
   },
   {
     "bindingId": "wan-video:wan3.0-video-prime",
@@ -174,7 +216,10 @@
     "contractRevision": 3,
     "protocol": "dashscope-video",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
   },
   {
     "bindingId": "wan-video:wan2.7-i2v-2026-04-25",
@@ -184,7 +229,10 @@
     "contractRevision": 2,
     "protocol": "dashscope-video",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
   },
   {
     "bindingId": "minimax-video:MiniMax-H3",
@@ -194,7 +242,10 @@
     "contractRevision": 2,
     "protocol": "minimax-video-v2",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
   },
   {
     "bindingId": "minimax-video:MiniMax-H3-Max",
@@ -204,7 +255,10 @@
     "contractRevision": 2,
     "protocol": "minimax-video-v2",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
   },
   {
     "bindingId": "seedance-video:doubao-seedance-2-0-260128",
@@ -214,7 +268,10 @@
     "contractRevision": 2,
     "protocol": "seedance-video",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
   },
   {
     "bindingId": "seedance-video:doubao-seedance-2-5-260628",
@@ -224,6 +281,165 @@
     "contractRevision": 2,
     "protocol": "seedance-video",
     "compatibility": "exact",
-    "status": "enabled"
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "upload"
+    }
+  },
+  {
+    "bindingId": "unicomp-wan3.0-video-media-v3",
+    "providerType": "unicompapi",
+    "remoteModelId": "wan3.0-video",
+    "contractId": "cn.qwen.wan3-0-video",
+    "contractRevision": 3,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    },
+    "transportOverride": {
+      "protocolFamily": "openai-compatible-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "media",
+          "to": "metadata.input.media"
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "metadata.parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "metadata.parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "metadata.parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "audio",
+          "to": "metadata.parameters.audio"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "metadata.parameters.seed"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "metadata.parameters.prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "metadata.parameters.watermark"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "status",
+          "to": "state"
+        }
+      ]
+    },
+    "inputTransport": {
+      "audio": "url-only"
+    }
+  },
+  {
+    "bindingId": "unicomp-wan3.0-video-prime-media-v3",
+    "providerType": "unicompapi",
+    "remoteModelId": "wan3.0-video-prime",
+    "contractId": "cn.qwen.wan3-0-video-prime",
+    "contractRevision": 3,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": {
+      "videoCancellation": false
+    },
+    "transportOverride": {
+      "protocolFamily": "openai-compatible-video",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "media",
+          "to": "metadata.input.media"
+        },
+        {
+          "operation": "copy",
+          "from": "resolution",
+          "to": "metadata.parameters.resolution"
+        },
+        {
+          "operation": "copy",
+          "from": "ratio",
+          "to": "metadata.parameters.ratio"
+        },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "metadata.parameters.duration"
+        },
+        {
+          "operation": "copy",
+          "from": "audio",
+          "to": "metadata.parameters.audio"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "metadata.parameters.seed"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "metadata.parameters.prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "metadata.parameters.watermark"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "id",
+          "to": "taskId"
+        },
+        {
+          "operation": "extract",
+          "from": "status",
+          "to": "state"
+        }
+      ]
+    },
+    "inputTransport": {
+      "audio": "url-only"
+    }
   }
 ]

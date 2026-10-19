@@ -25,7 +25,15 @@ import type {
   VideoProviderRegion,
 } from '@ai-video/contracts';
 import { createHash, randomUUID } from 'node:crypto';
-import { isWanVideoBaseUrl } from '@ai-video/contracts';
+import {
+  isWanVideoBaseUrl,
+  isWanMediaAdapter,
+  seedProductionInputs,
+  productionImagesFromParameters,
+  addProductionRoleVoices,
+  supportsProductionAudioUpload,
+  productionInputSupport,
+} from '@ai-video/contracts';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { adapterBindsCatalogModel, getAdapter } from '@ai-video/generation-adapters';
 import { createRepositories } from '@ai-video/persistence';
@@ -37,6 +45,7 @@ import { resolveProjectRelativePath, type ProjectService } from './project-servi
 import { assertStorageCapacity } from './storage-capacity.js';
 import type { VideoGenerationService } from './video-generation-service.js';
 import { isOfficialVideoAdapter, materializeOfficialVideoInputs } from './official-video-inputs.js';
+import { ProductionService } from './production-service.js';
 
 const MAX_MEDIA_CANDIDATES = 50;
 const MAX_MEDIA_PARAMETERS = 40;
@@ -87,6 +96,7 @@ export class MediaPreparationService {
   ) {}
 
   prepareImage(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
+    params = this.prepareProductionDraft(params);
     const materialized = this.materializeInputs([], params.parameters);
     try {
       return this.images.prepare({
@@ -101,6 +111,7 @@ export class MediaPreparationService {
   }
 
   prepareVideo(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
+    params = this.prepareProductionDraft(params);
     if (isOfficialVideoAdapter(params.adapterKey)) {
       const profile = params.providerProfileId
         ? this.settings.getProfile(params.providerProfileId)
@@ -145,9 +156,10 @@ export class MediaPreparationService {
         ),
       };
     }
-    const materialized = isOfficialVideoAdapter(params.adapterKey)
-      ? materializeOfficialVideoInputs(this.projects, params)
-      : this.materializeInputs([], params.parameters);
+    const materialized =
+      isOfficialVideoAdapter(params.adapterKey) || isWanMediaAdapter(getAdapter(params.adapterKey))
+        ? materializeOfficialVideoInputs(this.projects, params)
+        : this.materializeInputs([], params.parameters);
     try {
       return this.videos.prepare({
         ...params,
@@ -158,6 +170,32 @@ export class MediaPreparationService {
       cleanupMaterializedPaths(materialized.paths);
       throw error;
     }
+  }
+
+  private prepareProductionDraft<
+    T extends ImageGenerationPrepareParams | VideoGenerationPrepareParams,
+  >(params: T): T {
+    if (params.productionSource) return params;
+    const target =
+      'sceneId' in params && params.sceneId
+        ? { kind: 'scene' as const, id: params.sceneId }
+        : params.shotId
+          ? { kind: 'shot' as const, id: params.shotId }
+          : undefined;
+    if (!target) return params;
+    const compiled = new ProductionService(this.projects).compile({
+      target,
+      adapterKey: params.adapterKey,
+    });
+    if (compiled.issues.length)
+      throw new Error(compiled.issues.map((issue) => issue.message).join('\n'));
+    return compiled.source
+      ? {
+          ...params,
+          productionSource: compiled.source,
+          parameters: { ...compiled.parameters, ...params.parameters },
+        }
+      : params;
   }
 
   selectionContext(
@@ -262,7 +300,83 @@ export class MediaPreparationService {
       );
     }
 
-    const parameters = this.normalizeParameters(context, adapter, selection.parameters);
+    const target = context.arguments.sceneId
+      ? { kind: 'scene' as const, id: context.arguments.sceneId }
+      : context.arguments.shotId
+        ? { kind: 'shot' as const, id: context.arguments.shotId }
+        : undefined;
+    const production = target
+      ? new ProductionService(this.projects).compile({
+          target,
+          adapterKey: adapter.key,
+          ...(context.arguments.inputAssetIds.length
+            ? {
+                inputImages: context.arguments.inputAssetIds.map((assetId) => ({
+                  assetId,
+                  role: 'reference' as const,
+                })),
+              }
+            : {}),
+        })
+      : undefined;
+    if (production?.issues.length)
+      throw new Error(production.issues.map((issue) => issue.message).join('\n'));
+    let parameters = this.normalizeParameters(
+      production
+        ? {
+            ...context,
+            arguments: {
+              ...context.arguments,
+              parameters: { ...production.parameters, ...context.arguments.parameters },
+            },
+          }
+        : context,
+      adapter,
+      selection.parameters,
+    );
+    const audioMode = production?.instruction?.audio.mode;
+    const sceneInputs = production?.sceneInputs;
+    const hasAudio = (value: unknown): boolean => {
+      if (Array.isArray(value)) return value.some(hasAudio);
+      if (!value || typeof value !== 'object') return false;
+      const node = value as Record<string, unknown>;
+      return (
+        (typeof node.type === 'string' &&
+          ['reference_audio', 'driving_audio', 'audio_url'].includes(node.type)) ||
+        Object.values(node).some(hasAudio)
+      );
+    };
+
+    if (
+      sceneInputs &&
+      !hasAudio(parameters) &&
+      (audioMode === 'voice-reference' || audioMode === 'dialogue-driven')
+    ) {
+      if (!supportsProductionAudioUpload(adapter))
+        throw new Error('当前渠道未接入本地音频上传，请提供公网音频地址或选择支持上传的连接。');
+      const voices =
+        audioMode === 'voice-reference'
+          ? (sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
+              if (binding.voiceDisabled) return [];
+              const voice = binding.voiceReferenceVersionId
+                ? sceneInputs.media.voices.find(
+                    (v) =>
+                      v.versionId === binding.voiceReferenceVersionId &&
+                      v.characterDocumentId === binding.characterDocumentId,
+                  )
+                : sceneInputs.media.characters.find(
+                    (c) => c.characterDocumentId === binding.characterDocumentId,
+                  )?.voice;
+              return voice ? [voice] : [];
+            })
+          : [];
+      parameters = addProductionRoleVoices(
+        adapter,
+        parameters,
+        voices,
+        audioMode === 'dialogue-driven' ? sceneInputs.scene.dialogueAudioId : undefined,
+      );
+    }
     const validation = this.adapters.validate({ adapterKey: adapter.key, parameters });
     if (!validation.valid) {
       throw new AgentToolPolicyError(
@@ -276,16 +390,8 @@ export class MediaPreparationService {
     }
 
     const snapshot = this.snapshot(candidate, adapter);
-    const materialized =
-      context.kind === 'video' && isOfficialVideoAdapter(adapter.key)
-        ? materializeOfficialVideoInputs(this.projects, {
-            adapterKey: adapter.key,
-            parameters,
-            providerRegion: candidate.providerRegion,
-            modelId: candidate.remoteModelId,
-          })
-        : this.materializeInputs(context.arguments.inputAssetIds, parameters);
     const common = {
+      ...(production?.source ? { productionSource: production.source } : {}),
       shotId: context.arguments.shotId,
       adapterKey: adapter.key,
       parameters,
@@ -295,30 +401,20 @@ export class MediaPreparationService {
       originalPrompt: context.arguments.prompt,
       costNoticeAcknowledged: false,
       mediaModelSelection: snapshot,
-      mediaInputReferences: materialized.references,
-      mediaSubmissionParameters: materialized.parameters,
     };
-    let job: ImageGenerationJobInfo | VideoGenerationJobInfo;
-    try {
-      if (context.kind === 'image') {
-        job = this.images.prepare(common);
-      } else {
-        job = this.videos.prepare({
-          ...common,
-          sceneId: context.arguments.sceneId,
-          providerRegion: candidate.providerRegion,
-          assetKind:
-            context.arguments.assetKind === 'generated-video' ||
-            context.arguments.assetKind === 'shot-video' ||
-            context.arguments.assetKind === 'scene-video'
-              ? context.arguments.assetKind
-              : 'generated-video',
-        });
-      }
-    } catch (error) {
-      for (const path of materialized.paths) rmSync(path, { force: true });
-      throw error;
-    }
+    const job =
+      context.kind === 'image'
+        ? this.prepareImage(common)
+        : this.prepareVideo({
+            ...common,
+            sceneId: context.arguments.sceneId,
+            providerRegion: candidate.providerRegion,
+            assetKind:
+              context.arguments.assetKind === 'scene-video' ||
+              context.arguments.assetKind === 'shot-video'
+                ? context.arguments.assetKind
+                : 'generated-video',
+          });
     return {
       draftId: job.id,
       kind: context.kind,
@@ -475,39 +571,41 @@ export class MediaPreparationService {
       cloneParameters(context.arguments.parameters),
       cloneParameters(selected),
     );
-    if (properties.prompt?.type === 'string' && parameters.prompt === undefined) {
-      parameters.prompt = context.arguments.prompt;
+    const images = productionImagesFromParameters(adapter, parameters);
+    for (const assetId of context.arguments.inputAssetIds) {
+      if (
+        !images.some(
+          (image) => image.url.replace(/^project-asset:\/\//u, 'asset://') === 'asset://' + assetId,
+        )
+      )
+        images.push({ url: 'asset://' + assetId, role: 'reference' });
     }
-    if (properties.images) {
-      const assetReferences = context.arguments.inputAssetIds.map((id) => `asset://${id}`);
-      const selectedImages = Array.isArray(parameters.images) ? parameters.images : [];
-      parameters.images = [...new Set([...assetReferences, ...selectedImages])];
+    const content = Array.isArray(parameters.content) ? parameters.content : [];
+    const hasText = content.some(
+      (value) =>
+        value && typeof value === 'object' && !Array.isArray(value) && value.type === 'text',
+    );
+    const normalized = seedProductionInputs(
+      adapter,
+      parameters,
+      typeof parameters.prompt === 'string'
+        ? parameters.prompt
+        : hasText
+          ? undefined
+          : context.arguments.prompt,
+      images.length ? images : undefined,
+    );
+    if (adapter.parameterSchema.properties.media && typeof normalized.video === 'string') {
+      normalized.media = [
+        ...(Array.isArray(normalized.media) ? normalized.media : []),
+        {
+          type: adapter.capability === 'VIDEO_TO_VIDEO' ? 'first_clip' : 'reference_video',
+          url: normalized.video,
+        },
+      ];
+      delete normalized.video;
     }
-    if (isOfficialVideoAdapter(adapter.key)) {
-      const assets = context.arguments.inputAssetIds.map((id) => `asset://${id}`);
-      if (adapter.provider === 'wan-video') {
-        if (assets.length && !parameters.media)
-          parameters.media = assets.map((url, index) => ({
-            type: adapter.contractId?.includes('wan2-7')
-              ? index === 0
-                ? 'first_frame'
-                : 'last_frame'
-              : 'reference_image',
-            url,
-          }));
-      } else if (!parameters.content) {
-        parameters.content = [
-          { type: 'text', text: context.arguments.prompt },
-          ...assets.map((url) => ({
-            type: 'image_url',
-            image_url: { url },
-            role: 'reference_image',
-          })),
-        ];
-        delete parameters.prompt;
-      }
-    }
-    return parameters;
+    return normalized;
   }
 
   private materializeInputs(
@@ -516,6 +614,20 @@ export class MediaPreparationService {
   ): MaterializedMediaInputs {
     const project = this.projects.current();
     if (!project) throw new Error('No project is open.');
+    // Desktop sends asset IDs, just like Agent callers. Resolve bytes only in
+    // the owning Worker and pass bounded controlled-file handles to Native.
+    inputAssetIds = [
+      ...new Set([
+        ...inputAssetIds,
+        ...Object.values(parameters).flatMap((value) =>
+          (Array.isArray(value) ? value : [value]).flatMap((item) =>
+            typeof item === 'string' && /^(?:asset|project-asset):\/\//u.test(item)
+              ? [item.slice(item.indexOf('://') + 3)]
+              : [],
+          ),
+        ),
+      ]),
+    ];
     const images = Array.isArray(parameters.images) ? parameters.images : [];
     const inlineImages = images.flatMap((value) =>
       typeof value === 'string' && value.toLowerCase().startsWith('data:image/')
@@ -595,16 +707,16 @@ export class MediaPreparationService {
       for (const [key, value] of Object.entries(transformed)) {
         if (Array.isArray(value)) {
           transformed[key] = value.map((item) => {
-            if (typeof item === 'string' && item.startsWith('asset://')) {
-              return assetUris.get(item.slice('asset://'.length)) ?? item;
+            if (typeof item === 'string' && /^(?:asset|project-asset):\/\//u.test(item)) {
+              return assetUris.get(item.slice(item.indexOf('://') + 3)) ?? item;
             }
             if (typeof item === 'string' && item.toLowerCase().startsWith('data:image/')) {
               return inlineUris[inlineIndex++] ?? item;
             }
             return item;
           });
-        } else if (typeof value === 'string' && value.startsWith('asset://')) {
-          transformed[key] = assetUris.get(value.slice('asset://'.length)) ?? value;
+        } else if (typeof value === 'string' && /^(?:asset|project-asset):\/\//u.test(value)) {
+          transformed[key] = assetUris.get(value.slice(value.indexOf('://') + 3)) ?? value;
         } else if (typeof value === 'string' && value.toLowerCase().startsWith('data:image/')) {
           transformed[key] = inlineUris[inlineIndex++] ?? value;
         }
@@ -816,15 +928,22 @@ function adapterSupportsInputs(
 ): boolean {
   if (kind === 'image' && !adapter.capability.endsWith('TO_IMAGE')) return false;
   if (kind === 'video' && !adapter.capability.endsWith('TO_VIDEO')) return false;
-  const imageProperty = adapter.parameterSchema.properties.images;
-  if (adapter.capability === 'VIDEO_TO_VIDEO') {
-    return hasVideo && inputCount <= (imageProperty?.maxItems ?? 0);
-  }
-  if (hasVideo) return false;
-  if (inputCount === 0) return !imageProperty && adapter.capability.startsWith('TEXT_TO_');
-  if (!imageProperty) return false;
+  const support = productionInputSupport(adapter);
+  if (hasVideo)
+    return (
+      support.video &&
+      ['VIDEO_TO_VIDEO', 'REFERENCE_TO_VIDEO'].includes(adapter.capability) &&
+      inputCount <= support.maxImages
+    );
+  if (adapter.capability === 'VIDEO_TO_VIDEO') return false;
+  if (inputCount === 0) return adapter.capability.startsWith('TEXT_TO_');
+  if (!support.images) return false;
+  if (adapter.capability === 'IMAGE_TO_VIDEO') return inputCount === 1;
+  if (adapter.capability === 'START_END_TO_VIDEO') return inputCount === 2;
   return (
-    inputCount >= (imageProperty.minItems ?? 0) && inputCount <= (imageProperty.maxItems ?? 20)
+    adapter.capability.startsWith('REFERENCE_TO_') &&
+    inputCount >= support.minImages &&
+    inputCount <= support.maxImages
   );
 }
 

@@ -2,11 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { ImagePreview } from './ImagePreview';
 import { useProductionInstructions } from './use-production-instructions';
+import { ProjectProductionDefaults } from './ProjectProductionDefaults';
+import type { ProductionSegment } from '@ai-video/contracts';
 import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
 import {
   addOfficialRoleVoices,
   isOfficialVoiceVideo,
   seedOfficialVideoParameters,
+  usesStructuredVideoParameters,
 } from './official-video-parameters';
 import type { CharacterVoiceReferenceInfo, AudioFileInfo } from '@ai-video/contracts';
 import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
@@ -50,11 +53,17 @@ import type {
   SceneInfo,
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
-import { adapterBindsCatalogModel } from '@ai-video/contracts';
+import { projectWorker, workerMediaUrl } from './worker-scope';
+import {
+  adapterBindsCatalogModel,
+  isWanMediaAdapter,
+  productionAudioSupport,
+  seedProductionInputs,
+} from '@ai-video/contracts';
 import {
   generationErrorFeedback,
   generationStatusLabel,
+  generationTaskStatus,
   videoProgressGuidance,
 } from './generation-feedback';
 import { MediaSubmissionConfirmationDialog } from './media-confirmation';
@@ -68,9 +77,15 @@ import {
 } from './local-image-input';
 
 interface ProductionPanelProps {
+  onRequestSubmissionApproval?: (
+    confirmation: MediaSubmissionConfirmationRequest,
+  ) => Promise<boolean>;
   expanded?: boolean;
   capability?: GenerationCapability;
   projectId?: string;
+  projectSessionId?: string;
+  /** Identity of the loaded project view, including reopening the same project. */
+  projectViewEpoch?: object;
   projectRootPath?: string;
   shotId?: string;
   sceneId?: string;
@@ -78,10 +93,12 @@ interface ProductionPanelProps {
   seedPrompt?: string;
   seedImages?: string[];
   seedReferenceBindings?: SceneMaterialBindingInfo[];
+  seedImageBindings?: import('@ai-video/contracts').ProductionImageSelection[];
   preferredAssetKind?: ImageAssetKind;
   writable: boolean;
   assets?: AssetInfo[];
   videoJobs?: VideoGenerationJobInfo[];
+  imageJobs?: import('@ai-video/contracts').ImageGenerationJobInfo[];
   focusedAssetId?: string;
   focusedJobId?: string;
   onAssetsChanged?: (assets: AssetInfo[], selectedAssetId?: string) => void;
@@ -225,28 +242,6 @@ function isAssetReference(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('asset://') && value.length > 8;
 }
 
-async function resolveAssetReferences(parameters: AdapterParameters): Promise<AdapterParameters> {
-  const resolveValue = async (
-    value: AdapterParameters[string],
-  ): Promise<AdapterParameters[string]> => {
-    if (isAssetReference(value)) {
-      return (await callWorker('asset.preview', { assetId: value.slice(8) })).dataUrl;
-    }
-    if (Array.isArray(value)) {
-      return Promise.all(
-        value.map(async (item) => {
-          if (!isAssetReference(item)) return item;
-          return (await callWorker('asset.preview', { assetId: item.slice(8) })).dataUrl;
-        }),
-      );
-    }
-    return value;
-  };
-  const resolved: AdapterParameters = {};
-  for (const [key, value] of Object.entries(parameters)) resolved[key] = await resolveValue(value);
-  return resolved;
-}
-
 function isVideoCapability(capability: GenerationCapability | undefined): boolean {
   return (
     capability === 'TEXT_TO_VIDEO' ||
@@ -291,7 +286,7 @@ function mediaSrcForAbsolutePath(absolutePath: string): string | undefined {
 }
 
 function mediaSrcForAsset(assetId: string, absolutePath: string): string | undefined {
-  if (!('__TAURI_INTERNALS__' in window)) return `/worker-media/${encodeURIComponent(assetId)}`;
+  if (!('__TAURI_INTERNALS__' in window)) return workerMediaUrl(assetId);
   return mediaSrcForAbsolutePath(absolutePath);
 }
 
@@ -299,6 +294,8 @@ export function ProductionPanel({
   expanded = false,
   capability,
   projectId,
+  projectSessionId,
+  projectViewEpoch,
   projectRootPath,
   shotId,
   sceneId,
@@ -306,17 +303,21 @@ export function ProductionPanel({
   seedPrompt,
   seedImages,
   seedReferenceBindings,
+  seedImageBindings,
   preferredAssetKind,
   writable,
   assets: controlledAssets,
   videoJobs = [],
+  imageJobs = [],
   focusedAssetId,
   focusedJobId,
   onAssetsChanged,
   onOpenAssetLibrary,
   onOpenProviderSettings,
   providerSettingsRevision = 0,
+  onRequestSubmissionApproval,
 }: ProductionPanelProps) {
+  const callWorker = projectWorker();
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState('');
@@ -327,6 +328,9 @@ export function ProductionPanel({
   const [parameters, setParameters] = useState<AdapterParameters>({});
   const [formReady, setFormReady] = useState(false);
   const [draftOverrides, setDraftOverrides] = useState<AdapterParameters>();
+  const [segmentShotIds, setSegmentShotIds] = useState<string[]>();
+  const [sceneSegments, setSceneSegments] = useState<ProductionSegment[]>([]);
+  const [completeScenePrompt, setCompleteScenePrompt] = useState('');
   const productionInstructions = useProductionInstructions({
     projectId,
     target:
@@ -345,40 +349,26 @@ export function ProductionPanel({
     ready: formReady && adapter?.key === adapterKey,
     setParameters,
     initialOverrides: draftOverrides,
-    preparePatch: (compiled, current) => {
-      const next = { ...compiled.parameters };
-      if (!adapter || !compiled.sceneInputs) return next;
-      const { scene: latest, media } = compiled.sceneInputs;
-      const bindings = [
-        ...(latest.materialBindings ?? []).filter((b) => b.role !== 'character'),
-        ...(latest.characterBindings ?? []).flatMap((binding) => {
-          const character = media.characters.find(
-            (c) => c.characterDocumentId === binding.characterDocumentId,
-          );
-          const id = binding.imageDisabled
-            ? undefined
-            : (binding.imageAssetId ?? character?.defaultImage?.id);
-          return id
-            ? [
-                {
-                  id: `cast-${binding.characterDocumentId}`,
-                  role: 'character' as const,
-                  label:
-                    compiled.sceneInputs!.characterNames[binding.characterDocumentId] ?? '角色',
-                  assetId: id,
-                  sourceDocumentId: binding.characterDocumentId,
-                  source: 'auto' as const,
-                },
-              ]
-            : [];
-        }),
-      ];
-      const images = bindings.map((binding) => `project-asset://${binding.assetId}`);
-      return isOfficialVoiceVideo(adapter)
-        ? seedOfficialVideoParameters(adapter, { ...current, ...next }, undefined, images, true)
-        : { ...next, ...(adapter.parameterSchema.properties.images ? { images } : {}) };
-    },
+    shotIds: segmentShotIds,
+    inputImages: seedImageBindings,
   });
+  useEffect(() => {
+    setSegmentShotIds(undefined);
+    setSceneSegments([]);
+    setCompleteScenePrompt('');
+  }, [projectId, sceneId, adapterKey, selectedProfileId]);
+  useEffect(() => {
+    const result = productionInstructions.result;
+    if (
+      sceneId &&
+      result?.target.id === sceneId &&
+      !result.source?.shotIds &&
+      result.timeline?.length
+    ) {
+      setSceneSegments(result.segments ?? []);
+      setCompleteScenePrompt(result.compiledPrompt ?? '');
+    }
+  }, [sceneId, productionInstructions.result]);
   const [errors, setErrors] = useState<AdapterValidationError[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -388,15 +378,17 @@ export function ProductionPanel({
   const requestPaidSubmissionApproval = (
     confirmation: MediaSubmissionConfirmationRequest,
   ): Promise<boolean> =>
-    new Promise<boolean>((resolve) => {
-      paidSubmissionResolver.current?.(false);
-      setPaidSubmission(confirmation);
-      paidSubmissionResolver.current = (approved) => {
-        paidSubmissionResolver.current = undefined;
-        setPaidSubmission(undefined);
-        resolve(approved);
-      };
-    });
+    onRequestSubmissionApproval
+      ? onRequestSubmissionApproval(confirmation)
+      : new Promise<boolean>((resolve) => {
+          paidSubmissionResolver.current?.(false);
+          setPaidSubmission(confirmation);
+          paidSubmissionResolver.current = (approved) => {
+            paidSubmissionResolver.current = undefined;
+            setPaidSubmission(undefined);
+            resolve(approved);
+          };
+        });
 
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
@@ -420,6 +412,15 @@ export function ProductionPanel({
   const [sceneInputsLoading, setSceneInputsLoading] = useState(false);
   const [sceneInputsError, setSceneInputsError] = useState('');
   const compiledSceneInputs = productionInstructions.result?.sceneInputs;
+  const productionInstruction = productionInstructions.result?.instruction;
+  const needsVoiceInput =
+    !productionInstruction ||
+    productionInstruction.audio.mode === 'voice-reference' ||
+    productionInstruction.resources.some((r) => r.required && r.kind === 'voice-reference');
+  const needsDialogueInput =
+    !productionInstruction ||
+    productionInstruction.audio.mode === 'dialogue-driven' ||
+    productionInstruction.resources.some((r) => r.required && r.kind === 'dialogue-audio');
   const compiledSceneInputsRef = useRef(compiledSceneInputs);
   compiledSceneInputsRef.current = compiledSceneInputs;
   const compiledReferenceBindings = useMemo<SceneMaterialBindingInfo[] | undefined>(() => {
@@ -456,7 +457,7 @@ export function ProductionPanel({
     setBoundScene(latest);
     setVoiceReferences(media.voices);
     setSelectedVoiceIds(
-      (latest.characterBindings ?? [])
+      (needsVoiceInput ? (latest.characterBindings ?? []) : [])
         .filter(
           (binding) =>
             !binding.voiceDisabled &&
@@ -467,7 +468,7 @@ export function ProductionPanel({
         .map((binding) => binding.characterDocumentId),
     );
     setDialogueAudio(undefined);
-    if (latest.dialogueAudioId) {
+    if (needsDialogueInput && latest.dialogueAudioId) {
       let active = true;
       setSceneInputsLoading(true);
       void callWorker('audio.get', { audioId: latest.dialogueAudioId })
@@ -484,7 +485,12 @@ export function ProductionPanel({
         active = false;
       };
     }
-  }, [compiledSceneInputs, productionInstructions.result?.issues]);
+  }, [
+    compiledSceneInputs,
+    productionInstructions.result?.issues,
+    needsVoiceInput,
+    needsDialogueInput,
+  ]);
   useEffect(() => {
     let active = true;
     setVoiceReferences([]);
@@ -523,7 +529,7 @@ export function ProductionPanel({
                 setBoundScene(currentScene);
                 setDialogueAudio(audio ?? undefined);
                 setSelectedVoiceIds(
-                  adapter?.contractId?.includes('wan2-7')
+                  adapter && productionAudioSupport(adapter).dialogueDriven
                     ? []
                     : (currentScene.characterBindings ?? [])
                         .filter(
@@ -570,8 +576,37 @@ export function ProductionPanel({
   }>();
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>();
   const [savingPreview, setSavingPreview] = useState(false);
-  const currentProjectIdRef = useRef(projectId);
-  const currentSceneIdRef = useRef(sceneId);
+  const submissionScope = useMemo(
+    () => ({}),
+    [projectId, projectSessionId, projectViewEpoch, shotId, sceneId, sourceDocumentId],
+  );
+  const currentSubmissionScope = useRef(submissionScope);
+  currentSubmissionScope.current = submissionScope;
+  const activeSubmission = useRef<object | undefined>(undefined);
+  const beginSubmission = () => {
+    const token = {};
+    activeSubmission.current = token;
+    const isCurrent = () =>
+      currentSubmissionScope.current === submissionScope && activeSubmission.current === token;
+    setBusy(true);
+    return isCurrent;
+  };
+  useEffect(() => {
+    activeSubmission.current = undefined;
+    paidSubmissionResolver.current?.(false);
+    setBusy(false);
+    setGenerationJobId(undefined);
+    setGenerationStatus('');
+    setPreview(undefined);
+    setGeneratedImages(undefined);
+    setSavingPreview(false);
+    setMessage('');
+    setErrors([]);
+    return () => {
+      activeSubmission.current = undefined;
+      paidSubmissionResolver.current?.(false);
+    };
+  }, [submissionScope]);
   const seedPromptRef = useRef(seedPrompt);
   seedPromptRef.current = seedPrompt;
   const seedImagesRef = useRef(seedImages);
@@ -587,9 +622,6 @@ export function ProductionPanel({
       ? capability!
       : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
-  currentProjectIdRef.current = projectId;
-  currentSceneIdRef.current = sceneId;
-
   useEffect(() => {
     setGeneratedImages(undefined);
   }, [projectId, shotId, sceneId, sourceDocumentId]);
@@ -600,9 +632,10 @@ export function ProductionPanel({
 
   useEffect(() => {
     if (!seedPrompt && seedImages === undefined) return;
+    if (seedImageBindings) return;
     setParameters((current) =>
       productionInstructions.preserveEdits(
-        isOfficialVoiceVideo(adapter)
+        usesStructuredVideoParameters(adapter)
           ? seedOfficialVideoParameters(
               adapter!,
               current,
@@ -617,7 +650,14 @@ export function ProductionPanel({
             },
       ),
     );
-  }, [seedPrompt, seedImages, sourceDocumentId, adapter, productionInstructions.preserveEdits]);
+  }, [
+    seedPrompt,
+    seedImages,
+    seedImageBindings,
+    sourceDocumentId,
+    adapter,
+    productionInstructions.preserveEdits,
+  ]);
 
   useEffect(() => {
     if (focusedAssetId && assets.some((item) => item.id === focusedAssetId)) {
@@ -733,7 +773,22 @@ export function ProductionPanel({
         setMessage('');
         const defaults = defaultParameters(resolved);
         const withSeed = (params: AdapterParameters): AdapterParameters => {
-          if (isOfficialVoiceVideo(resolved))
+          if (seedImageBindings) {
+            try {
+              return seedProductionInputs(
+                resolved,
+                params,
+                seedPromptRef.current,
+                seedImageBindings.map((image) => ({
+                  ...image,
+                  url: 'project-asset://' + image.assetId,
+                })),
+              );
+            } catch {
+              return params;
+            }
+          }
+          if (usesStructuredVideoParameters(resolved))
             return seedOfficialVideoParameters(
               resolved,
               params,
@@ -814,6 +869,7 @@ export function ProductionPanel({
     shotId,
     sceneId,
     sourceDocumentId,
+    seedImageBindings,
   ]);
 
   useEffect(() => {
@@ -984,6 +1040,8 @@ export function ProductionPanel({
 
   const savePreviewToAssetLibrary = async () => {
     if (!preview?.jobId || preview.assetId || !writable) return;
+    const scope = submissionScope;
+    const isCurrent = () => currentSubmissionScope.current === scope;
     setSavingPreview(true);
     setGenerationStatus('');
     try {
@@ -993,15 +1051,17 @@ export function ProductionPanel({
         contentType: preview.contentType,
         assetKind,
       });
+      if (!isCurrent()) return;
       const savedAsset = saved.results.find((result) => result.asset)?.asset;
       const nextAssets = await callWorker('asset.list', {});
+      if (!isCurrent()) return;
       publishAssets(nextAssets, savedAsset?.id);
       if (saved.preview) setPreview(saved.preview);
       setGenerationStatus('图片已保存到本地素材库。');
     } catch (reason) {
-      setGenerationStatus(errorMessage(reason, '预览保存失败。'));
+      if (isCurrent()) setGenerationStatus(errorMessage(reason, '预览保存失败。'));
     } finally {
-      setSavingPreview(false);
+      if (isCurrent()) setSavingPreview(false);
     }
   };
 
@@ -1027,13 +1087,14 @@ export function ProductionPanel({
       setMessage('本地图片不会写入草稿，请改用公开 URL 后保存。');
       return;
     }
-    setBusy(true);
+    const isCurrent = beginSubmission();
     setMessage('');
     try {
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
         parameters,
       });
+      if (!isCurrent()) return;
       setErrors(validation.errors);
       if (!validation.valid) {
         setMessage(`${validation.errors.length} 项参数需要修正`);
@@ -1046,25 +1107,32 @@ export function ProductionPanel({
         modelId: selectedModel.remoteModelId,
         parameters,
       });
+      if (!isCurrent()) return;
       setMessage(`草稿已保存 · ${new Date(saved.updatedAt).toLocaleTimeString()}`);
     } catch (reason) {
-      setMessage(errorMessage(reason, '草稿保存失败'));
+      if (isCurrent()) setMessage(errorMessage(reason, '草稿保存失败'));
     } finally {
-      setBusy(false);
+      if (isCurrent()) {
+        setBusy(false);
+        activeSubmission.current = undefined;
+      }
     }
   };
 
   const generateImage = async () => {
     if (!adapter || !selectedProfile || !selectedModel || !writable) return;
-    setBusy(true);
+    const isCurrent = beginSubmission();
     setGenerationStatus('');
     try {
       const productionSource = await productionInstructions.beforeSubmit();
-      const submissionParameters = await resolveAssetReferences(parameters);
+      if (!isCurrent()) return;
+      const submissionParameters = parameters;
+      if (!isCurrent()) return;
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
         parameters: submissionParameters,
       });
+      if (!isCurrent()) return;
       setErrors(validation.errors);
       if (!validation.valid) {
         setGenerationStatus('请先修正参数。');
@@ -1079,21 +1147,27 @@ export function ProductionPanel({
         providerProfileId: selectedProfile.id,
         modelId: selectedModel.remoteModelId,
       });
+      if (!isCurrent()) return;
       setGenerationJobId(job.id);
       setGenerationStatus('正在请求 Provider...');
       const pending = await callWorker('media.generation.requestSubmission', { jobId: job.id });
+      if (!isCurrent()) return;
       if (!pending.confirmation) throw new Error('Image submission confirmation is unavailable.');
-      if (!(await requestPaidSubmissionApproval(pending.confirmation))) {
+      const approved = await requestPaidSubmissionApproval(pending.confirmation);
+      if (!onRequestSubmissionApproval && !isCurrent()) return;
+      if (!approved) {
         await callWorker('media.task.cancel', { jobId: job.id });
         return;
       }
-      const completed = (
-        await callWorker('media.generation.confirmSubmission', {
-          jobId: job.id,
-          confirmationToken: pending.confirmation.confirmationToken,
-          approved: true,
-        })
-      ).job as import('@ai-video/contracts').ImageGenerationJobInfo;
+      const completion = callWorker('media.generation.confirmSubmission', {
+        jobId: job.id,
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      if (isCurrent()) setBusy(false);
+      const completed = (await completion)
+        .job as import('@ai-video/contracts').ImageGenerationJobInfo;
+      if (!isCurrent()) return;
       if (completed.status === 'succeeded' && completed.preview) {
         setPreview(completed.preview);
       }
@@ -1106,12 +1180,14 @@ export function ProductionPanel({
       }
       if (completed.status === 'succeeded' && savedAsset) {
         const nextAssets = await callWorker('asset.list', {});
+        if (!isCurrent()) return;
         publishAssets(nextAssets, savedAsset.id);
         if (completed.preview) {
           setPreview(completed.preview);
         } else {
           await callWorker('asset.mediaSource', { assetId: savedAsset.id })
             .then((source) => {
+              if (!isCurrent()) return;
               const dataUrl = mediaSrcForAsset(savedAsset.id, source.path);
               if (dataUrl) {
                 setPreview({
@@ -1125,6 +1201,7 @@ export function ProductionPanel({
             .catch(() => undefined);
         }
       }
+      if (!isCurrent()) return;
       setGenerationStatus(
         completed.mediaState === 'submission_unknown'
           ? SUBMISSION_UNKNOWN_MESSAGE
@@ -1137,10 +1214,13 @@ export function ProductionPanel({
                 : '生成失败。',
       );
     } catch (reason) {
-      setGenerationStatus(errorMessage(reason, '图片生成失败。'));
+      if (isCurrent()) setGenerationStatus(errorMessage(reason, '图片生成失败。'));
     } finally {
-      setGenerationJobId(undefined);
-      setBusy(false);
+      if (isCurrent()) {
+        setGenerationJobId(undefined);
+        setBusy(false);
+        activeSubmission.current = undefined;
+      }
     }
   };
 
@@ -1153,32 +1233,35 @@ export function ProductionPanel({
       !writable
     )
       return;
-    const submissionProjectId = projectId;
-    setBusy(true);
+    const isCurrent = beginSubmission();
     setGenerationStatus('');
     try {
       const productionSource = await productionInstructions.beforeSubmit();
+      if (!isCurrent()) return;
       if (sceneInputsLoading || sceneInputsError)
         throw new Error(sceneInputsError || '正在读取场次绑定，请稍后提交。');
-      const driving = adapter.contractId?.includes('wan2-7');
+      const support = productionAudioSupport(adapter);
+      const driving = support.dialogueDriven;
       if (
         boundScene &&
         !isOfficialVoiceVideo(adapter) &&
-        (boundScene.dialogueAudioId ||
-          boundScene.characterBindings?.some((item) => item.voiceReferenceVersionId))
+        ((needsDialogueInput && boundScene.dialogueAudioId) ||
+          (needsVoiceInput &&
+            boundScene.characterBindings?.some((item) => item.voiceReferenceVersionId)))
       )
         throw new Error(
           '当前连接不支持本场绑定的声音输入，请选择支持声音的视频模型，或先调整场次声音绑定。',
         );
-      if (isOfficialVoiceVideo(adapter) && !driving && boundScene?.dialogueAudioId)
+      if (needsDialogueInput && !driving && boundScene?.dialogueAudioId)
         throw new Error(
           '本场绑定了完整对白，请选择支持完整对白驱动的模型，或先解除完整对白绑定后使用音色参考。',
         );
-      if (driving && boundScene?.dialogueAudioId && !dialogueAudio)
+      if (needsDialogueInput && driving && boundScene?.dialogueAudioId && !dialogueAudio)
         throw new Error('本场完整对白不可用，请重新绑定。');
       if (
         driving &&
         !dialogueAudio &&
+        needsVoiceInput &&
         boundScene?.characterBindings?.some((item) => item.voiceReferenceVersionId)
       )
         throw new Error(
@@ -1206,14 +1289,16 @@ export function ProductionPanel({
             adapter,
             parameters,
             selectedVoices,
-            dialogueAudio?.id,
+            needsDialogueInput ? dialogueAudio?.id : undefined,
             compiledReferenceBindings ?? seedReferenceBindings,
           )
-        : await resolveAssetReferences(parameters);
+        : parameters;
+      if (!isCurrent()) return;
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
         parameters: submissionParameters,
       });
+      if (!isCurrent()) return;
       setErrors(validation.errors);
       if (!validation.valid) {
         setGenerationStatus('请先修正参数。');
@@ -1230,26 +1315,33 @@ export function ProductionPanel({
         modelId: selectedModel.remoteModelId,
         assetKind: sceneId ? 'scene-video' : videoAssetKind,
       });
-      if (currentProjectIdRef.current !== submissionProjectId) return;
+      if (!isCurrent()) return;
       setGenerationStatus('正在提交视频任务...');
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         void Notification.requestPermission().catch(() => undefined);
       }
-      if (currentProjectIdRef.current !== submissionProjectId) return;
+      if (!isCurrent()) return;
       const pending = await callWorker('media.generation.requestSubmission', {
         jobId: prepared.id,
       });
+      if (!isCurrent()) return;
       if (!pending.confirmation) throw new Error('Video submission confirmation is unavailable.');
-      if (!(await requestPaidSubmissionApproval(pending.confirmation))) {
+      const approved = await requestPaidSubmissionApproval(pending.confirmation);
+      if (!onRequestSubmissionApproval && !isCurrent()) return;
+      if (!approved) {
         const cancelled = await callWorker('media.task.cancel', { jobId: prepared.id });
+        if (!isCurrent()) return;
         setGenerationStatus(cancellationMessage(cancelled.cancellation));
         return;
       }
-      const response = await callWorker('media.generation.confirmSubmission', {
+      const submission = callWorker('media.generation.confirmSubmission', {
         jobId: prepared.id,
         confirmationToken: pending.confirmation.confirmationToken,
         approved: true,
       });
+      if (isCurrent()) setBusy(false);
+      const response = await submission;
+      if (!isCurrent()) return;
       const submitted = response.job as VideoGenerationJobInfo;
       if (submitted.mediaState === 'submission_unknown') {
         setGenerationStatus(SUBMISSION_UNKNOWN_MESSAGE);
@@ -1263,14 +1355,17 @@ export function ProductionPanel({
         );
         return;
       }
-      if (currentProjectIdRef.current !== submissionProjectId) return;
+      if (!isCurrent()) return;
       setGenerationStatus('视频任务已提交，项目后台正在处理。');
     } catch (reason) {
-      if (currentProjectIdRef.current === submissionProjectId) {
+      if (isCurrent()) {
         setGenerationStatus(errorMessage(reason, '视频任务提交失败。'));
       }
     } finally {
-      setBusy(false);
+      if (isCurrent()) {
+        setBusy(false);
+        activeSubmission.current = undefined;
+      }
     }
   };
 
@@ -1283,12 +1378,7 @@ export function ProductionPanel({
       setGenerationStatus(sceneInputsError || '正在读取场次绑定，请稍后导入。');
       return;
     }
-    const capturedProjectId = projectId;
-    const capturedSceneId = sceneId;
-    const isCurrentScene = () =>
-      currentProjectIdRef.current === capturedProjectId &&
-      currentSceneIdRef.current === capturedSceneId;
-    setBusy(true);
+    const isCurrentScene = beginSubmission();
     try {
       const path = await openAudioDialog({
         multiple: false,
@@ -1316,7 +1406,10 @@ export function ProductionPanel({
     } catch (error) {
       if (isCurrentScene()) setGenerationStatus(errorMessage(error, '对白音频导入失败。'));
     } finally {
-      if (currentProjectIdRef.current === capturedProjectId) setBusy(false);
+      if (isCurrentScene()) {
+        setBusy(false);
+        activeSubmission.current = undefined;
+      }
     }
   };
 
@@ -1375,11 +1468,15 @@ export function ProductionPanel({
 
   const cancelImage = async () => {
     if (!generationJobId) return;
+    const owner = activeSubmission.current;
+    const scope = submissionScope;
+    const isCurrent = () =>
+      currentSubmissionScope.current === scope && activeSubmission.current === owner;
     try {
       await callWorker('image.generate.cancel', { jobId: generationJobId });
-      setGenerationStatus('已取消图片生成。');
+      if (isCurrent()) setGenerationStatus('已取消图片生成。');
     } catch (reason) {
-      setGenerationStatus(errorMessage(reason, '取消失败。'));
+      if (isCurrent()) setGenerationStatus(errorMessage(reason, '取消失败。'));
     }
   };
 
@@ -1397,6 +1494,47 @@ export function ProductionPanel({
 
   return (
     <aside className={`production-panel panel-border${expanded ? ' expanded' : ''}`}>
+      {imageJobs.some((job) =>
+        ['awaiting_confirmation', 'submitting', 'downloading', 'submission_unknown'].includes(
+          job.mediaState ?? '',
+        ),
+      ) && (
+        <section className="production-image-tasks" aria-label="图片后台任务">
+          {imageJobs
+            .filter((job) =>
+              ['awaiting_confirmation', 'submitting', 'downloading', 'submission_unknown'].includes(
+                job.mediaState ?? '',
+              ),
+            )
+            .map((job) => (
+              <div key={job.id}>
+                <span>
+                  {typeof job.request.prompt === 'string'
+                    ? job.request.prompt.slice(0, 40)
+                    : '图片任务'}{' '}
+                  ·{' '}
+                  {job.mediaState === 'submission_unknown'
+                    ? '提交结果待核实'
+                    : job.mediaState === 'downloading'
+                      ? '下载中'
+                      : job.mediaState === 'awaiting_confirmation'
+                        ? '排队或等待确认'
+                        : '生成中'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void callWorker('media.task.cancel', { jobId: job.id }).catch(
+                      (reason: unknown) => setGenerationStatus(errorMessage(reason, '取消失败。')),
+                    )
+                  }
+                >
+                  取消此图片任务
+                </button>
+              </div>
+            ))}
+        </section>
+      )}
       {paidSubmission && (
         <MediaSubmissionConfirmationDialog
           confirmation={paidSubmission}
@@ -1408,6 +1546,13 @@ export function ProductionPanel({
       ) : (
         <div className="production-panel-body">
           <div className="production-panel-main">
+            {projectId && (
+              <ProjectProductionDefaults
+                key={`${projectId}:${projectSessionId}`}
+                writable={writable}
+                onSaved={productionInstructions.refreshKeepingEdits}
+              />
+            )}
             <div className="production-config-row">
               <div className="field-group">
                 <label htmlFor="provider-profile">供应商连接</label>
@@ -1483,8 +1628,118 @@ export function ProductionPanel({
                   </span>
                 </div>
                 <div className="parameter-fields">
+                  {adapter.provider === 'unicompapi' && isWanMediaAdapter(adapter) && (
+                    <p role="note">
+                      “生成音频”控制成片是否带声音。指定声音参考时，在“参考素材”中添加“参考音频”，填写公网音频地址；本地声音样本请使用万相官方连接。
+                    </p>
+                  )}
                   {(productionInstructions.result?.source || productionInstructions.error) && (
                     <section aria-label="制作内容适配">
+                      {Boolean(productionInstructions.result?.notices?.length) && (
+                        <div role="status" aria-label="模型适配说明">
+                          <ul>
+                            {productionInstructions.result!.notices!.map((notice, index) => (
+                              <li key={`${notice.code}:${index}`}>{notice.message}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {sceneSegments.length > 1 && (
+                        <label className="parameter-field">
+                          本次制作范围
+                          <select
+                            disabled={busy || productionInstructions.loading}
+                            value={
+                              segmentShotIds
+                                ? String(
+                                    sceneSegments.findIndex(
+                                      (segment) =>
+                                        segment.shotIds.join(',') === segmentShotIds.join(','),
+                                    ),
+                                  )
+                                : 'full'
+                            }
+                            onChange={(event) =>
+                              setSegmentShotIds(
+                                event.target.value === 'full'
+                                  ? undefined
+                                  : sceneSegments[Number(event.target.value)]?.shotIds,
+                              )
+                            }
+                          >
+                            <option value="full">完整场次（全部分镜）</option>
+                            {sceneSegments.map((segment, index) => (
+                              <option
+                                key={index}
+                                value={index}
+                                disabled={segment.needsShotRevision}
+                              >
+                                第 {index + 1} 段 · 剧情预计 {segment.estimatedDurationSeconds} 秒
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                      {segmentShotIds && completeScenePrompt && (
+                        <details>
+                          <summary>查看完整场次方案</summary>
+                          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                            {completeScenePrompt}
+                          </pre>
+                        </details>
+                      )}
+                      {productionInstructions.result?.estimatedDurationSeconds !== undefined && (
+                        <p>
+                          剧情预计 {productionInstructions.result.estimatedDurationSeconds} 秒
+                          {productionInstructions.result.requestedDurationSeconds !== undefined
+                            ? ` · 模型请求 ${productionInstructions.result.requestedDurationSeconds} 秒`
+                            : ''}
+                          。镜头节奏按剧情安排。
+                        </p>
+                      )}
+                      {Boolean(productionInstructions.result?.timeline?.length) && (
+                        <details>
+                          <summary>
+                            场次分镜时间轴（{productionInstructions.result!.timeline!.length} 镜头）
+                          </summary>
+                          <ol>
+                            {productionInstructions.result!.timeline!.map((entry) => (
+                              <li key={entry.shotId}>
+                                {entry.title}：
+                                {entry.startSeconds === undefined || entry.endSeconds === undefined
+                                  ? '时间待补充'
+                                  : `${entry.startSeconds}—${entry.endSeconds} 秒`}
+                              </li>
+                            ))}
+                          </ol>
+                        </details>
+                      )}
+                      {productionInstructions.result?.issues.some(
+                        (issue) => issue.code === 'SCENE_REQUIRES_SEGMENTS',
+                      ) && (
+                        <section aria-label="场次分段制作建议">
+                          <p>完整场次已保留。以下按现有镜头边界分段；请逐段制作后合成。</p>
+                          <ol>
+                            {productionInstructions.result.segments?.map((segment, index) => (
+                              <li key={index}>
+                                第 {index + 1} 段：
+                                {segment.shotIds
+                                  .map(
+                                    (id) =>
+                                      productionInstructions.result?.timeline?.find(
+                                        (entry) => entry.shotId === id,
+                                      )?.title ?? id,
+                                  )
+                                  .join('、')}
+                                ，剧情预计 {segment.estimatedDurationSeconds} 秒
+                                {segment.needsShotRevision
+                                  ? '；单镜也超过模型能力，需要更长时长的模型或重新设计镜头。'
+                                  : `，模型请求 ${segment.requestedDurationSeconds} 秒。`}
+                              </li>
+                            ))}
+                          </ol>
+                        </section>
+                      )}
                       {productionInstructions.overriddenFields.length > 0 && (
                         <p>已保留你修改或保存的表单值；重新填入会替换这些值。</p>
                       )}
@@ -1553,9 +1808,11 @@ export function ProductionPanel({
                 {isOfficialVoiceVideo(adapter) && (
                   <section className="parameter-fields">
                     <h3>
-                      {adapter.contractId?.includes('wan2-7') ? '完整对白驱动' : '角色声音参考'}
+                      {productionAudioSupport(adapter).dialogueDriven
+                        ? '完整对白驱动'
+                        : '角色声音参考'}
                     </h3>
-                    {adapter.contractId?.includes('wan2-7') ? (
+                    {productionAudioSupport(adapter).dialogueDriven ? (
                       <>
                         <p>
                           万相 2.7
@@ -1626,7 +1883,14 @@ export function ProductionPanel({
                         className="button primary"
                         type="button"
                         onClick={() => void generateVideo()}
-                        disabled={!writable || busy || !selectedProfile || !selectedModel}
+                        disabled={
+                          !writable ||
+                          busy ||
+                          !formReady ||
+                          productionInstructions.loading ||
+                          !selectedProfile ||
+                          !selectedModel
+                        }
                       >
                         <Video size={14} />
                         提交视频任务
@@ -1636,7 +1900,14 @@ export function ProductionPanel({
                         className="button primary"
                         type="button"
                         onClick={() => void generateImage()}
-                        disabled={!writable || busy || !selectedProfile || !selectedModel}
+                        disabled={
+                          !writable ||
+                          busy ||
+                          !formReady ||
+                          productionInstructions.loading ||
+                          !selectedProfile ||
+                          !selectedModel
+                        }
                       >
                         <WandSparkles size={14} />
                         生成图片
@@ -1714,7 +1985,7 @@ export function ProductionPanel({
                       return (
                         <div className="video-task-row" key={job.id}>
                           <div className="video-task-summary">
-                            <strong>{generationStatusLabel(job.status)}</strong>
+                            <strong>{generationStatusLabel(generationTaskStatus(job))}</strong>
                             <span>{formatElapsed(job.elapsedMs)}</span>
                             <small>
                               {formatVideoCost(job.metadata.cost)}
@@ -1997,6 +2268,7 @@ function ParameterField({
   onChange,
   projectId,
 }: ParameterFieldProps) {
+  const callWorker = projectWorker();
   const inputId = `parameter-${field.key}`;
   const [localFiles, setLocalFiles] = useState<Array<LocalImageSelection | undefined>>([]);
   const [selectionError, setSelectionError] = useState('');
@@ -2119,7 +2391,7 @@ function ParameterField({
         const maximum = property.maxItems ?? 20;
         if (payload.assets.length > maximum) throw new Error(`最多可拖入 ${maximum} 项素材。`);
         await Promise.all(
-          payload.assets.map((item) => callWorker('asset.preview', { assetId: item.id })),
+          payload.assets.map((item) => callWorker('asset.mediaSource', { assetId: item.id })),
         );
         const next = payload.assets.map((item) => `asset://${item.id}`);
         while (next.length < minimumRows) next.push('');

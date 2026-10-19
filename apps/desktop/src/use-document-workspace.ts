@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react';
+import { useRef } from 'react';
+import { useProjectViewState } from './use-project-view-state';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type {
   DocumentDetail,
@@ -6,7 +7,7 @@ import type {
   DocumentSummary,
   DocumentVersionInfo,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker, workerScope, isCurrentWorkerScope } from './worker-scope';
 import { readMarkdownDocument } from './markdown-import-client';
 
 export interface UseDocumentWorkspaceOptions {
@@ -18,19 +19,30 @@ export interface UseDocumentWorkspaceOptions {
 
 export function useDocumentWorkspace({
   writable,
-  syncDetachedPanel,
-  openDocumentWorkspace,
-  closeDocumentPanel,
+  syncDetachedPanel: syncDetachedPanelCallback,
+  openDocumentWorkspace: openDocumentWorkspaceCallback,
+  closeDocumentPanel: closeDocumentPanelCallback,
 }: UseDocumentWorkspaceOptions) {
-  const [documents, setDocuments] = useState<DocumentSummary[]>([]);
-  const [document, setDocument] = useState<DocumentDetail>();
-  const [documentTitle, setDocumentTitle] = useState('');
-  const [documentKind, setDocumentKind] = useState<DocumentKind>('outline');
-  const [documentContent, setDocumentContent] = useState('');
-  const [versions, setVersions] = useState<DocumentVersionInfo[]>([]);
-  const [contentBusy, setContentBusy] = useState(false);
-  const [contentMessage, setContentMessage] = useState('');
-  const [documentCloseConfirmation, setDocumentCloseConfirmation] = useState(false);
+  const scope = workerScope();
+  const callWorker = projectWorker(scope);
+  const syncDetachedPanel: UseDocumentWorkspaceOptions['syncDetachedPanel'] = (...args) => {
+    if (isCurrentWorkerScope(scope)) syncDetachedPanelCallback(...args);
+  };
+  const openDocumentWorkspace: UseDocumentWorkspaceOptions['openDocumentWorkspace'] = (...args) => {
+    if (isCurrentWorkerScope(scope)) openDocumentWorkspaceCallback(...args);
+  };
+  const closeDocumentPanel = () => {
+    if (isCurrentWorkerScope(scope)) closeDocumentPanelCallback();
+  };
+  const [documents, setDocuments] = useProjectViewState<DocumentSummary[]>([]);
+  const [document, setDocument] = useProjectViewState<DocumentDetail>();
+  const [documentTitle, setDocumentTitle] = useProjectViewState('');
+  const [documentKind, setDocumentKind] = useProjectViewState<DocumentKind>('outline');
+  const [documentContent, setDocumentContent] = useProjectViewState('');
+  const [versions, setVersions] = useProjectViewState<DocumentVersionInfo[]>([]);
+  const [contentBusy, setContentBusy] = useProjectViewState(false);
+  const [contentMessage, setContentMessage] = useProjectViewState('');
+  const [documentCloseConfirmation, setDocumentCloseConfirmation] = useProjectViewState(false);
   const documentRequest = useRef(0);
 
   const documentEditorWritable =

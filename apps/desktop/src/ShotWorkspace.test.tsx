@@ -113,6 +113,153 @@ describe('shot reference storage', () => {
 });
 
 describe('ShotWorkspace', () => {
+  it('keeps confirmed continuity frames when opening image production from the ordinary shot action', async () => {
+    vi.mocked(callWorker).mockImplementation((method) =>
+      Promise.resolve(
+        method === 'shot.continuity.get'
+          ? {
+              shotId: 'shot',
+              rowVersion: 3,
+              stale: false,
+              videos: [],
+              images: [firstFrameAsset],
+              binding: {
+                sourceShotId: 'previous',
+                sourceVideoAssetId: 'video',
+                sourceVideoHash: 'hash',
+                targetRowVersion: 0,
+                mode: 'reframe',
+                notes: '',
+                frames: [{ assetId: firstFrameAsset.id, timeMs: 1000 }],
+                anchorAssetId: firstFrameAsset.id,
+                imagePrompt: '保留桥柱旁站位，调整为近景。',
+              },
+            }
+          : method === 'scene.media.resolve'
+            ? { characters: [], voices: [], assets: [] }
+            : method === 'asset.mediaSource'
+              ? { assetId: firstFrameAsset.id, path: 'D:/frame.png', contentType: 'image/png' }
+              : [],
+      ),
+    );
+    const { onGenerateImage } = renderWorkspace();
+    await screen.findByText('已确认的衔接');
+    fireEvent.click(screen.getByRole('button', { name: '生成本镜画面' }));
+    await waitFor(() =>
+      expect(onGenerateImage).toHaveBeenCalledWith({
+        firstFrameAssetId: undefined,
+        continuityRowVersion: 3,
+        continuityPrompt: '保留桥柱旁站位，调整为近景。',
+        continuityReferenceAssetIds: [firstFrameAsset.id],
+      }),
+    );
+  });
+  it('shows the scene cast in the shared cards and generates with every resolved character image', async () => {
+    const otherCharacter = { ...characterDoc, id: 'other-character', title: '沈舟' };
+    const otherImage = { ...characterAsset, id: 'other-image', relativePath: 'assets/other.png' };
+    const savedImage = { ...sceneAsset, id: 'saved-scene-image' };
+    const scene = {
+      id: 'scene',
+      projectId: 'project',
+      title: '第一场',
+      position: 0,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+      sceneDocumentId: sceneDoc.id,
+      characterBindings: [
+        { characterDocumentId: characterDoc.id },
+        { characterDocumentId: otherCharacter.id },
+      ],
+      materialBindings: [
+        {
+          id: 'scene-image',
+          role: 'scene' as const,
+          label: '场景',
+          assetId: savedImage.id,
+          source: 'manual' as const,
+        },
+      ],
+    };
+    const media = {
+      characters: [
+        { characterDocumentId: characterDoc.id, defaultImage: characterAsset },
+        { characterDocumentId: otherCharacter.id, defaultImage: otherImage },
+      ],
+      voices: [],
+      assets: [characterAsset, otherImage, savedImage],
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) =>
+      Promise.resolve(
+        method === 'scene.media.resolve'
+          ? media
+          : method === 'asset.mediaSource'
+            ? {
+                assetId: (params as { assetId: string }).assetId,
+                path: 'D:/ref.png',
+                contentType: 'image/png',
+              }
+            : [],
+      ),
+    );
+    const { onGenerateVideo } = renderWorkspace({
+      scene,
+      sceneDocumentId: sceneDoc.id,
+      documents: [characterDoc, otherCharacter, sceneDoc],
+      assets: [],
+    });
+    expect(await screen.findByRole('img', { name: 'lin.png' })).toBeInTheDocument();
+    expect(await screen.findByRole('img', { name: 'other.png' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: '参考资料' })).toHaveLength(1);
+    expect(screen.queryByLabelText('角色参考')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('场景参考')).toHaveValue(savedImage.id);
+    fireEvent.click(screen.getByRole('button', { name: '用参考图生成视频' }));
+    await waitFor(() =>
+      expect(onGenerateVideo).toHaveBeenCalledWith({
+        characterAssetIds: [characterAsset.id, otherImage.id],
+        sceneAssetId: savedImage.id,
+      }),
+    );
+    expect(loadShotReferences('project', 'shot')).toEqual({});
+  });
+
+  it('saves character and voice edits to the shared scene before generating and stops on save failure', async () => {
+    const scene = {
+      id: 'scene',
+      projectId: 'project',
+      title: '第一场',
+      position: 0,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+      characterBindings: [{ characterDocumentId: characterDoc.id }],
+    };
+    vi.mocked(callWorker).mockImplementation((method) =>
+      Promise.resolve(
+        method === 'scene.media.resolve'
+          ? {
+              characters: [{ characterDocumentId: characterDoc.id, defaultImage: characterAsset }],
+              voices: [],
+              assets: [characterAsset],
+            }
+          : [],
+      ),
+    );
+    const onSaveSceneReferences = vi.fn().mockResolvedValue(undefined);
+    const { onGenerateImage } = renderWorkspace({ scene, onSaveSceneReferences });
+    await screen.findByLabelText('林澈角色参考图');
+    fireEvent.change(screen.getByLabelText('林澈角色参考图'), { target: { value: 'none' } });
+    fireEvent.change(screen.getByLabelText('林澈声音样本'), { target: { value: 'none' } });
+    fireEvent.click(screen.getByRole('button', { name: '生成本镜画面' }));
+    await waitFor(() =>
+      expect(onSaveSceneReferences).toHaveBeenCalledWith(
+        [{ characterDocumentId: characterDoc.id, imageDisabled: true, voiceDisabled: true }],
+        undefined,
+      ),
+    );
+    expect(onGenerateImage).not.toHaveBeenCalled();
+  });
+
   it('shows generated shot images inline and opens an enlarged preview', async () => {
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'asset.list') return Promise.resolve([firstFrameAsset]);

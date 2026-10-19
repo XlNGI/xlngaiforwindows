@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { AssetInfo } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker, workerMediaUrl } from './worker-scope';
 import { ImagePreview } from './ImagePreview';
 
 type AssetImagePreviewProps =
   { asset: AssetInfo } | { assetId: string; projectId?: string; alt: string };
 
 export function AssetImagePreview(props: AssetImagePreviewProps) {
+  const callWorker = projectWorker();
   const assetId = 'asset' in props ? props.asset.id : props.assetId;
   const projectId = 'asset' in props ? props.asset.projectId : props.projectId;
   const name =
@@ -26,9 +27,7 @@ export function AssetImagePreview(props: AssetImagePreviewProps) {
       .then(() => callWorker('asset.mediaSource', { assetId }))
       .then((media) => {
         const src =
-          '__TAURI_INTERNALS__' in window
-            ? convertFileSrc(media.path)
-            : `/worker-media/${encodeURIComponent(assetId)}`;
+          '__TAURI_INTERNALS__' in window ? convertFileSrc(media.path) : workerMediaUrl(assetId);
         if (active) setSource({ assetId, projectId, src });
       })
       .catch(() => {

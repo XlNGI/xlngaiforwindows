@@ -10,6 +10,7 @@ import {
   APP_MIGRATION_V5,
   APP_MIGRATION_V6,
   APP_MIGRATION_V7,
+  APP_MIGRATION_V8,
   CURRENT_APP_SCHEMA_VERSION,
 } from './app-schema.js';
 import type { OpenDatabaseOptions } from './database.js';
@@ -119,6 +120,14 @@ export function migrateAppDatabase(
       database
         .prepare('INSERT INTO app_schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(7, now);
+    })();
+  }
+  if (getAppSchemaVersion(database) === 7) {
+    database.transaction(() => {
+      database.exec(APP_MIGRATION_V8);
+      database
+        .prepare('INSERT INTO app_schema_migrations(version,applied_at) VALUES(8,?)')
+        .run(now);
     })();
   }
   return getAppSchemaVersion(database);

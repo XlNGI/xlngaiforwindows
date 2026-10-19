@@ -1,3 +1,4 @@
+import { mapConcurrent } from './execution-pool.js';
 import { linkResearchCitations } from './agent-research-citations.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
@@ -36,7 +37,8 @@ import {
   rebuildLibraryChunksForDocument,
 } from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
-import { DocumentWorkflowService } from './document-workflow-service.js';
+import { DocumentWorkflowService, DocumentWorkflowError } from './document-workflow-service.js';
+import { PartialArtifactService } from './partial-artifact-service.js';
 import { ProjectService } from './project-service.js';
 import {
   assertSingleCharacterPromptDocument,
@@ -48,7 +50,12 @@ import {
   type ResearchFetchResult,
   type ResearchSearchResult,
 } from './research-service.js';
-import { LibraryError, LibrarySearchService } from './library-search-service.js';
+import {
+  LibraryError,
+  LibrarySearchService,
+  LIBRARY_SEARCH_CALL_LIMIT,
+  LIBRARY_READ_CALL_LIMIT,
+} from './library-search-service.js';
 import { registerResearchCache } from './research-cache.js';
 import {
   AgentToolPolicyError,
@@ -78,15 +85,16 @@ import {
 
 const TOOL_SCHEMA_VERSION = 'agent-tools.v2';
 const POLICY_VERSION = 'agent-policy.v2';
-const AUTHORIZATION_TTL_MS = 5 * 60_000;
+// Long provider turns can spend several minutes reading project sources before
+// issuing a write tool call. Each step is still single-use and step-scoped;
+// the longer lease prevents a valid in-flight turn from expiring mid-reasoning.
+const AUTHORIZATION_TTL_MS = 30 * 60_000;
 const AGENT_TASK_TOOL_CALL_DEFAULT = 16;
 const AGENT_TASK_TOOL_CALL_HARD_LIMIT = 32;
 const DOCUMENT_TOOL_CALL_RESERVE = 1;
 const RESEARCH_SEARCH_CALL_LIMIT = 3;
 const RESEARCH_FETCH_CALL_LIMIT = 8;
 const RESEARCH_STEP_CALL_LIMIT = 8;
-const LIBRARY_SEARCH_CALL_LIMIT = 4;
-const LIBRARY_READ_CALL_LIMIT = 8;
 const LIBRARY_STEP_CALL_LIMIT = 6;
 
 type ResearchOperation = 'research.search' | 'research.fetch';
@@ -285,6 +293,58 @@ export class AgentProviderLoopService {
 
   clearGeneration(generationId: string): void {
     this.researchCancellations.delete(generationId);
+  }
+
+  refreshTools(identity: LlmGenerationIdentity): LlmToolDefinition[] {
+    return this.projects.access(false, (database, project) => {
+      this.requireActiveGeneration(database, project.id, identity);
+      const task = this.requireTask(database, project.id, identity.generationId);
+      const step = this.requireOpenStep(database, identity.attemptId);
+      return this.remainingToolsForOpenStep(
+        database,
+        task,
+        step.id,
+        this.systemTools?.availableOperations() ?? false,
+        this.media !== undefined,
+      );
+    });
+  }
+
+  advanceTextTurn(params: AgentProviderStepCompleteParams): LlmToolDefinition[] {
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        this.requireActiveGeneration(database, project.id, params);
+        const task = this.requireTask(database, project.id, params.generationId);
+        const step = this.requireOpenStep(database, params.attemptId);
+        const now = new Date().toISOString();
+        this.completeStep(
+          database,
+          step,
+          params.providerResponseId,
+          0,
+          params.usage,
+          now,
+          'supplement',
+        );
+        const next = this.createStep(
+          database,
+          project.id,
+          params,
+          task.id,
+          step.ordinal + 1,
+          now,
+          authorizationSpecsForTask(
+            database,
+            task.id,
+            firstPrimaryAuthorization(database, task.id),
+            researchModeFromSnapshot(task.request_snapshot_json),
+            this.systemTools?.availableOperations() ?? false,
+            this.media !== undefined,
+          ),
+        );
+        return this.toolsForStep(next.authorizationHandles);
+      })(),
+    );
   }
 
   prepare(
@@ -555,6 +615,42 @@ export class AgentProviderLoopService {
       this.markToolCallsStarted(params);
       return await this.executeAuthorizedTools(params);
     } catch (error) {
+      if (
+        error instanceof DocumentWorkflowError &&
+        ['CONFLICT', 'DOCUMENT_BASE_CONFLICT'].includes(error.code) &&
+        params.calls.length === 1 &&
+        params.calls[0]?.name === 'novel.chapter.submit_draft'
+      ) {
+        const batchChild = this.projects.access(false, (database) =>
+          database
+            .prepare('SELECT task_id FROM novel_batch_children WHERE generation_id=?')
+            .get(params.generationId),
+        );
+        if (batchChild) {
+          const args = JSON.parse(params.calls[0].argumentsJson) as { contentMarkdown?: unknown };
+          if (typeof args.contentMarkdown === 'string') {
+            const candidate = new PartialArtifactService(
+              this.projects,
+              this.documents,
+            ).captureInterrupted(params, args.contentMarkdown);
+            if (candidate)
+              this.projects.access(true, (database) =>
+                database.transaction(() => {
+                  database
+                    .prepare(
+                      'UPDATE novel_batch_children SET conflict_artifact_id=? WHERE generation_id=? AND conflict_artifact_id IS NULL',
+                    )
+                    .run(candidate.id, params.generationId);
+                  database
+                    .prepare(
+                      "UPDATE agent_tasks SET status='waiting_review',phase='waiting_review',error_code='DOCUMENT_BASE_CONFLICT',error_message='目标已编辑；完整候选已保留，等待用户合并。',row_version=row_version+1 WHERE id=? AND status='running'",
+                    )
+                    .run(candidate.taskId);
+                })(),
+              );
+          }
+        }
+      }
       if (error instanceof AgentToolPolicyError) {
         this.auditPolicyRejection(params, error);
       }
@@ -1443,6 +1539,17 @@ export class AgentProviderLoopService {
             );
           }
           seenIds.add(call.id);
+          const existing = database
+            .prepare(
+              `SELECT result_summary_json FROM agent_tool_calls
+               WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
+            )
+            .get(task.id, params.attemptId, step.id, call.id) as
+            { result_summary_json: string | null } | undefined;
+          if (existing?.result_summary_json) {
+            outputs.push({ callId: call.id, output: existing.result_summary_json });
+            continue;
+          }
           const authorization = this.requireAuthorization(database, task, step, call, params);
           let args: unknown;
           try {
@@ -1468,17 +1575,6 @@ export class AgentProviderLoopService {
             registration.confirmationPolicy === 'always' ||
             registration.confirmationPolicy === 'protected-ui';
           const argumentsHash = hashAgentToolArguments(args);
-          const existing = database
-            .prepare(
-              `SELECT result_summary_json FROM agent_tool_calls
-               WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
-            )
-            .get(task.id, params.attemptId, step.id, call.id) as
-            { result_summary_json: string | null } | undefined;
-          if (existing?.result_summary_json) {
-            outputs.push({ callId: call.id, output: existing.result_summary_json });
-            continue;
-          }
           if (awaitsConfirmation) {
             if (params.calls.length !== 1) {
               throw new AgentToolPolicyError(
@@ -2192,7 +2288,7 @@ export class AgentProviderLoopService {
         } else if (call.name === 'novel.episode.submit_structure') {
           let structure: EpisodeStructure;
           try {
-            structure = parseEpisodeStructureArguments(call.argumentsJson);
+            structure = parseEpisodeStructureArguments(call.argumentsJson, true);
             validateEpisodeReferences(database, project.id, structure);
           } catch (error) {
             database
@@ -2221,6 +2317,7 @@ export class AgentProviderLoopService {
               sceneDocumentId: scene.sceneDocumentId,
               videoPrompt: scene.videoPrompt,
               characterDocumentIds: scene.characterDocumentIds,
+              instruction: scene.instruction,
             });
             for (const shot of scene.shots) {
               items.push({
@@ -2229,6 +2326,7 @@ export class AgentProviderLoopService {
                 parentItemOrdinal: sceneOrdinal,
                 title: shot.title,
                 prompt: shot.prompt,
+                instruction: shot.instruction,
               });
             }
           }
@@ -2637,16 +2735,17 @@ export class AgentProviderLoopService {
                       offset: toolArguments.offset,
                     });
               resultSummary = summarizeLibraryResult(result);
+              const providerResult = { ...result, budget: libraryBudget(database, task.id) };
               output = {
                 callId: call.id,
                 output:
                   'content' in result && typeof result.content === 'string'
                     ? unifiedAgentToolRegistry.serializeResultWithBoundedText(
-                        result,
+                        providerResult,
                         'content',
                         result.content,
                       )
-                    : unifiedAgentToolRegistry.serializeResult(result),
+                    : unifiedAgentToolRegistry.serializeResult(providerResult),
               };
             } catch (error) {
               const code = error instanceof LibraryError ? error.code : 'LIBRARY_SEARCH_FAILED';
@@ -2835,45 +2934,45 @@ export class AgentProviderLoopService {
       })(),
     );
 
-    const outcomes = await Promise.all(
-      staged.calls.map(
-        async ({ arguments: toolArguments, budgetFailure }): Promise<ResearchExecutionOutcome> => {
-          if (budgetFailure) return budgetFailure;
-          try {
-            const result =
-              toolArguments.operation === 'research.search'
-                ? await this.research.search({
-                    taskId: staged.taskId,
-                    attemptId: params.attemptId,
-                    query: toolArguments.query,
-                    language: toolArguments.language,
-                    recencyDays: toolArguments.recencyDays,
-                    limit: toolArguments.limit,
-                    signal: cancellation.signal,
-                  })
-                : await this.research.fetchSource({
-                    projectRoot: staged.projectRoot,
-                    taskId: staged.taskId,
-                    attemptId: params.attemptId,
-                    sourceHandle: toolArguments.sourceHandle,
-                    maxChars: toolArguments.maxChars,
-                    signal: cancellation.signal,
-                  });
-            return { ok: true, result };
-          } catch (error) {
-            return {
-              ok: false,
-              error: {
-                code: error instanceof ResearchError ? error.code : 'RESEARCH_SEARCH_FAILED',
-                message: (error instanceof Error ? error.message : 'External research failed.')
-                  .replace(/[\r\n\0]+/g, ' ')
-                  .slice(0, 500),
-                retryable: error instanceof ResearchError ? error.retryable : true,
-              },
-            };
-          }
-        },
-      ),
+    const outcomes = await mapConcurrent(
+      staged.calls,
+      4,
+      async ({ arguments: toolArguments, budgetFailure }): Promise<ResearchExecutionOutcome> => {
+        if (budgetFailure) return budgetFailure;
+        try {
+          const result =
+            toolArguments.operation === 'research.search'
+              ? await this.research.search({
+                  taskId: staged.taskId,
+                  attemptId: params.attemptId,
+                  query: toolArguments.query,
+                  language: toolArguments.language,
+                  recencyDays: toolArguments.recencyDays,
+                  limit: toolArguments.limit,
+                  signal: cancellation.signal,
+                })
+              : await this.research.fetchSource({
+                  projectRoot: staged.projectRoot,
+                  taskId: staged.taskId,
+                  attemptId: params.attemptId,
+                  sourceHandle: toolArguments.sourceHandle,
+                  maxChars: toolArguments.maxChars,
+                  signal: cancellation.signal,
+                });
+          return { ok: true, result };
+        } catch (error) {
+          return {
+            ok: false,
+            error: {
+              code: error instanceof ResearchError ? error.code : 'RESEARCH_SEARCH_FAILED',
+              message: (error instanceof Error ? error.message : 'External research failed.')
+                .replace(/[\r\n\0]+/g, ' ')
+                .slice(0, 500),
+              retryable: error instanceof ResearchError ? error.retryable : true,
+            },
+          };
+        }
+      },
     );
 
     return this.projects.access(true, (database, project) =>
@@ -3221,6 +3320,16 @@ export class AgentProviderLoopService {
           now,
         );
         if (!params.approved) {
+          // A denial ends tool authority, while the assistant still needs a tracked final text step.
+          this.createStep(
+            database,
+            project.id,
+            params,
+            task.id,
+            nextStepOrdinal(database, params.attemptId),
+            now,
+            [],
+          );
           return {
             continuation: createToolContinuation(
               activeGeneration.protocol,
@@ -3313,6 +3422,23 @@ export class AgentProviderLoopService {
       database.transaction(() => {
         const task = this.requireTask(database, project.id, params.generationId);
         const step = this.requireOpenStep(database, params.attemptId);
+        const conflict = database
+          .prepare(
+            'SELECT conflict_artifact_id FROM novel_batch_children WHERE generation_id=? AND conflict_artifact_id IS NOT NULL',
+          )
+          .get(params.generationId);
+        if (conflict) {
+          this.completeStep(
+            database,
+            step,
+            params.providerResponseId,
+            0,
+            params.usage,
+            new Date().toISOString(),
+            'waiting_conflict',
+          );
+          return;
+        }
         const request = JSON.parse(task.request_snapshot_json) as {
           agentMode?: string;
           documentOperation?: string;
@@ -4393,7 +4519,9 @@ function authorizationSpecsForTask(
           .filter(
             (operation) =>
               primary.operation !== 'novel.chapter.submit_draft' ||
-              (operation !== 'document.submit_draft' && operation !== 'novel.chapter.write_draft'),
+              (operation !== 'document.submit_draft' &&
+                operation !== 'novel.chapter.write_draft' &&
+                operation !== 'novel.chapter.batch.submit'),
           )
           .map((operation) => ({ operation }))
       : []),
@@ -4788,6 +4916,11 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
 }
 
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
+  'conversation.task.route',
+  'production.defaults.get',
+  'novel.chapter.batch.submit',
+  'novel.chapter.batch.source.read',
+  'novel.chapter.batch.get',
   'production.read',
   'production.execute',
   'scene.submit_structure',

@@ -19,6 +19,8 @@ import {
 import { validateSessionRequestParams } from './request-validation.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
+import { ChangeSetService } from './change-set-service.js';
+import { parseEpisodeStructureArguments } from './episode-structure.js';
 
 const fixtures: Array<{ projects: ProjectService; directory: string }> = [];
 afterEach(async () => {
@@ -86,6 +88,472 @@ const wan = () =>
   )!;
 
 describe('production execution in the project store', () => {
+  it('adapts an unselected recording preference without rewriting the creative instruction', async () => {
+    const f = await setup();
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    f.service.execute({
+      executionKey: 'unselected-recording',
+      operations: [
+        operation(
+          target,
+          f.shot.rowVersion,
+          instruction({
+            audio: { mode: 'dialogue-driven', ambience: '雨声' },
+            generation: { duration: 8 },
+          }),
+        ),
+      ],
+    });
+    const before = f.service.read(target);
+    const adapter = getAdapterCatalog().adapters.find(
+      (a) => a.contractId === 'cn.happyhorse.1.1.r2v',
+    )!;
+    const compiled = f.service.compile({ target, adapterKey: adapter.key });
+    expect(compiled.issues).toEqual([]);
+    expect(compiled.instruction?.audio.mode).toBe('auto');
+    expect(compiled.notices?.map((n) => n.code)).toContain('AUDIO_METHOD_ADAPTED');
+    expect(compiled.parameters.prompt).toContain('雨声');
+    expect(f.service.read(target)).toEqual(before);
+    expect(before.instruction?.audio.mode).toBe('dialogue-driven');
+    expect(() =>
+      f.service.assertSource(compiled.source, target, adapter.key, {
+        parameters: compiled.parameters,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      f.service.assertSource(compiled.source, target, adapter.key, {
+        parameters: { ...compiled.parameters, duration: 5 },
+      }),
+    ).toThrow('实际提交时长');
+  });
+  it('preserves selected image roles in the source and rejects changed selections or asset versions', async () => {
+    const f = await setup();
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    for (const id of ['board', 'frame']) {
+      await writeFile(join(f.project.rootPath, `assets/${id}.png`), 'fixture');
+      f.projects.access(true, (db, p) =>
+        db
+          .prepare(
+            "INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,'generated-image',?,'original',7,'now')",
+          )
+          .run(id, p.id, `assets/${id}.png`),
+      );
+    }
+    f.service.execute({
+      executionKey: 'roles',
+      operations: [
+        operation(target, f.shot.rowVersion, instruction({ generation: { duration: 8 } })),
+      ],
+    });
+    const adapter = getAdapterCatalog().adapters.find(
+      (a) => a.contractId === 'cn.happyhorse.1.1.i2v',
+    )!;
+    const inputImages = [
+      { assetId: 'board', role: 'character' as const },
+      { assetId: 'frame', role: 'first-frame' as const },
+    ];
+    const prepared = f.service.compile({ target, adapterKey: adapter.key, inputImages });
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.parameters.images).toEqual(['project-asset://frame']);
+    expect(prepared.source?.inputImages).toEqual(inputImages);
+    expect(() =>
+      f.service.assertSource(prepared.source, target, adapter.key, {
+        parameters: { ...prepared.parameters, images: ['https://example.com/another-frame.png'] },
+      }),
+    ).toThrow('本镜首帧');
+    expect(() =>
+      f.service.assertSource(prepared.source, target, adapter.key, {
+        parameters: prepared.parameters,
+      }),
+    ).not.toThrow();
+    const withoutFrame = f.service.compile({
+      target,
+      adapterKey: adapter.key,
+      inputImages: inputImages.slice(0, 1),
+    });
+    expect(withoutFrame.issues.map((i) => i.code)).toContain('INPUT_SELECTION_CONFLICT');
+    expect(() =>
+      f.service.compile({
+        target,
+        adapterKey: adapter.key,
+        inputImages: inputImages.slice(0, 1),
+        expectedToken: prepared.source!.token,
+      }),
+    ).toThrow('制作来源已变化');
+    f.projects.access(true, (db) =>
+      db.prepare("UPDATE assets SET content_hash='changed' WHERE id='frame'").run(),
+    );
+    expect(() => f.service.assertSource(prepared.source, target, adapter.key)).toThrow('制作来源');
+  });
+  it('keeps video editing independent of generation-duration segment planning', async () => {
+    const f = await setup();
+    const second = f.content.saveShot({ sceneId: f.scene.id, title: '第二镜' });
+    const target = { kind: 'scene' as const, id: f.scene.id };
+    f.service.execute({
+      executionKey: 'editing',
+      operations: [
+        operation(target, f.scene.rowVersion),
+        operation(
+          { kind: 'shot', id: f.shot.id },
+          f.shot.rowVersion,
+          instruction({ generation: { duration: 8 } }),
+        ),
+        operation(
+          { kind: 'shot', id: second.id },
+          second.rowVersion,
+          instruction({ generation: { duration: 15 } }),
+        ),
+      ],
+    });
+    const adapter = getAdapterCatalog().adapters.find(
+      (a) => a.contractId === 'cn.happyhorse.1.0.video-edit',
+    )!;
+    const compiled = f.service.compile({ target, adapterKey: adapter.key });
+    expect(compiled.timeline).toHaveLength(2);
+    expect(compiled.estimatedDurationSeconds).toBe(23);
+    expect(compiled.segments).toEqual([]);
+    expect(compiled.issues.some((i) => i.code === 'SCENE_REQUIRES_SEGMENTS')).toBe(false);
+  });
+  it('keeps unspecified legacy audio on the selected model defaults instead of forcing silent output', async () => {
+    const f = await setup();
+    f.service.saveDefaults({
+      expectedRowVersion: 0,
+      settings: { generation: { resolution: '720p' } },
+    });
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    const result = f.service.compile({ target, adapterKey: wan().key });
+    expect(result.instruction?.audio.mode).toBe('auto');
+    expect(result.parameters).not.toHaveProperty('audio');
+    expect(JSON.stringify(result.parameters)).not.toContain('无声音');
+    expect(result.issues).toEqual([]);
+  });
+  it('adapts shared output preferences to the selected schema while guarding actual required audio inputs', async () => {
+    const f = await setup();
+    f.service.saveDefaults({
+      expectedRowVersion: 0,
+      settings: {
+        generation: { ratio: '9:16', resolution: '1080p', promptExtend: true, watermark: false },
+      },
+    });
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    const spec = instruction({
+      audio: { mode: 'native', ambience: '雨声' },
+      generation: { duration: 8, seed: -1 },
+    });
+    f.service.execute({
+      executionKey: 'schema-native',
+      operations: [operation(target, f.shot.rowVersion, spec)],
+    });
+    const original = f.service.read(target);
+    const model = getAdapterCatalog().adapters.find(
+      (a) => a.contractId === 'cn.happyhorse.1.1.i2v',
+    )!;
+    const result = f.service.compile({ target, adapterKey: model.key });
+    expect(result.issues).toEqual([]);
+    expect(result.notices?.length).toBeGreaterThan(0);
+    expect(result.parameters).toMatchObject({ duration: 8, resolution: '1080P', watermark: false });
+    expect(result.parameters).not.toHaveProperty('ratio');
+    expect(result.parameters).not.toHaveProperty('seed');
+    expect(result.parameters).not.toHaveProperty('prompt_extend');
+    expect(result.parameters.prompt).toContain('雨声');
+    expect(() =>
+      f.service.assertSource(result.source, target, model.key, {
+        parameters: { ...result.parameters, images: ['https://example.com/frame.png'] },
+      }),
+    ).not.toThrow();
+    expect(f.service.read(target)).toEqual(original);
+    f.service.execute({
+      executionKey: 'schema-driving',
+      operations: [
+        operation(target, original.rowVersion, {
+          ...spec,
+          audio: { mode: 'dialogue-driven' },
+          resources: [
+            { kind: 'dialogue-audio', required: true, purpose: '用户指定的完整对白录音' },
+          ],
+        }),
+      ],
+    });
+    const required = f.service.compile({ target, adapterKey: model.key });
+    expect(required.issues.map((i) => i.code)).toEqual(
+      expect.arrayContaining(['UNSUPPORTED_DIALOGUE_AUDIO', 'MISSING_DIALOGUE']),
+    );
+    expect(() => f.service.assertSource(required.source, target, model.key)).toThrow('完整对白');
+  });
+  it.each([true, false])(
+    'adapts a saved prompt expansion default when switching models without rewriting the shot (enabled=%s)',
+    async (enabled) => {
+      const f = await setup();
+      f.service.saveDefaults({
+        expectedRowVersion: 0,
+        settings: { generation: { promptExtend: enabled } },
+      });
+      const target = { kind: 'shot' as const, id: f.shot.id };
+      f.service.execute({
+        executionKey: 'prompt-expansion',
+        operations: [
+          operation(
+            target,
+            f.shot.rowVersion,
+            instruction({ generation: { duration: 8, ratio: '16:9' } }),
+          ),
+        ],
+      });
+      const before = f.service.read(target);
+      const happyhorse = getAdapterCatalog().adapters.find(
+        (model) => model.contractId === 'cn.happyhorse.1.1.r2v' && model.provider === 'unicompapi',
+      )!;
+      const compiled = f.service.compile({ target, adapterKey: happyhorse.key });
+      expect(compiled.issues).toEqual([]);
+      expect(compiled.parameters).toMatchObject({ duration: 8, ratio: '16:9' });
+      expect(compiled.parameters).not.toHaveProperty('prompt_extend');
+      expect(compiled.parameters).not.toHaveProperty('promptExtend');
+      const supported = f.service.compile({ target, adapterKey: wan().key });
+      expect(supported.issues).toEqual([]);
+      expect(supported.parameters.prompt_extend).toBe(enabled);
+      expect(f.service.read(target)).toEqual(before);
+      expect(f.service.getDefaults().settings.generation?.promptExtend).toBe(enabled);
+    },
+  );
+  it('reviews complete scene/shot instructions atomically, derives 23 story seconds and fills every shot for two providers', async () => {
+    const f = await setup();
+    const shared = instruction({
+      version: 2,
+      narrative: { purpose: '等待、发现线索并决定离开' },
+      storyTime: { era: '现代', season: '深秋', timeOfDay: '傍晚' },
+      location: { description: '车站候车厅' },
+      style: { medium: '二维动画', technique: '赛璐璐' },
+      subjects: [{ documentId: f.actor.id, wardrobe: '蓝色外套' }],
+      generation: { ratio: '16:9', resolution: '720p' },
+    });
+    const detail = (title: string, seconds: number): ProductionInstruction =>
+      instruction({
+        version: 2,
+        summary: title,
+        narrative: { purpose: title },
+        timing: {
+          estimatedDurationSeconds: seconds,
+          rationale: '依据动作完成、观察反应和自然停顿',
+        },
+        camera: { framing: '中景', angle: '平视', movement: '缓慢前推' },
+        subjects: [{ documentId: f.actor.id }],
+        beats: [{ id: 'action', action: title, characterDocumentIds: [f.actor.id], dialogue: [] }],
+        stillFrame: `${title}开始前的画面`,
+      });
+    const structure = parseEpisodeStructureArguments(
+      JSON.stringify({
+        episodeTitle: '按剧情编排',
+        scenes: [
+          {
+            title: '线索',
+            sceneDocumentId: f.setting.id,
+            characterDocumentIds: [f.actor.id],
+            instruction: shared,
+            shots: [
+              { title: '观察线索', instruction: detail('观察线索', 8) },
+              { title: '确认后离开', instruction: detail('确认后离开', 15) },
+            ],
+          },
+        ],
+      }),
+    );
+    const spec = structure.scenes[0]!;
+    const changes = new ChangeSetService(f.projects);
+    const proposal = changes.create({
+      title: '剧情方案',
+      items: [
+        {
+          entityType: 'scene',
+          action: 'create',
+          title: spec.title,
+          sceneDocumentId: spec.sceneDocumentId,
+          characterDocumentIds: spec.characterDocumentIds,
+          videoPrompt: spec.videoPrompt,
+          instruction: spec.instruction,
+        },
+        ...spec.shots.map((shot) => ({
+          entityType: 'shot' as const,
+          action: 'create' as const,
+          parentItemOrdinal: 0,
+          ...shot,
+        })),
+      ],
+    });
+    expect(f.content.listScenes()).toHaveLength(1);
+    expect(proposal.items[1]?.instruction?.timing?.estimatedDurationSeconds).toBe(8);
+    const applied = changes.apply({
+      changeSetId: proposal.id,
+      expectedRowVersion: proposal.rowVersion,
+    });
+    expect(applied.status).toBe('applied');
+    const sceneId = applied.items[0]!.appliedEntityId!;
+    const compiled = f.service.compile({
+      target: { kind: 'scene', id: sceneId },
+      adapterKey: wan().key,
+    });
+    expect(compiled.issues).toEqual([]);
+    expect(compiled.estimatedDurationSeconds).toBe(23);
+    expect(compiled.requestedDurationSeconds).toBe(23);
+    expect(compiled.parameters).toMatchObject({
+      duration: 23,
+      ratio: '16:9',
+      resolution: '720P',
+      audio: false,
+    });
+    expect(compiled.parameters.prompt).toContain('0—8秒');
+    expect(compiled.parameters.prompt).toContain('8—23秒');
+    expect(compiled.parameters.prompt).toContain('确认后离开');
+    expect(compiled.parameters.prompt).toContain('深秋');
+    expect(compiled.parameters.prompt).toContain('蓝色外套');
+    const seedance = getAdapterCatalog().adapters.find(
+      (a) =>
+        a.contractId === 'cn.bytedance.seedance2-0.video' &&
+        a.provider === 'seedance-video' &&
+        a.capability === 'REFERENCE_TO_VIDEO',
+    )!;
+    const limited = f.service.compile({
+      target: { kind: 'scene', id: sceneId },
+      adapterKey: seedance.key,
+    });
+    expect(limited.issues.map((issue) => issue.code)).toContain('SCENE_REQUIRES_SEGMENTS');
+    expect(limited.parameters.content).toEqual([{ type: 'text', text: compiled.compiledPrompt }]);
+    expect(limited.segments?.map((segment) => segment.estimatedDurationSeconds)).toEqual([8, 15]);
+    expect(limited.parameters.duration).toBeUndefined();
+    const segment = f.service.compile({
+      target: { kind: 'scene', id: sceneId },
+      adapterKey: seedance.key,
+      shotIds: limited.segments![0]!.shotIds,
+    });
+    expect(segment.issues).toEqual([]);
+    expect(segment.parameters.duration).toBe(8);
+    expect(segment.source?.shotIds).toEqual(limited.segments![0]!.shotIds);
+    expect(() =>
+      f.service.assertSource(segment.source, { kind: 'scene', id: sceneId }, seedance.key),
+    ).not.toThrow();
+    expect(() =>
+      f.service.compile({
+        target: { kind: 'scene', id: sceneId },
+        adapterKey: seedance.key,
+        shotIds: [limited.segments![1]!.shotIds[0]!, limited.segments![0]!.shotIds[0]!],
+      }),
+    ).toThrow('按顺序连续');
+    f.projects.close();
+    f.projects.open(f.project.rootPath);
+    expect(
+      f.service.compile({ target: { kind: 'scene', id: sceneId }, adapterKey: wan().key }).source,
+    ).toEqual(compiled.source);
+    expect(
+      f.projects.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS n FROM generation_jobs').get(),
+      ),
+    ).toEqual({ n: 0 });
+    const changed = f.content.listShots(sceneId)[0]!;
+    f.content.saveShot({
+      shotId: changed.id,
+      sceneId,
+      title: changed.title,
+      prompt: '手工修改后的当前剧情',
+      expectedRowVersion: changed.rowVersion,
+    });
+    const current = f.service.read({ kind: 'scene', id: sceneId });
+    expect(current.compiledPrompt).toContain('手工修改后的当前剧情');
+    expect(current.issues.map((issue) => issue.code)).toContain('STALE_INSTRUCTION');
+    expect(current.estimatedDurationSeconds).toBeUndefined();
+  });
+  it('tracks edits, added/reordered/deleted shots and project style in the whole-scene source without rewriting story timing', async () => {
+    const f = await setup();
+    f.service.saveDefaults({
+      expectedRowVersion: 0,
+      settings: {
+        style: { medium: '二维动画', linework: '清晰细线' },
+        generation: { ratio: '9:16' },
+      },
+    });
+    const shot = f.content.saveShot({
+      sceneId: f.scene.id,
+      title: '第二镜',
+      prompt: '保留全部镜头文本',
+    });
+    const target = { kind: 'scene' as const, id: f.scene.id };
+    const first = f.service.read(target);
+    expect(first.compiledPrompt).toContain('保留全部镜头文本');
+    expect(first.compiledPrompt).toContain('清晰细线');
+    expect(first.estimatedDurationSeconds).toBeUndefined();
+    expect(
+      f.service.compile({ target, adapterKey: wan().key }).parameters.duration,
+    ).toBeUndefined();
+    f.content.saveShot({
+      shotId: shot.id,
+      sceneId: f.scene.id,
+      title: shot.title,
+      prompt: '修改后的镜头',
+      expectedRowVersion: shot.rowVersion,
+    });
+    const edited = f.service.read(target);
+    expect(edited.source?.token).not.toBe(first.source?.token);
+    expect(edited.compiledPrompt).toContain('修改后的镜头');
+    f.projects.access(true, (db) => {
+      db.prepare('UPDATE shots SET position=2 WHERE id=?').run(f.shot.id);
+      db.prepare('UPDATE shots SET position=0 WHERE id=?').run(shot.id);
+    });
+    const reordered = f.service.read(target);
+    expect(reordered.timeline?.[0]?.shotId).toBe(shot.id);
+    expect(reordered.source?.token).not.toBe(edited.source?.token);
+    f.projects.access(true, (db) => db.prepare('DELETE FROM shots WHERE id=?').run(shot.id));
+    expect(f.service.read(target).source?.token).not.toBe(reordered.source?.token);
+    const previous = f.service.read(target).source;
+    f.service.saveDefaults({
+      expectedRowVersion: 1,
+      settings: { style: { medium: '二维动画', linework: '粗线' } },
+    });
+    expect(f.service.read(target).source?.token).not.toBe(previous?.token);
+    expect(() => f.service.assertSource(previous, target, wan().key)).toThrow('制作来源');
+    expect(() => f.service.saveDefaults({ expectedRowVersion: 1, settings: {} })).toThrow('已变化');
+  });
+  it('rejects a missing shot duration and rolls back reviewed instructions when a late database write fails', async () => {
+    const f = await setup();
+    const detail = instruction({
+      version: 2,
+      narrative: { purpose: '自然完成动作' },
+      camera: { framing: '中景' },
+      beats: [{ id: 'b', action: '回头', characterDocumentIds: [], dialogue: [] }],
+    });
+    expect(() =>
+      parseEpisodeStructureArguments(
+        JSON.stringify({
+          episodeTitle: '测试',
+          scenes: [{ title: '场次', shots: [{ title: '分镜', instruction: detail }] }],
+        }),
+      ),
+    ).toThrow('预计时长');
+    const changes = new ChangeSetService(f.projects);
+    const proposal = changes.create({
+      title: '审核原子性',
+      items: [
+        {
+          entityType: 'shot',
+          action: 'create',
+          parentSceneId: f.scene.id,
+          title: '回头',
+          instruction: {
+            ...detail,
+            timing: { estimatedDurationSeconds: 3, rationale: '回头观察' },
+          },
+          prompt: '回头',
+        },
+      ],
+    });
+    f.projects.access(true, (db) =>
+      db.exec(
+        "CREATE TRIGGER fail_scene_instruction BEFORE INSERT ON production_instruction_versions BEGIN SELECT RAISE(ABORT,'instruction failure'); END",
+      ),
+    );
+    expect(() => changes.apply({ changeSetId: proposal.id, expectedRowVersion: 0 })).toThrow(
+      'instruction failure',
+    );
+    expect(f.content.listShots(f.scene.id)).toHaveLength(1);
+    expect(changes.list()[0]?.items[0]?.status).toBe('pending');
+  });
   it('atomically projects both pages, persists history across reopen, and replays only identical keys', async () => {
     const f = await setup();
     const list = {

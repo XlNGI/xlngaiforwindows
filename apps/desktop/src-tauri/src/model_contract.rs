@@ -1,6 +1,14 @@
 //! Shared official contracts and bindings; no channel-specific model/schema copies.
 use serde_json::Value;
 
+pub(crate) fn is_contract_adapter(adapter_key: &str) -> bool {
+    adapter_key.split(':').nth(3).is_some_and(|revision| {
+        revision.strip_prefix("contract-").is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
 const CONTRACTS: &str =
     include_str!("../../../../packages/contracts/src/official-video-contracts.json");
 const IMAGE_CONTRACTS: &str =
@@ -96,6 +104,58 @@ pub(crate) fn video_payload(
         .as_object()
         .cloned()
         .ok_or("Invalid contract parameters")?;
+    let contract = contract(adapter_key)?;
+    let provider = adapter_key.split(':').nth(1).unwrap_or_default();
+    let bindings: Vec<Value> =
+        serde_json::from_str(BINDINGS).map_err(|_| "Invalid model binding catalog")?;
+    let binding = bindings
+        .iter()
+        .find(|binding| {
+            binding["providerType"] == provider
+                && binding["remoteModelId"] == remote_model_id
+                && binding["contractId"] == contract["contractId"]
+                && binding["contractRevision"] == contract["contractRevision"]
+                && binding["status"] == "enabled"
+        })
+        .ok_or("Missing channel binding")?;
+    if let Some(mappings) = binding
+        .pointer("/transportOverride/request")
+        .and_then(Value::as_array)
+    {
+        let mut output = serde_json::json!({"model": remote_model_id});
+        for mapping in mappings {
+            if mapping["operation"] != "copy" {
+                return Err("Unsupported channel request mapping".into());
+            }
+            let source = mapping["from"]
+                .as_str()
+                .ok_or("Missing channel mapping source")?;
+            if let Some(value) = object.get(source) {
+                let destination = mapping["to"]
+                    .as_str()
+                    .ok_or("Missing channel mapping target")?;
+                let parts: Vec<_> = destination.split('.').collect();
+                if parts.iter().any(|part| {
+                    part.is_empty()
+                        || ["__proto__", "constructor", "prototype", "model"].contains(part)
+                }) {
+                    return Err("Invalid channel mapping target".into());
+                }
+                let mut target = &mut output;
+                for part in &parts[..parts.len() - 1] {
+                    if target.get(*part).is_none() {
+                        target[*part] = serde_json::json!({});
+                    }
+                    target = target
+                        .get_mut(*part)
+                        .ok_or("Invalid channel mapping path")?;
+                }
+                target[parts[parts.len() - 1]] = value.clone();
+            }
+        }
+        return serde_json::to_vec(&output)
+            .map_err(|error| format!("Unable to encode channel parameters: {error}"));
+    }
     if adapter_key.starts_with("IMAGE_TO_VIDEO:") {
         let images = object.remove("images").ok_or("Missing first-frame image")?;
         object.insert("image".into(), images[0].clone());
@@ -147,6 +207,55 @@ pub(crate) fn image_payload(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn wan_channel_preserves_audio_semantics_in_metadata_and_keeps_legacy_tasks_readable() {
+        for (id, model) in [
+            ("cn.qwen.wan3-0-video", "wan3.0-video"),
+            ("cn.qwen.wan3-0-video-prime", "wan3.0-video-prime"),
+        ] {
+            let key = format!("REFERENCE_TO_VIDEO:unicompapi:{id}:contract-3");
+            let media = json!([{ "type":"reference_image", "url":"https://example.com/actor.png" }, { "type":"reference_audio", "url":"https://example.com/voice.wav" }]);
+            let body: Value = serde_json::from_slice(&video_payload(&key, json!({"prompt":"图1的人用音频1的音色说你好", "media":media, "audio":true, "resolution":"720P", "ratio":"16:9", "duration":5, "seed":-1, "watermark":false}),model).unwrap()).unwrap();
+            assert_eq!(
+                body,
+                json!({"model":model,"prompt":"图1的人用音频1的音色说你好","metadata":{"input":{"media":media},"parameters":{"audio":true,"resolution":"720P","ratio":"16:9","duration":5,"seed":-1,"watermark":false}}})
+            );
+            assert!(video_payload(
+                &key,
+                json!({"prompt":"test","audio":"https://example.com/voice.wav"}),
+                model
+            )
+            .is_err());
+            assert!(video_payload(
+                &key,
+                json!({"prompt":"test","metadata":{"model":"forged"}}),
+                model
+            )
+            .is_err());
+            assert!(video_payload(
+                &key,
+                json!({"prompt":"test","media":[{"type":"reference_audio","url":"C:\\voice.wav"}]}),
+                model
+            )
+            .is_err());
+            assert!(contract(&format!("TEXT_TO_VIDEO:unicompapi:{id}:contract-1")).is_ok());
+            assert!(video_payload(&key, json!({"prompt":"test"}), "different-model").is_err());
+            let silent: Value = serde_json::from_slice(
+                &video_payload(
+                    &format!("TEXT_TO_VIDEO:unicompapi:{id}:contract-3"),
+                    json!({"prompt":"test","audio":false}),
+                    model,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                silent.pointer("/metadata/parameters/audio"),
+                Some(&json!(false))
+            );
+        }
+    }
 
     #[test]
     fn binds_the_exact_official_contract_and_rejects_other_models() {

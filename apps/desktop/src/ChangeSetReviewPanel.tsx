@@ -1,7 +1,7 @@
 import { Check, ChevronDown, CircleAlert, ListChecks, RefreshCw, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { AgentChangeSetInfo, DocumentSummary } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
 
 interface ChangeSetReviewPanelProps {
   projectId?: string;
@@ -30,6 +30,7 @@ export function ChangeSetReviewPanel({
   onApplied,
   documents = [],
 }: ChangeSetReviewPanelProps) {
+  const callWorker = projectWorker();
   const [changeSets, setChangeSets] = useState<AgentChangeSetInfo[]>([]);
   const [expandedId, setExpandedId] = useState<string>();
   const [selectedItems, setSelectedItems] = useState<Record<string, string[]>>({});
@@ -206,6 +207,12 @@ export function ChangeSetReviewPanel({
                               ? ` · base v${item.expectedRowVersion}`
                               : ''}
                           </small>
+                          {item.instruction?.timing && (
+                            <small>
+                              剧情预计 {item.instruction.timing.estimatedDurationSeconds} 秒；
+                              {item.instruction.timing.rationale}
+                            </small>
+                          )}
                           {item.prompt ? (
                             <small className="change-set-item-prompt">
                               {`提示词：${item.prompt}`}

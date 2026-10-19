@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AdapterCatalogResult,
@@ -104,7 +104,9 @@ function mockWorker(
  * `window.confirm`, so every generate click needs an explicit approval.
  */
 async function submitPaidGeneration(buttonName: '生成图片' | '提交视频任务'): Promise<void> {
-  fireEvent.click(screen.getByRole('button', { name: buttonName }));
+  const button = screen.getByRole('button', { name: buttonName });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
   fireEvent.click(await screen.findByRole('button', { name: '批准' }));
 }
 
@@ -351,6 +353,239 @@ const savedVideoAsset: AssetInfo = {
 };
 
 describe('ProductionPanel', () => {
+  it('fills the full narrative scene and allows a model-sized production segment without changing scene order', async () => {
+    const model: AdapterDescriptor = {
+      ...videoDescriptor,
+      key: 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2',
+      capability: 'TEXT_TO_VIDEO',
+      capabilityLabel: '文生视频',
+      parameterSchema: {
+        ...videoDescriptor.parameterSchema,
+        required: ['prompt', 'duration', 'resolution', 'audio'],
+        properties: {
+          ...videoDescriptor.parameterSchema.properties,
+          prompt: { type: 'string', title: '完整场次提示词' },
+        },
+      },
+      uiSchema: {
+        fields: [
+          { key: 'prompt', control: 'textarea', group: 'basic', order: 0 },
+          ...videoDescriptor.uiSchema.fields.filter((field) => field.key !== 'images'),
+        ],
+      },
+    };
+    const target = { kind: 'scene' as const, id: 'scene' };
+    const scene = {
+      id: 'scene',
+      projectId: 'project',
+      title: '剧情自然发展',
+      position: 0,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+      characterBindings: [],
+    };
+    const complete = '镜头01：观察线索 0—8秒\n镜头02：确认后离开 8—23秒';
+    const timeline = [
+      {
+        shotId: 's1',
+        title: '观察线索',
+        startSeconds: 0,
+        endSeconds: 8,
+        estimatedDurationSeconds: 8,
+        prompt: '观察线索',
+      },
+      {
+        shotId: 's2',
+        title: '确认后离开',
+        startSeconds: 8,
+        endSeconds: 23,
+        estimatedDurationSeconds: 15,
+        prompt: '确认后离开',
+      },
+    ];
+    mockWorker((method) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          capabilities: [{ key: 'TEXT_TO_VIDEO', label: '文生视频' }],
+          providers: videoCatalog.providers,
+          adapters: [model],
+        });
+      if (method === 'adapter.resolve') return Promise.resolve(model);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'scene.list') return Promise.resolve([scene]);
+      if (method === 'characterVoiceReference.list') return Promise.resolve([]);
+      if (method === 'asset.list' || method === 'video.job.list') return Promise.resolve([]);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'video.generate.prepare') return Promise.resolve(videoJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('video', videoJob('pending')));
+      if (method === 'media.task.cancel') return Promise.resolve({});
+      throw new Error(`Unexpected ${method}`);
+    });
+    const previous = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+      if (method === 'production.compile' || method === 'production.read') {
+        const ranged = Array.isArray(params.shotIds);
+        return Promise.resolve({
+          target,
+          rowVersion: 1,
+          source: {
+            target,
+            instructionId: 'instruction',
+            revision: 1,
+            token: 'a'.repeat(64),
+            ...(ranged ? { shotIds: params.shotIds } : {}),
+          },
+          compiledPrompt: ranged ? '镜头01：观察线索' : complete,
+          estimatedDurationSeconds: ranged ? 8 : 23,
+          requestedDurationSeconds: ranged ? 8 : undefined,
+          timeline: ranged ? timeline.slice(0, 1) : timeline,
+          parameters: {
+            prompt: ranged ? '镜头01：观察线索' : complete,
+            ...(ranged ? { duration: 8 } : {}),
+            resolution: '720p',
+            audio: false,
+          },
+          issues: ranged
+            ? []
+            : [{ code: 'SCENE_REQUIRES_SEGMENTS', message: '完整剧情超过单次时长' }],
+          segments: [
+            { shotIds: ['s1'], estimatedDurationSeconds: 8, requestedDurationSeconds: 8 },
+            { shotIds: ['s2'], estimatedDurationSeconds: 15, requestedDurationSeconds: 15 },
+          ],
+        });
+      }
+      return previous(method as never, params);
+    }) as typeof callWorker);
+    render(
+      <ProductionPanel
+        projectId="project"
+        sceneId="scene"
+        capability="TEXT_TO_VIDEO"
+        writable
+        onRequestSubmissionApproval={() => Promise.resolve(false)}
+      />,
+    );
+    const prompt = await screen.findByLabelText(/完整场次提示词/);
+    await waitFor(() => expect(prompt).toHaveValue(complete));
+    expect(screen.getByText('完整剧情超过单次时长')).toBeInTheDocument();
+    const range = await screen.findByLabelText('本次制作范围');
+    await waitFor(() => expect(range).toBeEnabled());
+    fireEvent.change(range, { target: { value: '0' } });
+    await waitFor(() => expect(prompt).toHaveValue('镜头01：观察线索'));
+    expect(screen.getByText('查看完整场次方案')).toBeInTheDocument();
+    expect(screen.getByLabelText(/时长/)).toHaveValue(8);
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(callWorker)
+          .mock.calls.find(([method]) => method === 'video.generate.prepare')?.[1],
+      ).toMatchObject({
+        sceneId: 'scene',
+        productionSource: { shotIds: ['s1'] },
+        parameters: { duration: 8, prompt: '镜头01：观察线索' },
+      }),
+    );
+  });
+  it.each([
+    { name: 'project', next: { projectId: 'next-project' } },
+    { name: 'shot', next: { shotId: 'next-shot' } },
+    { name: 'scene', next: { sceneId: 'next-scene' } },
+    { name: 'same project session', next: { projectSessionId: 'session-2' } },
+    { name: 'reopened project view', next: { projectViewEpoch: {} } },
+    { name: 'project A to B to A', next: { projectId: 'next-project' }, returnToOriginal: true },
+  ])('ignores a late image response after switching $name', async ({ next, returnToOriginal }) => {
+    const onAssetsChanged = vi.fn();
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      finish = resolve;
+    });
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission') return pending;
+      if (method === 'asset.list') return Promise.resolve([]);
+      if (method === 'characterVoiceReference.list' || method === 'scene.list')
+        return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const props = {
+      projectId: 'project',
+      projectSessionId: 'session-1',
+      shotId: 'shot',
+      writable: true,
+      onAssetsChanged,
+    };
+    const view = render(<ProductionPanel {...props} />);
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
+      target: { value: '旧目标图片' },
+    });
+    await submitPaidGeneration('生成图片');
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'media.generation.confirmSubmission',
+        expect.anything(),
+      ),
+    );
+    view.rerender(<ProductionPanel {...props} {...next} />);
+    if (returnToOriginal) view.rerender(<ProductionPanel {...props} />);
+    await act(async () => {
+      finish({ kind: 'image', job: imageJob('succeeded', { withPreview: true }) });
+      await pending;
+    });
+    expect(onAssetsChanged).not.toHaveBeenCalled();
+    expect(screen.queryByText('图片已保存到本地素材库。')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: savedAsset.relativePath })).not.toBeInTheDocument();
+  });
+
+  it('does not let an old image finally clear a newer submission', async () => {
+    const completions: Array<(value: unknown) => void> = [];
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return new Promise((resolve) => {
+          completions.push(resolve);
+        });
+      if (method === 'asset.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const props = { projectId: 'project', shotId: 'shot', writable: true };
+    const view = render(<ProductionPanel {...props} projectSessionId="first" />);
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), { target: { value: '图片' } });
+    await submitPaidGeneration('生成图片');
+    await waitFor(() => expect(completions).toHaveLength(1));
+    view.rerender(<ProductionPanel {...props} projectSessionId="second" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    const secondApproval = await screen.findByRole('button', { name: '批准' });
+    await act(async () => {
+      completions[0]!({ kind: 'image', job: imageJob('failed') });
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: '生成图片' })).toBeDisabled();
+    expect(secondApproval).toBeEnabled();
+    fireEvent.click(secondApproval);
+    await waitFor(() => expect(completions).toHaveLength(2));
+    await act(async () => {
+      completions[1]!({ kind: 'image', job: imageJob('cancelled') });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
+  });
+
   it('selects HappyHorse by official contract without a parameter-template selection', async () => {
     const contract = officialVideoContracts.find(
       (item) => item.officialModelName === 'happyhorse-1.1-t2v',
@@ -951,6 +1186,7 @@ describe('ProductionPanel', () => {
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
+    await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
 
     // The frozen draft is reviewed on the shared card, not a native dialog.
@@ -1279,6 +1515,11 @@ describe('ProductionPanel', () => {
   });
 
   it('keeps a prepared video job in submission_unknown when Provider acceptance is ambiguous', async () => {
+    const unknown: VideoGenerationJobInfo = {
+      ...videoJob('pending'),
+      mediaState: 'submission_unknown',
+      error: 'Submission status is unknown: network disconnected',
+    };
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
@@ -1291,16 +1532,12 @@ describe('ProductionPanel', () => {
       if (method === 'media.generation.confirmSubmission')
         return Promise.resolve({
           kind: 'video',
-          job: {
-            ...videoJob('pending'),
-            mediaState: 'submission_unknown',
-            error: 'Submission status is unknown: network disconnected',
-          },
+          job: unknown,
         });
       throw new Error(`Unexpected method ${method}`);
     });
 
-    render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
+    const view = render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
     fireEvent.change(await screen.findByLabelText('首帧 URL'), {
       target: { value: 'https://example.invalid/start.png' },
     });
@@ -1316,9 +1553,22 @@ describe('ProductionPanel', () => {
     ).not.toHaveLength(0);
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.fail', expect.anything());
     expect(screen.queryByText('视频任务已提交，正在本地查询。')).not.toBeInTheDocument();
+    view.rerender(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        assets={[]}
+        videoJobs={[unknown]}
+      />,
+    );
+    const tasks = screen.getByRole('region', { name: '视频任务' });
+    expect(within(tasks).getByText('提交结果未知', { exact: true })).toBeInTheDocument();
+    expect(within(tasks).queryByText('正在提交', { exact: true })).not.toBeInTheDocument();
+    expect(within(tasks).getByText(/生成服务未返回任务编号/)).toBeInTheDocument();
   });
 
-  it('stores dropped asset references in the draft and resolves them for submission', async () => {
+  it('keeps dropped asset references bounded through drafts and submission', async () => {
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
       if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
@@ -1395,10 +1645,13 @@ describe('ProductionPanel', () => {
         .mock.calls.find(([method]) => method === 'video.generate.prepare');
       expect(prepareCall?.[1]).toMatchObject({
         parameters: {
-          images: ['data:image/png;base64,asset-start', 'data:image/png;base64,asset-end'],
+          images: ['asset://asset-start', 'asset://asset-end'],
         },
       });
     });
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'asset.preview'),
+    ).toHaveLength(0);
   });
 
   it('previews and reorders local start and end frames and submits Data URLs once', async () => {
@@ -1695,5 +1948,98 @@ describe('ProductionPanel', () => {
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.list', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.observe', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.timeout', expect.anything());
+  });
+  it('submits two image jobs from one panel and cancels the chosen job while the other keeps its own result', async () => {
+    const jobs = new Map<string, ImageGenerationJobInfo>();
+    const completions = new Map<string, (value: unknown) => void>();
+    const onAssetsChanged = vi.fn(),
+      approve = vi.fn(() => Promise.resolve(true));
+    const otherAsset = {
+      ...savedAsset,
+      id: 'asset-second',
+      relativePath: 'assets/images/second.png',
+    };
+    mockWorker((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') {
+        const job = {
+          ...imageJob('running'),
+          id: 'image-' + (jobs.size + 1),
+          mediaState: 'draft' as const,
+          request: params.parameters as ImageGenerationJobInfo['request'],
+        };
+        jobs.set(job.id, job);
+        return Promise.resolve(job);
+      }
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', jobs.get(params.jobId as string)!));
+      if (method === 'media.generation.confirmSubmission')
+        return new Promise((resolve) => completions.set(params.jobId as string, resolve));
+      if (method === 'media.task.cancel')
+        return Promise.resolve({
+          kind: 'image',
+          job: {
+            ...jobs.get(params.jobId as string)!,
+            status: 'cancelled',
+            mediaState: 'cancelled',
+          },
+        });
+      if (method === 'asset.list') return Promise.resolve([otherAsset]);
+      return Promise.resolve([]);
+    });
+    const props = {
+      projectId: 'project',
+      shotId: 'shot',
+      writable: true,
+      onAssetsChanged,
+      onRequestSubmissionApproval: approve,
+    };
+    const view = render(<ProductionPanel {...props} />);
+    fireEvent.change(await screen.findByLabelText(/画面提示词/), {
+      target: { value: 'First independent image' },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await waitFor(() => expect(completions.size).toBe(1));
+    expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText(/画面提示词/), {
+      target: { value: 'Second independent image' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await waitFor(() => expect(completions.size).toBe(2));
+    const active = [...jobs.values()].map((job) => ({ ...job, mediaState: 'submitting' as const }));
+    view.rerender(<ProductionPanel {...props} imageJobs={active} />);
+    const background = screen.getByRole('region', { name: '图片后台任务' });
+    fireEvent.click(within(background).getAllByRole('button', { name: '取消此图片任务' })[0]!);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: 'image-1' }),
+    );
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'media.task.cancel'),
+    ).toHaveLength(1);
+    await act(async () => {
+      completions.get('image-1')!({
+        kind: 'image',
+        job: { ...jobs.get('image-1')!, status: 'cancelled', mediaState: 'cancelled' },
+      });
+      await Promise.resolve();
+    });
+    expect(onAssetsChanged).not.toHaveBeenCalled();
+    await act(async () => {
+      completions.get('image-2')!({
+        kind: 'image',
+        job: {
+          ...imageJob('succeeded'),
+          id: 'image-2',
+          results: [{ id: 'result-2', jobId: 'image-2', asset: otherAsset, createdAt: 'now' }],
+        },
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(onAssetsChanged).toHaveBeenCalledWith([otherAsset], otherAsset.id));
+    expect(approve).toHaveBeenCalledTimes(2);
   });
 });

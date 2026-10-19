@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentSummary, SceneInfo, SceneMediaResolveResult } from '@ai-video/contracts';
 import { SceneWorkspace } from './SceneWorkspace';
@@ -74,6 +74,59 @@ function props() {
 }
 
 describe('scene cast bindings', () => {
+  it('keeps scene binding and scene image with the cast in a single reference area', async () => {
+    const location = { ...character, id: 'location', kind: 'scene' as const, title: '庭院' };
+    const image = {
+      id: 'location-image',
+      projectId: 'project',
+      kind: 'scene',
+      relativePath: 'assets/courtyard.png',
+      contentHash: 'h',
+      sizeBytes: 10,
+      createdAt: 'now',
+    };
+    vi.mocked(callWorker).mockImplementation((method) =>
+      Promise.resolve(
+        method === 'scene.media.resolve'
+          ? { characters: [], voices: [], assets: [] }
+          : method === 'asset.list'
+            ? [image]
+            : method === 'asset.mediaSource'
+              ? { assetId: image.id, path: 'D:/courtyard.png', contentType: 'image/png' }
+              : [],
+      ),
+    );
+    const p = props();
+    const onBindSceneDocument = vi.fn();
+    render(
+      <SceneWorkspace
+        {...p}
+        scene={{ ...scene, sceneDocumentId: location.id }}
+        documents={[character, location]}
+        onBindSceneDocument={onBindSceneDocument}
+      />,
+    );
+    expect(await screen.findByRole('img', { name: 'courtyard.png' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: '参考资料' })).toHaveLength(1);
+    expect(screen.getByLabelText('场次绑定场景')).toHaveValue(location.id);
+    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
+    expect(p.onSave).toHaveBeenCalledWith(
+      p.prompt,
+      [
+        expect.objectContaining({
+          role: 'scene',
+          assetId: image.id,
+          sourceDocumentId: location.id,
+          source: 'auto',
+        }),
+      ],
+      [],
+      undefined,
+    );
+    fireEvent.change(screen.getByLabelText('场次绑定场景'), { target: { value: '' } });
+    expect(onBindSceneDocument).toHaveBeenCalledWith('');
+  });
+
   it('resolves late media outside the first library page and preserves explicit disabling across updates', async () => {
     let available = false;
     const image = {
@@ -112,7 +165,9 @@ describe('scene cast bindings', () => {
         scene={{ ...scene, characterBindings: [{ characterDocumentId: 'actor' }] }}
       />,
     );
-    expect(await screen.findByText('角色尚无参考图')).toBeInTheDocument();
+    expect(
+      await within(screen.getByLabelText('角色参考：林澈卡片')).findByText('拖入或下拉选择'),
+    ).toBeInTheDocument();
     available = true;
     await act(() =>
       window.dispatchEvent(
@@ -226,7 +281,9 @@ describe('scene cast bindings', () => {
     fireEvent.change(screen.getByLabelText('选择出场角色'), { target: { value: 'actor' } });
     fireEvent.click(screen.getByRole('button', { name: '添加角色' }));
     await waitFor(() => expect(screen.getByLabelText('林澈声音样本')).toHaveValue('default'));
-    expect(await screen.findByText('角色尚无参考图')).toBeInTheDocument();
+    expect(
+      await within(screen.getByLabelText('角色参考：林澈卡片')).findByText('拖入或下拉选择'),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
     expect(p.onSave).toHaveBeenCalledWith(
       '本场对话',

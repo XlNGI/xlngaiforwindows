@@ -2,7 +2,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { Image as ImageIcon, RotateCcw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { AssetInfo, AssetMediaSourceInfo, DocumentKind } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker, workerMediaUrl } from './worker-scope';
 import { ImagePreview } from './ImagePreview';
 import { VoiceProfilePanel } from './dubbing/VoiceProfilePanel';
 
@@ -45,6 +45,7 @@ export function CharacterSceneWorkspace({
   onGenerate: () => void;
   onOpenAsset?: (assetId: string) => void;
 }) {
+  const callWorker = projectWorker();
   const [mediaById, setMediaById] = useState<Record<string, AssetMediaSourceInfo>>({});
 
   useEffect(() => {
@@ -201,7 +202,7 @@ export function CharacterSceneWorkspace({
 }
 
 function mediaSrcFor(assetId: string, absolutePath: string): string | undefined {
-  if (!('__TAURI_INTERNALS__' in window)) return `/worker-media/${encodeURIComponent(assetId)}`;
+  if (!('__TAURI_INTERNALS__' in window)) return workerMediaUrl(assetId);
   try {
     return convertFileSrc(absolutePath);
   } catch {

@@ -7,6 +7,7 @@ import { NetworkAdmission, sharedNetworkAdmission } from '@ai-video/llm';
 import { ContentService } from './content-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { ProjectService } from './project-service.js';
+import { ExecutionPool } from './execution-pool.js';
 
 const roots: string[] = [];
 const services: ProjectService[] = [];
@@ -25,13 +26,17 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(capacity = new ExecutionPool()) {
   const base = await mkdtemp(join(tmpdir(), 'ai-video-image-'));
   roots.push(base);
   const project = new ProjectService({ recentProjectsPath: join(base, 'recent.json') });
   services.push(project);
   project.create(join(base, 'project'), 'Image Project');
-  return { base, project, service: new ImageGenerationService(project) };
+  return {
+    base,
+    project,
+    service: new ImageGenerationService(project, undefined, undefined, capacity),
+  };
 }
 
 describe('ImageGenerationService', () => {
@@ -903,4 +908,153 @@ describe('ImageGenerationService', () => {
     });
     expect(service.recoverInterrupted()).toBe(0);
   });
+});
+
+it('downloads independent images across projects within one shared limit and commits all results of a job atomically', async () => {
+  const pool = new ExecutionPool(),
+    a = await setup(pool),
+    b = await setup(pool);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let active = 0,
+    peak = 0;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await gate;
+    active -= 1;
+    return new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
+      status: (typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      ).includes('bad')
+        ? 500
+        : 200,
+      headers: { 'content-type': 'image/png' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  const prepare = (f: typeof a, prompt: string) =>
+    f.service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt, aspect_ratio: '16:9', resolution: '1080p' },
+    });
+  const ja = prepare(a, 'A'),
+    jb = prepare(b, 'B');
+  const params = {
+    jobId: ja.id,
+    providerStatus: 200,
+    providerBody: {
+      data: [
+        { url: 'https://a.example.invalid/1.png' },
+        { url: 'https://a.example.invalid/2.png' },
+      ],
+    },
+  };
+  const first = a.service.complete(params),
+    replay = a.service.complete({ ...params });
+  const second = b.service.complete({
+    jobId: jb.id,
+    providerStatus: 200,
+    providerBody: {
+      data: [
+        { url: 'https://b.example.invalid/good.png' },
+        { url: 'https://b.example.invalid/bad.png' },
+      ],
+    },
+  });
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  expect(a.service.listAssets({})).toEqual([]);
+  expect(b.service.listAssets({})).toEqual([]);
+  release();
+  const [result, duplicate, failed] = await Promise.all([first, replay, second]);
+  expect(result.results.map((entry) => entry.asset?.id)).toEqual(
+    duplicate.results.map((entry) => entry.asset?.id),
+  );
+  expect(result.status).toBe('succeeded');
+  expect(failed.status).toBe('failed');
+  expect(peak).toBe(2);
+  expect(fetchMock).toHaveBeenCalledTimes(4);
+  expect(a.service.listAssets({})).toHaveLength(2);
+  expect(b.service.listAssets({})).toEqual([]);
+});
+
+it('cancels only its own downloading job and releases shared download capacity without fetching its remaining results', async () => {
+  const pool = new ExecutionPool(),
+    a = await setup(pool),
+    b = await setup(pool);
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (
+      (typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).includes(
+        'cancelled.example',
+      )
+    )
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Cancelled', 'AbortError')),
+          { once: true },
+        );
+      });
+    return Promise.resolve(
+      new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  const prepare = (f: typeof a, prompt: string) =>
+    f.service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt, aspect_ratio: '16:9', resolution: '1080p' },
+    });
+  const ja = prepare(a, 'cancel A'),
+    jb = prepare(b, 'keep B');
+  const cancelled = a.service.complete({
+    jobId: ja.id,
+    providerStatus: 200,
+    providerBody: {
+      data: [1, 2, 3, 4].map((index) => ({
+        url: 'https://cancelled.example.invalid/' + index + '.png',
+      })),
+    },
+  });
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  const independent = b.service.complete({
+    jobId: jb.id,
+    providerStatus: 200,
+    providerBody: { data: [{ url: 'https://independent.example.invalid/output.png' }] },
+  });
+  a.service.cancel(ja.id);
+  expect((await cancelled).status).toBe('cancelled');
+  expect((await independent).status).toBe('succeeded');
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(a.service.listAssets({})).toEqual([]);
+  expect(b.service.listAssets({})).toHaveLength(1);
+});
+
+it('discards controlled native output delivered after cancellation without creating an asset', async () => {
+  const { service } = await setup();
+  const job = service.prepare({
+    adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+    parameters: { prompt: 'late output', aspect_ratio: '16:9', resolution: '1080p' },
+  });
+  service.cancel(job.id);
+  const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+  mkdirSync(nativeDirectory, { recursive: true });
+  const nativeImageFilePath = join(nativeDirectory, 'image-late-cancel-' + job.id + '.png');
+  writeFileSync(nativeImageFilePath, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+  const result = await service.complete({
+    jobId: job.id,
+    providerStatus: 200,
+    providerBody: { data: [{ nativeImageFilePath, contentType: 'image/png' }] },
+  });
+  expect(result.status).toBe('cancelled');
+  expect(service.listAssets({})).toEqual([]);
+  expect(existsSync(nativeImageFilePath)).toBe(false);
 });

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type Database from 'better-sqlite3';
@@ -42,9 +43,16 @@ import type {
   ProviderProfileUpdateParams,
   ProviderRuntimeProfile,
   RemoteProviderModelInfo,
+  ProjectRuntimeRegistration,
 } from '@ai-video/contracts';
 import { isUniCompApiMediaTemplateKey, mediaModelBindings } from '@ai-video/contracts';
-import { createAppRepositories, migrateAppDatabase, openAppDatabase } from '@ai-video/persistence';
+import {
+  createAppRepositories,
+  migrateAppDatabase,
+  openAppDatabase,
+  getAppSchemaVersion,
+  checkAppIntegrity,
+} from '@ai-video/persistence';
 import {
   listModelBindings as listStaticModelBindings,
   listModelContracts as listStaticModelContracts,
@@ -572,7 +580,7 @@ export class AppSettingsService {
           binding.providerType === profile.providerType &&
           binding.remoteModelId === record.remoteModelId,
       );
-      if (officialBinding) {
+      if (officialBinding || resolveModelBinding(profile.providerType, record.remoteModelId)) {
         const existing = toModelInfo(record).capabilities;
         const official = inferContractCapabilities(profile.providerType, record.remoteModelId);
         const capabilities = hasAnyModelCapability(existing)
@@ -584,11 +592,14 @@ export class AppSettingsService {
             )
           : official;
         const capabilitiesJson = JSON.stringify(capabilities);
-        if (record.parameterTemplateKey || record.capabilitiesJson !== capabilitiesJson) {
+        if (
+          (officialBinding && record.parameterTemplateKey) ||
+          record.capabilitiesJson !== capabilitiesJson
+        ) {
           record = {
             ...record,
             capabilitiesJson,
-            parameterTemplateKey: undefined,
+            parameterTemplateKey: officialBinding ? undefined : record.parameterTemplateKey,
             updatedAt: this.now(),
           };
           repository.save(record);
@@ -597,6 +608,7 @@ export class AppSettingsService {
       if (
         metadata.contractId &&
         (record.contractId !== metadata.contractId ||
+          record.contractRevision !== metadata.contractRevision ||
           record.contractStatus !== metadata.contractStatus)
       ) {
         record = { ...record, ...metadata, updatedAt: this.now() };
@@ -875,6 +887,44 @@ export class AppSettingsService {
     this.database = undefined;
   }
 
+  listRuntimeRegistrations(): ProjectRuntimeRegistration[] {
+    const rows = this.getDatabase()
+      .prepare(
+        `SELECT project_id AS projectId, canonical_path AS canonicalPath,
+      directory_identity AS directoryIdentity,recover_on_startup AS recoverOnStartup,last_error AS lastError,
+      updated_at AS updatedAt FROM project_runtime_registrations ORDER BY updated_at DESC,project_id LIMIT 1000`,
+      )
+      .all() as Array<
+      Omit<ProjectRuntimeRegistration, 'recoverOnStartup' | 'lastError'> & {
+        recoverOnStartup: number;
+        lastError: string | null;
+      }
+    >;
+    return rows.map((row) => ({
+      ...row,
+      recoverOnStartup: row.recoverOnStartup === 1,
+      lastError: row.lastError ?? undefined,
+    }));
+  }
+
+  saveRuntimeRegistration(record: Omit<ProjectRuntimeRegistration, 'updatedAt'>): void {
+    this.getDatabase()
+      .prepare(
+        `INSERT INTO project_runtime_registrations(project_id,canonical_path,directory_identity,recover_on_startup,last_error,updated_at)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET canonical_path=excluded.canonical_path,
+      directory_identity=excluded.directory_identity,recover_on_startup=excluded.recover_on_startup,
+      last_error=excluded.last_error,updated_at=excluded.updated_at`,
+      )
+      .run(
+        record.projectId,
+        record.canonicalPath,
+        record.directoryIdentity,
+        record.recoverOnStartup ? 1 : 0,
+        record.lastError ?? null,
+        this.now(),
+      );
+  }
+
   indexLlmAttempt(project: ProjectRecord, attempt: LlmGenerationAttemptRecord): void {
     const record = toUsageIndexRecord(project, attempt);
     if (record) this.repositories().usageIndex.save(record);
@@ -902,7 +952,31 @@ export class AppSettingsService {
       this.database = openAppDatabase(join(this.appDataDirectory, APP_DATABASE_NAME), {
         nativeBinding: this.nativeBinding,
       });
-      migrateAppDatabase(this.database);
+      try {
+        const version = getAppSchemaVersion(this.database);
+        if (version > 0 && version < 8) {
+          const backups = join(this.appDataDirectory, 'backups');
+          mkdirSync(backups, { recursive: true });
+          const path = join(backups, `app-pre-v${version}-${randomUUID()}.sqlite`);
+          this.database.pragma('wal_checkpoint(FULL)');
+          this.database.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`);
+          const backup = openAppDatabase(path, {
+            readonly: true,
+            nativeBinding: this.nativeBinding,
+          });
+          try {
+            if (!checkAppIntegrity(backup).ok)
+              throw new Error('Application migration backup failed integrity checks.');
+          } finally {
+            backup.close();
+          }
+        }
+        migrateAppDatabase(this.database);
+      } catch (error) {
+        this.database.close();
+        this.database = undefined;
+        throw error;
+      }
       if (!this.modelContractDirectorySeeded) {
         this.seedModelContractDirectory();
         this.modelContractDirectorySeeded = true;
@@ -942,11 +1016,34 @@ export class AppSettingsService {
     }
     for (const binding of listStaticModelBindings()) {
       const existing = repositories.modelBindings.get(binding.bindingId);
+      const previous = existing
+        ? undefined
+        : repositories.modelBindings
+            .list()
+            .filter(
+              (item) =>
+                item.providerType === binding.providerType &&
+                item.remoteModelId === binding.remoteModelId &&
+                item.contractId === binding.contractId &&
+                item.contractRevision < binding.contractRevision,
+            )
+            .sort((left, right) => right.contractRevision - left.contractRevision)[0];
+      const previousContract = previous
+        ? repositories.modelContracts.get(previous.contractId, previous.contractRevision)
+        : undefined;
+      const inheritedStatus =
+        previous && previous.status !== 'enabled'
+          ? previous.status
+          : previousContract && previousContract.status !== 'enabled'
+            ? 'verified'
+            : undefined;
       const isOfficialMediaBinding = mediaModelBindings.some(
         (item) => item.bindingId === binding.bindingId,
       );
       const status = isOfficialMediaBinding
-        ? ((existing?.status as ModelCatalogStatus | undefined) ?? binding.status)
+        ? ((existing?.status as ModelCatalogStatus | undefined) ??
+          (inheritedStatus as ModelCatalogStatus | undefined) ??
+          binding.status)
         : binding.status === 'enabled' &&
             existing?.status !== 'rejected' &&
             existing?.status !== 'revalidation_required'
@@ -1261,8 +1358,8 @@ function assertOfficialMediaConfiguration(
   const binding = mediaModelBindings.find(
     (item) => item.providerType === providerType && item.remoteModelId === remoteModelId,
   );
-  if (!binding) return;
-  if (templateKey)
+  if (!binding && !resolveModelBinding(providerType, remoteModelId)) return;
+  if (binding && templateKey)
     throw new ProviderProfileValidationError(
       'This media model binds an official contract and cannot use a channel parameter template.',
     );

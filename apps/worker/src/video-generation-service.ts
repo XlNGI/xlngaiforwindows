@@ -44,6 +44,7 @@ import { assertStorageCapacity } from './storage-capacity.js';
 import { multiplyDecimalStrings } from './usage-cost.js';
 import { withNetworkResponse } from './network-transfer.js';
 import { ProductionService } from './production-service.js';
+import { ExecutionPool } from './execution-pool.js';
 
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const OFF_PEAK_POLL_TIMEOUT_MS = 48 * 60 * 60 * 1000;
@@ -102,6 +103,7 @@ export class VideoGenerationService {
     private readonly projects: ProjectService,
     private readonly storageCapacityCheck: StorageCapacityCheck = assertStorageCapacity,
     private readonly pricingResolver?: VideoCreditPricingResolver,
+    private readonly capacity = new ExecutionPool(),
   ) {}
 
   prepare(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
@@ -770,15 +772,18 @@ export class VideoGenerationService {
     if (this.downloads.has(job.id)) return;
     const controller = new AbortController();
     this.downloads.set(job.id, controller);
-    void this.downloadAndComplete(
-      projectSession,
-      projectSessionId,
-      job,
-      providerTaskId,
-      source,
-      metadata,
-      controller.signal,
-    )
+    void this.capacity
+      .run('download', projectSession.id, controller.signal, () =>
+        this.downloadAndComplete(
+          projectSession,
+          projectSessionId,
+          job,
+          providerTaskId,
+          source,
+          metadata,
+          controller.signal,
+        ),
+      )
       .catch((error) => {
         if (this.projects.current() !== projectSession) return;
         try {

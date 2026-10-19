@@ -387,10 +387,10 @@ export function resolveModelBinding(
   providerType: string,
   remoteModelId: string,
 ): { binding: ModelBinding; contract: ModelContract } | undefined {
-  const binding = BINDINGS.find(
+  const binding = BINDINGS.filter(
     (candidate) =>
       candidate.providerType === providerType && candidate.remoteModelId === remoteModelId,
-  );
+  ).sort((left, right) => right.contractRevision - left.contractRevision)[0];
   if (!binding) return undefined;
   const contract = getModelContract(binding.contractId, binding.contractRevision);
   if (!contract) {

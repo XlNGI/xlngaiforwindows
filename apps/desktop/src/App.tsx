@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -59,8 +59,6 @@ import type {
   UnifiedAgentCapability,
   UnifiedAgentRunParams,
   LlmInputAttachment,
-  MediaModelSelectionDecision,
-  MediaModelSelectionRequest,
   MediaSubmissionConfirmationRequest,
   AgentProtectedUiHandoff,
   NovelWritingIntent,
@@ -68,13 +66,21 @@ import type {
   ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
 import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import {
+  projectWorker,
+  workerScope,
+  selectWorkerScope,
+  forgetWorkerScope,
+  isCurrentWorkerScope,
+  WORKER_SCOPE_STALE_EVENT,
+} from './worker-scope';
+import { TaskConfirmationQueue, type TaskConfirmation } from './task-confirmations';
 import { useProjectMaintenance } from './use-project-maintenance';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { useConversationWorkspace } from './use-conversation-workspace';
 import { useAssetWorkspace } from './use-asset-workspace';
 import { useProductionState } from './use-production-state';
-import { MediaSubmissionConfirmationDialog } from './media-confirmation';
+import { TaskConfirmationDialog } from './TaskConfirmationDialog';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
@@ -82,9 +88,12 @@ import { SceneWorkspace } from './SceneWorkspace';
 import { sceneReferenceBindings } from './scene-reference-bindings';
 import { effectiveSceneCast, readSceneMedia, sceneMediaParams } from './scene-media';
 import { ScriptWorkspace } from './ScriptWorkspace';
+import { SceneShotDirectory } from './SceneShotDirectory';
 import { ShotWorkspace, type ShotReferenceAssets } from './ShotWorkspace';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel, type ChatAttachment } from './ChatPanel';
+import { composeConversationPrompt } from './conversation-prompt-template';
+import { useConversationPromptTemplate } from './use-conversation-prompt-template';
 import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
@@ -139,12 +148,7 @@ interface DetachedPanelRegistration {
   actionSequence: number;
 }
 
-const TERMINAL_VIDEO_STATUSES = new Set<VideoGenerationJobInfo['status']>([
-  'succeeded',
-  'failed',
-  'timed-out',
-  'cancelled',
-]);
+const TERMINAL_VIDEO_STATUSES = new Set<string>(['succeeded', 'failed', 'timed-out', 'cancelled']);
 
 function notifyVideoTerminal(job: VideoGenerationJobInfo): void {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
@@ -493,6 +497,10 @@ export function mergeGenerationMessage(
   next: LlmGenerationInfo,
 ): ChatMessageInfo[] {
   if (selectedConversationId !== next.conversationId) return messages;
+  if (messages.some((message) => message.id === next.assistantMessage.id))
+    return messages.map((message) =>
+      message.id === next.assistantMessage.id ? next.assistantMessage : message,
+    );
   return [
     ...messages.filter((message) => message.id !== next.assistantMessage.id),
     next.assistantMessage,
@@ -565,6 +573,8 @@ export function composeImageGenerationPrompt(
   if (prefix.length >= maximum) return prefix.slice(0, maximum);
   return `${prefix}${content.slice(0, maximum - prefix.length)}`;
 }
+
+export { composeConversationPrompt } from './conversation-prompt-template';
 
 export function buildAgentAttachments(attachments: ChatAttachment[]): LlmInputAttachment[] {
   return attachments.flatMap((attachment): LlmInputAttachment[] => {
@@ -662,6 +672,7 @@ function readVideoPreviewAsDataUrl(file: File): Promise<string> {
 }
 
 export function App() {
+  const callWorker = projectWorker();
   const [health, setHealth] = useState<HealthResult>();
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [sqlite, setSqlite] = useState<SqliteProbeResult>();
@@ -724,7 +735,7 @@ export function App() {
       composerPrompt?: string;
     }
   >();
-  const [agentMediaSelection, setAgentMediaSelection] = useState<MediaModelSelectionRequest>();
+
   const [agentModelPreferences, setAgentModelPreferences] = useState<
     Record<
       string,
@@ -761,31 +772,30 @@ export function App() {
   >([]);
   const [liveAgentActions, setLiveAgentActions] = useState<ConversationRuntimeLiveAction[]>([]);
   const lastGenerationErrorRef = useRef<string | undefined>(undefined);
-  const [agentConfirmation, setAgentConfirmation] =
-    useState<import('@ai-video/contracts').AgentToolConfirmationRequest>();
-  const confirmationResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
-  /**
-   * Every paid submission — composer, Agent stream or production panel — is
-   * approved through this one modal, so the frozen draft, parameters and cost
-   * notice cannot drift between code paths.
-   */
-  const [paidSubmissionApproval, setPaidSubmissionApproval] =
-    useState<MediaSubmissionConfirmationRequest>();
-  const paidSubmissionResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const [confirmationItems, setConfirmationItems] = useState<TaskConfirmation[]>([]);
+  const confirmationQueue = useRef<TaskConfirmationQueue | undefined>(undefined);
+  if (!confirmationQueue.current)
+    confirmationQueue.current = new TaskConfirmationQueue(setConfirmationItems);
+  const currentConfirmation = confirmationItems[0];
   const requestMediaSubmissionApproval = (confirmation: MediaSubmissionConfirmationRequest) =>
-    new Promise<boolean>((resolve) => {
-      paidSubmissionResolverRef.current?.(false);
-      setPaidSubmissionApproval(confirmation);
-      paidSubmissionResolverRef.current = (approved) => {
-        paidSubmissionResolverRef.current = undefined;
-        setPaidSubmissionApproval(undefined);
-        resolve(approved);
-      };
-    });
-  const mediaSelectionResolverRef = useRef<
-    ((selection: MediaModelSelectionDecision | undefined) => void) | undefined
-  >(undefined);
+    confirmationQueue.current!.request(
+      `media:${confirmation.jobId}`,
+      project?.name ?? '项目',
+      'paid',
+      confirmation,
+    );
   const activeMediaInputsRef = useRef<string[]>([]);
+  const nativeRuns = useRef(
+    new Map<
+      string,
+      {
+        run: LlmStreamRun;
+        state: LlmGenerationInfo;
+        taskId?: string;
+        actions: ConversationRuntimeLiveAction[];
+      }
+    >(),
+  );
   const retryRequestsRef = useRef(new Set<string>());
   const pendingMessageRequestsRef = useRef(new Set<string>());
   const projectActionRequest = useRef(0);
@@ -796,7 +806,7 @@ export function App() {
     conversationId: undefined as string | undefined,
     generationId: undefined as string | undefined,
   });
-  const nativeLlmRun = useRef<LlmStreamRun | undefined>(undefined);
+
   const agentTaskEventPollRef = useRef<
     | {
         version: number;
@@ -1084,7 +1094,7 @@ export function App() {
   const observedProjectTasks = useRef<
     | {
         projectSessionId: string;
-        statuses: Map<string, VideoGenerationJobInfo['status']>;
+        statuses: Map<string, string>;
       }
     | undefined
   >(undefined);
@@ -1099,10 +1109,11 @@ export function App() {
     if (!projectTasks) return;
     const previous = observedProjectTasks.current;
     const newSession = previous?.projectSessionId !== projectTasks.projectSessionId;
-    const statuses = new Map(projectTasks.videoJobs.map((job) => [job.id, job.status]));
+    const mediaJobs = [...projectTasks.videoJobs, ...(projectTasks.imageJobs ?? [])];
+    const statuses = new Map(mediaJobs.map((job) => [job.id, job.status]));
     const terminalTransitions = newSession
       ? []
-      : projectTasks.videoJobs.filter((job) => {
+      : mediaJobs.filter((job) => {
           const previousStatus = previous.statuses.get(job.id);
           return (
             TERMINAL_VIDEO_STATUSES.has(job.status) &&
@@ -1111,13 +1122,17 @@ export function App() {
         });
     observedProjectTasks.current = { projectSessionId: projectTasks.projectSessionId, statuses };
 
-    for (const job of terminalTransitions) notifyVideoTerminal(job);
+    for (const job of terminalTransitions)
+      if (projectTasks.videoJobs.some((video) => video.id === job.id))
+        notifyVideoTerminal(job as VideoGenerationJobInfo);
     const missingInitialAsset =
       newSession &&
-      projectTasks.videoJobs.some(
+      mediaJobs.some(
         (job) =>
           job.status === 'succeeded' &&
-          job.results.some((result) => !assets.some((asset) => asset.id === result.asset.id)),
+          job.results.some(
+            (result) => result.asset && !assets.some((asset) => asset.id === result.asset!.id),
+          ),
       );
     if (!missingInitialAsset && !terminalTransitions.some((job) => job.status === 'succeeded')) {
       return;
@@ -1141,6 +1156,8 @@ export function App() {
     assetKind?: 'character' | 'scene' | 'first-frame';
     images?: string[];
     referenceBindings?: import('@ai-video/contracts').SceneMaterialBindingInfo[];
+    inputImages?: import('@ai-video/contracts').ProductionImageSelection[];
+    continuityRevision?: number;
   }>();
   const [linkedAssets, setLinkedAssets] = useState<AssetInfo[]>([]);
 
@@ -1249,9 +1266,10 @@ export function App() {
   const nativeRunIsCurrent = (run: LlmStreamRun): boolean => {
     const owner = generationPollOwner.current;
     return (
-      nativeLlmRun.current?.identity.attemptId === run.identity.attemptId &&
+      nativeRuns.current.get(run.identity.generationId)?.run === run &&
       owner.projectId === run.identity.projectId &&
-      owner.conversationId === run.identity.conversationId
+      owner.conversationId === run.identity.conversationId &&
+      owner.generationId === run.identity.generationId
     );
   };
 
@@ -1288,15 +1306,16 @@ export function App() {
             limit: 100,
           }),
         )
-        .then((result) => {
+        .then(async (result) => {
           if (agentTaskEventPollRef.current !== poll) return;
-          void callWorker('agent.task.get', { taskId })
+          await callWorker('agent.task.get', { taskId })
             .then((detail) => {
               const current = agentTaskEventPollRef.current;
-              if (current && current.taskId !== taskId) return;
+              if (current !== poll) return;
               rememberAgentTask(detail);
             })
             .catch(() => undefined);
+          if (agentTaskEventPollRef.current !== poll) return;
           poll.afterSequence = result.nextSequence;
           const latest = result.events.at(-1);
           if (latest?.level === 'error') {
@@ -1322,31 +1341,43 @@ export function App() {
   const launchPreparedGeneration = (
     prepared: LlmGenerationPrepareResult,
     includeAttachments = true,
+    observeOnly = false,
   ): Promise<void> => {
-    confirmationResolverRef.current?.(false);
-    paidSubmissionResolverRef.current?.(false);
-    mediaSelectionResolverRef.current?.(undefined);
-    activeMediaInputsRef.current = includeAttachments
+    const previous = nativeRuns.current.get(prepared.stream.generationId);
+    if (previous) return previous.run.completion;
+    const callWorker = projectWorker({
+      projectId: prepared.stream.projectId,
+      projectSessionId: prepared.stream.projectSessionId,
+    });
+    const isVisible = () =>
+      generationPollOwner.current.projectId === prepared.stream.projectId &&
+      generationPollOwner.current.conversationId === prepared.stream.conversationId;
+    const referenceImageInputs = includeAttachments
       ? collectReferenceImageInputs(chatAttachments)
       : [];
-    if (includeAttachments) setChatAttachments([]);
+    if (isVisible()) {
+      activeMediaInputsRef.current = referenceImageInputs;
+      if (includeAttachments) setChatAttachments([]);
+    }
     const agentTaskId =
       'agentTaskId' in prepared && typeof prepared.agentTaskId === 'string'
         ? prepared.agentTaskId
         : undefined;
     const isAgentGeneration = agentTaskId !== undefined;
-    lastGenerationErrorRef.current = undefined;
-    setLiveAgentActions([]);
-    if (agentTaskId) {
-      setAgentTask(undefined);
-      startAgentTaskEventPolling(agentTaskId);
-    } else {
-      stopAgentTaskEventPolling();
+    if (isVisible()) {
+      lastGenerationErrorRef.current = undefined;
+      setLiveAgentActions([]);
+      if (agentTaskId) {
+        setAgentTask(undefined);
+        startAgentTaskEventPolling(agentTaskId);
+      } else {
+        stopAgentTaskEventPolling();
+      }
     }
     const previousDocumentIds = new Set(documents.map((item) => item.id));
     let agentDocumentRefreshStarted = false;
     const refreshAgentDocuments = () => {
-      if (!isAgentGeneration || agentDocumentRefreshStarted) return;
+      if (!isAgentGeneration || agentDocumentRefreshStarted || !isVisible()) return;
       agentDocumentRefreshStarted = true;
       const projectId = prepared.stream.projectId;
       const refreshDocumentList = (artifactDocumentId?: string, verifiedTask = false) =>
@@ -1407,90 +1438,109 @@ export function App() {
           }
         });
     };
-    setGeneration(prepared.generation);
-    setMessages((current) => {
-      const withoutAssistant = current.filter(
-        (message) => message.id !== prepared.generation.assistantMessage.id,
-      );
-      return [
-        ...withoutAssistant,
-        ...(withoutAssistant.some((message) => message.id === prepared.generation.userMessage.id)
-          ? []
-          : [prepared.generation.userMessage]),
-        prepared.generation.assistantMessage,
-      ];
-    });
+    if (isVisible()) {
+      setGeneration(prepared.generation);
+      setMessages((current) => {
+        const withoutAssistant = current.filter(
+          (message) => message.id !== prepared.generation.assistantMessage.id,
+        );
+        return [
+          ...withoutAssistant,
+          ...(withoutAssistant.some((message) => message.id === prepared.generation.userMessage.id)
+            ? []
+            : [prepared.generation.userMessage]),
+          prepared.generation.assistantMessage,
+        ];
+      });
+    }
     if (!isGenerationActive(prepared.generation)) {
-      setChatMessage(prepared.generation.error ?? '生成已完成');
+      if (isVisible()) setChatMessage(prepared.generation.error ?? '生成已完成');
       refreshAgentDocuments();
       return Promise.resolve();
     }
-    const run = streamPreparedLlmGeneration(prepared, {
-      onLiveActions(actions) {
-        if (!nativeRunIsCurrent(run)) return;
-        setLiveAgentActions(actions);
-      },
-      onDelta(content) {
-        if (!nativeRunIsCurrent(run)) return;
-        const next: LlmGenerationInfo = {
-          ...prepared.generation,
-          status: 'streaming',
-          assistantMessage: {
-            ...prepared.generation.assistantMessage,
-            content,
+    const run = streamPreparedLlmGeneration(
+      prepared,
+      {
+        onLiveActions(actions) {
+          const entry = nativeRuns.current.get(run.identity.generationId);
+          if (entry) entry.actions = actions;
+          if (!nativeRunIsCurrent(run)) return;
+          setLiveAgentActions(actions);
+        },
+        onDelta(content) {
+          const entry = nativeRuns.current.get(run.identity.generationId);
+          if (!entry || entry.run !== run) return;
+          const next: LlmGenerationInfo = {
+            ...prepared.generation,
             status: 'streaming',
-          },
-        };
-        setGeneration((current) =>
-          current?.generationId === next.generationId ? { ...current, ...next } : current,
-        );
-        setMessages((current) =>
-          mergeGenerationMessage(current, run.identity.conversationId, next),
-        );
-      },
-      onState(next) {
-        if (!nativeRunIsCurrent(run)) return;
-        setGeneration(next);
-        setMessages((current) =>
-          mergeGenerationMessage(current, run.identity.conversationId, next),
-        );
-        if (!isGenerationActive(next)) {
-          confirmationResolverRef.current?.(false);
-          paidSubmissionResolverRef.current?.(false);
-          mediaSelectionResolverRef.current?.(undefined);
-          activeMediaInputsRef.current = [];
-          if (next.error) lastGenerationErrorRef.current = next.error;
-          setChatMessage(readableGenerationError(next.error) ?? '生成完成');
-          refreshAgentDocuments();
-        }
-      },
-      onConfirmation(request) {
-        confirmationResolverRef.current?.(false);
-        setAgentConfirmation(request);
-        return new Promise<boolean>((resolve) => {
-          confirmationResolverRef.current = (approved) => {
-            confirmationResolverRef.current = undefined;
-            setAgentConfirmation(undefined);
-            resolve(approved);
+            assistantMessage: {
+              ...prepared.generation.assistantMessage,
+              content,
+              status: 'streaming',
+            },
           };
-        });
+          entry.state = next;
+          if (!isVisible()) return;
+          setGeneration((current) =>
+            current?.generationId === next.generationId ? { ...current, ...next } : current,
+          );
+          setMessages((current) =>
+            mergeGenerationMessage(current, run.identity.conversationId, next),
+          );
+        },
+        onState(next) {
+          const entry = nativeRuns.current.get(run.identity.generationId);
+          if (!entry || entry.run !== run) return;
+          entry.state = next;
+          if (!isGenerationActive(next))
+            confirmationQueue.current!.removeOwner(run.identity.generationId);
+          if (!isVisible()) return;
+          if (nativeRunIsCurrent(run)) setGeneration(next);
+          setMessages((current) =>
+            mergeGenerationMessage(current, run.identity.conversationId, next),
+          );
+          if (!isGenerationActive(next) && nativeRunIsCurrent(run)) {
+            confirmationQueue.current!.removeOwner(prepared.stream.generationId);
+            if (next.error) lastGenerationErrorRef.current = next.error;
+            setChatMessage(readableGenerationError(next.error) ?? '生成完成');
+            refreshAgentDocuments();
+          }
+        },
+        onConfirmation(request) {
+          return confirmationQueue.current!.request(
+            prepared.stream.generationId,
+            `${project?.name ?? '项目'} · ${prepared.stream.conversationId}`,
+            'tool',
+            request,
+          );
+        },
+        onMediaSelection(request) {
+          return confirmationQueue.current!.request(
+            prepared.stream.generationId,
+            `${project?.name ?? '项目'} · ${prepared.stream.conversationId}`,
+            'model',
+            request,
+            referenceImageInputs,
+          );
+        },
+        onMediaSubmission(request) {
+          return confirmationQueue.current!.request(
+            prepared.stream.generationId,
+            `${project?.name ?? '项目'} · ${prepared.stream.conversationId}`,
+            'paid',
+            request,
+          );
+        },
       },
-      onMediaSelection(request) {
-        mediaSelectionResolverRef.current?.(undefined);
-        setAgentMediaSelection(request);
-        return new Promise<MediaModelSelectionDecision | undefined>((resolve) => {
-          mediaSelectionResolverRef.current = (selection) => {
-            mediaSelectionResolverRef.current = undefined;
-            setAgentMediaSelection(undefined);
-            resolve(selection);
-          };
-        });
-      },
-      onMediaSubmission(request) {
-        return requestMediaSubmissionApproval(request);
-      },
+      { observeOnly },
+    );
+    nativeRuns.current.set(run.identity.generationId, {
+      run,
+      state: prepared.generation,
+      taskId: agentTaskId,
+      actions: [],
     });
-    nativeLlmRun.current = run;
+
     return run.completion
       .catch((reason: unknown) => {
         if (nativeRunIsCurrent(run)) {
@@ -1498,66 +1548,43 @@ export function App() {
         }
       })
       .finally(async () => {
-        // The terminal Provider step and its task event can be committed just
-        // after the generation reaches its terminal state. Read the task once
-        // before stopping the poller so the UI does not remain on "执行中".
-        if (isAgentGeneration && agentTaskId && nativeRunIsCurrent(run)) {
+        if (isAgentGeneration && agentTaskId) {
           const detail = await callWorker('agent.task.get', { taskId: agentTaskId }).catch(
             () => undefined,
           );
-          if (detail && nativeRunIsCurrent(run)) {
-            rememberAgentTask(detail);
+          if (detail && isVisible()) {
+            setConversationAgentTasks((current) => upsertAgentTaskDetail(current, detail));
+            if (nativeRunIsCurrent(run)) setAgentTask(detail);
           }
         }
-        stopAgentTaskEventPolling();
-        if (nativeRunIsCurrent(run)) setLiveAgentActions([]);
-        if (nativeLlmRun.current?.identity.attemptId === run.identity.attemptId) {
-          confirmationResolverRef.current?.(false);
-          paidSubmissionResolverRef.current?.(false);
-          mediaSelectionResolverRef.current?.(undefined);
-          activeMediaInputsRef.current = [];
-          nativeLlmRun.current = undefined;
+        if (nativeRunIsCurrent(run)) {
+          stopAgentTaskEventPolling();
+          setLiveAgentActions([]);
+        }
+        confirmationQueue.current!.removeOwner(run.identity.generationId);
+        if (nativeRuns.current.get(run.identity.generationId)?.run === run) {
+          nativeRuns.current.delete(run.identity.generationId);
+          if (
+            isVisible() &&
+            generationPollOwner.current.generationId === run.identity.generationId
+          ) {
+            const other = [...nativeRuns.current.values()].find(
+              (entry) =>
+                entry.run.identity.projectId === run.identity.projectId &&
+                entry.run.identity.conversationId === run.identity.conversationId,
+            );
+            if (other) setGeneration(other.state);
+          }
         }
       });
   };
 
-  const cancelNativeLlmRun = async () => {
-    confirmationResolverRef.current?.(false);
-    paidSubmissionResolverRef.current?.(false);
-    mediaSelectionResolverRef.current?.(undefined);
-    activeMediaInputsRef.current = [];
-    const run = nativeLlmRun.current;
-    if (!run) {
-      stopAgentTaskEventPolling();
-      return;
-    }
-    // Invalidate callbacks before asking the native transport to stop so late events
-    // cannot put a cancelled generation back into the streaming state.
-    nativeLlmRun.current = undefined;
-    await run.cancel().catch(() => undefined);
-    const terminal = await callWorker('llm.generation.get', {
-      generationId: run.identity.generationId,
-    }).catch(() => undefined);
-    if (terminal) {
-      setGeneration((current) =>
-        current?.generationId === terminal.generationId ? terminal : current,
-      );
-      setMessages((current) => mergeGenerationMessage(current, terminal.conversationId, terminal));
-    }
-    stopAgentTaskEventPolling();
-  };
-
-  const cancelGenerationForConversation = async (conversationId: string) => {
-    if (
-      generation &&
-      isGenerationActive(generation) &&
-      generation.conversationId !== conversationId
-    ) {
-      if (generation.executionMode === 'native') await cancelNativeLlmRun();
-      setGeneration(
-        await callWorker('llm.generation.cancel', { generationId: generation.generationId }),
-      );
-    }
+  const cancelNativeLlmRun = async (generationId = generation?.generationId) => {
+    if (!generationId) return;
+    const entry = nativeRuns.current.get(generationId);
+    if (!entry) return;
+    confirmationQueue.current!.removeOwner(generationId);
+    await entry.run.cancel().catch(() => undefined);
   };
 
   const conversationWorkspace = useConversationWorkspace({
@@ -1568,7 +1595,6 @@ export function App() {
     setMessages,
     setContextPreview,
     setChatMessage,
-    onCancelGenerationForConversation: cancelGenerationForConversation,
   });
   const {
     conversations,
@@ -1588,6 +1614,19 @@ export function App() {
     loadEarlierMessages,
     reset: resetConversationWorkspace,
   } = conversationWorkspace;
+
+  const conversationPromptTemplate = useConversationPromptTemplate(conversation);
+  const saveConversationPromptTemplate = async () => {
+    if (!conversation || conversation.archivedAt) return;
+    try {
+      await conversationPromptTemplate.saveForSubmission(conversation);
+      if (generationPollOwner.current.conversationId === conversation.id)
+        setChatMessage('本会话要求约束已保存。');
+    } catch (reason) {
+      if (generationPollOwner.current.conversationId === conversation.id)
+        setChatMessage(reason instanceof Error ? reason.message : '会话约束保存失败');
+    }
+  };
 
   generationPollOwner.current = {
     projectId: project?.id,
@@ -1613,6 +1652,7 @@ export function App() {
   };
 
   const loadProjectContent = async () => {
+    const callWorker = projectWorker();
     const requestId = ++projectContentRequest.current;
     try {
       const [documentList, sceneList, constraintList] = await Promise.all([
@@ -1653,14 +1693,101 @@ export function App() {
     }
   };
 
+  useEffect(() => {
+    if (project) void loadProjectContent();
+  }, [project?.id, workerScope(project?.id)?.projectSessionId]);
+
   const ensureWorkerProjectSession = async (): Promise<boolean> => {
     if (!project?.rootPath) return false;
-    const current = await callWorker('project.current', {});
-    if (current) return true;
-    await callWorker('project.open', { rootPath: project.rootPath });
-    await loadProjectContent();
+    const captured = workerScope(project.id);
+    try {
+      // This scoped read validates the epoch, independently of the globally active project.
+      const current = await callWorker('project.current', {});
+      if (current?.id === project.id) return true;
+    } catch (reason) {
+      if (
+        !reason ||
+        typeof reason !== 'object' ||
+        !('workerError' in reason) ||
+        (reason.workerError as { code?: string }).code !== 'STALE_SESSION'
+      )
+        throw reason;
+      // The stale notification already started recovery; require a fresh user action.
+      return false;
+    }
+    const attached = await callWorker('project.runtime.attach', {
+      rootPath: project.rootPath,
+      expectedProjectId: project.id,
+    });
+    if (!isCurrentWorkerScope(captured)) return false;
+    selectWorkerScope({
+      projectId: attached.project.id,
+      projectSessionId: attached.projectSessionId,
+    });
+    setProject({ ...project });
     return true;
   };
+
+  useEffect(() => {
+    if (!project) return;
+    let active = true;
+    let pending = false;
+    const recover = (event: Event) => {
+      const scope = (event as CustomEvent<import('@ai-video/contracts').ProjectRuntimeScope>)
+        .detail;
+      if (
+        !scope ||
+        scope.projectId !== project.id ||
+        !isCurrentWorkerScope(scope) ||
+        pending ||
+        projectBusy
+      )
+        return;
+      pending = true;
+      const action = projectActionRequest.current;
+      setProjectMessage('本地服务已重新连接，正在恢复项目…');
+      void callWorker('project.runtime.attach', {
+        rootPath: project.rootPath,
+        expectedProjectId: project.id,
+      })
+        .then((runtime) => {
+          if (!active || action !== projectActionRequest.current || !isCurrentWorkerScope(scope))
+            return;
+          selectWorkerScope({
+            projectId: runtime.project.id,
+            projectSessionId: runtime.projectSessionId,
+          });
+          for (const [id, entry] of nativeRuns.current) {
+            if (
+              entry.run.identity.projectId === scope.projectId &&
+              entry.run.identity.projectSessionId === scope.projectSessionId
+            ) {
+              entry.run.detach();
+              confirmationQueue.current!.removeOwner(id);
+              nativeRuns.current.delete(id);
+            }
+          }
+          generationPollVersion.current += 1;
+          stopAgentTaskEventPolling();
+          setGeneration(undefined);
+          setLiveAgentActions([]);
+          setProject(runtime.project);
+          setProjectMessage('项目连接已恢复。刚才失败的操作未自动重试，请检查后重新操作。');
+        })
+        .catch((reason) => {
+          if (active && action === projectActionRequest.current)
+            setProjectMessage(reason instanceof Error ? reason.message : '项目重新连接失败');
+        })
+        .finally(() => {
+          pending = false;
+        });
+    };
+    window.addEventListener(WORKER_SCOPE_STALE_EVENT, recover);
+    return () => {
+      active = false;
+      window.removeEventListener(WORKER_SCOPE_STALE_EVENT, recover);
+    };
+  }, [project?.id, project?.rootPath, projectBusy]);
 
   useEffect(() => {
     void checkRuntime();
@@ -1668,15 +1795,54 @@ export function App() {
     void callWorker('llm.status', {})
       .then(setLlmStatus)
       .catch(() => undefined);
-    void Promise.all([callWorker('project.current', {}), callWorker('project.recent', {})])
+    let savedView: { projectId: string; rootPath: string } | undefined;
+    try {
+      const value = JSON.parse(
+        window.sessionStorage.getItem('ai-video.project-view') ?? 'null',
+      ) as { projectId?: unknown; rootPath?: unknown } | null;
+      if (typeof value?.projectId === 'string' && typeof value.rootPath === 'string')
+        savedView = { projectId: value.projectId, rootPath: value.rootPath };
+    } catch {
+      /* A malformed view hint cannot choose a project. */
+    }
+    const restoreView = savedView
+      ? callWorker('project.runtime.attach', {
+          rootPath: savedView.rootPath,
+          expectedProjectId: savedView.projectId,
+        }).then((runtime) => runtime.project)
+      : callWorker('project.current', {});
+    void Promise.all([restoreView, callWorker('project.recent', {})])
       .then(async ([current, recent]) => {
+        if (current) {
+          const runtime = ((await callWorker('project.runtime.list', {})) ?? []).find(
+            (entry) => entry.project.id === current.id,
+          );
+          if (runtime)
+            selectWorkerScope({
+              projectId: runtime.project.id,
+              projectSessionId: runtime.projectSessionId,
+            });
+        } else selectWorkerScope(undefined);
         setProject(current ?? undefined);
         setRecentProjects(recent);
-        if (current) await loadProjectContent();
       })
       .catch(() => undefined)
       .finally(() => setStartupLoaded(true));
   }, []);
+
+  useEffect(() => {
+    if (!startupLoaded) return;
+    try {
+      if (project)
+        window.sessionStorage.setItem(
+          'ai-video.project-view',
+          JSON.stringify({ projectId: project.id, rootPath: project.rootPath }),
+        );
+      else window.sessionStorage.removeItem('ai-video.project-view');
+    } catch {
+      /* Window-local view recovery remains best effort. */
+    }
+  }, [startupLoaded, project?.id, project?.rootPath]);
 
   useEffect(() => {
     try {
@@ -1736,25 +1902,15 @@ export function App() {
     }
   }, [selectedLlmProfileId, selectedLlmModelId, researchMode]);
 
-  useEffect(
-    () => () => {
-      void nativeLlmRun.current?.cancel();
-      confirmationResolverRef.current?.(false);
-      paidSubmissionResolverRef.current?.(false);
-      mediaSelectionResolverRef.current?.(undefined);
-    },
-    [],
-  );
-
   useEffect(() => {
-    const run = nativeLlmRun.current;
-    if (
-      run &&
-      (run.identity.projectId !== project?.id || run.identity.conversationId !== conversation?.id)
-    ) {
-      void cancelNativeLlmRun();
-    }
-  }, [project?.id, conversation?.id]);
+    const entry = [...nativeRuns.current.values()].find(
+      (item) =>
+        item.run.identity.projectId === project?.id &&
+        item.run.identity.conversationId === conversation?.id,
+    );
+    setGeneration(entry?.state);
+    setLiveAgentActions(entry?.actions ?? []);
+  }, [project?.id, workerScope(project?.id)?.projectSessionId, conversation?.id]);
 
   useEffect(() => {
     setDetachedPanels((current) => {
@@ -1813,7 +1969,62 @@ export function App() {
       window.clearInterval(timer);
       if (generationPollVersion.current === version) generationPollVersion.current += 1;
     };
-  }, [project?.id, generation?.generationId, generation?.status, conversation?.id]);
+  }, [
+    project?.id,
+    workerScope(project?.id)?.projectSessionId,
+    generation?.generationId,
+    generation?.status,
+    conversation?.id,
+  ]);
+
+  useEffect(() => {
+    if (!project?.id) return;
+    let active = true;
+    let pending = false;
+    const recover = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const runs = await callWorker('conversation.runtime.list', {});
+        if (!active) return;
+        for (const item of runs ?? []) {
+          if (nativeRuns.current.has(item.identity.generationId)) continue;
+          void launchPreparedGeneration(
+            {
+              generation: item.generation,
+              stream: item.identity,
+              agentTaskId: item.taskId,
+              runtimeOwner: 'pi',
+            } as LlmGenerationPrepareResult,
+            false,
+            true,
+          );
+        }
+      } catch {
+        /* Keep existing loops alive while observation reconnects. */
+      } finally {
+        pending = false;
+      }
+    };
+    void recover();
+    const timer = window.setInterval(() => void recover(), 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [project?.id, workerScope(project?.id)?.projectSessionId, conversation?.id]);
+
+  useEffect(
+    () => () => {
+      for (const [id, entry] of nativeRuns.current) {
+        entry.run.detach();
+        confirmationQueue.current!.removeOwner(id);
+      }
+      const poll = agentTaskEventPollRef.current;
+      if (poll?.timer !== undefined) window.clearInterval(poll.timer);
+    },
+    [],
+  );
 
   // Re-discover persisted Agent tasks after app restart or conversation switches.
   // SQLite remains authoritative; this only restores observation/presentation and
@@ -1845,9 +2056,9 @@ export function App() {
         if (!active) return;
         setConversationAgentTasks(details);
         const live =
-          details.find((item) =>
-            ['queued', 'running', 'waiting_review'].includes(item.task.status),
-          ) ?? details[0];
+          details.find((item) => ['queued', 'running'].includes(item.task.status)) ??
+          details.find((item) => item.task.status === 'waiting_review') ??
+          details[0];
         if (!live) {
           stopAgentTaskEventPolling();
           setAgentTask(undefined);
@@ -1862,7 +2073,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [project?.id, conversation?.id]);
+  }, [project?.id, workerScope(project?.id)?.projectSessionId, conversation?.id]);
 
   const runProjectAction = async (action: () => Promise<ProjectInfo | string | undefined>) => {
     const requestId = ++projectActionRequest.current;
@@ -1873,7 +2084,7 @@ export function App() {
     setNovelFocusChapterId(undefined);
     setNovelFocusReferenceId(undefined);
     sceneRequest.current += 1;
-    await cancelNativeLlmRun();
+    stopAgentTaskEventPolling();
     setProjectBusy(true);
     setProjectMessage('');
     try {
@@ -1886,9 +2097,16 @@ export function App() {
           setAssetTrashRequest(0);
           setAssetLibraryFocusRevision(0);
         }
+        const runtime = ((await callWorker('project.runtime.list', {})) ?? []).find(
+          (entry) => entry.project.id === result.id,
+        );
+        if (!runtime) throw new Error('项目运行上下文不可用');
+        selectWorkerScope({
+          projectId: runtime.project.id,
+          projectSessionId: runtime.projectSessionId,
+        });
         setGeneration(undefined);
         setProject(result);
-        await loadProjectContent();
       }
       setRecentProjects(await callWorker('project.recent', {}));
     } catch (reason) {
@@ -1920,22 +2138,34 @@ export function App() {
       if (!name) setProjectMessage('请输入项目名称');
       return;
     }
-    return runProjectAction(() => callWorker('project.create', { name, rootPath }));
+    return runProjectAction(
+      async () => (await callWorker('project.runtime.create', { name, rootPath })).project,
+    );
   };
   const createSampleProject = () => {
     const rootPath = normalizeProjectPath(projectPath);
     if (!rootPath) return;
-    return runProjectAction(() =>
-      callWorker('project.createSample', {
-        rootPath,
-        name: projectName.trim() || undefined,
-      }),
+    return runProjectAction(
+      async () =>
+        (
+          await callWorker('project.runtime.createSample', {
+            rootPath,
+            name: projectName.trim() || undefined,
+          })
+        ).project,
     );
   };
   const openProject = (requestedPath?: string) => {
     const rootPath = normalizeProjectPath(requestedPath ?? projectPath);
     if (!rootPath) return;
-    return runProjectAction(() => callWorker('project.open', { rootPath }));
+    return runProjectAction(async () => {
+      const attached = await callWorker('project.runtime.attach', { rootPath });
+      const activated = await callWorker('project.runtime.activate', {
+        projectId: attached.project.id,
+        projectSessionId: attached.projectSessionId,
+      });
+      return activated.project;
+    });
   };
   const selectProjectDirectory = async (openAfterSelection = false) => {
     setProjectMessage('');
@@ -1954,7 +2184,17 @@ export function App() {
   };
   const closeProject = () =>
     runProjectAction(async () => {
-      await callWorker('project.close', {});
+      const scope = workerScope(project?.id);
+      if (scope) await callWorker('project.runtime.unload', scope);
+      if (project) {
+        forgetWorkerScope(project.id);
+        for (const [id, entry] of nativeRuns.current) {
+          if (entry.run.identity.projectId === project.id) {
+            confirmationQueue.current!.removeOwner(id);
+            nativeRuns.current.delete(id);
+          }
+        }
+      }
       setProject(undefined);
       resetDocumentWorkspace();
       setScenes([]);
@@ -2091,7 +2331,6 @@ export function App() {
       if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
         return;
       setScene(updated);
-      setSceneVideoPrompt(updated.videoPrompt ?? '');
       setScenes((rows) => rows.map((item) => (item.id === updated.id ? updated : item)));
       setSceneBindingMessage(
         sceneDocumentId ? '场次已绑定场景，下属镜头可沿用场景参考图。' : '场次的场景绑定已解除。',
@@ -2138,7 +2377,7 @@ export function App() {
     setShotPrompt(nextShot?.prompt ?? '');
   };
 
-  const selectScene = async (selected: SceneInfo) => {
+  const selectScene = async (selected: SceneInfo, selectedShot?: ShotInfo) => {
     const requestId = ++sceneRequest.current;
     conversationRequest.current += 1;
     setScene(selected);
@@ -2160,7 +2399,7 @@ export function App() {
         ].join('\n\n');
         setSceneVideoPrompt(composed);
       }
-      setShot(items[0]);
+      setShot(selectedShot ? items.find((item) => item.id === selectedShot.id) : undefined);
       openProjectView('shots');
     } catch (reason) {
       if (requestId === sceneRequest.current) {
@@ -2241,9 +2480,14 @@ export function App() {
       return;
     }
     const references = sceneReferenceBindings(materialBindings, resolvedCharacters, documents);
+    const production = await callWorker('production.read', {
+      target: { kind: 'scene', id: scene.id },
+    });
+    if (activeProjectIdRef.current !== expectedProjectId || activeSceneIdRef.current !== scene.id)
+      return;
     setProductionSeed({
       sceneId: scene.id,
-      prompt: sceneVideoPrompt.trim(),
+      prompt: production?.compiledPrompt ?? sceneVideoPrompt.trim(),
       images: references.map((item) => `asset://${item.assetId}`),
       referenceBindings: references,
     });
@@ -2313,7 +2557,15 @@ export function App() {
   };
 
   const referenceImages = (refs: ShotReferenceAssets): string[] =>
-    [refs.characterAssetId, refs.sceneAssetId, refs.firstFrameAssetId]
+    [
+      ...new Set([
+        ...(refs.characterAssetIds ?? []),
+        refs.characterAssetId,
+        refs.sceneAssetId,
+        refs.firstFrameAssetId,
+        ...(refs.continuityReferenceAssetIds ?? []),
+      ]),
+    ]
       .filter((id): id is string => Boolean(id))
       .map((id) => `asset://${id}`);
 
@@ -2323,16 +2575,32 @@ export function App() {
       await saveShotPrompt();
     }
     const images = referenceImages(refs);
+    const inputImages: import('@ai-video/contracts').ProductionImageSelection[] = [
+      ...[
+        ...(refs.characterAssetIds ?? []),
+        ...(refs.characterAssetId ? [refs.characterAssetId] : []),
+      ].map((assetId) => ({ assetId, role: 'character' as const })),
+      ...(refs.sceneAssetId ? [{ assetId: refs.sceneAssetId, role: 'scene' as const }] : []),
+      ...(refs.continuityReferenceAssetIds ?? []).map((assetId) => ({
+        assetId,
+        role: 'reference' as const,
+      })),
+      ...(refs.firstFrameAssetId
+        ? [{ assetId: refs.firstFrameAssetId, role: 'first-frame' as const }]
+        : []),
+    ];
     setProductionSeed({
       shotId: shot.id,
-      prompt: shotPrompt.trim(),
+      prompt: refs.continuityPrompt ?? shotPrompt.trim(),
+      continuityRevision: refs.continuityRowVersion,
       assetKind: 'first-frame',
       images,
+      inputImages,
     });
     if (mode === 'image') {
       setProductionCapability(images.length > 0 ? 'REFERENCE_TO_IMAGE' : 'TEXT_TO_IMAGE');
     } else {
-      setProductionCapability(images.length > 1 ? 'REFERENCE_TO_VIDEO' : 'IMAGE_TO_VIDEO');
+      setProductionCapability(refs.firstFrameAssetId ? 'IMAGE_TO_VIDEO' : 'REFERENCE_TO_VIDEO');
     }
   };
 
@@ -2365,10 +2633,22 @@ export function App() {
     acceptedComposerValue = composerValue,
     messageConversation = conversation,
     includeAttachments = true,
+    taskExecution?: 'ordered' | 'parallel' | 'supplement',
   ) => {
     const conversation = messageConversation;
     const messageAttachments = includeAttachments ? chatAttachments : [];
     if ((!composerValue.trim() && messageAttachments.length === 0) || !conversation) return;
+    const activeRun = [...nativeRuns.current.values()].find(
+      (entry) => entry.run.identity.conversationId === conversation.id,
+    )?.run;
+    if (
+      !selectedLlmProfile &&
+      (activeRun?.identity.conversationId === conversation.id ||
+        (generation?.conversationId === conversation.id && isGenerationActive(generation)))
+    ) {
+      setChatMessage('当前会话的上一轮仍在执行，请等待完成或停止生成后再发送。');
+      return;
+    }
     const requestKey = `${conversation.projectId}:${conversation.id}`;
     if (pendingMessageRequestsRef.current.has(requestKey)) return;
     pendingMessageRequestsRef.current.add(requestKey);
@@ -2386,18 +2666,25 @@ export function App() {
       // A Worker sidecar can restart independently of the Desktop window. In
       // that case restore the project session before any Agent/media operation.
       try {
-        await ensureWorkerProjectSession();
+        if (!(await ensureWorkerProjectSession())) return;
       } catch (reason) {
         setChatMessage(reason instanceof Error ? reason.message : '项目会话未打开');
         return;
       }
+      const callWorker = projectWorker(workerScope(conversation.projectId));
+      // The Agent sees active task summaries and chooses independent, follow-up,
+      // or supplement routing in its normal model turn. The Desktop does not
+      // classify or bind this message before the model runs.
       const attachmentContext = messageAttachments.length
         ? `\n\n[附件：${messageAttachments.map((attachment) => attachment.name).join('、')}]${messageAttachments
             .filter((attachment) => attachment.text)
             .map((attachment) => `\n\n--- ${attachment.name} ---\n${attachment.text}`)
             .join('')}`
         : '';
-      const promptForAgent = prompt.includes('[附件：') ? prompt : `${prompt}${attachmentContext}`;
+      // Wait for this conversation's template and persist the exact draft that
+      // will be submitted. A failed load/save keeps the message available to retry.
+      const template = await conversationPromptTemplate.saveForSubmission(conversation);
+      const promptForAgent = composeConversationPrompt(`${prompt}${attachmentContext}`, template);
       if (
         (selectedLlmProfile || llmProfiles.length > 0) &&
         (modelSelection || (selectedLlmProfile && selectedLlmModel) || llmProfiles.length > 0)
@@ -2433,6 +2720,7 @@ export function App() {
             : buildAgentAttachments(messageAttachments);
           const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
           const runParams: UnifiedAgentRunParams = {
+            ...(taskExecution === 'parallel' ? { taskExecution } : {}),
             conversationId: conversation.id,
             prompt: agentPrompt || '请分析我提供的附件。',
             capability,
@@ -2570,7 +2858,7 @@ export function App() {
           const idempotencyKey = `desktop-prepare:${conversation.id}:${crypto.randomUUID()}`;
           const prepared = await callWorker('llm.generation.prepare', {
             conversationId: conversation.id,
-            prompt,
+            prompt: promptForAgent,
             providerProfileId: selectedLlmProfile.id,
             modelId: selectedLlmModel.id,
             idempotencyKey,
@@ -2588,7 +2876,7 @@ export function App() {
           const idempotencyKey = `desktop-generate:${conversation.id}:${crypto.randomUUID()}`;
           const started = await callWorker('llm.generate', {
             conversationId: conversation.id,
-            prompt,
+            prompt: promptForAgent,
             idempotencyKey,
           });
           setGeneration(started);
@@ -2603,7 +2891,7 @@ export function App() {
         const saved = await callWorker('chat.message.save', {
           conversationId: conversation.id,
           role: 'user',
-          content: prompt,
+          content: promptForAgent,
         });
         setMessages((current) => [...current, saved]);
         clearAcceptedComposer();
@@ -2611,6 +2899,9 @@ export function App() {
       } catch (reason) {
         setChatMessage(readableFailure(reason, '消息保存失败'));
       }
+    } catch (reason) {
+      if (generationPollOwner.current.conversationId === conversation.id)
+        setChatMessage(readableFailure(reason, '会话约束未保存，请重试后发送'));
     } finally {
       pendingMessageRequestsRef.current.delete(requestKey);
     }
@@ -2680,9 +2971,6 @@ export function App() {
       return;
     }
     const agentTaskId = agentTask?.task.id;
-    confirmationResolverRef.current?.(false);
-    paidSubmissionResolverRef.current?.(false);
-    mediaSelectionResolverRef.current?.(undefined);
     generationPollVersion.current += 1;
     if (current.executionMode === 'native') {
       await cancelNativeLlmRun();
@@ -2892,6 +3180,11 @@ export function App() {
         conversation,
         messages,
         composer,
+        promptTemplate: conversationPromptTemplate.content,
+        promptTemplateBusy: conversationPromptTemplate.busy,
+        promptTemplateLoading: conversationPromptTemplate.loading,
+        promptTemplateError: conversationPromptTemplate.error,
+        promptTemplateDirty: conversationPromptTemplate.dirty,
         statusMessage: chatMessage,
         llmStatus: displayedLlmStatus,
         legacyLlmConfigured: llmStatus?.configurationSource === 'environment',
@@ -3178,6 +3471,12 @@ export function App() {
     } else if (action.type === 'conversation-composer') {
       setAgentModelSelection(undefined);
       setComposer(action.value);
+    } else if (action.type === 'conversation-prompt-template') {
+      conversationPromptTemplate.change(action.value);
+    } else if (action.type === 'conversation-prompt-template-save') {
+      void saveConversationPromptTemplate();
+    } else if (action.type === 'conversation-prompt-template-reload') {
+      void conversationPromptTemplate.reload().catch(() => undefined);
     } else if (action.type === 'conversation-cancel') {
       void cancelGeneration();
     } else if (action.type === 'conversation-send') {
@@ -3228,6 +3527,11 @@ export function App() {
     selectedLlmProfileId,
     selectedLlmModelId,
     researchMode,
+    conversationPromptTemplate.content,
+    conversationPromptTemplate.busy,
+    conversationPromptTemplate.loading,
+    conversationPromptTemplate.error,
+    conversationPromptTemplate.dirty,
   ]);
 
   useEffect(() => {
@@ -3282,15 +3586,21 @@ export function App() {
       selectedLlmProfileId={selectedLlmProfileId}
       selectedLlmModelId={selectedLlmModelId}
       researchMode={researchMode}
+      promptTemplate={conversationPromptTemplate.content}
+      onPromptTemplateChange={conversationPromptTemplate.change}
+      onSavePromptTemplate={() => void saveConversationPromptTemplate()}
+      promptTemplateBusy={conversationPromptTemplate.busy}
+      promptTemplateLoading={conversationPromptTemplate.loading}
+      promptTemplateError={conversationPromptTemplate.error}
+      promptTemplateDirty={conversationPromptTemplate.dirty}
+      onReloadPromptTemplate={() => void conversationPromptTemplate.reload().catch(() => undefined)}
       contextPreview={contextPreview}
-      generation={generation}
+      generation={generation?.conversationId === conversation?.id ? generation : undefined}
       agentTask={agentTask}
       agentTasks={conversationAgentTasks}
       liveAgentActions={liveAgentActions}
-      confirmation={agentConfirmation}
       activeVideoTaskCount={projectTasks?.activeCount ?? 0}
       agentModelSelection={agentModelSelection}
-      mediaModelSelection={agentMediaSelection}
       mediaReferenceImageInputs={activeMediaInputsRef.current}
       onSelectAgentModel={(providerProfileId, modelId) => {
         const pending = agentModelSelection;
@@ -3310,10 +3620,16 @@ export function App() {
           });
         }
       }}
-      onConfirmAgentAction={(approved) => confirmationResolverRef.current?.(approved)}
+      onConfirmAgentAction={(approved) =>
+        currentConfirmation && confirmationQueue.current!.decide(currentConfirmation.key, approved)
+      }
       onOpenProtectedUi={openAgentProtectedUi}
-      onSelectMediaModel={(selection) => mediaSelectionResolverRef.current?.(selection)}
-      onCancelMediaModelSelection={() => mediaSelectionResolverRef.current?.(undefined)}
+      onSelectMediaModel={(selection) =>
+        currentConfirmation && confirmationQueue.current!.decide(currentConfirmation.key, selection)
+      }
+      onCancelMediaModelSelection={() =>
+        currentConfirmation && confirmationQueue.current!.decide(currentConfirmation.key, undefined)
+      }
       onOpenLibrarySource={openLibrarySource}
       onConfirmSchemaProposal={(adapterKey, version) => {
         void confirmSchemaProposal(adapterKey, version);
@@ -3365,7 +3681,24 @@ export function App() {
       onAddAttachments={(files) => void addChatAttachments(files)}
       onRemoveAttachment={removeChatAttachment}
       onCancelGeneration={() => void cancelGeneration()}
-      onSendMessage={() => void sendMessage()}
+      allowConcurrentTasks={Boolean(selectedLlmProfile && selectedLlmModel)}
+      runningGenerations={[...nativeRuns.current.values()]
+        .filter(
+          (entry) =>
+            entry.run.identity.projectId === project?.id &&
+            entry.run.identity.conversationId === conversation?.id &&
+            isGenerationActive(entry.state),
+        )
+        .map((entry) => entry.state)}
+      onSelectGeneration={(id) => {
+        const entry = nativeRuns.current.get(id);
+        if (entry) {
+          setGeneration(entry.state);
+          setLiveAgentActions(entry.actions);
+          if (entry.taskId) startAgentTaskEventPolling(entry.taskId);
+        }
+      }}
+      onSendMessage={() => void sendMessage(composer, undefined, composer, conversation, true)}
       agentParameterRequest={agentParameterRequest}
       onSubmitAgentParameters={(adapterKey, parameters) => {
         const pending = agentParameterRequest;
@@ -3412,7 +3745,7 @@ export function App() {
         }
         setAgentParameterRequest(undefined);
         void sendMessage(
-          pending.prompt,
+          pending.composerPrompt,
           {
             providerProfileId: pending.providerProfileId,
             modelId: pending.modelId,
@@ -3427,10 +3760,18 @@ export function App() {
 
   const productionPanel = (
     <ProductionPanel
+      key={
+        productionSeed?.continuityRevision === undefined
+          ? 'production'
+          : `continuity:${productionSeed.shotId}:${productionSeed.continuityRevision}`
+      }
       expanded
       capability={productionCapability}
       projectId={project?.id}
       projectRootPath={project?.rootPath}
+      projectSessionId={workerScope(project?.id)?.projectSessionId}
+      onRequestSubmissionApproval={requestMediaSubmissionApproval}
+      projectViewEpoch={project}
       shotId={
         productionSeed?.documentId || productionSeed?.sceneId
           ? undefined
@@ -3441,10 +3782,12 @@ export function App() {
       seedPrompt={productionSeed?.prompt}
       seedImages={productionSeed?.images}
       seedReferenceBindings={productionSeed?.referenceBindings}
+      seedImageBindings={productionSeed?.inputImages}
       preferredAssetKind={productionSeed?.assetKind}
       writable={writable}
       assets={assets}
       videoJobs={projectTasks?.videoJobs ?? []}
+      imageJobs={projectTasks?.imageJobs ?? []}
       focusedAssetId={focusedSource?.assetId}
       focusedJobId={focusedSource?.jobId}
       onAssetsChanged={updateAssets}
@@ -3894,14 +4237,17 @@ export function App() {
         </div>
       )}
 
-      {paidSubmissionApproval && (
-        <MediaSubmissionConfirmationDialog
-          confirmation={paidSubmissionApproval}
-          onDecide={(approved) => paidSubmissionResolverRef.current?.(approved)}
+      {currentConfirmation && (
+        <TaskConfirmationDialog
+          item={currentConfirmation}
+          count={confirmationItems.length}
+          onDecide={(key, decision) => confirmationQueue.current!.decide(key, decision)}
+          onOpenProtectedUi={openAgentProtectedUi}
         />
       )}
 
       <ResizableAppLayout
+        key={workerScope(project?.id)?.projectSessionId ?? project?.id}
         projectId={project?.id}
         sidebarOpen={leftOpen}
         onSidebarOpenChange={setLeftOpen}
@@ -4374,8 +4720,8 @@ export function App() {
               <>
                 <div className="workspace-toolbar">
                   <div>
-                    <span className="eyebrow">{scene?.title ?? '场次未选择'}</span>
-                    <h1>{shot?.title ?? '镜头工作区'}</h1>
+                    <span className="eyebrow">{shot ? scene?.title : '场次与镜头'}</span>
+                    <h1>{shot?.title ?? scene?.title ?? '场次未选择'}</h1>
                   </div>
                   <button
                     className="button primary"
@@ -4389,119 +4735,32 @@ export function App() {
                 </div>
                 {project ? (
                   <div className="directory-layout">
-                    <aside className="directory-index" aria-label="场次与镜头目录">
-                      <div className="tree-heading">
-                        <span>场次与镜头</span>
-                        <button
-                          className="icon-button subtle"
-                          type="button"
-                          title="新建场次"
-                          onClick={() => void addScene()}
-                          disabled={!writable}
-                        >
-                          <Plus size={14} />
-                        </button>
-                      </div>
-                      {scenes.map((item) => (
-                        <Fragment key={item.id}>
-                          <button
-                            className={`tree-item ${scene?.id === item.id ? 'selected' : ''}`}
-                            type="button"
-                            onClick={() => void selectScene(item)}
-                          >
-                            <Clapperboard size={13} />
-                            <span>{item.title}</span>
-                          </button>
-                          {scene && scene.id === item.id ? (
-                            <div className="scene-binding">
-                              <label>
-                                绑定场景
-                                <select
-                                  aria-label="场次绑定场景"
-                                  value={scene.sceneDocumentId ?? ''}
-                                  disabled={!writable || sceneBindingBusy}
-                                  onChange={(event) => void bindSceneDocument(event.target.value)}
-                                >
-                                  <option value="">未绑定场景</option>
-                                  {scene.sceneDocumentId &&
-                                  !documents.some(
-                                    (document) =>
-                                      document.id === scene.sceneDocumentId &&
-                                      document.kind === 'scene' &&
-                                      document.domainScope !== 'novel',
-                                  ) ? (
-                                    <option value={scene.sceneDocumentId}>
-                                      已绑定的场景资料不可用
-                                    </option>
-                                  ) : null}
-                                  {documents
-                                    .filter(
-                                      (document) =>
-                                        document.kind === 'scene' &&
-                                        document.domainScope !== 'novel' &&
-                                        document.lifecycleStatus === 'active',
-                                    )
-                                    .map((document) => (
-                                      <option key={document.id} value={document.id}>
-                                        {document.title}
-                                      </option>
-                                    ))}
-                                </select>
-                              </label>
-                              {scene.sceneDocumentId ? (
-                                <button
-                                  className="text-button"
-                                  type="button"
-                                  onClick={() => void openDocumentById(scene.sceneDocumentId!)}
-                                >
-                                  打开场景资料
-                                </button>
-                              ) : null}
-                              {sceneBindingMessage ? (
-                                <span role="status">{sceneBindingMessage}</span>
-                              ) : null}
-                            </div>
-                          ) : null}
-                        </Fragment>
-                      ))}
-                      {scene && (
-                        <>
-                          <div className="tree-heading nested">
-                            <span>镜头</span>
-                            <button
-                              className="icon-button subtle"
-                              type="button"
-                              title="新建镜头"
-                              onClick={() => void addShot()}
-                              disabled={!writable}
-                            >
-                              <Plus size={14} />
-                            </button>
-                          </div>
-                          {shots.map((item) => (
-                            <button
-                              className={`tree-item nested ${shot?.id === item.id ? 'selected' : ''}`}
-                              type="button"
-                              key={item.id}
-                              onClick={() => {
-                                conversationRequest.current += 1;
-                                setShot(item);
-                              }}
-                            >
-                              <Aperture size={13} />
-                              <span>{item.title}</span>
-                            </button>
-                          ))}
-                        </>
-                      )}
-                      {scenes.length === 0 && <small className="tree-empty">暂无场次</small>}
-                    </aside>
+                    <SceneShotDirectory
+                      projectId={project.id}
+                      scenes={scenes}
+                      sceneId={scene?.id}
+                      shotId={shot?.id}
+                      shots={shots}
+                      writable={writable}
+                      onAddScene={() => void addScene()}
+                      onSelectScene={(item) => void selectScene(item)}
+                      onSelectShot={(parent, item) => {
+                        if (scene?.id === parent.id) {
+                          conversationRequest.current += 1;
+                          setShot(item);
+                        } else void selectScene(parent, item);
+                      }}
+                    />
                     <div className="directory-pane">
-                      {scene ? (
+                      {scene && !shot ? (
                         <SceneWorkspace
                           projectId={project.id}
                           scene={scene}
                           mediaRevision={taskCompletionRevision}
+                          onBindSceneDocument={(id) => void bindSceneDocument(id)}
+                          onOpenDocument={(id) => void openDocumentById(id)}
+                          sceneBindingBusy={sceneBindingBusy}
+                          sceneBindingMessage={sceneBindingMessage}
                           prompt={sceneVideoPrompt}
                           bindings={scene.materialBindings ?? []}
                           documents={documents}
@@ -4543,10 +4802,35 @@ export function App() {
                         <ShotWorkspace
                           projectId={project.id}
                           shotId={shot.id}
+                          scene={scene}
+                          mediaRevision={taskCompletionRevision}
+                          onSaveSceneReferences={(characters, dialogueAudioId) =>
+                            saveSceneVideoPrompt(
+                              scene?.videoPrompt ?? '',
+                              scene?.materialBindings ?? [],
+                              characters,
+                              dialogueAudioId,
+                            )
+                          }
+                          onBindSceneDocument={(id) => void bindSceneDocument(id)}
+                          onOpenDocument={(id) => void openDocumentById(id)}
+                          sceneBindingBusy={sceneBindingBusy}
+                          sceneBindingMessage={sceneBindingMessage}
                           sceneDocumentId={scene?.sceneDocumentId}
                           shotTitle={shot.title}
                           shotStatus={shot.status}
                           shotPosition={shot.position}
+                          continuitySourceDirty={shotPrompt !== (shot.prompt ?? '')}
+                          llm={
+                            selectedLlmProfile && selectedLlmModel
+                              ? {
+                                  providerProfileId: selectedLlmProfile.id,
+                                  modelId: selectedLlmModel.id,
+                                  name: selectedLlmModel.displayName,
+                                  vision: selectedLlmModel.capabilities.vision,
+                                }
+                              : undefined
+                          }
                           prompt={shotPrompt}
                           writable={writable}
                           assets={assets}
@@ -4563,8 +4847,8 @@ export function App() {
                           onStoryboardContentChange={setShotStoryboardContent}
                           onSaveStoryboard={() => void saveShotStoryboard()}
                         />
-                      ) : (
-                        <EmptyWorkspace title={scene ? '还没有镜头' : '还没有场次'} />
+                      ) : scene ? null : (
+                        <EmptyWorkspace title="还没有场次" />
                       )}
                     </div>
                   </div>

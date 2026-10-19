@@ -18,6 +18,8 @@ import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 
 export interface AgentProviderToolExecutor {
+  refreshTools?(identity: LlmGenerationIdentity): LlmToolDefinition[];
+  advanceTextTurn?(params: AgentProviderStepCompleteParams): LlmToolDefinition[];
   executeTools(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult>;
@@ -36,6 +38,7 @@ export interface AgentProviderToolExecutor {
 }
 
 type ProviderCallContext = {
+  definition?: LlmToolDefinition;
   providerResponseId: string;
   usage?: NormalizedLlmUsage;
 };
@@ -60,6 +63,13 @@ export interface AgentProviderPlanHooks {
 export class AgentProviderToolGateway {
   private definitions: LlmToolDefinition[];
   private readonly calls = new Map<string, ProviderCallContext>();
+  private batch?: {
+    key: string;
+    definitions: Map<string, LlmToolDefinition>;
+    updates: LlmToolDefinition[][];
+  };
+  private activeReads = 0;
+  private readonly readWaiters: Array<() => void> = [];
 
   constructor(
     private readonly executor: AgentProviderToolExecutor,
@@ -99,12 +109,61 @@ export class AgentProviderToolGateway {
     return this.definitions.some((definition) => definition.name === operation);
   }
 
+  freezeProviderResponse(calls: Array<{ id: string; name: string }>): void {
+    const key = calls.map((call) => call.id).join(':');
+    if (
+      this.batch?.key === key ||
+      !calls.every((call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel')
+    )
+      return;
+    if (calls.length > 8 || new Set(calls.map((call) => call.id)).size !== calls.length)
+      throw new Error('A read-only response must contain at most eight distinct tool calls.');
+    this.batch = {
+      key,
+      definitions: new Map(
+        calls.map((call) => [call.id, structuredClone(this.liveDefinition(call.name))]),
+      ),
+      updates: [],
+    };
+  }
+
+  finishProviderResponse(): void {
+    const batch = this.batch;
+    if (!batch) return;
+    if (this.executor.refreshTools)
+      this.definitions = cloneDefinitions(this.executor.refreshTools(this.identity));
+    else if (batch.updates.length)
+      this.definitions = cloneDefinitions(
+        batch.updates[0]!.filter((definition) =>
+          batch.updates.every((update) =>
+            update.some(
+              (candidate) =>
+                candidate.name === definition.name &&
+                candidate.authorizationHandle === definition.authorizationHandle,
+            ),
+          ),
+        ),
+      );
+    this.batch = undefined;
+  }
+
+  advanceTextTurn(providerResponseId: string | undefined, usage?: NormalizedLlmUsage): void {
+    const tools = this.executor.advanceTextTurn?.({
+      ...this.identity,
+      providerResponseId,
+      finishReason: 'supplement',
+      usage,
+    });
+    if (tools) this.definitions = cloneDefinitions(tools);
+  }
+
   captureProviderCall(
     toolCallId: string,
     providerResponseId: string | undefined,
     usage?: NormalizedLlmUsage,
   ): void {
     this.calls.set(toolCallId, {
+      definition: this.batch?.definitions.get(toolCallId),
       providerResponseId:
         providerResponseId?.trim() || `pi:${this.identity.attemptId}:${toolCallId}`,
       usage,
@@ -163,7 +222,13 @@ export class AgentProviderToolGateway {
     const context = this.calls.get(toolCallId);
     this.calls.delete(toolCallId);
     if (!context) throw new Error('Pi tool call is missing its Provider response context.');
-    const definition = this.liveDefinition(name);
+    const definition = context.definition ?? this.liveDefinition(name);
+    const readonly = unifiedAgentToolRegistry.executionMode(name) === 'parallel';
+    if (readonly) {
+      if (this.activeReads >= 4)
+        await new Promise<void>((resolve) => this.readWaiters.push(resolve));
+      else this.activeReads += 1;
+    }
     const stepId = this.planHooks?.begin(definition.name);
     const call = {
       id: toolCallId,
@@ -211,7 +276,8 @@ export class AgentProviderToolGateway {
         throw new Error('Worker tool execution did not return a continuation result.');
       }
       if (execution.tools) {
-        this.definitions = cloneDefinitions(execution.tools);
+        if (this.batch) this.batch.updates.push(cloneDefinitions(execution.tools));
+        else this.definitions = cloneDefinitions(execution.tools);
       }
       const output = execution.continuation.outputs.find(
         (item) => item.callId === toolCallId,
@@ -229,6 +295,12 @@ export class AgentProviderToolGateway {
     } catch (error) {
       if (stepId) this.planHooks?.fail(stepId, definition.name, error);
       throw error;
+    } finally {
+      if (readonly) {
+        const next = this.readWaiters.shift();
+        if (next) next();
+        else this.activeReads -= 1;
+      }
     }
   }
 }

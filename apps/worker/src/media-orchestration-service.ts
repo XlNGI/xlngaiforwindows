@@ -30,11 +30,14 @@ import type { ProjectService } from './project-service.js';
 import type { VideoGenerationService } from './video-generation-service.js';
 import { resolveMediaProviderRoute } from './media-preparation-service.js';
 import { ProductionService } from './production-service.js';
+import type { TaskScheduleService } from './task-schedule-service.js';
+import { ExecutionPool } from './execution-pool.js';
+import { assertProjectTaskAdmission } from './task-admission.js';
 
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 // Includes Native admission, connection, synchronous inference, and result transfer.
-// The Native image receive timeout is 5 minutes; Desktop waits for Worker for 12 minutes.
-const IMAGE_SUBMISSION_TIMEOUT_MS = 10 * 60 * 1000;
+// Native paid submissions may wait 5 minutes for a response; Desktop allows 12 minutes.
+const MEDIA_SUBMISSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface ResolvedMediaSubmission {
   baseUrl?: string;
@@ -66,6 +69,8 @@ export class MediaOrchestrationService {
     private readonly videos: VideoGenerationService,
     private readonly native: NativeProviderBridge,
     private readonly adapterResolver: typeof getAdapter = getAdapter,
+    private readonly scheduler?: TaskScheduleService,
+    private readonly capacity = new ExecutionPool(),
   ) {}
 
   requestSubmission(params: MediaSubmissionRequestParams): MediaSubmissionResult {
@@ -111,6 +116,7 @@ export class MediaOrchestrationService {
       }
       const resolved = this.resolveSubmission(job, snapshot, kind);
       const token = randomBytes(32).toString('base64url');
+      assertProjectTaskAdmission(database, job.mediaState === 'awaiting_confirmation' ? 0 : 1);
       const expiresAt = new Date(Date.now() + CONFIRMATION_TTL_MS).toISOString();
       const confirmation = this.confirmation(job.id, kind, resolved, expiresAt, token);
       const now = new Date().toISOString();
@@ -147,6 +153,29 @@ export class MediaOrchestrationService {
   }
 
   async confirmSubmission(params: MediaSubmissionConfirmParams): Promise<MediaSubmissionResult> {
+    this.projects.access(false, (db, project) => {
+      const job = createRepositories(db).jobs.get(params.jobId);
+      if (!job || job.projectId !== project.id)
+        throw new Error('Media generation job was not found.');
+      return this.kind(job.adapterKey, job.taskSnapshotJson);
+    });
+    if (params.approved && this.scheduler?.enabled) {
+      return this.scheduler.runSubmission(params.jobId, params.confirmationToken, () =>
+        this.confirmUnscheduledSubmission(params),
+      );
+    }
+    if (params.approved) {
+      const projectId = this.projects.current()!.id;
+      return this.capacity.run('media-submit', projectId, undefined, () =>
+        this.confirmUnscheduledSubmission(params),
+      );
+    }
+    return this.confirmUnscheduledSubmission(params);
+  }
+
+  private async confirmUnscheduledSubmission(
+    params: MediaSubmissionConfirmParams,
+  ): Promise<MediaSubmissionResult> {
     const prepared:
       | { kind: 'image' | 'video'; job: JobRecord; skip: true }
       | {
@@ -270,13 +299,11 @@ export class MediaOrchestrationService {
     };
     let response: unknown;
     try {
-      response =
-        kind === 'image' ||
-        ['wan-video', 'seedance-video', 'minimax-video'].includes(
-          resolved.adapterKey.split(':')[1] ?? '',
-        )
-          ? await this.native.request('provider.media.submit', request, IMAGE_SUBMISSION_TIMEOUT_MS)
-          : await this.native.request('provider.media.submit', request);
+      response = await this.native.request(
+        'provider.media.submit',
+        request,
+        MEDIA_SUBMISSION_TIMEOUT_MS,
+      );
     } catch (error) {
       if (this.projects.currentSessionId() !== prepared.projectSessionId) {
         cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
@@ -301,8 +328,11 @@ export class MediaOrchestrationService {
       };
     }
     const body = asRecord(response);
+    if (this.projects.currentSessionId() === prepared.projectSessionId)
+      this.scheduler?.releaseSubmissionCapacity(job.id);
     cleanupControlledInputs(snapshot, this.projects.current()?.rootPath);
     if (this.projects.currentSessionId() !== prepared.projectSessionId) {
+      if (kind === 'image') this.images.discardProviderOutput(body.body);
       throw new Error('Project session changed during media submission.');
     }
     const status = typeof body.status === 'number' ? body.status : 0;
@@ -416,6 +446,7 @@ export class MediaOrchestrationService {
   }
 
   recoverInterrupted(): number {
+    this.scheduler?.recover();
     const current = this.projects.current();
     if (!current || current.mode !== 'read-write') return 0;
     return this.projects.access(true, (database, project) => {

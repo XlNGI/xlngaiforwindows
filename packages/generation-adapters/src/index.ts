@@ -12,6 +12,7 @@ import {
   officialVideoAudioContracts,
   officialImageContracts,
   mediaModelBindings,
+  isWanMediaAdapter,
   isUniCompApiMediaTemplateKey,
   uniCompApiTemplateAdapterKey,
   type AdapterCatalogResult,
@@ -111,7 +112,12 @@ function contractProperty(key: string, value: unknown): AdapterParameterProperty
   const property: AdapterParameterProperty = {
     ...structuredClone(source),
     type,
-    title: typeof source.title === 'string' ? source.title : key,
+    title:
+      typeof source.title === 'string'
+        ? source.title
+        : (({ media: '参考素材', audio: '生成音频', prompt: '提示词' } as Record<string, string>)[
+            key
+          ] ?? key),
   };
   for (const field of [
     'description',
@@ -1189,7 +1195,11 @@ const contractAdapters: AdapterDescriptor[] = [
   );
 });
 const officialModeAdapters = contractAdapters
-  .filter((adapter) => ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider))
+  .filter(
+    (adapter) =>
+      ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider) ||
+      (adapter.provider === 'unicompapi' && adapter.contractRevision === 3),
+  )
   .flatMap((adapter) => {
     const contract = officialVideoAudioContracts.find(
       (contract) =>
@@ -1325,25 +1335,29 @@ export function validateAdapterParameters(
               Object.entries(value).map(([key, item]) => [key, normalizeReferences(item)]),
             )
           : value;
-  const validationParameters = ['wan-video', 'seedance-video', 'minimax-video'].includes(
-    adapter.provider,
-  )
-    ? normalizeReferences(parameters)
-    : /^contract-\d+$/u.test(adapter.apiVersion) && Array.isArray(parameters.images)
-      ? {
-          ...parameters,
-          images: parameters.images.map((image) =>
-            typeof image === 'string' && /^(?:asset|controlled-file):\/\//u.test(image)
-              ? 'https://controlled-input.invalid/image'
-              : image,
-          ),
-        }
-      : parameters;
+  const validationParameters =
+    isWanMediaAdapter(adapter) ||
+    ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider)
+      ? normalizeReferences(parameters)
+      : Array.isArray(parameters.images)
+        ? {
+            ...parameters,
+            images: parameters.images.map((image) =>
+              typeof image === 'string' &&
+              /^(?:asset|project-asset|controlled-file):\/\//u.test(image)
+                ? 'https://controlled-input.invalid/image'
+                : image,
+            ),
+          }
+        : parameters;
   const valid = validator(validationParameters);
   return { valid: Boolean(valid), errors: validationErrors(validator.errors) };
 }
 export {
   parseProductionExecution,
   inspectProductionInstruction,
+  inspectProductionTargetInstruction,
+  resolveProductionDuration,
+  parseProductionDefaults,
   compileProductionParameters,
 } from './production.js';

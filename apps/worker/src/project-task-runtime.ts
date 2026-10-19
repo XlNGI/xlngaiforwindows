@@ -7,6 +7,8 @@ import type {
 import type { NativeProviderBridge } from './native-provider-bridge.js';
 import type { ProjectService } from './project-service.js';
 import type { VideoGenerationService } from './video-generation-service.js';
+import type { TaskDispatch, TaskScheduleService } from './task-schedule-service.js';
+import type { ImageGenerationService } from './image-generation-service.js';
 
 const BASE_DELAY_MS = 2_000;
 const MAX_DELAY_MS = 30_000;
@@ -26,6 +28,8 @@ interface ScheduledVideoJob {
 export interface ProjectTaskRuntimeOptions {
   now?: () => number;
   random?: () => number;
+  scheduler?: TaskScheduleService;
+  images?: ImageGenerationService;
 }
 
 class InvalidPollResultError extends Error {}
@@ -39,6 +43,9 @@ export class ProjectTaskRuntime {
   private lastRequestAt = 0;
   private revision = 0;
   private runningSessionId?: string;
+  private readonly scheduler?: TaskScheduleService;
+  private readonly images?: ImageGenerationService;
+  private imageFingerprint = '';
 
   constructor(
     private readonly projects: ProjectService,
@@ -48,6 +55,8 @@ export class ProjectTaskRuntime {
   ) {
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
+    this.scheduler = options.scheduler;
+    this.images = options.images;
   }
 
   start(): void {
@@ -63,6 +72,7 @@ export class ProjectTaskRuntime {
   stop(): void {
     this.runningSessionId = undefined;
     for (const scheduled of this.jobs.values()) {
+      this.scheduler?.cancelWaiting(scheduled.job.id);
       if (scheduled.timer) clearTimeout(scheduled.timer);
     }
     this.jobs.clear();
@@ -82,14 +92,33 @@ export class ProjectTaskRuntime {
     const projectSessionId = this.projects.currentSessionId();
     if (!project || !projectSessionId) throw new Error('No project is open.');
     const videoJobs = this.videos.list();
+    const imageJobs = this.images?.list() ?? [];
+    const fingerprint = imageJobs
+      .map(
+        (job) =>
+          `${job.id}:${job.status}:${job.mediaState}:${job.updatedAt}:${job.results.map((result) => result.id).join(',')}`,
+      )
+      .join('|');
+    if (fingerprint !== this.imageFingerprint) {
+      this.imageFingerprint = fingerprint;
+      this.revision += 1;
+    }
     return {
       projectId: project.id,
       projectSessionId,
       revision: this.revision,
       changed: afterRevision !== this.revision,
-      activeCount: videoJobs.filter((job) => ['polling', 'downloading'].includes(job.status))
-        .length,
+      activeCount:
+        videoJobs.filter(
+          (job) =>
+            !this.scheduler?.isHistoricalJob(job.id) &&
+            ['polling', 'downloading'].includes(job.status),
+        ).length +
+        imageJobs.filter((job) =>
+          ['awaiting_confirmation', 'submitting', 'downloading'].includes(job.mediaState ?? ''),
+        ).length,
       videoJobs,
+      imageJobs,
     };
   }
 
@@ -101,12 +130,17 @@ export class ProjectTaskRuntime {
     } catch {
       return;
     }
+    if (this.scheduler) {
+      for (const job of jobs)
+        if (this.scheduler.isHistoricalJob(job.id)) this.scheduler.register(job.id);
+    }
     const activeIds = new Set(
       jobs
         .filter(
           (job) =>
-            (job.status === 'polling' && Boolean(job.providerTaskId)) ||
-            job.status === 'downloading',
+            !this.scheduler?.isHistoricalJob(job.id) &&
+            ((job.status === 'polling' && Boolean(job.providerTaskId)) ||
+              job.status === 'downloading'),
         )
         .map((job) => job.id),
     );
@@ -209,6 +243,15 @@ export class ProjectTaskRuntime {
         providerTaskId: current.providerTaskId,
       };
       const requestSessionId = this.runningSessionId;
+      let dispatch: TaskDispatch | undefined;
+      if (this.scheduler?.enabled) {
+        this.scheduler.register(current.id);
+        dispatch = this.scheduler.claim(current.id, 'poll');
+        if (!dispatch) {
+          this.schedule(scheduled, MIN_GLOBAL_INTERVAL_MS);
+          return;
+        }
+      }
       this.activeRequests += 1;
       this.lastRequestAt = this.now();
       let response: NativeProviderMediaPollResult;
@@ -217,6 +260,7 @@ export class ProjectTaskRuntime {
           await this.native.request('provider.media.poll', params, NATIVE_MEDIA_REQUEST_TIMEOUT_MS),
         );
       } finally {
+        if (dispatch) this.scheduler?.release(dispatch);
         if (this.runningSessionId === requestSessionId) {
           this.activeRequests = Math.max(0, this.activeRequests - 1);
         }
@@ -290,6 +334,7 @@ export class ProjectTaskRuntime {
   }
 
   private remove(jobId: string): void {
+    this.scheduler?.cancelWaiting(jobId);
     const scheduled = this.jobs.get(jobId);
     if (scheduled?.timer) clearTimeout(scheduled.timer);
     this.jobs.delete(jobId);

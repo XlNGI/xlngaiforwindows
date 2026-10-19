@@ -21,6 +21,7 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { AssistantReply } from './AssistantReply';
 import { ComposerTextarea } from './ComposerTextarea';
+import { SCENE_PROMPT_CONSTRAINT_TEMPLATE } from './conversation-prompt-template';
 import type {
   AgentResearchMode,
   ChatMessageInfo,
@@ -142,9 +143,24 @@ interface ChatPanelProps {
   onResearchModeChange?: (mode: AgentResearchMode) => void;
   onOpenProviderSettings: () => void;
   onComposerChange: (value: string) => void;
+  /** Editable instructions appended to every request in this conversation. */
+  promptTemplate?: string;
+  onPromptTemplateChange?: (value: string) => void;
+  onSavePromptTemplate?: () => void;
+  promptTemplateBusy?: boolean;
+  promptTemplateLoading?: boolean;
+  promptTemplateError?: string;
+  promptTemplateDirty?: boolean;
+  onReloadPromptTemplate?: () => void;
   onCancelGeneration: () => void;
   batchRunning?: boolean;
-  onSendMessage: () => void;
+  allowConcurrentTasks?: boolean;
+  runningGenerations?: LlmGenerationInfo[];
+  onSelectGeneration?: (generationId: string) => void;
+  onSendMessage: (
+    execution?: 'ordered' | 'parallel' | 'supplement',
+    targetGenerationId?: string,
+  ) => void;
   attachments?: ChatAttachment[];
   onAddAttachments?: (files: FileList | File[]) => void;
   onRemoveAttachment?: (id: string) => void;
@@ -174,6 +190,9 @@ interface ChatPanelProps {
 
 export function ChatPanel({
   scopeAvailable,
+  allowConcurrentTasks = false,
+  runningGenerations = [],
+  onSelectGeneration,
   writable,
   conversations,
   conversation,
@@ -219,6 +238,14 @@ export function ChatPanel({
   onResearchModeChange,
   onOpenProviderSettings,
   onComposerChange,
+  promptTemplate = '',
+  onPromptTemplateChange,
+  onSavePromptTemplate,
+  promptTemplateBusy = false,
+  promptTemplateLoading = false,
+  promptTemplateError = '',
+  promptTemplateDirty = false,
+  onReloadPromptTemplate,
   onCancelGeneration,
   batchRunning = false,
   onSendMessage,
@@ -284,6 +311,20 @@ export function ChatPanel({
   const isArchived = Boolean(conversation?.archivedAt);
   const generationLocked =
     batchRunning || generation?.status === 'prepared' || generation?.status === 'streaming';
+  const conversationBusy =
+    !allowConcurrentTasks &&
+    (generationLocked ||
+      [agentTask, ...(agentTasks ?? [])].some(
+        (detail) =>
+          detail?.task.conversationId === conversation?.id &&
+          (detail?.task.status === 'queued' || detail?.task.status === 'running') &&
+          !(
+            generation &&
+            generation.userMessage.id === detail.task.userMessageId &&
+            !['prepared', 'streaming'].includes(generation.status)
+          ),
+      ));
+  const send = () => onSendMessage();
   const messageListRef = useRef<HTMLDivElement>(null);
   /**
    * Paid media submissions never render here. `media-confirmation.tsx` owns that
@@ -945,6 +986,101 @@ export function ChatPanel({
             )}
           </div>
         )}
+        {allowConcurrentTasks && runningGenerations.length > 0 && (
+          <div className="task-execution-options">
+            <span>执行方式由 Agent 根据当前消息和活动任务自动判断</span>
+            <div aria-label="当前会话运行任务">
+              {runningGenerations.map((run) => (
+                <button
+                  key={run.generationId}
+                  type="button"
+                  aria-pressed={generation?.generationId === run.generationId}
+                  onClick={() => onSelectGeneration?.(run.generationId)}
+                >
+                  {run.userMessage.content.slice(0, 30)} ·{' '}
+                  {run.status === 'prepared' ? '等待 Agent 调度' : '执行中'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {onPromptTemplateChange && (
+          <details className="conversation-prompt-template">
+            <summary>
+              <span>本会话要求约束</span>
+              <small>
+                {promptTemplateLoading
+                  ? ' · 加载中'
+                  : promptTemplate.trim()
+                    ? ` · ${promptTemplate.length} 字，发送时附加`
+                    : ' · 当前为空'}
+              </small>
+            </summary>
+            <div className="conversation-prompt-template-body">
+              <small>
+                每次发送前自动保存并附加此处最新内容。可修改时间、风格、连续性和输出要求；清空后发送将不携带约束。
+              </small>
+              <textarea
+                aria-label="本会话要求约束"
+                value={promptTemplate}
+                onChange={(event) => onPromptTemplateChange(event.target.value)}
+                placeholder="例如：固定故事时间与视觉风格；每个镜头写清时间、地点、动作、景别、运镜、对白和连续性；不要为了凑时长改变剧情逻辑。"
+                rows={5}
+                maxLength={20_000}
+                disabled={!conversation || !writable || isArchived || promptTemplateBusy}
+              />
+              <div className="conversation-prompt-template-actions">
+                <small>{promptTemplate.length}/20000</small>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => onPromptTemplateChange(SCENE_PROMPT_CONSTRAINT_TEMPLATE)}
+                  disabled={!conversation || !writable || isArchived || promptTemplateBusy}
+                >
+                  载入分镜制作模板
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => onPromptTemplateChange('')}
+                  disabled={!conversation || !writable || isArchived || promptTemplateBusy}
+                >
+                  清空约束
+                </button>
+                {onSavePromptTemplate && (
+                  <button
+                    className="button secondary"
+                    type="button"
+                    onClick={onSavePromptTemplate}
+                    disabled={!conversation || !writable || isArchived || promptTemplateBusy}
+                  >
+                    {promptTemplateLoading
+                      ? '加载中…'
+                      : promptTemplateBusy
+                        ? '保存中…'
+                        : '保存会话约束'}
+                  </button>
+                )}
+              </div>
+              <small role="status">
+                {promptTemplateDirty
+                  ? '有未保存修改，发送时会自动保存并带上。'
+                  : '当前内容将在发送时附加。'}
+              </small>
+              {promptTemplateError && <small role="alert">{promptTemplateError}</small>}
+              {onReloadPromptTemplate && (
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={promptTemplateBusy}
+                  onClick={onReloadPromptTemplate}
+                >
+                  重新加载已保存约束（替换当前编辑）
+                </button>
+              )}
+            </div>
+          </details>
+        )}
         <ComposerTextarea
           key={conversation?.id ?? 'no-conversation'}
           panelRef={panelRef}
@@ -968,17 +1104,18 @@ export function ChatPanel({
             event.preventDefault();
             if (
               !isArchived &&
-              !generationLocked &&
+              !conversationBusy &&
+              !promptTemplateBusy &&
               (composer.trim() || attachments.length > 0) &&
               conversation &&
               writable
             ) {
-              onSendMessage();
+              send();
             }
           }}
           disabled={!conversation || !writable || isArchived}
           actions={
-            generationLocked ? (
+            generationLocked && !allowConcurrentTasks ? (
               <button
                 className="icon-button send-button"
                 type="button"
@@ -989,6 +1126,16 @@ export function ChatPanel({
               </button>
             ) : (
               <>
+                {generationLocked && (
+                  <button
+                    className="icon-button send-button"
+                    type="button"
+                    title="停止生成"
+                    onClick={onCancelGeneration}
+                  >
+                    <Square size={14} fill="currentColor" />
+                  </button>
+                )}
                 <input
                   ref={fileInputRef}
                   id={fileInputId}
@@ -1017,10 +1164,15 @@ export function ChatPanel({
                 <button
                   className="icon-button send-button"
                   type="button"
-                  title="发送消息"
-                  onClick={onSendMessage}
+                  title={conversationBusy ? '上一轮仍在执行' : '发送消息'}
+                  onClick={send}
                   disabled={
-                    (!composer.trim() && attachments.length === 0) || !conversation || isArchived
+                    conversationBusy ||
+                    promptTemplateBusy ||
+                    !writable ||
+                    (!composer.trim() && attachments.length === 0) ||
+                    !conversation ||
+                    isArchived
                   }
                 >
                   <ChevronRight size={18} />
@@ -1125,17 +1277,29 @@ function agentTaskForAssistantMessage(
   generation: LlmGenerationInfo | undefined,
   liveTask: AgentTaskDetail | undefined,
 ): AgentTaskDetail | undefined {
-  if (generation?.assistantMessage.id === messageId && liveTask) return liveTask;
+  if (
+    generation?.assistantMessage.id === messageId &&
+    liveTask &&
+    (!liveTask.task.userMessageId || liveTask.task.userMessageId === generation.userMessage.id)
+  )
+    return liveTask;
   const index = messages.findIndex((item) => item.id === messageId);
   if (index < 0) return undefined;
-  const user = [...messages.slice(0, index)].reverse().find((item) => item.role === 'user');
+  const replyToMessageId = messages[index]?.replyToMessageId;
+  const user = replyToMessageId
+    ? messages.find((item) => item.id === replyToMessageId && item.role === 'user')
+    : [...messages.slice(0, index)].reverse().find((item) => item.role === 'user');
   if (!user) return undefined;
   return tasks
     .filter((item) => item.task.userMessageId === user.id)
     .sort((left, right) => right.task.updatedAt.localeCompare(left.task.updatedAt))[0];
 }
 
-function agentActionRows(detail: AgentTaskDetail, generationFailed: boolean): AgentActionRow[] {
+function agentActionRows(
+  detail: AgentTaskDetail,
+  generationFailed: boolean,
+  generationSettled = false,
+): AgentActionRow[] {
   const rows: AgentActionRow[] = [];
   const pending: AgentActionRow[] = [];
   const flushPending = (status: AgentActionRow['status'], detailText?: string) => {
@@ -1215,9 +1379,18 @@ function agentActionRows(detail: AgentTaskDetail, generationFailed: boolean): Ag
     }
   }
 
-  const runningTask = detail.task.status === 'running' || detail.task.status === 'queued';
+  const runningTask =
+    !generationSettled && (detail.task.status === 'running' || detail.task.status === 'queued');
   if (runningTask && !generationFailed) rows.push(...pending);
-  else flushPending(generationFailed || detail.task.status === 'failed' ? 'error' : 'ok');
+  else
+    flushPending(
+      generationFailed || detail.task.status === 'failed'
+        ? 'error'
+        : generationSettled
+          ? 'warn'
+          : 'ok',
+      generationSettled && !generationFailed ? '调用结果未同步' : undefined,
+    );
   return rows;
 }
 
@@ -1235,7 +1408,14 @@ function mergeLiveAgentActions(
       id: `live:${live.id}`,
       title: agentToolActionLabel(live.toolName),
       toolName: live.toolName,
-      status: live.status === 'failed' ? 'error' : live.status === 'succeeded' ? 'ok' : 'running',
+      status:
+        live.status === 'failed'
+          ? 'error'
+          : live.status === 'succeeded'
+            ? 'ok'
+            : running
+              ? 'running'
+              : 'warn',
     });
   }
   if (running && merged.length === 0) {
@@ -1264,15 +1444,18 @@ function AgentToolTimeline({
   onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
 }) {
   const generationFailed = generationStatus === 'failed' || generationStatus === 'cancelled';
+  const generationSettled =
+    generationStatus !== undefined && !['prepared', 'streaming'].includes(generationStatus);
   const running =
-    runningPlaceholder ||
-    (!generationFailed &&
-      (generationStatus === 'prepared' ||
-        generationStatus === 'streaming' ||
-        detail?.task.status === 'running' ||
-        detail?.task.status === 'queued'));
+    !generationSettled &&
+    (runningPlaceholder ||
+      (!generationFailed &&
+        (generationStatus === 'prepared' ||
+          generationStatus === 'streaming' ||
+          detail?.task.status === 'running' ||
+          detail?.task.status === 'queued')));
   const actions = mergeLiveAgentActions(
-    detail ? agentActionRows(detail, generationFailed) : [],
+    detail ? agentActionRows(detail, generationFailed, generationSettled) : [],
     liveActions,
     running && !generationFailed,
   );
@@ -1305,7 +1488,13 @@ function AgentToolTimeline({
             onClick={() => setExpandedOverride(!expanded)}
           >
             <Terminal size={12} />
-            <span>{running ? '正在调用工具' : '调用了工具'}</span>
+            <span>
+              {running
+                ? actions.some((action) => action.toolName && action.status === 'running')
+                  ? '正在调用工具'
+                  : '等待助手回复'
+                : '调用了工具'}
+            </span>
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
           {expanded ? (
@@ -1357,7 +1546,7 @@ function AgentToolTimeline({
   );
 }
 
-function MediaModelSelectionCard({
+export function MediaModelSelectionCard({
   request,
   referenceImageInputs,
   onSelect,

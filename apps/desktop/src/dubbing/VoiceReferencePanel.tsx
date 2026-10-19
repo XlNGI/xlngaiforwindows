@@ -1,7 +1,7 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useRef, useState } from 'react';
 import type { CharacterVoiceReferenceInfo } from '@ai-video/contracts';
-import { callWorker } from '../worker-client';
+import { projectWorker } from '../worker-scope';
 import { useDubbingMedia } from './media';
 
 export function VoiceReferencePanel({
@@ -13,6 +13,7 @@ export function VoiceReferencePanel({
   characterDocumentId: string;
   writable: boolean;
 }) {
+  const callWorker = projectWorker();
   const [reference, setReference] = useState<CharacterVoiceReferenceInfo>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');

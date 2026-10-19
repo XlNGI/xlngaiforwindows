@@ -4,6 +4,7 @@ import {
   generationEventSummary,
   generationPhaseLabel,
   generationStatusLabel,
+  generationTaskStatus,
   videoProgressGuidance,
 } from './generation-feedback';
 
@@ -96,5 +97,17 @@ describe('generation feedback', () => {
     expect(
       videoProgressGuidance({ status: 'downloading', elapsedMs: 60_000, request: {} }),
     ).toContain('保存到本地素材库');
+  });
+
+  it('shows an unknown submission independently of the pending video domain status', () => {
+    const job = {
+      status: 'pending' as const,
+      mediaState: 'submission_unknown' as const,
+      elapsedMs: 38_000,
+      request: {},
+    };
+    expect(generationStatusLabel(generationTaskStatus(job))).toBe('提交结果未知');
+    expect(videoProgressGuidance(job)).toContain('未返回任务编号');
+    expect(videoProgressGuidance(job)).not.toContain('提交成功后会自动查询');
   });
 });

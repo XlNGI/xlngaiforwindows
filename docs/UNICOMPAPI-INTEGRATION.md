@@ -1,5 +1,7 @@
 # UniCompAPI 集成与验收
 
+2026-10-16 补充：Wan 3.0／Prime 新请求使用官方 revision 3，并由独立 Binding 将素材与生成参数映射到 UniComp `metadata.input` / `metadata.parameters`。参考音频入口为公网 URL，`audio` 仅控制有声输出；未接入本地音频上传。旧修订保留用于历史任务查询。具体参数、兼容边界与验证见 [UniComp 媒体兼容层](./UNICOMP-MEDIA-COMPATIBILITY-IMPLEMENTATION.md)。
+
 日期：2026-09-18  
 状态：模型目录改以 UniComp `GET /v1/models` 同步为准；自动化门禁覆盖协议 Agent、媒体模板和未知视频 ID 绑定。真实凭据冒烟待用户复验；安装包正式签名 `HOLD`
 

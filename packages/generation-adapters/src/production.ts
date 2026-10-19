@@ -2,6 +2,9 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import {
   productionExecuteSchema,
   productionInstructionSchema,
+  productionDefaultsSchema,
+  productionAudioSupport,
+  type ProductionDefaults,
   renderProductionInstruction,
   type ProductionInstruction,
   type ProductionIssue,
@@ -13,6 +16,12 @@ import {
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 const validateList = ajv.compile(productionExecuteSchema);
 const validateInstruction = ajv.compile(productionInstructionSchema);
+const validateDefaults = ajv.compile(productionDefaultsSchema);
+export function parseProductionDefaults(input: unknown): ProductionDefaults {
+  if (!validateDefaults(input))
+    throw new Error(`项目视觉设置无效：${ajv.errorsText(validateDefaults.errors)}`);
+  return structuredClone(input as ProductionDefaults);
+}
 
 export function parseProductionExecution(input: unknown): ProductionExecuteParams {
   if (!validateList(input))
@@ -31,6 +40,8 @@ export function inspectProductionInstruction(input: unknown): ProductionIssue[] 
   const issues: ProductionIssue[] = [];
   const add = (code: string, message: string) => issues.push({ code, message });
   if (!instruction.summary.trim()) add('EMPTY_SUMMARY', '制作摘要不能为空。');
+  if (instruction.version === 2 && !instruction.narrative?.purpose.trim())
+    add('MISSING_NARRATIVE', '详细制作指令必须说明叙事目的，先按剧情编排再估算时长。');
   if (
     instruction.audio.mode === 'silent' &&
     [instruction.audio.ambience, instruction.audio.music, instruction.audio.effects].some(Boolean)
@@ -74,6 +85,8 @@ export function inspectProductionInstruction(input: unknown): ProductionIssue[] 
   }
   if (instruction.generation.duration !== undefined && end > instruction.generation.duration)
     add('DURATION_CONFLICT', '节拍结束时间超过要求的视频时长。');
+  if (instruction.timing && end > instruction.timing.estimatedDurationSeconds)
+    add('DURATION_CONFLICT', '镜头内动作节拍超过剧情预计时长。');
   for (const fact of instruction.continuity.locked)
     if (
       [...instruction.continuity.before, ...instruction.continuity.after].some(
@@ -84,16 +97,107 @@ export function inspectProductionInstruction(input: unknown): ProductionIssue[] 
   return issues;
 }
 
+export function inspectProductionTargetInstruction(
+  instruction: ProductionInstruction,
+  kind: string,
+): ProductionIssue[] {
+  const issues = inspectProductionInstruction(instruction);
+  if (issues.length || instruction.version !== 2) return issues;
+  if (kind === 'scene') {
+    if (!instruction.storyTime?.timeOfDay.trim())
+      issues.push({ code: 'MISSING_STORY_TIME', message: '场次必须明确故事时段（日夜时间）。' });
+    if (!instruction.location?.description.trim())
+      issues.push({ code: 'MISSING_LOCATION', message: '场次必须明确地点环境。' });
+    if (
+      !instruction.visual.style?.trim() &&
+      !Object.values(instruction.style ?? {}).some((value) => value.trim())
+    )
+      issues.push({ code: 'MISSING_STYLE', message: '场次必须明确视觉风格或采用的项目风格。' });
+  }
+  if (kind === 'shot') {
+    if (!instruction.timing)
+      issues.push({
+        code: 'MISSING_SHOT_TIMING',
+        message: '分镜必须包含根据剧情推导的预计时长和节奏依据。',
+      });
+    if (!instruction.beats.length)
+      issues.push({ code: 'MISSING_SHOT_ACTION', message: '分镜必须描述实际动作或反应。' });
+    if (!instruction.camera?.framing && !instruction.beats.some((beat) => beat.camera?.framing))
+      issues.push({ code: 'MISSING_SHOT_FRAMING', message: '分镜必须明确景别。' });
+  }
+  return issues;
+}
+
+/** Provider padding is separate from authored story duration. */
+export function resolveProductionDuration(
+  adapter: AdapterDescriptor,
+  seconds: number,
+): number | undefined {
+  const schema = adapter.parameterSchema.properties.duration;
+  if (!schema || !Number.isFinite(seconds) || seconds <= 0) return undefined;
+  const property = structuredClone(schema);
+  for (const key of ['title', 'description', 'default']) delete property[key];
+  const validate = new Ajv2020({ strict: false }).compile(property);
+  const choices = schema.enum
+    ? schema.enum
+        .map(Number)
+        .filter((value) => Number.isFinite(value) && value >= seconds)
+        .sort((a, b) => a - b)
+    : Array.from(
+        {
+          length: Math.max(
+            0,
+            Math.min(Number(schema.maximum ?? 3600), 3600) - Math.ceil(seconds) + 1,
+          ),
+        },
+        (_, index) => Math.ceil(seconds) + index,
+      );
+  return choices.find((value) => validate(schema.type === 'string' ? String(value) : value));
+}
+
 /** Only schema-declared parameters are emitted. Unsupported intent is returned as a conflict. */
 export function compileProductionParameters(
   instruction: ProductionInstruction,
   adapter: AdapterDescriptor,
   names: Record<string, string> = {},
-): { parameters: AdapterParameters; issues: ProductionIssue[] } {
+  options: { prompt?: string; estimatedDurationSeconds?: number } = {},
+): { parameters: AdapterParameters; issues: ProductionIssue[]; notices: ProductionIssue[] } {
   const issues = inspectProductionInstruction(instruction);
+  const notices: ProductionIssue[] = [];
   const parameters: AdapterParameters = {};
   const properties = adapter.parameterSchema.properties;
-  const prompt = renderProductionInstruction(instruction, names);
+  const video = adapter.capability.endsWith('_VIDEO');
+  const still = !video && instruction.version === 2;
+  let prompt =
+    options.prompt ??
+    renderProductionInstruction(
+      still
+        ? {
+            ...instruction,
+            summary: instruction.stillFrame ?? instruction.summary,
+            beats: [],
+            audio: { mode: 'silent' },
+            timing: undefined,
+            stillFrame: undefined,
+            transition: undefined,
+            subjects: instruction.subjects.map((subject) => ({
+              ...subject,
+              action: undefined,
+              endState: undefined,
+            })),
+            continuity: { ...instruction.continuity, after: [] },
+          }
+        : instruction,
+      names,
+      { includeAudio: !still },
+    );
+  if (instruction.visual.negative && !properties.negative_prompt) {
+    prompt += `\n画面约束：避免${instruction.visual.negative}`;
+    notices.push({
+      code: 'NEGATIVE_IN_PROMPT',
+      message: '当前模型没有独立的负向提示词参数，已将画面约束保留在提示词中。',
+    });
+  }
   if (properties.prompt) parameters.prompt = prompt;
   else if (properties.content) parameters.content = [{ type: 'text', text: prompt }];
   else issues.push({ code: 'NO_PROMPT_MAPPING', message: '当前模型尚未登记结构化提示词映射。' });
@@ -108,12 +212,75 @@ export function compileProductionParameters(
   if (!properties.watermark && properties.aigc_watermark) mappings.watermark = 'aigc_watermark';
   // These are explicit equivalents in current contracts; no seconds/size/name guessing.
   if (!properties.ratio && properties.aspect_ratio) mappings.ratio = 'aspect_ratio';
-  for (const [key, value] of Object.entries(instruction.generation)) {
-    const field = mappings[key]!;
-    if (!properties[field])
+  const generation = { ...instruction.generation };
+  if (still) delete generation.duration;
+  // Qwen's registered image contracts express output geometry as size, not video resolution.
+  if (
+    !video &&
+    adapter.contractId?.startsWith('cn.qwen.qwen-image') &&
+    properties.size &&
+    generation.ratio &&
+    generation.ratio !== 'adaptive'
+  ) {
+    const [widthRatio, heightRatio] = generation.ratio.split(':').map(Number);
+    const resolution = generation.resolution?.toLowerCase();
+    const shortEdge = resolution === '720p' ? 720 : resolution === '1080p' ? 1080 : undefined;
+    const longEdge =
+      resolution === '2k'
+        ? 2048
+        : resolution === '4k'
+          ? 4096
+          : resolution === undefined
+            ? 1024
+            : undefined;
+    if (widthRatio && heightRatio && (shortEdge || longEdge)) {
+      const scale = shortEdge
+        ? shortEdge / Math.min(widthRatio, heightRatio)
+        : longEdge! / Math.max(widthRatio, heightRatio);
+      const width = Math.round(widthRatio * scale),
+        height = Math.round(heightRatio * scale);
+      parameters.size = `${width}x${height}`;
+      if (width * height < 512 * 512 || width * height > 2048 * 2048)
+        issues.push({
+          code: 'IMAGE_SIZE_CONFLICT',
+          message: '所需画幅与分辨率超出千问图像合同的像素范围，请调整图像输出规格。',
+        });
+      delete generation.ratio;
+      delete generation.resolution;
+    }
+  }
+  const storyDuration =
+    options.estimatedDurationSeconds ?? instruction.timing?.estimatedDurationSeconds;
+  if (video && properties.duration && storyDuration !== undefined) {
+    if (generation.duration !== undefined && generation.duration < storyDuration)
       issues.push({
-        code: 'UNSUPPORTED_PARAMETER',
-        message: `当前模型不支持制作要求中的 ${key}。`,
+        code: 'STORY_DURATION_CONFLICT',
+        message: '请求时长短于剧情预计时长，请调整制作安排；不能为模型上限压缩剧情。',
+      });
+    if (generation.duration === undefined) {
+      const duration = resolveProductionDuration(adapter, storyDuration);
+      if (duration === undefined)
+        issues.push({
+          code: 'SCENE_REQUIRES_SEGMENTS',
+          message: `剧情预计${storyDuration}秒，超出当前模型单次时长能力。请按自然镜头分段制作，保留完整剧情。`,
+        });
+      else generation.duration = duration;
+    }
+  }
+  for (const [key, value] of Object.entries(generation)) {
+    const field = mappings[key]!;
+    const labels: Record<string, string> = {
+      duration: '请求时长',
+      ratio: '画幅比例',
+      resolution: '分辨率',
+      seed: '随机种子',
+      promptExtend: '提示词扩写',
+      watermark: '水印',
+    };
+    if (!properties[field])
+      notices.push({
+        code: 'MODEL_PARAMETER_NOT_APPLIED',
+        message: `当前模型没有${labels[key] ?? key}参数，本次不传入该设置；原制作偏好已保留。`,
       });
     else {
       const schema = properties[field];
@@ -136,65 +303,42 @@ export function compileProductionParameters(
   }
   if (instruction.visual.negative) {
     if (properties.negative_prompt) parameters.negative_prompt = instruction.visual.negative;
-    else
-      issues.push({
-        code: 'UNSUPPORTED_NEGATIVE_PROMPT',
-        message: '当前模型没有独立的负向提示词字段，请调整制作要求。',
-      });
   }
   if (adapter.capability.endsWith('_VIDEO')) {
-    const audioField =
-      properties.audio?.type === 'boolean'
-        ? 'audio'
-        : properties.generate_audio?.type === 'boolean'
-          ? 'generate_audio'
-          : undefined;
-    const wan =
-      [2, 3].includes(adapter.contractRevision ?? 0) &&
-      ['cn.qwen.wan3-0-video', 'cn.qwen.wan3-0-video-prime'].includes(adapter.contractId ?? '');
-    const current = [1, 2].includes(adapter.contractRevision ?? 0);
-    const voice =
-      wan ||
-      (current &&
-        [
-          'cn.bytedance.seedance2-0.video',
-          'cn.bytedance.seedance2-5.video',
-          'cn.minimax.h3.video',
-          'cn.minimax.h3-max.video',
-        ].includes(adapter.contractId ?? ''));
-    const dialogue = current && adapter.contractId === 'cn.qwen.wan2-7-i2v';
-    const nativeOnly =
-      current &&
-      ['cn.minimax.h3.video', 'cn.minimax.h3-max.video'].includes(adapter.contractId ?? '');
-    if (audioField) parameters[audioField] = instruction.audio.mode !== 'silent';
-    else if (
-      !(nativeOnly && instruction.audio.mode !== 'silent') &&
-      !(dialogue && instruction.audio.mode === 'dialogue-driven') &&
-      instruction.audio.mode !== 'silent'
-    )
-      issues.push({
-        code: 'UNSUPPORTED_AUDIO',
-        message: '当前模型合同未登记所需有声输出，请调整模型或声音要求。',
+    const {
+      outputField: audioField,
+      voiceReference: voice,
+      dialogueDriven: dialogue,
+    } = productionAudioSupport(adapter);
+    const needsVoice =
+      instruction.audio.mode === 'voice-reference' ||
+      instruction.resources.some((r) => r.required && r.kind === 'voice-reference');
+    const needsDialogue =
+      instruction.audio.mode === 'dialogue-driven' ||
+      instruction.resources.some((r) => r.required && r.kind === 'dialogue-audio');
+    if (audioField && instruction.audio.mode !== 'auto')
+      parameters[audioField] = instruction.audio.mode !== 'silent';
+    else if (audioField && (needsVoice || needsDialogue)) parameters[audioField] = true;
+    else if (instruction.audio.mode === 'silent' || instruction.audio.mode === 'native')
+      notices.push({
+        code: 'AUDIO_IN_PROMPT',
+        message: '当前模型未提供独立的声音开关；声音要求保留在提示词中，是否满足需检查成片。',
       });
-    if (instruction.audio.mode === 'silent' && nativeOnly)
-      issues.push({
-        code: 'UNSUPPORTED_AUDIO',
-        message: '当前模型没有登记关闭声音的方法，请调整模型或声音要求。',
-      });
-    if (instruction.audio.mode === 'voice-reference' && !voice)
+    if (needsVoice && !voice)
       issues.push({
         code: 'UNSUPPORTED_VOICE_REFERENCE',
         message: '当前模型修订尚未接入角色音色参考。',
       });
-    if (instruction.audio.mode === 'dialogue-driven' && !dialogue)
+    if (needsDialogue && !dialogue)
       issues.push({
         code: 'UNSUPPORTED_DIALOGUE_AUDIO',
         message: '当前模型修订尚未接入完整对白驱动。',
       });
   } else if (
-    instruction.beats.some((beat) => beat.dialogue.length) ||
-    instruction.audio.mode !== 'silent' ||
-    instruction.generation.duration !== undefined
+    !still &&
+    (instruction.beats.some((beat) => beat.dialogue.length) ||
+      !['auto', 'silent'].includes(instruction.audio.mode) ||
+      instruction.generation.duration !== undefined)
   ) {
     issues.push({
       code: 'IMAGE_VIDEO_INTENT',
@@ -206,11 +350,24 @@ export function compileProductionParameters(
     for (const metadata of ['title', 'description', 'default']) delete property[metadata];
     // UI annotations are not JSON Schema validation keywords.
     const validate = new Ajv2020({ allErrors: true, strict: false }).compile(property);
-    if (!validate(value))
-      issues.push({
-        code: 'PARAMETER_CONFLICT',
-        message: `${field} 不符合所选模型规则：${ajv.errorsText(validate.errors)}`,
-      });
+    if (!validate(value)) {
+      if (
+        ['duration', 'prompt', 'content', 'negative_prompt', 'audio', 'generate_audio'].includes(
+          field,
+        )
+      )
+        issues.push({
+          code: 'PARAMETER_CONFLICT',
+          message: `${field} 不符合所选模型规则：${ajv.errorsText(validate.errors)}`,
+        });
+      else {
+        delete parameters[field];
+        notices.push({
+          code: 'MODEL_PARAMETER_NOT_APPLIED',
+          message: `${properties[field]!.title ?? field}的制作偏好不符合当前模型范围，本次使用模型表单设置。`,
+        });
+      }
+    }
   }
-  return { parameters, issues };
+  return { parameters, issues, notices };
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { officialVideoAudioContracts, mediaModelBindings } from '@ai-video/contracts';
+import {
+  officialVideoAudioContracts,
+  mediaModelBindings,
+  currentMediaModelBinding,
+} from '@ai-video/contracts';
 import {
   buildOfficialVideoAudioRequest,
   validateOfficialVideoAudioParameters,
@@ -41,12 +45,13 @@ describe('official video audio contracts', () => {
     },
   );
 
-  it('keeps old UniComp bindings on revision one while official runtime uses the new revision', () => {
+  it('keeps old UniComp bindings for history and selects the current verified media revision', () => {
     expect(
       mediaModelBindings
         .filter((b) => b.contractId === wan && b.providerType === 'unicompapi')
-        .every((b) => b.contractRevision === 1),
+        .some((b) => b.contractRevision === 1),
     ).toBe(true);
+    expect(currentMediaModelBinding('unicompapi', 'wan3.0-video')?.contractRevision).toBe(3);
     expect(officialVideoAudioContracts.filter((c) => c.status === 'enabled')).toHaveLength(7);
     expect(
       mediaModelBindings.find(

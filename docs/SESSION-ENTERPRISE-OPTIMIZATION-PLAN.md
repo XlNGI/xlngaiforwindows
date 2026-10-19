@@ -277,6 +277,8 @@ llm_generations
 
 ### 8.3 验收测试
 
+2026-10-17 并发计划 P2 增量：后端为每个已加载项目创建独立 ProjectService 与服务组；projectSessionId 表示该项目运行实例，不随 `project.runtime.activate` 改变。新 attach/activate/unload 与旧 project.open/close 分开；旧入口继续停止并替换选中项目，新 activate 只改变请求默认目标。请求在入队前绑定运行身份，短写队列按项目代次隔离；显式卸载撤销旧代次并安全关闭该项目，不停止其他运行。前端多任务观察及切换语义在 P3 接入，不能把后端验收当成 UI 已支持。验证见 [P2 记录](./code-traces/2026-10-17-concurrency-p2.md)。
+
 - 图片下载期间会话列表和消息加载仍可响应；
 - 备份期间 LLM 取消不会无限等待；
 - 关闭项目后旧回调无法写入重新打开的同一项目；
@@ -556,3 +558,5 @@ details
 - Windows 原生构建、安装、升级、回滚和签名门禁通过；
 - 代码、Schema、文档和验证记录保持同步；
 - 审核中确认的产品边界没有未记录的临时实现。
+
+2026-10-17 并发计划 P3 增量：Desktop 的项目激活和会话切换只切换观察；显式卸载仍停止对应本地运行。请求/媒体预览绑定原项目运行代次，多任务确认按 owner/token 排队，断线不取消 Worker Pi。旧回调及 finally 不得更新新项目视图。证据：[P3 验收](./code-traces/2026-10-17-concurrency-p3.md)。

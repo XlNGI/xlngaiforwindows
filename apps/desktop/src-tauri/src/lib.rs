@@ -184,7 +184,10 @@ struct UniCompAdapterParts<'a> {
 
 fn parse_unicompapi_adapter_key(adapter_key: &str) -> Result<UniCompAdapterParts<'_>, String> {
     let parts = adapter_key.split(':').collect::<Vec<_>>();
-    if parts.len() == 4 && parts[1] == "unicompapi" && parts[3] == "contract-1" {
+    if parts.len() == 4
+        && parts[1] == "unicompapi"
+        && model_contract::is_contract_adapter(adapter_key)
+    {
         model_contract::contract(adapter_key)?;
         return Ok(UniCompAdapterParts {
             capability: parts[0],
@@ -481,7 +484,7 @@ fn resolve_media_selection(
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
             && if let Some(parts) = unicomp_parts.as_ref() {
-                if adapter_key.ends_with(":contract-1") {
+                if model_contract::is_contract_adapter(adapter_key) {
                     model
                         .get("contractStatus")
                         .and_then(serde_json::Value::as_str)
@@ -600,7 +603,7 @@ fn unicompapi_payload(
     remote_model_id: &str,
 ) -> Result<Vec<u8>, String> {
     validate_unicompapi_remote_model_id(remote_model_id)?;
-    if adapter_key.ends_with(":contract-1") {
+    if model_contract::is_contract_adapter(adapter_key) {
         let capability = adapter_key.split(':').next().unwrap_or_default();
         if matches!(capability, "TEXT_TO_IMAGE" | "REFERENCE_TO_IMAGE") {
             let encoded = model_contract::image_payload(adapter_key, payload, remote_model_id)?;
@@ -882,36 +885,58 @@ fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
 }
 
 fn provider_task_id(body: &serde_json::Value) -> Option<&str> {
-    body.pointer("/output/task_id")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            body.get("task_id")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| body.get("id").and_then(serde_json::Value::as_str))
-                .or_else(|| {
-                    body.get("data")
-                        .and_then(|data| data.get("task_id").or_else(|| data.get("id")))
-                        .and_then(serde_json::Value::as_str)
-                })
-        })
+    [
+        "/output/task_id",
+        "/task_id",
+        "/id",
+        "/data/task_id",
+        "/data/id",
+    ]
+    .iter()
+    .find_map(|path| {
+        body.pointer(path)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 fn provider_state(body: &serde_json::Value) -> Option<&str> {
-    body.pointer("/output/task_status")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            body.get("state")
-                .or_else(|| body.get("status"))
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    body.get("data")
-                        .and_then(|data| data.get("state").or_else(|| data.get("status")))
-                        .and_then(serde_json::Value::as_str)
-                })
-        })
+    [
+        "/output/task_status",
+        "/state",
+        "/status",
+        "/task_status",
+        "/data/state",
+        "/data/status",
+        "/data/task_status",
+    ]
+    .iter()
+    .find_map(|path| {
+        body.pointer(path)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 fn provider_video_source(value: &serde_json::Value) -> Option<&str> {
+    for path in [
+        "/video_url",
+        "/url",
+        "/data/video_url",
+        "/data/url",
+        "/output/video_url",
+        "/output/results/video_url",
+        "/content/video_url",
+        "/data/content/video_url",
+    ] {
+        if let Some(source) = value
+            .pointer(path)
+            .and_then(serde_json::Value::as_str)
+            .filter(|source| !source.trim().is_empty())
+        {
+            return Some(source);
+        }
+    }
     match value {
         serde_json::Value::Array(items) => items.iter().find_map(provider_video_source),
         serde_json::Value::Object(object) => {
@@ -931,7 +956,9 @@ fn provider_video_source(value: &serde_json::Value) -> Option<&str> {
                     }
                 }
             }
-            object.values().find_map(provider_video_source)
+            ["data", "output", "result"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(provider_video_source))
         }
         _ => None,
     }
@@ -1024,7 +1051,16 @@ fn provider_error_field(body: &serde_json::Value, keys: &[&str]) -> Option<Strin
 fn provider_submit_error(body: &serde_json::Value) -> (Option<String>, Option<String>) {
     (
         provider_error_field(body, &["err_code", "error_code", "code", "type"]),
-        provider_error_field(body, &["message", "error", "error_description", "detail"]),
+        provider_error_field(
+            body,
+            &[
+                "message",
+                "error",
+                "error_description",
+                "detail",
+                "fail_reason",
+            ],
+        ),
     )
 }
 
@@ -1920,7 +1956,7 @@ fn provider_submit_blocking(
         return Err("Video adapters must use the asynchronous provider task bridge".to_string());
     }
     if provider_region == "unicompapi" {
-        if adapter_key.ends_with(":contract-1") {
+        if model_contract::is_contract_adapter(adapter_key) {
             let body = unicompapi_payload(adapter_key, payload, remote_model_id)?;
             let secret = credential_read(credential_subject)?;
             let mut response =
@@ -2096,8 +2132,9 @@ fn request_unicompapi_bytes(
 }
 
 fn unicompapi_receive_timeout(method: &str, path: &str) -> Duration {
-    if method == "POST" && path == "/v1/images/generations" {
-        // Synchronous image generation returns only after inference finishes.
+    if method == "POST" && matches!(path, "/v1/images/generations" | "/v1/videos") {
+        // Paid submissions can wait for inference or large-reference processing
+        // before returning. Keep queries on their short timeout and never replay POSTs.
         Duration::from_secs(5 * 60)
     } else {
         provider_http::DEFAULT_RECEIVE_TIMEOUT
@@ -2802,9 +2839,75 @@ fn resolve_controlled_media_inputs_at_root(
                 false,
             ));
         }
+        // These legacy/gateway channels accept image URLs or Data URLs. A local
+        // Windows path cannot be read by a remote Provider. Official upload
+        // channels use their own resolver before reaching this function.
+        let content_type = item
+            .get("contentType")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !["image/png", "image/jpeg", "image/webp"].contains(&content_type) {
+            return Err(host_error(
+                "INVALID_PARAMETERS",
+                "This channel requires a public audio/video URL; local media upload is unavailable",
+                false,
+            ));
+        }
+        let metadata = canonical.metadata().map_err(|_| {
+            host_error(
+                "INVALID_PARAMETERS",
+                "Controlled image is unavailable",
+                false,
+            )
+        })?;
+        if metadata.len() == 0 || metadata.len() > UNICOMPAPI_IMAGE_INPUT_LIMIT as u64 {
+            return Err(host_error(
+                "INVALID_PARAMETERS",
+                "Controlled image exceeds the transport limit",
+                false,
+            ));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|_| {
+            host_error(
+                "INVALID_PARAMETERS",
+                "Controlled image is unavailable",
+                false,
+            )
+        })?;
+        let valid_signature = match content_type {
+            "image/png" => bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]),
+            "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+            "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+            _ => false,
+        };
+        if !valid_signature
+            || item
+                .get("sizeBytes")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|size| size != bytes.len() as u64)
+        {
+            return Err(host_error(
+                "INVALID_PARAMETERS",
+                "Controlled image content changed or has an invalid signature",
+                false,
+            ));
+        }
+        if let Some(hash) = item.get("sha256").and_then(serde_json::Value::as_str) {
+            use sha2::{Digest, Sha256};
+            if format!("{:x}", Sha256::digest(&bytes)) != hash {
+                return Err(host_error(
+                    "INVALID_PARAMETERS",
+                    "Controlled image content changed",
+                    false,
+                ));
+            }
+        }
         replacements.insert(
             format!("controlled-file://{handle}"),
-            canonical.to_string_lossy().to_string(),
+            format!(
+                "data:{content_type};base64,{}",
+                BASE64_STANDARD.encode(bytes)
+            ),
         );
     }
     fn walk(
@@ -2894,7 +2997,16 @@ fn provider_media_poll_blocking(
             )
         });
     let output = if succeeded {
-        if provider_region == "unicompapi" && provider_video_source(&response.body).is_none() {
+        let source = provider_video_source(&response.body);
+        let authenticated_content = source
+            .and_then(|source| tauri::Url::parse(source).ok())
+            .is_some_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str() == Some(UNICOMPAPI_HOST)
+                    && unicompapi_video_content_path(provider_task_id)
+                        .is_ok_and(|path| url.path() == path)
+            });
+        if provider_region == "unicompapi" && (source.is_none() || authenticated_content) {
             Some(provider_download_task_blocking(
                 adapter_key,
                 provider_region,
@@ -2917,7 +3029,7 @@ fn provider_media_poll_blocking(
     };
     normalize_provider_media_poll(
         &response,
-        if adapter_key.ends_with(":contract-1") {
+        if model_contract::is_contract_adapter(adapter_key) {
             "official-contract"
         } else {
             provider_region
@@ -2942,12 +3054,14 @@ fn normalize_provider_media_poll(
         "failed"
     } else {
         match provider_state.as_deref() {
-            Some("created" | "queueing" | "queued" | "pending") => "queued",
+            Some("created" | "queueing" | "queued" | "pending" | "submitted" | "not_start") => {
+                "queued"
+            }
             Some("in_progress" | "processing" | "running") => "running",
             Some("unknown") if provider_region == "unicompapi" => "running",
             Some("success" | "succeeded" | "completed") => "succeeded",
             Some("cancelled" | "canceled") => "cancelled",
-            Some("failed" | "error") | None => "failed",
+            Some("failed" | "failure" | "error" | "expired") | None => "failed",
             Some(_) => "failed",
         }
     };
@@ -4013,14 +4127,16 @@ mod tests {
     }
 
     #[test]
-    fn only_synchronous_image_submissions_use_the_long_receive_timeout() {
-        assert_eq!(
-            super::unicompapi_receive_timeout("POST", "/v1/images/generations"),
-            Duration::from_secs(300)
-        );
+    fn paid_unicompapi_submissions_use_the_long_receive_timeout() {
+        for path in ["/v1/images/generations", "/v1/videos"] {
+            assert_eq!(
+                super::unicompapi_receive_timeout("POST", path),
+                Duration::from_secs(300)
+            );
+        }
         for (method, path) in [
             ("GET", "/v1/models"),
-            ("POST", "/v1/videos"),
+            ("POST", "/v1/unknown"),
             ("GET", "/v1/videos/task"),
         ] {
             assert_eq!(
@@ -4715,10 +4831,21 @@ mod tests {
         resolve_controlled_media_inputs_at_root(&mut parameters, Some(&inputs), &root)
             .expect("resolve controlled media fixture");
         assert_eq!(
-            Path::new(parameters["images"][0].as_str().expect("resolved path"))
-                .canonicalize()
-                .expect("canonical resolved path"),
-            image.canonicalize().expect("canonical fixture path")
+            parameters["images"][0].as_str().expect("resolved image"),
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        let mut nested = json!({"media":[{"type":"reference_image","url":format!("controlled-file://{handle}")}]});
+        resolve_controlled_media_inputs_at_root(&mut nested, Some(&inputs), &root).unwrap();
+        assert_eq!(
+            nested["media"][0]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        let audio_inputs =
+            json!([{"type":"controlled_temporary_file","handle":handle,"contentType":"audio/wav"}]);
+        let mut audio = json!({"media":[{"type":"reference_audio","url":format!("controlled-file://{handle}")}]});
+        assert!(
+            resolve_controlled_media_inputs_at_root(&mut audio, Some(&audio_inputs), &root)
+                .is_err()
         );
 
         let mut unregistered = json!({
@@ -4744,6 +4871,49 @@ mod tests {
         .is_err());
 
         remove_dir_all(root).expect("remove controlled media fixture directory");
+    }
+
+    #[test]
+    fn gateway_video_responses_use_video_urls_and_real_terminal_states() {
+        assert_eq!(
+            provider_task_id(&json!({"id":"", "data":{"task_id":"nested-id"}})),
+            Some("nested-id")
+        );
+        assert_eq!(
+            provider_state(&json!({"state":"", "data":{"status":"completed"}})),
+            Some("completed")
+        );
+        for body in [
+            json!({"url":"https://example.com/video.mp4"}),
+            json!({"data":{"url":"https://example.com/video.mp4"}}),
+            json!({"output":{"results":{"video_url":"https://example.com/video.mp4"}}}),
+        ] {
+            assert_eq!(
+                super::provider_video_source(&body),
+                Some("https://example.com/video.mp4")
+            );
+        }
+        assert!(super::provider_video_source(
+            &json!({"metadata":{"url":"https://example.com/cover.png"}})
+        )
+        .is_none());
+        let response = ProviderHttpResponse {
+            status: 200,
+            body: json!({"status":"FAILURE","fail_reason":"blocked"}),
+            retry_after_ms: None,
+        };
+        let failure = normalize_provider_media_poll(&response, "unicompapi", None).unwrap();
+        assert_eq!(failure["state"], "failed");
+        assert_eq!(failure["error"]["message"], "blocked");
+        let success = ProviderHttpResponse {
+            status: 200,
+            body: json!({"status":"completed","url":"https://example.com/video.mp4"}),
+            retry_after_ms: None,
+        };
+        assert!(normalize_provider_media_poll(&success, "unicompapi", None).is_err());
+        let key = "REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3";
+        assert!(ensure_video_adapter(key).is_ok());
+        assert!(unicompapi_payload(key,json!({"prompt":"test","audio":true,"media":[{"type":"reference_audio","url":"https://example.com/voice.wav"}]}),"wan3.0-video").is_ok());
     }
 
     #[test]

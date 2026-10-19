@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ProviderProfileInfo, VoiceProfileInfo } from '@ai-video/contracts';
-import { callWorker } from '../worker-client';
+import { projectWorker } from '../worker-scope';
 import './dubbing.css';
 import { VoiceReferencePanel } from './VoiceReferencePanel';
 
@@ -39,6 +39,7 @@ function VoiceProfileEditor({
   writable: boolean;
   onSaved?: () => void;
 }) {
+  const callWorker = projectWorker();
   const active = useRef(true);
   const [profile, setProfile] = useState<VoiceProfileInfo>();
   const [providers, setProviders] = useState<ProviderProfileInfo[]>([]);

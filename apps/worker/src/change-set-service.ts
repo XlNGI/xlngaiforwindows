@@ -10,6 +10,13 @@ import type {
   AgentChangeSetRejectParams,
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
+import {
+  renderProductionInstruction,
+  type ProductionInstruction,
+  type ProductionExecuteParams,
+} from '@ai-video/contracts';
+import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
+import { ProductionService } from './production-service.js';
 import { rebuildLibraryChunksForChangeSet, SceneCharacterRepository } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
@@ -45,6 +52,7 @@ type ItemRow = {
   scene_document_id: string | null;
   scene_bindings_json: string | null;
   shot_prompt: string | null;
+  production_instruction_json: string | null;
   document_kind: AgentChangeSetItemInfo['documentKind'] | null;
   content_markdown: string | null;
   scope_type: AgentChangeSetItemInfo['scopeType'] | null;
@@ -85,6 +93,9 @@ function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
       : {}),
     shotStatus: row.shot_status ?? undefined,
     prompt: row.shot_prompt ?? undefined,
+    instruction: row.production_instruction_json
+      ? (JSON.parse(row.production_instruction_json) as ProductionInstruction)
+      : undefined,
     documentKind: row.document_kind ?? undefined,
     contentMarkdown: row.content_markdown ?? undefined,
     scopeType: row.scope_type ?? undefined,
@@ -128,6 +139,47 @@ export class ChangeSetService {
         );
         params.items.forEach((candidate, ordinal) => {
           const item = this.validateDraft(candidate, ordinal, params.items);
+          if (item.instruction) {
+            requireProductionCharacters(
+              database,
+              project.id,
+              item.instruction.subjects.map((subject) => subject.documentId),
+            );
+            for (const resource of item.instruction.resources) {
+              if (
+                resource.documentId &&
+                !database
+                  .prepare(
+                    "SELECT 1 FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
+                  )
+                  .get(resource.documentId, project.id)
+              )
+                throw new Error('制作资源引用了无效的项目文档。');
+              if (
+                resource.assetId &&
+                !database
+                  .prepare(
+                    'SELECT 1 FROM assets WHERE id=? AND project_id=? AND deleted_at IS NULL',
+                  )
+                  .get(resource.assetId, project.id)
+              )
+                throw new Error('制作资源引用了无效的项目素材。');
+            }
+            const names = Object.fromEntries(
+              (
+                database
+                  .prepare('SELECT id,title FROM documents WHERE project_id=?')
+                  .all(project.id) as Array<{ id: string; title: string }>
+              ).map((doc) => [doc.id, doc.title]),
+            );
+            const prompt = requiredText(
+              renderProductionInstruction(item.instruction, names),
+              'Structured prompt',
+              20000,
+            );
+            if (item.entityType === 'scene') item.videoPrompt = prompt;
+            else item.prompt = prompt;
+          }
           if (item.sceneDocumentId)
             requireProductionSceneDocument(database, project.id, item.sceneDocumentId);
           if (item.characterDocumentIds !== undefined) {
@@ -170,6 +222,12 @@ export class ChangeSetService {
             now,
             now,
           );
+          if (item.instruction)
+            database
+              .prepare(
+                'INSERT INTO production_change_set_instructions(item_id,project_id,instruction_json) VALUES(?,?,?)',
+              )
+              .run(itemIds[ordinal], project.id, JSON.stringify(item.instruction));
         });
         rebuildLibraryChunksForChangeSet(database, project.id, id, now);
         return this.getInTransaction(database, project.id, id);
@@ -203,6 +261,7 @@ export class ChangeSetService {
         const now = new Date().toISOString();
         try {
           database.transaction(() => {
+            const operations: ProductionExecuteParams['operations'] = [];
             for (const item of selected) {
               const appliedEntityId = this.applyItem(database, project.id, item, now);
               database
@@ -212,7 +271,28 @@ export class ChangeSetService {
                    WHERE id = ? AND status = 'pending'`,
                 )
                 .run(appliedEntityId, now, item.id);
+              if (item.production_instruction_json) {
+                const kind = item.entity_type === 'scene' ? 'scene' : 'shot';
+                const row = database
+                  .prepare(
+                    `SELECT row_version FROM ${kind === 'scene' ? 'scenes' : 'shots'} WHERE id=?`,
+                  )
+                  .get(appliedEntityId) as { row_version: number };
+                operations.push({
+                  action: 'set_prompt',
+                  target: { kind, id: appliedEntityId },
+                  expectedRowVersion: row.row_version,
+                  instruction: JSON.parse(
+                    item.production_instruction_json,
+                  ) as ProductionInstruction,
+                });
+              }
             }
+            for (let index = 0; index < operations.length; index += 30)
+              new ProductionService(this.projects).execute({
+                executionKey: `change-set:${set.id}:${set.row_version}:${index}`,
+                operations: operations.slice(index, index + 30),
+              });
           })();
         } catch (error) {
           if (!(error instanceof ChangeSetConflict)) throw error;
@@ -297,6 +377,14 @@ export class ChangeSetService {
     all: AgentChangeSetItemDraft[],
   ): AgentChangeSetItemDraft {
     const item = { ...candidate, title: requiredText(candidate.title, 'Item title', 200) };
+    if (item.instruction) {
+      if (!['scene', 'shot'].includes(item.entityType))
+        throw new Error('Only scenes and shots accept production instructions.');
+      const issues = inspectProductionTargetInstruction(item.instruction, item.entityType);
+      if (issues.length) throw new Error(issues.map((issue) => issue.message).join('\n'));
+      if (Buffer.byteLength(JSON.stringify(item.instruction)) > 512 * 1024)
+        throw new Error('制作指令超过512 KiB。');
+    }
     if (item.sceneDocumentId !== undefined) {
       if (item.entityType !== 'scene')
         throw new Error('Only scene proposals can bind scene documents.');
@@ -774,9 +862,10 @@ export class ChangeSetService {
   private itemRows(database: Database.Database, changeSetId: string): ItemRow[] {
     return database
       .prepare(
-        `SELECT items.*, parent.ordinal AS parent_item_ordinal
+        `SELECT items.*, parent.ordinal AS parent_item_ordinal, instruction.instruction_json AS production_instruction_json
          FROM agent_change_set_items items
          LEFT JOIN agent_change_set_items parent ON parent.id = items.parent_item_id
+         LEFT JOIN production_change_set_instructions instruction ON instruction.item_id = items.id AND instruction.project_id = items.project_id
          WHERE items.change_set_id = ? ORDER BY items.ordinal`,
       )
       .all(changeSetId) as ItemRow[];

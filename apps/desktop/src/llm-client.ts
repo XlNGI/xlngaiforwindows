@@ -13,7 +13,7 @@ import type {
   MediaSubmissionConfirmationRequest,
   ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
 
 export function coalesceVisibleDelta(accumulated: string, incoming: string): string | undefined {
   if (!incoming) return undefined;
@@ -74,13 +74,19 @@ export interface LlmStreamRun {
   readonly identity: LlmGenerationIdentity;
   readonly completion: Promise<void>;
   cancel(): Promise<void>;
+  detach(): void;
 }
 
 export function streamPreparedLlmGeneration(
   prepared: LlmGenerationPrepareResult,
   callbacks: LlmStreamCallbacks,
+  options: { observeOnly?: boolean } = {},
 ): LlmStreamRun {
   const identity = prepared.stream;
+  const callWorker = projectWorker({
+    projectId: identity.projectId,
+    projectSessionId: identity.projectSessionId,
+  });
   const nativeAgentRuntime =
     Boolean((prepared as AgentCapablePrepared).agentTaskId) &&
     (prepared as AgentCapablePrepared).runtimeOwner === 'native-agent';
@@ -91,6 +97,7 @@ export function streamPreparedLlmGeneration(
   let streamVisible = '';
   let persisted = aggregate;
   let terminal = false;
+  let detached = false;
   let closing = false;
   let cancelRequested = false;
   let providerInvocationCount = 0;
@@ -426,20 +433,20 @@ export function streamPreparedLlmGeneration(
     try {
       if (piRuntime) {
         const runtimeMode = (prepared as AgentCapablePrepared).runtimeMode ?? 'document';
-        await callWorker('conversation.runtime.start', {
-          ...identity,
-          taskId: (prepared as AgentCapablePrepared).agentTaskId!,
-          mode: runtimeMode,
-          prompt: prepared.generation.userMessage.content,
-        });
+        if (!options.observeOnly)
+          await callWorker('conversation.runtime.start', {
+            ...identity,
+            taskId: (prepared as AgentCapablePrepared).agentTaskId!,
+            mode: runtimeMode,
+            prompt: prepared.generation.userMessage.content,
+          });
         const deadline = Date.now() + PI_POLL_TIMEOUT_MS;
         const handledConfirmations = new Set<string>();
         const handledMediaSelections = new Set<string>();
         const handledMediaSubmissions = new Set<string>();
-        while (true) {
+        while (!detached) {
           if (Date.now() >= deadline) {
-            await cancelOwnedRuntime();
-            throw new Error('Pi runtime did not reach a terminal state before the timeout.');
+            throw new Error('Pi observation timed out; the task continues in the background.');
           }
           await new Promise((resolve) => setTimeout(resolve, PI_POLL_INTERVAL_MS));
           const runtimeState = await callWorker('conversation.runtime.get', {
@@ -454,6 +461,7 @@ export function streamPreparedLlmGeneration(
             const approved = callbacks.onConfirmation
               ? await callbacks.onConfirmation(runtimeState.confirmation)
               : false;
+            if (detached || cancelRequested) return;
             const confirmed = await callWorker('conversation.runtime.confirm', {
               generationId: identity.generationId,
               confirmationToken: runtimeState.confirmation.confirmationToken,
@@ -471,6 +479,7 @@ export function streamPreparedLlmGeneration(
             const selection = callbacks.onMediaSelection
               ? await callbacks.onMediaSelection(runtimeState.mediaSelection)
               : undefined;
+            if (detached || cancelRequested) return;
             const selected = await callWorker('conversation.runtime.selectMedia', {
               generationId: identity.generationId,
               selectionToken: runtimeState.mediaSelection.selectionToken,
@@ -488,6 +497,7 @@ export function streamPreparedLlmGeneration(
             const approved = callbacks.onMediaSubmission
               ? await callbacks.onMediaSubmission(runtimeState.mediaSubmission)
               : false;
+            if (detached || cancelRequested) return;
             const confirmed = await callWorker('conversation.runtime.confirmMediaSubmission', {
               generationId: identity.generationId,
               jobId: runtimeState.mediaSubmission.jobId,
@@ -550,6 +560,7 @@ export function streamPreparedLlmGeneration(
         else await fail('Native LLM stream ended without a terminal event.', true);
       }
     } catch (error) {
+      if (piRuntime && !cancelRequested) throw error;
       await events;
       if (cancelRequested) await cancelWorker();
       else {
@@ -562,6 +573,9 @@ export function streamPreparedLlmGeneration(
   return {
     identity,
     completion,
+    detach() {
+      detached = true;
+    },
     async cancel() {
       if (terminal) return;
       cancelRequested = true;

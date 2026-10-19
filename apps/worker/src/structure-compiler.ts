@@ -419,9 +419,13 @@ function documentSource(
   binding?: BindingMetadataRow,
 ): ProjectStructureSource {
   const status = chapterVersionStatus(document.current_version_id, document.published_version_id);
+  const type =
+    binding?.domain_scope === 'novel' && binding.status === 'active'
+      ? 'novel-reference'
+      : 'document';
   return {
-    id: `document:${document.id}`,
-    type: 'document',
+    id: `${type}:${document.id}`,
+    type,
     sourceId: document.id,
     title: document.title,
     kind: document.kind,

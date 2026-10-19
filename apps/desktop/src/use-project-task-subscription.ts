@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { ProjectTaskSnapshot } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker, workerScope } from './worker-scope';
 
 const ACTIVE_REFRESH_MS = 1_000;
 const IDLE_REFRESH_MS = 5_000;
 
 export function useProjectTaskSubscription(projectId?: string): ProjectTaskSnapshot | undefined {
+  const callWorker = projectWorker();
+  const projectSessionId = workerScope(projectId)?.projectSessionId;
   const [snapshot, setSnapshot] = useState<ProjectTaskSnapshot>();
 
   useEffect(() => {
@@ -44,7 +46,7 @@ export function useProjectTaskSubscription(projectId?: string): ProjectTaskSnaps
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [projectId]);
+  }, [projectId, projectSessionId]);
 
   return snapshot;
 }

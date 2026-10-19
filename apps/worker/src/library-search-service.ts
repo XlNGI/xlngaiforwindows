@@ -14,12 +14,13 @@ import {
   listProjectLibrarySourceChunks,
   searchProjectStructureNodesPage,
   searchProjectLibraryChunksPage,
+  taskLibraryVisibility,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
 const SOURCE_HANDLE_TTL_MS = 10 * 60_000;
-const SEARCH_CALL_LIMIT = 4;
-const READ_CALL_LIMIT = 8;
+export const LIBRARY_SEARCH_CALL_LIMIT = 8;
+export const LIBRARY_READ_CALL_LIMIT = 16;
 const DEFAULT_READ_CHARS = 4_000;
 const MAX_READ_CHARS = 20_000;
 const DRAFT_CANDIDATE_NOTE = '未审核候选资料，不能当作已发布权威';
@@ -84,11 +85,17 @@ export class LibrarySearchService {
     const sourceTypes = normalizeSourceTypes(params.sourceTypes);
     const offset = boundedInteger(params.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     return this.projects.access(false, (database, project) => {
+      const generationId = (
+        database
+          .prepare('SELECT generation_id AS id FROM llm_generation_attempts WHERE id=?')
+          .get(params.attemptId) as { id: string } | undefined
+      )?.id;
       const limit = boundedInteger(params.limit, searchMode === 'structure' ? 20 : 8, 1, 20);
       const page =
         searchMode === 'structure'
           ? searchProjectStructureNodesPage(database, {
               projectId: project.id,
+              generationId,
               query,
               sourceTypes,
               status: params.status,
@@ -102,6 +109,7 @@ export class LibrarySearchService {
             })
           : searchProjectLibraryChunksPage(database, {
               projectId: project.id,
+              generationId,
               query,
               sourceTypes,
               status: params.status,
@@ -165,6 +173,12 @@ export class LibrarySearchService {
         searchMode,
         queryHash: sha256(query),
         resultCount: sources.length,
+        ...(sources.length === 0
+          ? {
+              guidance:
+                'No matches for this query and filters; this does not mean retrieval is unavailable. Check the catalog/resourceMap sourceType. sourceTypes=["document"] excludes novel-reference (novel outlines, character bibles and world settings). If unsure, omit sourceTypes or use the actual sourceType, then read a returned sourceHandle; document IDs are not handles.',
+            }
+          : {}),
         truncated,
         ...(searchMode === 'structure' && truncated ? { nextOffset: offset + sources.length } : {}),
         sources,
@@ -190,7 +204,7 @@ export class LibrarySearchService {
     ) {
       throw new LibraryError(
         'LIBRARY_HANDLE_INVALID',
-        'Library source handle is invalid or expired.',
+        'Library source handle is invalid or expired. Use a sourceHandle returned by library.search in this task and attempt; document IDs, version IDs and resourceIds are not handles. Search again with the correct sourceType or omit sourceTypes when unsure.',
         false,
       );
     }
@@ -221,6 +235,24 @@ export class LibrarySearchService {
           false,
         );
       }
+      const generationId = (
+        database
+          .prepare('SELECT generation_id AS id FROM llm_generation_attempts WHERE id=?')
+          .get(params.attemptId) as { id: string } | undefined
+      )?.id;
+      if (
+        generationId &&
+        !database
+          .prepare(
+            `SELECT 1 FROM project_library_chunks chunks WHERE chunks.id=? AND ${taskLibraryVisibility()}`,
+          )
+          .get(chunk.id, generationId)
+      )
+        throw new LibraryError(
+          'LIBRARY_READ_BLOCKED',
+          'Source is outside this task history boundary.',
+          false,
+        );
       // Use the immutable document version when possible. RAG chunks trim
       // whitespace and overlap, so joining them cannot reproduce every paragraph.
       const version =
@@ -307,7 +339,7 @@ export class LibrarySearchService {
 
   private assertBudget(taskId: string, attemptId: string, operation: 'search' | 'read'): void {
     const usage = this.usage.get(usageKey(taskId, attemptId)) ?? { search: 0, read: 0 };
-    const limit = operation === 'search' ? SEARCH_CALL_LIMIT : READ_CALL_LIMIT;
+    const limit = operation === 'search' ? LIBRARY_SEARCH_CALL_LIMIT : LIBRARY_READ_CALL_LIMIT;
     if (usage[operation] >= limit) {
       throw new LibraryError(
         'LIBRARY_BUDGET_EXCEEDED',

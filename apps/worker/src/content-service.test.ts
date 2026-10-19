@@ -380,6 +380,73 @@ describe('ContentService', () => {
     });
   });
 
+  it('persists editable conversation prompt templates with CAS and project isolation', async () => {
+    const { content } = await setup();
+    const conversation = content.createConversation({ scopeType: 'project', title: '模板会话' });
+    expect(content.getConversationPromptTemplate(conversation.id)).toMatchObject({
+      conversationId: conversation.id,
+      content: '',
+      rowVersion: 0,
+    });
+    const saved = content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: '固定时间、风格和角色连续性。',
+      expectedRowVersion: 0,
+    });
+    expect(saved).toMatchObject({ content: '固定时间、风格和角色连续性。', rowVersion: 1 });
+    expect(content.getConversationPromptTemplate(conversation.id)).toMatchObject(saved);
+    expect(() =>
+      content.saveConversationPromptTemplate({
+        conversationId: conversation.id,
+        content: '旧版本覆盖',
+        expectedRowVersion: 0,
+      }),
+    ).toThrow('CONVERSATION_PROMPT_TEMPLATE_ROW_VERSION_CONFLICT');
+    expect(() =>
+      content.saveConversationPromptTemplate({
+        conversationId: conversation.id,
+        content: 'x'.repeat(20_001),
+        expectedRowVersion: 1,
+      }),
+    ).toThrow('at most 20000');
+    expect(() =>
+      content.saveConversationPromptTemplate({
+        conversationId: 'missing-conversation',
+        content: '',
+        expectedRowVersion: 0,
+      }),
+    ).toThrow('Conversation was not found.');
+    const cleared = content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: '',
+      expectedRowVersion: 1,
+    });
+    expect(cleared).toMatchObject({ content: '', rowVersion: 2 });
+    const other = await setup();
+    expect(() => other.content.getConversationPromptTemplate(conversation.id)).toThrow(
+      'Conversation was not found.',
+    );
+    expect(() =>
+      other.content.saveConversationPromptTemplate({
+        conversationId: conversation.id,
+        content: '跨项目覆盖',
+        expectedRowVersion: 2,
+      }),
+    ).toThrow('Conversation was not found.');
+    content.archiveConversation({ conversationId: conversation.id });
+    expect(content.getConversationPromptTemplate(conversation.id)).toMatchObject({
+      content: '',
+      rowVersion: 2,
+    });
+    expect(() =>
+      content.saveConversationPromptTemplate({
+        conversationId: conversation.id,
+        content: '归档后覆盖',
+        expectedRowVersion: 2,
+      }),
+    ).toThrow('Archived conversations');
+  });
+
   it('pages conversations with a deterministic cursor', async () => {
     const { content } = await setup();
     vi.useFakeTimers();

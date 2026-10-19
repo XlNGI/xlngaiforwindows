@@ -30,6 +30,8 @@ import {
   createRepositories,
   rebuildLibraryChunksForDocument,
   rebuildNovelRagChunks,
+  splitNovelRagChunks,
+  type NovelRagChunkDraft,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 
@@ -317,7 +319,44 @@ export class NovelService {
     });
   }
 
-  importNovel(params: NovelImportParams): NovelImportResult {
+  async importNovelAsync(
+    params: NovelImportParams,
+    signal: AbortSignal,
+    onProgress?: (value: number) => void,
+  ): Promise<NovelImportResult> {
+    const epoch = this.projects.currentSessionId(),
+      frozen = structuredClone(params);
+    const prepared = new Map<string, NovelRagChunkDraft[]>();
+    let size = 0;
+    for (const [index, chapter] of frozen.chapters.entries()) {
+      signal.throwIfAborted();
+      if (this.projects.currentSessionId() !== epoch)
+        throw new Error('Project session changed during import.');
+      required(chapter.title, 'Chapter title');
+      const text = chapter.contentMarkdown.trim();
+      const bytes = Buffer.byteLength(text, 'utf8');
+      size += bytes;
+      if (!text || bytes > MAX_IMPORT_CHAPTER_BYTES || size > MAX_IMPORT_TOTAL_BYTES)
+        throw new NovelServiceError(
+          'INVALID_PARAMETERS',
+          'Imported chapter or novel exceeds its content limit.',
+        );
+      prepared.set(text, splitNovelRagChunks(text));
+      onProgress?.(Math.floor(((index + 1) * 80) / frozen.chapters.length));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    signal.throwIfAborted();
+    if (this.projects.currentSessionId() !== epoch)
+      throw new Error('Project session changed during import.');
+    const result = this.importNovel(frozen, prepared);
+    onProgress?.(100);
+    return result;
+  }
+
+  importNovel(
+    params: NovelImportParams,
+    preparedChunks?: Map<string, NovelRagChunkDraft[]>,
+  ): NovelImportResult {
     return this.projects.access(true, (database, project) => {
       const chapters = params.chapters ?? [];
       if (chapters.length < 1 || chapters.length > 200) {
@@ -426,8 +465,15 @@ export class NovelService {
             documentVersionId: versionId,
             contentMarkdown: content,
             now,
+            preparedChunks: preparedChunks?.get(content),
           });
-          rebuildLibraryChunksForDocument(database, project.id, documentId, now);
+          rebuildLibraryChunksForDocument(
+            database,
+            project.id,
+            documentId,
+            now,
+            preparedChunks?.get(content),
+          );
           imported.push({
             id: chapterId,
             projectId: project.id,

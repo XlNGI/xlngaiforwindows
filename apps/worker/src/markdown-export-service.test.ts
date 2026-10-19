@@ -39,8 +39,8 @@ describe('MarkdownExportService', () => {
       return chapter;
     });
     const exports = new MarkdownExportService(project);
-    expect(() => exports.prepare({ exportType: 'work' })).toThrow('请勾选“包含草稿”');
-    const job = exports.prepare({
+    await expect(exports.prepare({ exportType: 'work' })).rejects.toThrow('请勾选“包含草稿”');
+    const job = await exports.prepare({
       exportType: 'selection',
       chapterIds: [chapters[2]!.id, chapters[0]!.id],
       includeDraft: true,
@@ -78,7 +78,11 @@ describe('MarkdownExportService', () => {
     });
     const openDirectory = vi.fn();
     const exports = new MarkdownExportService(project, openDirectory);
-    const job = exports.prepare({ exportType: 'work', exportFormat: 'merged', includeDraft: true });
+    const job = await exports.prepare({
+      exportType: 'work',
+      exportFormat: 'merged',
+      includeDraft: true,
+    });
     expect(await readFile(join(job.packagePath, 'merged.draft.md'), 'utf8')).toContain(
       'Saved draft body',
     );
@@ -103,14 +107,14 @@ describe('MarkdownExportService', () => {
     expect(exports.reconcile()).toEqual({ succeeded: 0, failed: 1 });
     expect(openDirectory).not.toHaveBeenCalled();
 
-    const otherJob = exports.prepare({ exportType: 'work', includeDraft: true });
+    const otherJob = await exports.prepare({ exportType: 'work', includeDraft: true });
     project.access(true, (database) =>
       database
         .prepare('UPDATE markdown_export_jobs SET package_relative_path = ? WHERE id = ?')
         .run('exports/../outside', otherJob.id),
     );
     await expect(exports.reveal({ jobId: otherJob.id })).rejects.toThrow('导出目录无效');
-    const movedJob = exports.prepare({ exportType: 'work', includeDraft: true });
+    const movedJob = await exports.prepare({ exportType: 'work', includeDraft: true });
     await rm(movedJob.packagePath, { recursive: true, force: true });
     await expect(exports.reveal({ jobId: movedJob.id })).rejects.toThrow('已被移动或删除');
     project.close();
@@ -172,7 +176,7 @@ describe('MarkdownExportService', () => {
       expectedPublishedVersionId: reviewed.publishedVersionId,
     });
 
-    const job = new MarkdownExportService(project).prepare({
+    const job = await new MarkdownExportService(project).prepare({
       exportType: 'work',
       exportFormat: 'files',
     });
@@ -225,7 +229,7 @@ describe('MarkdownExportService', () => {
       });
     }
 
-    const job = new MarkdownExportService(project).prepare({
+    const job = await new MarkdownExportService(project).prepare({
       exportType: 'work',
       exportFormat: 'merged',
     });
@@ -264,7 +268,7 @@ describe('MarkdownExportService', () => {
       expectedPublishedVersionId: reviewed.publishedVersionId,
     });
     const exports = new MarkdownExportService(project);
-    const verified = exports.prepare({ exportType: 'work', exportFormat: 'files' });
+    const verified = await exports.prepare({ exportType: 'work', exportFormat: 'files' });
     project.access(true, (database) => {
       database
         .prepare(
@@ -282,7 +286,7 @@ describe('MarkdownExportService', () => {
       ),
     ).toMatchObject({ status: 'succeeded' });
 
-    const interrupted = exports.prepare({ exportType: 'work', exportFormat: 'merged' });
+    const interrupted = await exports.prepare({ exportType: 'work', exportFormat: 'merged' });
     await rm(join(interrupted.packagePath, 'manifest.sha256'));
     project.access(true, (database) => {
       database
@@ -333,7 +337,7 @@ describe('MarkdownExportService', () => {
       expectedPublishedVersionId: reviewed.publishedVersionId,
     });
     const exports = new MarkdownExportService(project);
-    const job = exports.prepare({ exportType: 'work', exportFormat: 'files' });
+    const job = await exports.prepare({ exportType: 'work', exportFormat: 'files' });
     project.access(true, (database) => {
       database
         .prepare(
@@ -351,7 +355,7 @@ describe('MarkdownExportService', () => {
       ),
     ).toMatchObject({ error_code: 'EXPORT_RECOVERY_FAILED' });
 
-    const merged = exports.prepare({ exportType: 'work', exportFormat: 'merged' });
+    const merged = await exports.prepare({ exportType: 'work', exportFormat: 'merged' });
     await writeFile(join(merged.packagePath, 'merged.md'), 'externally modified', 'utf8');
     project.access(true, (database) => {
       database
@@ -365,7 +369,7 @@ describe('MarkdownExportService', () => {
     });
     expect(exports.reconcile()).toEqual({ succeeded: 0, failed: 1 });
 
-    const linked = exports.prepare({ exportType: 'work', exportFormat: 'files' });
+    const linked = await exports.prepare({ exportType: 'work', exportFormat: 'files' });
     const linkedManifest = JSON.parse(
       await readFile(join(linked.packagePath, 'manifest.json'), 'utf8'),
     ) as { items: Array<{ relativePath: string }> };

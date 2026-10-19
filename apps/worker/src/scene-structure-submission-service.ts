@@ -74,6 +74,7 @@ export class SceneStructureSubmissionService {
           throw new Error('Provide resolution: resolved or needs_clarification.');
         const structure = parseEpisodeStructureArguments(
           JSON.stringify({ episodeTitle: args.episodeTitle, scenes: args.scenes }),
+          true,
         );
         validateEpisodeReferences(database, project.id, structure);
         const items: AgentChangeSetItemDraft[] = [];
@@ -89,6 +90,7 @@ export class SceneStructureSubmissionService {
             sceneDocumentId: scene.sceneDocumentId,
             videoPrompt: scene.videoPrompt,
             characterDocumentIds: scene.characterDocumentIds,
+            instruction: scene.instruction,
           });
           for (const shot of scene.shots)
             items.push({ entityType: 'shot', action: 'create', parentItemOrdinal, ...shot });

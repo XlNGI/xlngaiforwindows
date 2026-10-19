@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
 import { resolveSceneMedia } from './scene-media-service.js';
 import { ProductionService } from './production-service.js';
+import { ShotContinuityService } from './shot-continuity-service.js';
 import type { CharacterVoiceReferenceSaveParams } from '@ai-video/contracts';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
@@ -44,6 +45,7 @@ import {
   type ConversationModelPreferenceGetParams,
   type ConversationModelPreferenceSetParams,
   type ConversationModelPreferenceClearParams,
+  type ConversationPromptTemplateSaveParams,
   type DocumentRestoreParams,
   type DocumentDraftSaveParams,
   type DocumentPublishParams,
@@ -117,7 +119,7 @@ import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
 import { NovelContextService } from './novel-context-service.js';
 import { DocumentWorkflowError, DocumentWorkflowService } from './document-workflow-service.js';
-import { GenerationService } from './generation-service.js';
+import { ConversationBusyError, GenerationService } from './generation-service.js';
 import { ProjectService } from './project-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
@@ -157,6 +159,13 @@ import { NativeProviderBridge } from './native-provider-bridge.js';
 import { MediaOrchestrationService } from './media-orchestration-service.js';
 import { ProjectStructureCompiler } from './structure-compiler.js';
 import { ProjectTaskRuntime } from './project-task-runtime.js';
+import { TaskScheduleService } from './task-schedule-service.js';
+import { TaskCapacity } from './task-capacity.js';
+import { ExecutionPool } from './execution-pool.js';
+import { NovelBatchService } from './novel-batch-service.js';
+import { FileTaskService } from './file-task-service.js';
+import { ProjectRuntimeRegistry, ProjectRuntimeScopeError } from './project-runtime-registry.js';
+import { resetRuntime, recoverRuntime } from './worker-commands.js';
 import { DubbingService, DubbingValidationError } from './dubbing-service.js';
 import type { DubbingWorkerMethodMap } from '@ai-video/contracts';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
@@ -194,6 +203,7 @@ export function resolveMediaProviderRegion(profile: {
  * canonical local ID. No provider, model, adapter, or region is inferred.
  */
 function resolveMediaSelectionForRequest(
+  adapterService: AdapterService,
   capability: 'image' | 'video',
   adapterKey: string,
   providerProfileId: string | undefined,
@@ -452,7 +462,7 @@ function adapterMatchesCapability(
 function toModelSchemaInfo(
   profile: ReturnType<typeof appSettingsService.listProfiles>[number],
   model: ReturnType<typeof appSettingsService.listModels>[number],
-  adapters: ReturnType<typeof adapterService.catalog>['adapters'],
+  adapters: ReturnType<AdapterService['catalog']>['adapters'],
   capability?: UnifiedAgentCapability,
 ): UnifiedAgentModelSchemaInfo {
   const matchingAdapters = adapters.filter((adapter) =>
@@ -550,6 +560,14 @@ const methods = new Set<WorkerMethod>([
   'project.open',
   'project.close',
   'project.current',
+  'project.runtime.attach',
+  'project.runtime.create',
+  'project.runtime.createSample',
+  'project.runtime.restore',
+  'project.runtime.activate',
+  'project.runtime.unload',
+  'project.runtime.list',
+  'project.runtime.registrations',
   'project.recent',
   'project.integrity',
   'project.backup',
@@ -603,6 +621,14 @@ const methods = new Set<WorkerMethod>([
   'novel.intent.list',
   'novel.intent.cancel',
   'novel.export.prepare',
+  'novel.export.start',
+  'novel.export.get',
+  'novel.export.list',
+  'novel.export.cancel',
+  'file.task.create',
+  'file.task.get',
+  'file.task.list',
+  'file.task.cancel',
   'novel.export.reveal',
   'agent.partial.list',
   'agent.partial.recover',
@@ -632,6 +658,10 @@ const methods = new Set<WorkerMethod>([
   'adapter.schema.audit.list',
   'conversation.runtime.start',
   'conversation.runtime.get',
+  'conversation.runtime.list',
+  'conversation.runtime.supplement',
+  'novel.batch.get',
+  'novel.batch.cancel',
   'conversation.runtime.confirm',
   'conversation.runtime.selectMedia',
   'conversation.runtime.confirmMediaSubmission',
@@ -651,6 +681,15 @@ const methods = new Set<WorkerMethod>([
   'scene.list',
   'production.read',
   'production.compile',
+  'shot.continuity.get',
+  'shot.continuity.preview',
+  'shot.continuity.confirm',
+  'shot.continuity.clear',
+  'shot.continuity.firstFrame',
+  'shot.continuity.prompt.prepare',
+  'shot.continuity.prompt.save',
+  'production.defaults.get',
+  'production.defaults.save',
   'scene.save',
   'shot.list',
   'shot.save',
@@ -664,6 +703,8 @@ const methods = new Set<WorkerMethod>([
   'conversation.modelPreference.get',
   'conversation.modelPreference.set',
   'conversation.modelPreference.clear',
+  'conversation.promptTemplate.get',
+  'conversation.promptTemplate.save',
   'chat.message.list',
   'chat.message.save',
   'chat.message.toDocument',
@@ -706,6 +747,11 @@ const methods = new Set<WorkerMethod>([
   'video.generate.get',
   'video.generate.list',
   'project.task.subscribe',
+  'task.schedule.list',
+  'task.schedule.get',
+  'task.schedule.events',
+  'task.schedule.create',
+  'task.schedule.cancel',
   'asset.list',
   'scene.media.resolve',
   'asset.preview',
@@ -737,171 +783,348 @@ const packagedSqliteBinding = isPackaged
   ? // eslint-disable-next-line @typescript-eslint/no-require-imports
     (require('better-sqlite3/build/Release/better_sqlite3.node') as object)
   : undefined;
-const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding });
 const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqliteBinding });
 setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
-const contentService = new ContentService(projectService);
-const documentWorkflowService = new DocumentWorkflowService(projectService);
-const novelService = new NovelService(projectService);
-const agentOrchestrationService = new AgentOrchestrationService(projectService);
-const partialArtifactService = new PartialArtifactService(projectService, documentWorkflowService);
-const markdownExportService = new MarkdownExportService(projectService);
-const changeSetService = new ChangeSetService(projectService);
-const taskPlanService = new TaskPlanService(projectService);
-let piConversationRuntime: PiConversationRuntime | undefined;
-
-export function configurePiConversationRuntime(bridge: NativeProviderBridge): void {
-  nativeProviderBridge = bridge;
-  projectTaskRuntime.start();
-  dubbingService.recover();
-  piConversationRuntime = new PiConversationRuntime({
-    generation: generationService,
-    plans: taskPlanService,
-    bridge,
-    createGateway: (identity) =>
-      new DomainToolGateway(
-        projectService,
-        taskPlanService,
-        documentWorkflowService,
-        changeSetService,
-        identity,
-      ),
-    providerTools: agentProviderLoopService,
-  });
-}
-const adapterService = new AdapterService(projectService);
-const imageGenerationService = new ImageGenerationService(projectService);
-const videoGenerationService = new VideoGenerationService(
-  projectService,
-  undefined,
-  appSettingsService,
-);
-const maintenanceService = new MaintenanceService(projectService);
-const sampleProjectService = new SampleProjectService(projectService);
-const contextService = new ContextService(projectService);
-const novelContextService = new NovelContextService(projectService);
-const usageService = new UsageService(projectService, appSettingsService, {
-  nativeBinding: packagedSqliteBinding,
-});
+let nativeProviderBridge: NativeProviderBridge | undefined;
+const taskCapacity = new TaskCapacity();
+const executionPool = new ExecutionPool();
 const llmProvider = new OpenAIResponsesProvider({
   apiKey: process.env.OPENAI_API_KEY,
   baseUrl: process.env.OPENAI_BASE_URL,
   model: process.env.OPENAI_MODEL,
 });
-const generationService = new GenerationService(
-  projectService,
-  contentService,
-  contextService,
-  llmProvider,
-  {
-    novelContextService,
-    selectionResolver: appSettingsService,
-    usageIndexer: appSettingsService,
-    generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
-  },
-);
-const mediaPreparationService = new MediaPreparationService(
-  projectService,
-  appSettingsService,
-  adapterService,
-  imageGenerationService,
-  videoGenerationService,
-  (identity) => generationService.runtime(identity).attachments ?? [],
-);
-let nativeProviderBridge: NativeProviderBridge | undefined;
-const mediaOrchestrationService = new MediaOrchestrationService(
-  projectService,
-  appSettingsService,
-  imageGenerationService,
-  videoGenerationService,
-  {
-    request: async (...args: Parameters<NativeProviderBridge['request']>) => {
-      if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
-      return nativeProviderBridge.request(...args);
+function createProjectRuntimeServices() {
+  const projectService = new ProjectService({ nativeBinding: packagedSqliteBinding });
+  const contentService = new ContentService(projectService);
+  const documentWorkflowService = new DocumentWorkflowService(projectService);
+  const novelService = new NovelService(projectService);
+  const agentOrchestrationService = new AgentOrchestrationService(projectService);
+  const partialArtifactService = new PartialArtifactService(
+    projectService,
+    documentWorkflowService,
+  );
+  const markdownExportService = new MarkdownExportService(projectService, undefined, executionPool);
+  const fileTaskService = new FileTaskService(projectService, novelService, executionPool);
+  const changeSetService = new ChangeSetService(projectService);
+  const taskPlanService = new TaskPlanService(projectService);
+  let piConversationRuntime: PiConversationRuntime | undefined;
+
+  function configureRuntime(bridge: NativeProviderBridge): void {
+    nativeProviderBridge = bridge;
+    projectTaskRuntime.start();
+    dubbingService.recover();
+    if (piConversationRuntime && piConversationRuntime.list().length > 0) return;
+    piConversationRuntime = new PiConversationRuntime({
+      generation: generationService,
+      capacity: executionPool,
+      plans: taskPlanService,
+      bridge,
+      createGateway: (identity) =>
+        new DomainToolGateway(
+          projectService,
+          taskPlanService,
+          documentWorkflowService,
+          changeSetService,
+          identity,
+        ),
+      providerTools: agentProviderLoopService,
+    });
+  }
+  const adapterService = new AdapterService(projectService);
+  const imageGenerationService = new ImageGenerationService(
+    projectService,
+    undefined,
+    undefined,
+    executionPool,
+  );
+  const videoGenerationService = new VideoGenerationService(
+    projectService,
+    undefined,
+    appSettingsService,
+    executionPool,
+  );
+  const maintenanceService = new MaintenanceService(projectService);
+  const sampleProjectService = new SampleProjectService(projectService);
+  const contextService = new ContextService(projectService);
+  const novelContextService = new NovelContextService(projectService);
+  const usageService = new UsageService(projectService, appSettingsService, {
+    nativeBinding: packagedSqliteBinding,
+  });
+
+  const generationService = new GenerationService(
+    projectService,
+    contentService,
+    contextService,
+    llmProvider,
+    {
+      novelContextService,
+      selectionResolver: appSettingsService,
+      usageIndexer: appSettingsService,
+      generationMetricReporter: (metric) => maintenanceService.recordGenerationMetric(metric),
     },
-  } as unknown as NativeProviderBridge,
-);
-const projectTaskRuntime = new ProjectTaskRuntime(projectService, videoGenerationService, {
-  request: async (...args: Parameters<NativeProviderBridge['request']>) => {
-    if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
-    return nativeProviderBridge.request(...args);
-  },
-} as Pick<NativeProviderBridge, 'request'>);
-const dubbingService = new DubbingService(projectService, appSettingsService, {
-  nativeAvailable: () => Boolean(nativeProviderBridge),
-  native: {
-    request: async (...args: Parameters<NativeProviderBridge['request']>) => {
-      if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
-      return nativeProviderBridge.request(...args);
+  );
+  const mediaPreparationService = new MediaPreparationService(
+    projectService,
+    appSettingsService,
+    adapterService,
+    imageGenerationService,
+    videoGenerationService,
+    (identity) => generationService.runtime(identity).attachments ?? [],
+  );
+  const shotContinuityService = new ShotContinuityService(
+    projectService,
+    imageGenerationService,
+    undefined,
+    executionPool,
+    generationService,
+    appSettingsService,
+  );
+  const taskScheduleService = new TaskScheduleService(projectService, {
+    enabled: process.env.AI_VIDEO_TASK_SCHEDULER_ENABLED !== '0',
+    capacity: taskCapacity,
+  });
+  const mediaOrchestrationService = new MediaOrchestrationService(
+    projectService,
+    appSettingsService,
+    imageGenerationService,
+    videoGenerationService,
+    {
+      request: async (...args: Parameters<NativeProviderBridge['request']>) => {
+        if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
+        return nativeProviderBridge.request(...args);
+      },
+    } as unknown as NativeProviderBridge,
+    undefined,
+    taskScheduleService,
+    executionPool,
+  );
+  const projectTaskRuntime = new ProjectTaskRuntime(
+    projectService,
+    videoGenerationService,
+    {
+      request: async (...args: Parameters<NativeProviderBridge['request']>) => {
+        if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
+        return nativeProviderBridge.request(...args);
+      },
+    } as Pick<NativeProviderBridge, 'request'>,
+    { scheduler: taskScheduleService, images: imageGenerationService },
+  );
+  const dubbingService = new DubbingService(projectService, appSettingsService, {
+    capacity: executionPool,
+    nativeAvailable: () => Boolean(nativeProviderBridge),
+    native: {
+      request: async (...args: Parameters<NativeProviderBridge['request']>) => {
+        if (!nativeProviderBridge) throw new Error('Native Provider bridge is not configured.');
+        return nativeProviderBridge.request(...args);
+      },
     },
-  },
-});
-const agentSystemToolService = new AgentSystemToolService(
-  projectService,
-  contentService,
-  imageGenerationService,
-  appSettingsService,
-  mediaPreparationService,
-  documentWorkflowService,
-  maintenanceService,
-  new ProjectStructureCompiler(),
-  novelService,
-);
-const agentProviderLoopService = new AgentProviderLoopService(
-  projectService,
-  documentWorkflowService,
-  undefined,
-  changeSetService,
-  {
-    get: (adapterKey) =>
-      appSettingsService.getAdapterSchema(adapterKey) ?? getAdapter(adapterKey) ?? null,
-  },
-  {
-    propose: ({ adapterKey, descriptor, reason, conversationId }) => {
-      validateAdapterDescriptorProposal(adapterKey, descriptor);
-      const existing =
-        appSettingsService.getAdapterSchema(adapterKey) ??
-        adapterService.catalog().adapters.find((adapter) => adapter.key === adapterKey);
-      if (
-        existing &&
-        (existing.endpoint !== descriptor.endpoint ||
-          existing.credentialProvider !== descriptor.credentialProvider ||
-          existing.provider !== descriptor.provider)
-      ) {
-        throw new AdapterSchemaValidationError(
-          'Agent schema proposals cannot change provider connection or credential settings.',
+  });
+  const agentSystemToolService: AgentSystemToolService = new AgentSystemToolService(
+    projectService,
+    contentService,
+    imageGenerationService,
+    appSettingsService,
+    mediaPreparationService,
+    documentWorkflowService,
+    maintenanceService,
+    new ProjectStructureCompiler(),
+    novelService,
+    {
+      submit: (...args) => novelBatchService.submit(...args),
+      get: (...args) => novelBatchService.get(...args),
+      readSource: (...args) => novelBatchService.readSource(...args),
+    },
+  );
+  const agentProviderLoopService: AgentProviderLoopService = new AgentProviderLoopService(
+    projectService,
+    documentWorkflowService,
+    undefined,
+    changeSetService,
+    {
+      get: (adapterKey) =>
+        appSettingsService.getAdapterSchema(adapterKey) ?? getAdapter(adapterKey) ?? null,
+    },
+    {
+      propose: ({ adapterKey, descriptor, reason, conversationId }) => {
+        validateAdapterDescriptorProposal(adapterKey, descriptor);
+        const existing =
+          appSettingsService.getAdapterSchema(adapterKey) ??
+          adapterService.catalog().adapters.find((adapter) => adapter.key === adapterKey);
+        if (
+          existing &&
+          (existing.endpoint !== descriptor.endpoint ||
+            existing.credentialProvider !== descriptor.credentialProvider ||
+            existing.provider !== descriptor.provider)
+        ) {
+          throw new AdapterSchemaValidationError(
+            'Agent schema proposals cannot change provider connection or credential settings.',
+          );
+        }
+        const diff = diffAdapterDescriptors(existing, descriptor);
+        const proposal = appSettingsService.proposeAdapterSchema(
+          {
+            adapterKey,
+            descriptor,
+            reason,
+            conversationId,
+            actorType: 'agent',
+          },
+          diff,
         );
-      }
-      const diff = diffAdapterDescriptors(existing, descriptor);
-      const proposal = appSettingsService.proposeAdapterSchema(
+        if (!schemaDiffRequiresConfirmation(diff)) {
+          appSettingsService.confirmAdapterSchema({
+            adapterKey,
+            version: proposal.version,
+            reason: '低风险 Schema 字段变更自动确认',
+            conversationId,
+            actorType: 'agent',
+          });
+          return { ...proposal, requiresConfirmation: false };
+        }
+        return proposal;
+      },
+      listAudits: (adapterKey, limit) =>
+        appSettingsService.listAdapterSchemaAudits(adapterKey, limit),
+    } satisfies AgentSchemaManager,
+    agentSystemToolService,
+    mediaPreparationService,
+    mediaOrchestrationService,
+  );
+  const novelBatchService: NovelBatchService = new NovelBatchService(projectService, {
+    available: () => Boolean(piConversationRuntime) && resolvePiConversationRuntimeEnabled(),
+    prepare: (params, target) =>
+      prepareAgentGeneration(
         {
-          adapterKey,
-          descriptor,
-          reason,
-          conversationId,
-          actorType: 'agent',
+          generations: generationService,
+          loop: agentProviderLoopService,
+          orchestration: agentOrchestrationService,
         },
-        diff,
-      );
-      if (!schemaDiffRequiresConfirmation(diff)) {
-        appSettingsService.confirmAdapterSchema({
-          adapterKey,
-          version: proposal.version,
-          reason: '低风险 Schema 字段变更自动确认',
-          conversationId,
-          actorType: 'agent',
+        params,
+        target,
+      ),
+    start: async (prepared) => {
+      try {
+        if (!piConversationRuntime) throw new Error('Pi runtime is unavailable.');
+        await piConversationRuntime.start({
+          identity: prepared.stream,
+          projectId: prepared.stream.projectId,
+          projectSessionId: prepared.stream.projectSessionId,
+          conversationId: prepared.stream.conversationId,
+          taskId: prepared.agentTaskId,
+          mode: 'novel-writing',
+          prompt: prepared.generation.userMessage.content,
         });
-        return { ...proposal, requiresConfirmation: false };
+      } catch (error) {
+        agentProviderLoopService.terminateGeneration(
+          prepared.stream.generationId,
+          'failed',
+          error instanceof Error ? error.message : 'Batch child could not start.',
+        );
+        generationService.failNative({
+          ...prepared.stream,
+          content: '',
+          error: 'Batch child could not start.',
+          retryable: true,
+        });
       }
-      return proposal;
     },
-    listAudits: (adapterKey, limit) =>
-      appSettingsService.listAdapterSchemaAudits(adapterKey, limit),
-  } satisfies AgentSchemaManager,
-  agentSystemToolService,
-  mediaPreparationService,
-  mediaOrchestrationService,
+    cancel: async (id) => {
+      piConversationRuntime?.cancel(id);
+      agentProviderLoopService.terminateGeneration(id, 'cancelled');
+      await generationService.cancel(id);
+    },
+    discardUncommitted: () => generationService.discardUncommitted(),
+  });
+
+  const services = {
+    appSettingsService,
+    projectService,
+    contentService,
+    documentWorkflowService,
+    novelService,
+    agentOrchestrationService,
+    partialArtifactService,
+    markdownExportService,
+    fileTaskService,
+    changeSetService,
+    taskPlanService,
+    novelBatchService,
+    adapterService,
+    imageGenerationService,
+    videoGenerationService,
+    maintenanceService,
+    sampleProjectService,
+    contextService,
+    novelContextService,
+    usageService,
+    generationService,
+    mediaPreparationService,
+    shotContinuityService,
+    taskScheduleService,
+    mediaOrchestrationService,
+    projectTaskRuntime,
+    dubbingService,
+    agentSystemToolService,
+    agentProviderLoopService,
+    get piConversationRuntime() {
+      return piConversationRuntime;
+    },
+    configureRuntime,
+    async stop() {
+      shotContinuityService.cancelAll();
+      await fileTaskService.stop();
+      await markdownExportService.stop();
+      taskScheduleService.cancelAllWaiting();
+      piConversationRuntime?.cancelAll();
+      await piConversationRuntime?.drain();
+      await resetRuntime(services);
+    },
+    recover() {
+      recoverRuntime(services);
+    },
+    isBusy() {
+      if (!projectService.current()) return false;
+      return projectService.access(false, (db) =>
+        Boolean(
+          db
+            .prepare(
+              `SELECT 1 FROM llm_generations WHERE status IN ('prepared','streaming')
+        UNION ALL SELECT 1 FROM generation_jobs WHERE media_state IN ('awaiting_confirmation','submitting','submission_unknown','polling','downloading')
+        UNION ALL SELECT 1 FROM dubbing_jobs WHERE status IN ('pending','running','cancelling','interrupted')
+        UNION ALL SELECT 1 FROM file_tasks WHERE status IN ('pending','running')
+        UNION ALL SELECT 1 FROM markdown_export_jobs WHERE status IN ('queued','writing','verifying') LIMIT 1`,
+            )
+            .get(),
+        ),
+      );
+    },
+  };
+  if (nativeProviderBridge) configureRuntime(nativeProviderBridge);
+  return services;
+}
+type RuntimeServices = ReturnType<typeof createProjectRuntimeServices>;
+const runtimeRegistry = new ProjectRuntimeRegistry(
+  createProjectRuntimeServices,
+  appSettingsService,
+  {
+    nativeBinding: packagedSqliteBinding,
+    maxLoaded: process.env.AI_VIDEO_TASK_SCHEDULER_ENABLED === '0' ? 1 : 4,
+  },
 );
+export function configurePiConversationRuntime(bridge: NativeProviderBridge): void {
+  nativeProviderBridge = bridge;
+  for (const runtime of runtimeRegistry.all()) runtime.configureRuntime(bridge);
+  void runtimeRegistry
+    .restoreRegistered()
+    .catch((error: unknown) => recordWorkerError('project.runtime.restore', error));
+}
+
+/** Used by controlled host shutdown and integration harnesses after admission stops. */
+export async function shutdownWorker(): Promise<void> {
+  await runtimeRegistry.shutdown();
+  await runtimeRegistry.fallback.stop();
+  appSettingsService.close();
+}
 
 function errorResponse(id: string, error: WorkerError): WorkerResponse {
   return {
@@ -913,11 +1136,11 @@ function errorResponse(id: string, error: WorkerError): WorkerResponse {
 }
 
 export function recordWorkerError(operation: string, error: unknown): void {
-  maintenanceService.recordError(operation, error);
+  runtimeRegistry.fallback.maintenanceService.recordError(operation, error);
 }
 
 export function recordQueueWait(method: WorkerMethod, waitMs: number): void {
-  maintenanceService.recordQueueWait(method, waitMs);
+  runtimeRegistry.fallback.maintenanceService.recordQueueWait(method, waitMs);
 }
 
 export function parseRequest(value: unknown): WorkerRequest | WorkerResponse {
@@ -945,11 +1168,21 @@ export function parseRequest(value: unknown): WorkerRequest | WorkerResponse {
     });
   }
 
+  try {
+    validateRuntimeScope(candidate.scope);
+  } catch (error) {
+    return errorResponse(id, {
+      code: 'INVALID_REQUEST',
+      message: error instanceof Error ? error.message : 'Invalid runtime scope.',
+    });
+  }
+
   return {
     id,
     protocolVersion: IPC_PROTOCOL_VERSION,
     method: candidate.method,
     params: candidate.params ?? {},
+    ...(candidate.scope ? { scope: candidate.scope } : {}),
   };
 }
 
@@ -1014,7 +1247,10 @@ function requireNumber(params: Record<string, unknown>, key: string): number {
   return value;
 }
 
-function listGenerationJobEvents(params: GenerationJobEventsListParams): GenerationJobEventsPage {
+function listGenerationJobEvents(
+  projectService: ProjectService,
+  params: GenerationJobEventsListParams,
+): GenerationJobEventsPage {
   const jobId = requireString(params as unknown as Record<string, unknown>, 'jobId');
   const afterSequence = Math.max(-1, Math.floor(params.afterSequence ?? -1));
   const limit = Math.min(Math.max(Math.floor(params.limit ?? 50), 1), 100);
@@ -1093,18 +1329,184 @@ function optionalImageAssetKind(
 }
 
 export async function handleRequest(request: WorkerRequest): Promise<WorkerResponse> {
-  const startedAt = performance.now();
-  const response = await handleRequestCore(request);
-  maintenanceService.recordRequest(
-    request.method,
-    request.id,
-    response.ok,
-    performance.now() - startedAt,
-  );
-  return response;
+  return bindWorkerRequest(request).run();
 }
 
-async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse> {
+function validateRuntimeScope(value: unknown): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new RequestValidationError('Runtime scope must be an object.');
+  const scope = value as Record<string, unknown>;
+  if (
+    Object.keys(scope).some((key) => key !== 'projectId' && key !== 'projectSessionId') ||
+    [scope.projectId, scope.projectSessionId].some(
+      (id) => typeof id !== 'string' || !id.trim() || id.length > 128,
+    )
+  )
+    throw new RequestValidationError('Runtime scope requires bounded project and session IDs.');
+}
+
+const lifecycleMethods = new Set<string>([
+  'project.create',
+  'project.createSample',
+  'project.open',
+  'project.restore',
+  'project.close',
+]);
+/** Capture ownership at ingress, before a mutation is queued. */
+export function bindWorkerRequest(request: WorkerRequest): {
+  queueKey: string;
+  run: () => Promise<WorkerResponse>;
+} {
+  let services: RuntimeServices = runtimeRegistry.fallback;
+  let epoch: string | undefined;
+  let bindingError: unknown;
+  const control = request.method.startsWith('project.runtime.');
+  try {
+    validateRuntimeScope(request.scope);
+    services = request.scope ? runtimeRegistry.get(request.scope) : runtimeRegistry.current();
+    epoch = services.projectService.currentSessionId();
+  } catch (error) {
+    bindingError = error;
+  }
+  const release = runtimeRegistry.retain(services);
+  return {
+    queueKey:
+      control || lifecycleMethods.has(request.method)
+        ? 'project-lifecycle'
+        : (epoch ?? 'application'),
+    run: async () => {
+      const startedAt = performance.now();
+      try {
+        let response: WorkerResponse;
+        try {
+          if (bindingError)
+            throw bindingError instanceof Error
+              ? bindingError
+              : new Error('Project runtime binding failed.');
+          const params = validateSessionRequestParams(request.method, request.params);
+          if (control) {
+            let result: unknown;
+            if (request.scope)
+              throw new RequestValidationError(
+                'Lifecycle controls use their explicit runtime parameters.',
+              );
+            if (
+              [
+                'project.runtime.create',
+                'project.runtime.createSample',
+                'project.runtime.restore',
+              ].includes(request.method)
+            ) {
+              const method = request.method.replace('project.runtime.', 'project.') as WorkerMethod;
+              const created = (await runtimeRegistry.replace(async (runtime) => {
+                const response = await executeInfrastructureCommand(method, params, {
+                  ...runtime,
+                  appSettingsService,
+                });
+                return response.result;
+              })) as import('@ai-video/contracts').ProjectInfo;
+              result = runtimeRegistry.list().find((entry) => entry.project.id === created.id)!;
+            } else if (request.method === 'project.runtime.attach')
+              result = await runtimeRegistry.attach(
+                params as unknown as import('@ai-video/contracts').WorkerMethodMap['project.runtime.attach']['params'],
+              );
+            else if (request.method === 'project.runtime.activate')
+              result = await runtimeRegistry.activate(
+                params as unknown as import('@ai-video/contracts').ProjectRuntimeScope,
+              );
+            else if (request.method === 'project.runtime.unload')
+              result = await runtimeRegistry.unload(
+                params as unknown as import('@ai-video/contracts').ProjectRuntimeScope,
+              );
+            else if (request.method === 'project.runtime.registrations')
+              result = appSettingsService.listRuntimeRegistrations();
+            else result = runtimeRegistry.list();
+            response = {
+              id: request.id,
+              protocolVersion: IPC_PROTOCOL_VERSION,
+              ok: true,
+              result,
+            } as WorkerResponse;
+          } else if (lifecycleMethods.has(request.method)) {
+            runtimeRegistry.assertBound(services, epoch);
+            if (request.method !== 'project.close')
+              requireString(params, 'rootPath' in params ? 'rootPath' : 'destinationRoot');
+            const previous = epoch
+              ? { projectId: services.projectService.current()!.id, projectSessionId: epoch }
+              : undefined;
+            const result =
+              request.method === 'project.close'
+                ? previous
+                  ? await runtimeRegistry.unload(previous)
+                  : { closed: true }
+                : await runtimeRegistry.replace(async (runtime) => {
+                    const result = await executeInfrastructureCommand(request.method, params, {
+                      ...runtime,
+                      appSettingsService,
+                    });
+                    return result.result;
+                  }, previous);
+            response = {
+              id: request.id,
+              protocolVersion: IPC_PROTOCOL_VERSION,
+              ok: true,
+              result,
+            } as WorkerResponse;
+          } else {
+            runtimeRegistry.assertBound(services, epoch);
+            response = await handleRequestCore(request, services);
+          }
+        } catch (error) {
+          response = errorResponse(request.id, mapWorkerError(request.method, error));
+        }
+        services.maintenanceService.recordRequest(
+          request.method,
+          request.id,
+          response.ok,
+          performance.now() - startedAt,
+        );
+        return response;
+      } finally {
+        release();
+      }
+    },
+  };
+}
+
+async function handleRequestCore(
+  request: WorkerRequest,
+  services: RuntimeServices,
+): Promise<WorkerResponse> {
+  const {
+    projectService,
+    contentService,
+    documentWorkflowService,
+    novelService,
+    agentOrchestrationService,
+    partialArtifactService,
+    markdownExportService,
+    fileTaskService,
+    changeSetService,
+    adapterService,
+    imageGenerationService,
+    videoGenerationService,
+    maintenanceService,
+    sampleProjectService,
+    contextService,
+    novelContextService,
+    usageService,
+    generationService,
+    mediaPreparationService,
+    taskScheduleService,
+    mediaOrchestrationService,
+    projectTaskRuntime,
+    dubbingService,
+    agentProviderLoopService,
+    shotContinuityService,
+    piConversationRuntime,
+    novelBatchService,
+  } = services;
   try {
     if (request.method === 'health') {
       const result: HealthResult = {
@@ -1162,14 +1564,65 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
       videoGenerationService,
       projectTaskRuntime,
       dubbingService,
+      shotContinuityService,
     });
     if (infrastructure.handled) {
       result = infrastructure.result;
     } else {
       switch (request.method) {
+        case 'production.defaults.get':
+          result = new ProductionService(projectService).getDefaults();
+          break;
+        case 'production.defaults.save':
+          result = new ProductionService(projectService).saveDefaults(
+            params as unknown as {
+              expectedRowVersion: number;
+              settings: import('@ai-video/contracts').ProductionDefaults;
+            },
+          );
+          break;
         case 'production.read':
           result = new ProductionService(projectService).read(
             params.target as import('@ai-video/contracts').ProductionTarget,
+          );
+          break;
+        case 'shot.continuity.get':
+          result = shotContinuityService.get(requireString(params, 'shotId'));
+          break;
+        case 'shot.continuity.preview':
+          result = await shotContinuityService.preview(
+            params as unknown as import('@ai-video/contracts').ShotContinuityPreviewParams,
+          );
+          break;
+        case 'shot.continuity.confirm':
+          result = await shotContinuityService.confirm(
+            params as unknown as import('@ai-video/contracts').ShotContinuityConfirmParams,
+          );
+          break;
+        case 'shot.continuity.clear':
+          result = shotContinuityService.clear(
+            requireString(params, 'shotId'),
+            params.expectedRowVersion as number,
+          );
+          break;
+        case 'shot.continuity.firstFrame':
+          result = shotContinuityService.firstFrame(
+            requireString(params, 'shotId'),
+            params.expectedRowVersion as number,
+            requireString(params, 'assetId'),
+          );
+          break;
+        case 'shot.continuity.prompt.prepare':
+          result = await shotContinuityService.preparePrompt(
+            params as unknown as import('@ai-video/contracts').ShotContinuityPromptPrepareParams,
+          );
+          break;
+        case 'shot.continuity.prompt.save':
+          result = shotContinuityService.savePrompt(
+            requireString(params, 'shotId'),
+            params.expectedRowVersion as number,
+            params.kind as 'image' | 'video',
+            requireString(params, 'prompt'),
           );
           break;
         case 'production.compile':
@@ -1313,7 +1766,17 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = novelService.restoreChapter(params as unknown as NovelChapterRestoreParams);
           break;
         case 'novel.import':
-          result = novelService.importNovel(params as unknown as NovelImportParams);
+          {
+            const job = fileTaskService.create({
+              kind: 'novel-import',
+              input: params as unknown as NovelImportParams,
+              idempotencyKey: `legacy:${request.id}`,
+            });
+            const completed = await fileTaskService.wait(job.id);
+            if (completed.status !== 'succeeded')
+              throw new Error(completed.error ?? 'Novel import failed.');
+            result = completed.result;
+          }
           break;
         case 'novel.binding.list':
           result = novelService.listBindings(params);
@@ -1333,9 +1796,37 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           );
           break;
         case 'novel.export.prepare':
-          result = markdownExportService.prepare(
+          result = await markdownExportService.prepare(
             params as unknown as NovelMarkdownExportPrepareParams,
           );
+          break;
+        case 'novel.export.start':
+          result = markdownExportService.start(
+            params as unknown as NovelMarkdownExportPrepareParams,
+          );
+          break;
+        case 'novel.export.get':
+          result = markdownExportService.get(String(params.jobId));
+          break;
+        case 'novel.export.list':
+          result = markdownExportService.list();
+          break;
+        case 'novel.export.cancel':
+          result = await markdownExportService.cancel(String(params.jobId));
+          break;
+        case 'file.task.create':
+          result = fileTaskService.create(
+            params as unknown as import('@ai-video/contracts').FileTaskCreateParams,
+          );
+          break;
+        case 'file.task.get':
+          result = fileTaskService.get(String(params.taskId));
+          break;
+        case 'file.task.list':
+          result = fileTaskService.list();
+          break;
+        case 'file.task.cancel':
+          result = await fileTaskService.cancel(String(params.taskId));
           break;
         case 'novel.export.reveal':
           result = await markdownExportService.reveal({ jobId: requireString(params, 'jobId') });
@@ -1674,6 +2165,9 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
             {
               conversationId: agentParams.conversationId,
               prompt: agentParams.prompt,
+              ...(resolvePiConversationRuntimeEnabled()
+                ? { taskExecution: agentParams.taskExecution ?? ('parallel' as const) }
+                : {}),
               providerProfileId: selected.providerProfileId,
               modelId: selected.modelId,
               attachments: agentParams.attachments,
@@ -1766,6 +2260,24 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           });
           break;
         }
+        case 'novel.batch.get':
+          result = novelBatchService.get(String(params.batchId));
+          break;
+        case 'novel.batch.cancel':
+          result = await novelBatchService.cancel(String(params.batchId));
+          break;
+        case 'conversation.runtime.supplement':
+          if (!piConversationRuntime?.hasActive(String(params.generationId)))
+            throw new Error('Target runtime is no longer accepting input.');
+          result = generationService.supplement(
+            String(params.generationId),
+            String(params.content),
+            String(params.idempotencyKey),
+          );
+          break;
+        case 'conversation.runtime.list':
+          result = piConversationRuntime?.list() ?? [];
+          break;
         case 'conversation.runtime.get': {
           if (!piConversationRuntime) throw new Error('Pi conversation runtime is not configured.');
           result = piConversationRuntime.get(requireString(params, 'generationId'));
@@ -1893,7 +2405,10 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
           result = documentWorkflowService.listTaskLog(params);
           break;
         case 'generation.job.events.list':
-          result = listGenerationJobEvents(params as unknown as GenerationJobEventsListParams);
+          result = listGenerationJobEvents(
+            projectService,
+            params as unknown as GenerationJobEventsListParams,
+          );
           break;
         case 'scene.list':
           result = contentService.listScenes();
@@ -1945,6 +2460,16 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'conversation.modelPreference.clear':
           result = contentService.clearConversationModelPreference(
             params as unknown as ConversationModelPreferenceClearParams,
+          );
+          break;
+        case 'conversation.promptTemplate.get':
+          result = contentService.getConversationPromptTemplate(
+            requireString(params, 'conversationId'),
+          );
+          break;
+        case 'conversation.promptTemplate.save':
+          result = contentService.saveConversationPromptTemplate(
+            params as unknown as ConversationPromptTemplateSaveParams,
           );
           break;
         case 'chat.message.list':
@@ -2051,6 +2576,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'image.generate.prepare': {
           const imageParams = params as unknown as ImageGenerationPrepareParams;
           const selection = resolveMediaSelectionForRequest(
+            adapterService,
             'image',
             imageParams.adapterKey,
             imageParams.providerProfileId,
@@ -2118,6 +2644,7 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'video.generate.prepare': {
           const videoParams = params as unknown as VideoGenerationPrepareParams;
           const selection = resolveMediaSelectionForRequest(
+            adapterService,
             'video',
             requireString(params, 'adapterKey'),
             videoParams.providerProfileId,
@@ -2194,6 +2721,50 @@ async function handleRequestCore(request: WorkerRequest): Promise<WorkerResponse
         case 'video.generate.list':
           result = videoGenerationService.list();
           break;
+        case 'task.schedule.list':
+        case 'task.schedule.get':
+        case 'task.schedule.events':
+        case 'task.schedule.create':
+        case 'task.schedule.cancel': {
+          if (params.projectId !== projectService.current()?.id)
+            throw new RequestValidationError('Scheduled task project scope is stale.');
+          if (
+            (request.method === 'task.schedule.create' ||
+              request.method === 'task.schedule.cancel') &&
+            params.projectSessionId !== projectService.currentSessionId()
+          )
+            throw new RequestValidationError('Scheduled task runtime scope is stale.');
+          const id = (key: string) => {
+            const value = requireString(params, key);
+            if (value.length > 128) throw new RequestValidationError('Task ID exceeds its limit.');
+            return value;
+          };
+          if (request.method === 'task.schedule.list') result = taskScheduleService.list();
+          else if (request.method === 'task.schedule.get')
+            result = taskScheduleService.get(id('taskId'));
+          else if (request.method === 'task.schedule.events') {
+            const after = params.afterSequence ?? 0;
+            if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0)
+              throw new RequestValidationError('Event sequence is invalid.');
+            result = taskScheduleService.events(id('taskId'), after);
+          } else if (request.method === 'task.schedule.create') {
+            const upstream = params.upstreamTaskIds ?? [];
+            if (
+              !Array.isArray(upstream) ||
+              upstream.length > 32 ||
+              upstream.some(
+                (value: unknown) =>
+                  typeof value !== 'string' || !value.trim() || value.length > 128,
+              )
+            )
+              throw new RequestValidationError('Task dependencies are invalid.');
+            result = taskScheduleService.register(id('jobId'), upstream as string[]);
+          } else {
+            const task = taskScheduleService.get(id('taskId'));
+            result = await mediaOrchestrationService.cancel({ jobId: task.ownerJobId });
+          }
+          break;
+        }
         case 'project.task.subscribe':
           result = projectTaskRuntime.snapshot(
             typeof params.afterRevision === 'number' ? params.afterRevision : -1,
@@ -2484,8 +3055,13 @@ function schemaDiffRequiresConfirmation(diff: string[]): boolean {
 
 function mapWorkerError(operation: string, error: unknown): WorkerError {
   const message = error instanceof Error ? error.message : 'Unexpected worker error.';
+  if (error instanceof ProjectRuntimeScopeError)
+    return { code: 'STALE_SESSION', message, retryable: false, operation };
   if (error instanceof RequestValidationError) {
     return { code: 'INVALID_REQUEST', message, retryable: false, operation };
+  }
+  if (error instanceof ConversationBusyError) {
+    return { code: 'CONFLICT', message, retryable: false, operation };
   }
   if (error instanceof DubbingValidationError) {
     return {

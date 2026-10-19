@@ -10,19 +10,6 @@
   grid-column: 1 / -1;
   flex: 0 0 auto;
 }
-/* Scene and shot sections share one scroll owner; neither may collapse into the other. */
-.directory-pane:has(> .scene-workspace) {
-  overflow-y: auto;
-}
-.directory-pane:has(> .scene-workspace) > .scene-workspace,
-.directory-pane:has(> .scene-workspace) > .shot-workspace,
-.directory-pane:has(> .scene-workspace) > .empty-stage {
-  flex: 0 0 auto;
-  min-width: 0;
-}
-.directory-pane:has(> .scene-workspace) > .shot-workspace {
-  overflow: visible;
-}
 .scene-workspace:has(.dubbing-panel) {
   padding-bottom: 14px;
 }

@@ -12,6 +12,49 @@ export const officialVideoAudioContracts: readonly ModelContract[] =
   videoAudioContracts as ModelContract[];
 export const mediaModelBindings: readonly ModelBinding[] = bindings as ModelBinding[];
 
+export function supportsProductionAudioUpload(
+  adapter:
+    | {
+        provider: string;
+        contractId?: string;
+        contractRevision?: number;
+      }
+    | undefined,
+): boolean {
+  return Boolean(
+    adapter &&
+    mediaModelBindings.some(
+      (binding) =>
+        binding.providerType === adapter.provider &&
+        binding.contractId === adapter.contractId &&
+        binding.contractRevision === adapter.contractRevision &&
+        binding.status === 'enabled' &&
+        binding.inputTransport?.audio === 'upload',
+    ),
+  );
+}
+
+/** New tasks use the highest registered revision; older bindings remain for frozen task recovery. */
+export function currentMediaModelBinding(providerType: string, remoteModelId: string) {
+  return mediaModelBindings
+    .filter(
+      (binding) => binding.providerType === providerType && binding.remoteModelId === remoteModelId,
+    )
+    .sort((left, right) => right.contractRevision - left.contractRevision)[0];
+}
+
+export function isWanMediaAdapter(
+  adapter: { provider: string; contractId?: string; contractRevision?: number } | undefined,
+): boolean {
+  return Boolean(
+    adapter &&
+    (adapter.provider === 'wan-video' || adapter.provider === 'unicompapi') &&
+    (adapter.contractId === 'cn.qwen.wan3-0-video' ||
+      adapter.contractId === 'cn.qwen.wan3-0-video-prime') &&
+    adapter.contractRevision === 3,
+  );
+}
+
 export function adapterBindsCatalogModel(
   adapter: {
     provider: string;
@@ -30,13 +73,12 @@ export function adapterBindsCatalogModel(
   if (adapter.provider !== selection.providerType) return false;
   if (/^contract-\d+$/u.test(adapter.apiVersion ?? '')) {
     if (selection.contractStatus && selection.contractStatus !== 'enabled') return false;
-    return mediaModelBindings.some(
-      (binding) =>
-        binding.providerType === selection.providerType &&
-        binding.remoteModelId === selection.remoteModelId &&
-        binding.contractId === adapter.contractId &&
-        binding.contractRevision === (adapter.contractRevision ?? 1) &&
-        binding.status === 'enabled',
+    const binding = currentMediaModelBinding(selection.providerType, selection.remoteModelId);
+    return Boolean(
+      binding &&
+      binding.contractId === adapter.contractId &&
+      binding.contractRevision === (adapter.contractRevision ?? 1) &&
+      binding.status === 'enabled',
     );
   }
   return selection.providerType === 'unicompapi'

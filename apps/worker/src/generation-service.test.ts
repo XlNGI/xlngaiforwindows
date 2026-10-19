@@ -12,6 +12,8 @@ import {
   type LlmUsageIndexer,
 } from './generation-service.js';
 import { ProjectService } from './project-service.js';
+import { LibrarySearchService } from './library-search-service.js';
+import { DocumentWorkflowService } from './document-workflow-service.js';
 
 const directories: string[] = [];
 const projectsToClose: ProjectService[] = [];
@@ -49,6 +51,80 @@ async function setup(
 }
 
 describe('GenerationService', () => {
+  it('serializes a conversation across callers without duplicating messages or snapshots', async () => {
+    const stream = vi.fn(() => Promise.reject(new Error('must not start another Provider')));
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test', configured: true }),
+      stream,
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: 'profile',
+        modelId: 'model',
+        providerName: 'Test',
+        modelName: 'Test',
+        remoteModelId: 'test',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    };
+    const { projects, content, conversation, generations } = await setup(
+      provider,
+      selectionResolver,
+    );
+    const params = {
+      conversationId: conversation.id,
+      prompt: '修改现有设定',
+      providerProfileId: 'profile',
+      modelId: 'model',
+      idempotencyKey: 'first',
+    };
+    const first = generations.prepare(params);
+    expect(generations.prepare(params).generation.generationId).toBe(first.generation.generationId);
+    const otherCaller = new GenerationService(
+      projects,
+      content,
+      new ContextService(projects),
+      provider,
+      {
+        selectionResolver,
+      },
+    );
+    const counts = () =>
+      projects.access(false, (db) => ({
+        messages: db.prepare('SELECT COUNT(*) AS n FROM chat_messages').get(),
+        snapshots: db.prepare('SELECT COUNT(*) AS n FROM context_snapshots').get(),
+        generations: db.prepare('SELECT COUNT(*) AS n FROM llm_generations').get(),
+      }));
+    const before = counts();
+    expect(() =>
+      otherCaller.prepare({ ...params, prompt: '？', idempotencyKey: 'second' }),
+    ).toThrow('上一轮仍在执行');
+    expect(() => otherCaller.generate(conversation.id, '？')).toThrow('上一轮仍在执行');
+    generations.observe({ ...first.stream, content: '正在读取' });
+    expect(() => generations.prepare({ ...params, idempotencyKey: 'third' })).toThrow(
+      '上一轮仍在执行',
+    );
+    expect(counts()).toEqual(before);
+    expect(stream).not.toHaveBeenCalled();
+
+    const secondConversation = content.createConversation({ scopeType: 'project' });
+    expect(
+      generations.prepare({
+        ...params,
+        conversationId: secondConversation.id,
+        idempotencyKey: 'other',
+      }).generation.status,
+    ).toBe('prepared');
+    generations.complete({ ...first.stream, content: '已完成' });
+    const next = generations.prepare({ ...params, idempotencyKey: 'next' });
+    expect(next.generation.status).toBe('prepared');
+    await generations.cancel(next.generation.generationId);
+    expect(
+      generations.prepare({ ...params, idempotencyKey: 'after-cancel' }).generation.status,
+    ).toBe('prepared');
+  });
+
   it('labels the environment-variable provider as a legacy configuration source', async () => {
     const provider: LlmProvider = {
       status: () => ({ key: 'legacy', name: 'OpenAI', model: 'gpt-test', configured: true }),
@@ -879,4 +955,152 @@ describe('GenerationService', () => {
       assistantMessage: { content: 'Still complete', status: 'complete' },
     });
   });
+});
+
+it('freezes concurrent task inputs and excludes another active branch even after it completes and is indexed', async () => {
+  const provider: LlmProvider = {
+    status: () => ({ key: 'mock', name: 'Mock', model: 'mock', configured: true }),
+    stream: vi.fn(),
+  };
+  const resolver: LlmSelectionResolver = {
+    resolveLlmSelection: () => ({
+      providerProfileId: 'profile',
+      modelId: 'model',
+      providerName: 'Mock',
+      modelName: 'Mock',
+      remoteModelId: 'mock',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://mock.invalid/v1',
+    }),
+  };
+  const { projects, conversation, generations } = await setup(provider, resolver);
+  const params = {
+    conversationId: conversation.id,
+    providerProfileId: 'profile',
+    modelId: 'model',
+    taskExecution: 'parallel' as const,
+  };
+  const a = generations.prepare({ ...params, prompt: 'branch A isolated_secret' });
+  generations.observe({ ...a.stream, content: 'A partial isolated_secret' });
+  const b = generations.prepare({ ...params, prompt: 'Independent B input' });
+  expect(generations.runtime(b.stream).context).not.toContain('isolated_secret');
+  projects.access(true, (database, project) => {
+    const insert = database.prepare(
+      `INSERT INTO agent_tasks(id,project_id,project_session_id,conversation_id,user_message_id,task_type,scope_type,title,request_snapshot_json,request_hash,status,created_at,updated_at)VALUES(?,?,?,?,?,'document-create','project',?,?,'hash','running','now','now')`,
+    );
+    insert.run(
+      'parent-A',
+      project.id,
+      a.stream.projectSessionId,
+      conversation.id,
+      a.generation.userMessage.id,
+      'Parent A',
+      '{}',
+    );
+    insert.run(
+      'artifact-A',
+      project.id,
+      a.stream.projectSessionId,
+      conversation.id,
+      a.generation.userMessage.id,
+      'Artifact A',
+      JSON.stringify({ parentTaskId: 'parent-A' }),
+    );
+    database
+      .prepare(
+        "INSERT INTO agent_task_generations(task_id,generation_id,ordinal,purpose,created_at)VALUES('parent-A',?,0,'primary','now')",
+      )
+      .run(a.stream.generationId);
+  });
+  new DocumentWorkflowService(projects).saveDraft({
+    title: 'Private branch artifact',
+    kind: 'note',
+    contentMarkdown: 'private_artifact_secret',
+    sourceTaskId: 'artifact-A',
+    authorType: 'agent',
+  });
+  const artifactSearch = new LibrarySearchService(projects);
+  expect(
+    artifactSearch.search({
+      taskId: 'B',
+      attemptId: b.stream.attemptId,
+      query: 'private_artifact_secret',
+      sourceTypes: ['document'],
+    }).sources,
+  ).toEqual([]);
+
+  const supplement = generations.supplement(
+    a.stream.generationId,
+    'A supplemental isolated_secret',
+    'extra-A',
+  );
+  expect(generations.supplement(a.stream.generationId, supplement.content, 'extra-A').id).toBe(
+    supplement.id,
+  );
+  expect(() =>
+    generations.supplement(b.stream.generationId, supplement.content, 'extra-A'),
+  ).toThrow('different input');
+  generations.complete({ ...a.stream, content: 'A partial isolated_secret complete' });
+  const library = new LibrarySearchService(projects);
+  expect(
+    library.search({
+      taskId: 'B',
+      attemptId: b.stream.attemptId,
+      query: 'isolated_secret',
+      sourceTypes: ['conversation'],
+    }).sources,
+  ).toEqual([]);
+  expect(generations.runtime(b.stream).context).not.toContain('isolated_secret');
+  const rows = projects.access(false, (db) =>
+    db.prepare('SELECT * FROM generation_branches ORDER BY created_at,branch_id').all(),
+  );
+  expect(rows).toHaveLength(2);
+  generations.complete({ ...b.stream, content: 'B finished' });
+  const c = generations.prepare({ ...params, prompt: 'New baseline C' });
+  expect(generations.runtime(c.stream).context).toContain('isolated_secret');
+});
+
+it('waits for an ordered task and freezes its completed result without occupying Provider execution', async () => {
+  const stream = vi.fn();
+  const provider: LlmProvider = {
+    status: () => ({ key: 'mock', name: 'Mock', model: 'mock', configured: true }),
+    stream,
+  };
+  const resolver: LlmSelectionResolver = {
+    resolveLlmSelection: () => ({
+      providerProfileId: 'profile',
+      modelId: 'model',
+      providerName: 'Mock',
+      modelName: 'Mock',
+      remoteModelId: 'mock',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://mock.invalid/v1',
+    }),
+  };
+  const { conversation, generations } = await setup(provider, resolver);
+  const params = {
+    conversationId: conversation.id,
+    providerProfileId: 'profile',
+    modelId: 'model',
+    taskExecution: 'ordered' as const,
+  };
+  const a = generations.prepare({ ...params, prompt: 'First task' });
+  const b = generations.prepare({ ...params, prompt: 'Follow up' });
+  let ready = false;
+  const waiting = generations.waitUntilReady(b.stream, new AbortController().signal).then(() => {
+    ready = true;
+  });
+  await Promise.resolve();
+  expect(ready).toBe(false);
+  expect(stream).not.toHaveBeenCalled();
+  generations.complete({ ...a.stream, content: 'Frozen upstream result' });
+  await waiting;
+  expect(generations.runtime(b.stream).context).toContain('Frozen upstream result');
+  generations.complete({ ...b.stream, content: 'Follow up complete' });
+  const c = generations.prepare({ ...params, prompt: 'Parent to cancel' });
+  const d = generations.prepare({ ...params, prompt: 'Dependent task' });
+  await generations.cancel(c.stream.generationId);
+  await expect(generations.waitUntilReady(d.stream, new AbortController().signal)).rejects.toThrow(
+    'explicit retry',
+  );
 });

@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useProjectViewState } from './use-project-view-state';
 import type {
   CacheInspectionResult,
   DiagnosticExportResult,
   ProjectInfo,
   WorkerMetricsSnapshot,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
 
 export interface UseProjectMaintenanceOptions {
   runProjectAction: (
@@ -18,15 +18,16 @@ export function useProjectMaintenance({
   runProjectAction,
   onCloseSettings,
 }: UseProjectMaintenanceOptions) {
-  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
-  const [maintenanceMessage, setMaintenanceMessage] = useState('');
-  const [cacheInspection, setCacheInspection] = useState<CacheInspectionResult>();
-  const [workerMetrics, setWorkerMetrics] = useState<WorkerMetricsSnapshot>();
-  const [diagnosticExport, setDiagnosticExport] = useState<DiagnosticExportResult>();
-  const [diagnosticDestination, setDiagnosticDestination] = useState('');
-  const [exportDestination, setExportDestination] = useState('');
-  const [restoreBackupPath, setRestoreBackupPath] = useState('');
-  const [restoreDestination, setRestoreDestination] = useState('');
+  const callWorker = projectWorker();
+  const [maintenanceBusy, setMaintenanceBusy] = useProjectViewState(false);
+  const [maintenanceMessage, setMaintenanceMessage] = useProjectViewState('');
+  const [cacheInspection, setCacheInspection] = useProjectViewState<CacheInspectionResult>();
+  const [workerMetrics, setWorkerMetrics] = useProjectViewState<WorkerMetricsSnapshot>();
+  const [diagnosticExport, setDiagnosticExport] = useProjectViewState<DiagnosticExportResult>();
+  const [diagnosticDestination, setDiagnosticDestination] = useProjectViewState('');
+  const [exportDestination, setExportDestination] = useProjectViewState('');
+  const [restoreBackupPath, setRestoreBackupPath] = useProjectViewState('');
+  const [restoreDestination, setRestoreDestination] = useProjectViewState('');
 
   const runMaintenanceAction = async (action: () => Promise<string>) => {
     setMaintenanceBusy(true);
@@ -88,8 +89,12 @@ export function useProjectMaintenance({
       return;
     }
     return runMaintenanceAction(async () => {
-      const result = await callWorker('project.export', { destinationRoot });
-      return `项目已导出：${result.path}`;
+      await callWorker('file.task.create', {
+        kind: 'project-export',
+        destinationRoot,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      return '项目导出已排队，可在任务日志查看进度或取消。';
     });
   };
 
@@ -101,7 +106,10 @@ export function useProjectMaintenance({
       return;
     }
     onCloseSettings();
-    return runProjectAction(() => callWorker('project.restore', { backupPath, destinationRoot }));
+    return runProjectAction(
+      async () =>
+        (await callWorker('project.runtime.restore', { backupPath, destinationRoot })).project,
+    );
   };
 
   const checkIntegrity = () =>
@@ -114,8 +122,11 @@ export function useProjectMaintenance({
 
   const backupProject = () =>
     runMaintenanceAction(async () => {
-      const result = await callWorker('project.backup', {});
-      return `备份完成：${result.path}`;
+      await callWorker('file.task.create', {
+        kind: 'project-backup',
+        idempotencyKey: crypto.randomUUID(),
+      });
+      return '项目备份已排队，可在任务日志查看进度或取消。';
     });
 
   const cleanupContextSnapshots = (olderThanDays = 90) => {

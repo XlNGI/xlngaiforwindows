@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ConversationBusyError, GenerationService } from './generation-service.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   IPC_PROTOCOL_VERSION,
@@ -175,6 +176,37 @@ afterEach(async () => {
 });
 
 describe('worker handler', () => {
+  it('validates and scopes task scheduling queries and controls', async () => {
+    expect(
+      parseRequest({
+        id: 'schedule-parse',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'task.schedule.list',
+        params: { projectId: 'project' },
+      }),
+    ).toMatchObject({ method: 'task.schedule.list' });
+    const unknown = await handleRequest({
+      id: 'schedule-extra',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'task.schedule.list',
+      params: { projectId: 'project', unexpected: true },
+    } as unknown as WorkerRequest);
+    expect(unknown).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    const missingEpoch = await handleRequest({
+      id: 'schedule-cancel',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'task.schedule.cancel',
+      params: { projectId: 'project', taskId: 'task' },
+    } as unknown as WorkerRequest);
+    expect(missingEpoch).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    const foreign = await handleRequest({
+      id: 'schedule-foreign',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'task.schedule.list',
+      params: { projectId: 'foreign-project' },
+    });
+    expect(foreign).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+  });
   it('reports its health using protocol v1', async () => {
     const response = await handleRequest({
       id: 'health-1',
@@ -259,6 +291,54 @@ describe('worker handler', () => {
         retryable: false,
         operation: 'conversation.list',
       },
+    });
+  });
+
+  it('accepts prompt template methods through the real IPC parser and saves an empty template', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ai-video-template-worker-'));
+    temporaryDirectories.push(root);
+    const created = await handleRequest({
+      id: 'template-project',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'project.create',
+      params: { name: 'Template Test', rootPath: root },
+    });
+    expect(created.ok).toBe(true);
+    const conversation = await handleRequest({
+      id: 'template-conversation',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'conversation.create',
+      params: { scopeType: 'project' },
+    });
+    expect(conversation.ok).toBe(true);
+    if (!conversation.ok) return;
+    const conversationId = (conversation.result as { id: string }).id;
+    for (const method of [
+      'conversation.promptTemplate.get',
+      'conversation.promptTemplate.save',
+    ] as const) {
+      const request = {
+        id: `template-${method}`,
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method,
+        params: method.endsWith('.get')
+          ? { conversationId }
+          : { conversationId, content: '', expectedRowVersion: 0 },
+      };
+      const parsed = parseRequest(request);
+      expect(parsed).toMatchObject({ method });
+      if (!('method' in parsed)) throw new Error('IPC parser rejected the prompt template method');
+      const response = await handleRequest(parsed);
+      expect(response).toMatchObject({
+        ok: true,
+        result: { conversationId, content: '', rowVersion: method.endsWith('.get') ? 0 : 1 },
+      });
+    }
+    await handleRequest({
+      id: 'template-project-close',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'project.close',
+      params: {},
     });
   });
 
@@ -547,6 +627,35 @@ describe('worker handler', () => {
           operation: 'agent.generation.prepare',
         },
       });
+    }
+  });
+
+  it('reports a busy conversation as a non-retryable conflict instead of an internal failure', async () => {
+    const prepare = vi.spyOn(GenerationService.prototype, 'prepare').mockImplementation(() => {
+      throw new ConversationBusyError();
+    });
+    try {
+      const response = await handleRequest({
+        id: 'busy-conversation',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'llm.generation.prepare',
+        params: {
+          conversationId: 'conversation',
+          prompt: '？',
+          providerProfileId: '11111111-1111-4111-8111-111111111111',
+          modelId: '22222222-2222-4222-8222-222222222222',
+        },
+      });
+      expect(response).toMatchObject({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          retryable: false,
+        },
+      });
+      if (!response.ok) expect(response.error.message).toContain('上一轮仍在执行');
+    } finally {
+      prepare.mockRestore();
     }
   });
 

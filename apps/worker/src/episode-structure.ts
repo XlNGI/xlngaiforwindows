@@ -1,4 +1,6 @@
 import type Database from 'better-sqlite3';
+import { renderProductionInstruction, type ProductionInstruction } from '@ai-video/contracts';
+import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
 
@@ -11,11 +13,15 @@ export interface EpisodeStructure {
     expectedRowVersion?: number;
     videoPrompt?: string;
     characterDocumentIds?: string[];
-    shots: Array<{ title: string; prompt: string }>;
+    instruction?: ProductionInstruction;
+    shots: Array<{ title: string; prompt: string; instruction?: ProductionInstruction }>;
   }>;
 }
 
-export function parseEpisodeStructureArguments(value: string): EpisodeStructure {
+export function parseEpisodeStructureArguments(
+  value: string,
+  requireDetailed = false,
+): EpisodeStructure {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -50,11 +56,19 @@ export function parseEpisodeStructureArguments(value: string): EpisodeStructure 
           'expectedRowVersion',
           'videoPrompt',
           'characterDocumentIds',
+          'instruction',
         ].includes(key),
     );
     if (sceneUnknown)
       throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
     const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
+    const sceneInstruction = parseInstruction(scene.instruction, 'scene');
+    if (requireDetailed && sceneInstruction?.version !== 2)
+      throw new Error(
+        '新场次制作方案必须提供v2结构化指令：故事时间、地点、风格、叙事目的及每镜剧情预计时长。',
+      );
+    if (scene.videoPrompt === undefined && sceneInstruction)
+      scene.videoPrompt = renderProductionInstruction(sceneInstruction);
     if (
       scene.sceneDocumentId !== undefined &&
       scene.sceneDocumentId !== null &&
@@ -105,22 +119,36 @@ export function parseEpisodeStructureArguments(value: string): EpisodeStructure 
         throw new Error(`Episode shot ${sceneIndex}:${shotIndex} must be an object.`);
       }
       const shot = rawShot as Record<string, unknown>;
-      const shotUnknown = Object.keys(shot).find((key) => !['title', 'prompt'].includes(key));
+      const shotUnknown = Object.keys(shot).find(
+        (key) => !['title', 'prompt', 'instruction'].includes(key),
+      );
       if (shotUnknown)
         throw new Error(
           `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
         );
       const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
+      const shotInstruction = parseInstruction(shot.instruction, 'shot');
+      if (requireDetailed && shotInstruction?.version !== 2)
+        throw new Error('每个新分镜必须提供v2结构化指令和依据剧情推导的预计时长。');
+      if (sceneInstruction?.version === 2 && !shotInstruction)
+        throw new Error('详细场次的每个分镜都必须提供结构化指令和剧情预计时长。');
+      if (shot.prompt === undefined && shotInstruction)
+        shot.prompt = renderProductionInstruction(shotInstruction);
       if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 20000) {
         throw new Error(
           `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 20000 characters.`,
         );
       }
-      shots.push({ title: shotTitle, prompt: shot.prompt.trim() });
+      shots.push({
+        title: shotTitle,
+        prompt: shot.prompt.trim(),
+        ...(shotInstruction ? { instruction: shotInstruction } : {}),
+      });
     }
     scenes.push({
       title: sceneTitle,
       shots,
+      ...(sceneInstruction ? { instruction: sceneInstruction } : {}),
       ...(scene.sceneDocumentId !== undefined ? { sceneDocumentId: scene.sceneDocumentId } : {}),
       ...(scene.sceneId
         ? {
@@ -135,6 +163,14 @@ export function parseEpisodeStructureArguments(value: string): EpisodeStructure 
     });
   }
   return { episodeTitle, scenes };
+}
+
+function parseInstruction(value: unknown, kind: string): ProductionInstruction | undefined {
+  if (value === undefined) return undefined;
+  const instruction = value as ProductionInstruction;
+  const issues = inspectProductionTargetInstruction(instruction, kind);
+  if (issues.length) throw new Error(issues.map((issue) => issue.message).join('\n'));
+  return instruction;
 }
 
 export function validateEpisodeReferences(

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants, existsSync, statSync } from 'node:fs';
-import { copyFile, lstat, mkdtemp, realpath, rm, stat, unlink } from 'node:fs/promises';
+import { copyFile, lstat, mkdtemp, readFile, realpath, rm, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { assertStorageCapacity, type StorageStats } from './storage-capacity.js';
 
@@ -509,6 +509,166 @@ export class FfmpegRuntime {
       },
       durationMs,
     );
+  }
+
+  /** Decode at a manually selected time. Preview is bounded JPEG; adopted output is full-size PNG. */
+  async extractFrame(
+    input: string,
+    output: string,
+    timeMs: number,
+    preview = false,
+    signal?: AbortSignal,
+  ): Promise<MediaProbe> {
+    const source = await localFile(input);
+    const probe = await this.probe(source, signal);
+    if (
+      !probe.hasVideo ||
+      !Number.isSafeInteger(timeMs) ||
+      timeMs < 0 ||
+      timeMs >= probe.durationMs
+    )
+      throw new Error('请选择视频时长内的有效画面时间点。');
+    if (extname(output).toLowerCase() !== (preview ? '.jpg' : '.png'))
+      throw new Error('Frame output extension does not match its encoding.');
+    const parent = await this.outputDirectory(output);
+    const tools = await this.tools();
+    assertStorageCapacity(parent, 0, this.options.storageProbe);
+    const cwd = await mkdtemp(join(parent, '.ffmpeg-'));
+    const staged = join(cwd, basename(output));
+    let ownsOutput = false;
+    const checkOutput = () => {
+      assertStorageCapacity(cwd, 0, this.options.storageProbe);
+      if (
+        existsSync(staged) &&
+        statSync(staged).size >
+          Math.min(this.options.maxOutputBytes ?? Infinity, preview ? 512 * 1024 : 25 * 1024 * 1024)
+      )
+        throw new Error('抽帧图片超过大小限制。');
+    };
+    try {
+      await this.run(
+        tools.ffmpegPath,
+        [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-nostdin',
+          '-n',
+          ...LOCAL_INPUT_OPTIONS,
+          '-ss',
+          seconds(timeMs),
+          '-i',
+          source,
+          '-map',
+          '0:v:0',
+          '-frames:v',
+          '1',
+          '-an',
+          ...(preview
+            ? [
+                '-vf',
+                "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease",
+                '-q:v',
+                '4',
+              ]
+            : ['-pix_fmt', 'rgb24']),
+          '-threads',
+          '1',
+          '-update',
+          '1',
+          staged,
+        ],
+        cwd,
+        signal,
+        this.options.timeoutMs ?? 30000,
+        checkOutput,
+      );
+      checkOutput();
+      if (!existsSync(staged)) throw new Error('所选时间点没有可解码画面，请向前选择一帧。');
+      const bytes = await readFile(staged);
+      if (
+        !(preview
+          ? bytes[0] === 0xff && bytes[1] === 0xd8
+          : bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')))
+      )
+        throw new Error('未能从所选时间点解码出完整图片，请向前选择一帧。');
+      if (signal?.aborted) throw new Error('Media operation cancelled.');
+      assertStorageCapacity(parent, bytes.length, this.options.storageProbe);
+      await copyFile(staged, output, constants.COPYFILE_EXCL);
+      ownsOutput = true;
+      if (signal?.aborted) throw new Error('Media operation cancelled.');
+      return probe;
+    } catch (error) {
+      if (ownsOutput) await unlink(output).catch(() => undefined);
+      throw error;
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }
+
+  /** Small multimodal transport copy; never replaces the user's full reference image. */
+  async previewImage(input: string, output: string, signal?: AbortSignal): Promise<void> {
+    const source = await localFile(input);
+    if (
+      !['.png', '.jpg', '.jpeg', '.webp'].includes(extname(source).toLowerCase()) ||
+      extname(output).toLowerCase() !== '.jpg'
+    )
+      throw new Error('Image preview requires a local PNG, JPEG or WebP image.');
+    const parent = await this.outputDirectory(output);
+    const tools = await this.tools();
+    assertStorageCapacity(parent, 0, this.options.storageProbe);
+    const directory = await mkdtemp(join(parent, '.ffmpeg-'));
+    const staged = join(directory, 'preview.jpg');
+    let ownsOutput = false;
+    const check = () => {
+      assertStorageCapacity(directory, 0, this.options.storageProbe);
+      if (existsSync(staged) && statSync(staged).size > 512 * 1024)
+        throw new Error('图片预览超过大小限制。');
+    };
+    try {
+      await this.run(
+        tools.ffmpegPath,
+        [
+          '-v',
+          'error',
+          '-nostdin',
+          '-n',
+          '-protocol_whitelist',
+          'file',
+          '-format_whitelist',
+          'image2,png_pipe,jpeg_pipe,webp_pipe',
+          '-i',
+          source,
+          '-frames:v',
+          '1',
+          '-vf',
+          "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease",
+          '-q:v',
+          '4',
+          '-threads',
+          '1',
+          '-update',
+          '1',
+          staged,
+        ],
+        directory,
+        signal,
+        30000,
+        check,
+      );
+      check();
+      const bytes = await readFile(staged);
+      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('图片预览解码失败。');
+      if (signal?.aborted) throw new Error('Media operation cancelled.');
+      await copyFile(staged, output, constants.COPYFILE_EXCL);
+      ownsOutput = true;
+      if (signal?.aborted) throw new Error('Media operation cancelled.');
+    } catch (error) {
+      if (ownsOutput) await unlink(output).catch(() => undefined);
+      throw error;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   async composeDubbing(

@@ -1818,3 +1818,13 @@ P3.2 还必须记录具体 Research Adapter、endpoint/profile、凭据来源（
 | 2026-08-19 | P3.2 Native 研究取消贯穿 | Worker 研究请求携带请求 ID；AbortSignal 触发 Native `/research/cancel`，桥维护进程级取消注册表并将取消标记传入 WinHTTP 分段读取；取消后不写入研究缓存或草稿 | Worker 26 个测试文件/198 项、Desktop 20 个测试文件/111 项、Worker/Desktop typecheck、Rust 55 项、`cargo fmt --check`、`git diff --check` 通过 | Worker 崩溃后 in-flight 恢复、真实研究冒烟、安装包链路和 Windows 实机取消演练仍待完成 |
 | 2026-08-19 | P4 普通聊天文档意图切片 | Chat 模式仅对明确的创建/读取/更新/归档/恢复表达升级 Agent；目标文档操作必须绑定当前唯一文档，缺少目标只提示且零写入；否定表达和普通问答保持原聊天路径 | 新增 `inferDocumentIntent` 3 项回归；Desktop 全量 20 个测试文件/111 项和 typecheck 通过 | 持久化 pending intent、更多目标选择入口和真实 Provider 端到端验收仍待完成 |
 | 2026-08-19 | P7 场次/镜头/关联文档原子 change set | Schema v26 增加 scene/shot `row_version` 与项目/任务隔离的 change set 表；Schema v27 增加 `document` item 及文档 create/update 提案字段；Worker 在单一 SQLite 事务中应用场次、镜头和关联文档变更，文档 CAS 冲突整批回滚并保留冲突状态；Desktop `shots` 工作区保留 item 级差异审阅、批准/拒绝和冲突提示。Persistence 22 项、Worker 211 项、Desktop 116 项，且全仓 `pnpm.cmd test`、`pnpm.cmd typecheck`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`pnpm.cmd build`、`git diff --check` 通过 | 真实 Windows 多窗口并发、跨场次人工验收和安装包链路仍待完成；P7 保持进行中 |
+
+## 并发任务实现更新
+
+2026-10-17。统一并发计划已接入多项目运行上下文和按任务观察。激活另一项目或切换会话只改变界面订阅；显式卸载项目会停止该项目本地运行。任务和索引继续存储在本地项目 SQLite，GitHub 只管理源码和评审。
+
+图片、视频、配音、章节和文件任务拥有独立身份，并按依赖、目标锁、版本 CAS 和共享容量执行。人工确认按项目、任务和令牌排队；取消一项任务不否决其他任务。素材库仍仅展示成功且已落盘的图片或视频，失败和排队过程留在任务日志。
+
+普通发送采用有序跟进，独立任务可显式并行，补充输入须指定目标任务并在轮次边界消费。历史和检索遵守已冻结的任务边界；正文按需读取，草稿、正式版本与未知提交状态明确区分。审核、发布、费用确认、声音版本、采用 take 和引用快照的原有规则保持有效。
+
+阶段验证与尚待执行的发布验收以 docs/UNIFIED-TASK-CONCURRENCY-IMPLEMENTATION-PLAN.md 及 docs/code-traces/2026-10-17-concurrency-p3.md 至 concurrency-p5d.md 为准。模拟 Provider 测试不替代真实账号质量、Windows 休眠、旧版本升级或签名验收。

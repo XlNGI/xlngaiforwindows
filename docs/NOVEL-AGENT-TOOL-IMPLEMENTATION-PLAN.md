@@ -2185,3 +2185,5 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 | 待填写 | P7 | 未开始 |  |  |  |
 | 待填写 | P8 | 未开始 |  |  |  |
 | 待填写 | P9 | 未开始 |  |  |  |
+
+2026-10-17 并发 P5a 增量：普通会话仍由 LLM 判断语义；新 novel.chapter.batch.submit 工具接受经过校验的章节清单，每章创建已有 Agent/generation owner 和单章锁。依赖必须显式选 draft 或 published 并引用本批次前序项；不按关键词分章。选定资料版本及上游产物版本冻结在项目库，只通过 novel.chapter.batch.source.read 按需读取。父回复结束/取消不取消独立子任务；任务日志另提供明确批次取消。用户编辑导致 CAS 冲突时保留完整候选及原章节，显示待合并；无正文的取消占位归档，已有草稿保留。证据见统一并发 P5a 验收记录。

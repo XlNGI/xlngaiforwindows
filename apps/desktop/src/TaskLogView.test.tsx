@@ -217,8 +217,26 @@ const generationEvents: GenerationJobEventInfo[] = [
 ];
 
 describe('TaskLogView', () => {
+  it('shows a scheduled capacity wait without replacing the domain task identity', async () => {
+    const item: TaskLogItem = {
+      ...imageItem,
+      kind: 'video',
+      status: 'awaiting_confirmation',
+      scheduling: { state: 'waiting', waitReason: 'capacity', revision: 2 },
+    };
+    const baseline = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation((method, params) =>
+      method === 'task.log.list'
+        ? Promise.resolve({ items: [item], nextCursor: undefined })
+        : baseline(method, params),
+    );
+    render(<TaskLogView projectId="project-1" />);
+    expect(await screen.findByText('等待执行名额')).toBeInTheDocument();
+    expect(screen.getByText(item.title)).toBeInTheDocument();
+  });
   beforeEach(() => {
     vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
       if (method === 'task.log.list')
         return Promise.resolve({ items: [agentItem, imageItem], nextCursor: undefined });
       if (method === 'agent.task.get') return Promise.resolve(agentDetail);
@@ -289,6 +307,7 @@ describe('TaskLogView', () => {
 
   it('shows an uncertain image submission instead of running and advises checking the Provider', async () => {
     vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
       if (method === 'task.log.list')
         return Promise.resolve({ items: [{ ...imageItem, status: 'submission_unknown' }] });
       if (method === 'image.generate.get')
@@ -321,6 +340,7 @@ describe('TaskLogView', () => {
       sourceId: 'video-job-1',
     };
     vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
       if (method === 'task.log.list')
         return Promise.resolve({ items: [videoItem], nextCursor: undefined });
       if (method === 'video.generate.get') return Promise.resolve(videoJob);
@@ -379,6 +399,7 @@ describe('TaskLogView', () => {
     };
     const respond = (value: unknown) => Promise.resolve(value as never);
     vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
       if (method === 'task.log.list') return respond({ items: [agentItem], nextCursor: undefined });
       if (method === 'agent.task.get') return respond(failedDetail);
       if (method === 'agent.partial.list') return respond([partial, discardablePartial]);
@@ -433,6 +454,7 @@ describe('TaskLogView', () => {
 
   it('filters by kind and loads the next cursor page', async () => {
     vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
       if (method === 'task.log.list') {
         const typed = params as { cursor?: string; kind?: string };
         return Promise.resolve(
@@ -477,6 +499,7 @@ describe('TaskLogView', () => {
       ((value: { items: TaskLogItem[]; nextCursor?: string }) => void) | undefined;
     let listCalls = 0;
     vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
       if (method !== 'task.log.list') {
         return Promise.reject(new Error(`Unexpected method ${method}`));
       }

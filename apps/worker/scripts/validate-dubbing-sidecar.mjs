@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { copyFile, cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -67,6 +67,16 @@ function encode(args) {
     throw new Error(
       `FFmpeg smoke fixture failed: ${result.error?.message ?? result.stderr.slice(-1024)}`,
     );
+}
+
+async function removeValidationRoot() {
+  const cleanupRoot = resolve(validationRoot);
+  if (
+    !cleanupRoot.startsWith(resolve(tmpdir()) + sep) ||
+    !cleanupRoot.includes('ai-video-dubbing-sidecar-')
+  )
+    throw new Error('Unexpected dubbing validation cleanup path.');
+  await rm(cleanupRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
 }
 
 try {
@@ -387,7 +397,7 @@ try {
   );
 } finally {
   if (child) {
-    const closed = new Promise((resolveResult) => child.once('exit', resolveResult));
+    const closed = new Promise((resolveResult) => child.once('close', resolveResult));
     child.stdin.end();
     await Promise.race([closed, new Promise((resolveResult) => setTimeout(resolveResult, 3000))]);
     if (child.exitCode === null) {
@@ -395,5 +405,5 @@ try {
       await Promise.race([closed, new Promise((resolveResult) => setTimeout(resolveResult, 2000))]);
     }
   }
-  await rm(validationRoot, { recursive: true, force: true });
+  await removeValidationRoot();
 }

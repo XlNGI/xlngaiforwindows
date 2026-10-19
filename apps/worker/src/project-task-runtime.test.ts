@@ -8,6 +8,7 @@ import { ProjectService } from './project-service.js';
 import { nextProjectTaskDelay, ProjectTaskRuntime } from './project-task-runtime.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { NativeProviderRequestError } from './native-provider-bridge.js';
+import { TaskScheduleService } from './task-schedule-service.js';
 
 const roots: string[] = [];
 const projects: ProjectService[] = [];
@@ -23,7 +24,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(scheduled = false) {
   const root = await mkdtemp(join(tmpdir(), 'project-task-runtime-'));
   roots.push(root);
   const projectsService = new ProjectService({ recentProjectsPath: join(root, 'recent.json') });
@@ -32,8 +33,14 @@ async function setup() {
   const videos = new VideoGenerationService(projectsService);
   const request =
     vi.fn<(method: string, params: unknown, timeoutMs?: number) => Promise<unknown>>();
-  const runtime = new ProjectTaskRuntime(projectsService, videos, { request }, { random: () => 0 });
-  return { root, projectsService, videos, request, runtime };
+  const scheduler = new TaskScheduleService(projectsService);
+  const runtime = new ProjectTaskRuntime(
+    projectsService,
+    videos,
+    { request },
+    { random: () => 0, scheduler: scheduled ? scheduler : undefined },
+  );
+  return { root, projectsService, videos, request, runtime, scheduler };
 }
 
 function attach(videos: VideoGenerationService, suffix = '1') {
@@ -79,6 +86,23 @@ function runningPoll(providerStatus = 200, retryAfterMs?: number) {
 }
 
 describe('ProjectTaskRuntime', () => {
+  it('does not automatically poll jobs copied into an exported history snapshot', async () => {
+    const { projectsService, videos, request, runtime, root, scheduler } = await setup(true);
+    const job = attach(videos);
+    const destination = join(root, 'exported-history');
+    vi.useRealTimers();
+    await projectsService.exportProject(destination);
+    projectsService.close();
+    projectsService.open(destination);
+    scheduler.recover();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-07T00:00:00.000Z'));
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(request).not.toHaveBeenCalled();
+    expect(scheduler.get(job.id).waitReason).toBe('snapshot_history');
+    runtime.stop();
+  });
   it('polls persisted jobs without a Desktop page owner and publishes revisioned snapshots', async () => {
     const { projectsService, videos, request, runtime } = await setup();
     const job = attach(videos);
@@ -273,43 +297,53 @@ describe('ProjectTaskRuntime', () => {
     expect(videos.get(job.id)).toMatchObject({ status: 'polling', providerTaskId: 'provider-1' });
   });
 
-  it('commits one asset from a Native UniCompAPI file and remains idempotent', async () => {
-    const { projectsService, videos, request, runtime } = await setup();
-    const job = attachUnicomp(videos);
-    const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
-    mkdirSync(nativeDirectory, { recursive: true });
-    const nativePath = join(nativeDirectory, `runtime-${process.pid}-${Date.now()}.mp4`);
-    writeFileSync(
-      nativePath,
-      new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0]),
-    );
-    request.mockResolvedValue({
-      providerStatus: 200,
-      state: 'succeeded',
-      providerState: 'completed',
-      output: {
-        type: 'native_temporary_file',
-        path: nativePath,
-        contentType: 'video/mp4',
-      },
-    });
+  it.each([false, true])(
+    'commits one asset from a Native UniCompAPI file and remains idempotent (scheduled=%s)',
+    async (scheduled) => {
+      const { projectsService, videos, request, runtime, scheduler } = await setup(scheduled);
+      const job = attachUnicomp(videos);
+      const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
+      mkdirSync(nativeDirectory, { recursive: true });
+      const nativePath = join(nativeDirectory, `runtime-${process.pid}-${Date.now()}.mp4`);
+      writeFileSync(
+        nativePath,
+        new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0]),
+      );
+      request.mockResolvedValue({
+        providerStatus: 200,
+        state: 'succeeded',
+        providerState: 'completed',
+        output: {
+          type: 'native_temporary_file',
+          path: nativePath,
+          contentType: 'video/mp4',
+        },
+      });
 
-    runtime.start();
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(videos.get(job.id).status).toBe('succeeded'));
-    runtime.kick();
-    await vi.advanceTimersByTimeAsync(5_000);
+      runtime.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(videos.get(job.id).status).toBe('succeeded'));
+      runtime.kick();
+      await vi.advanceTimersByTimeAsync(5_000);
 
-    const completed = videos.get(job.id);
-    expect(existsSync(nativePath)).toBe(false);
-    expect(completed.results).toHaveLength(1);
-    projectsService.access(false, (database) => {
-      const repositories = createRepositories(database);
-      expect(repositories.generationResults.listByJob(job.id)).toHaveLength(1);
-      expect(repositories.assets.listByProject(job.projectId)).toHaveLength(1);
-    });
-    expect(request).toHaveBeenCalledOnce();
-  });
+      const completed = videos.get(job.id);
+      expect(existsSync(nativePath)).toBe(false);
+      expect(completed.results).toHaveLength(1);
+      projectsService.access(false, (database) => {
+        const repositories = createRepositories(database);
+        expect(repositories.generationResults.listByJob(job.id)).toHaveLength(1);
+        expect(repositories.assets.listByProject(job.projectId)).toHaveLength(1);
+      });
+      expect(request).toHaveBeenCalledOnce();
+      if (scheduled) {
+        expect(scheduler.get(job.id)).toMatchObject({
+          scheduleState: 'settled',
+          domainState: 'succeeded',
+        });
+        expect(scheduler.events(job.id).map((event) => event.kind)).toContain('poll.claimed');
+      }
+    },
+  );
 
   it('commits a Native-normalized Vidu WebM output without exposing its signed URL', async () => {
     const { projectsService, videos, request, runtime } = await setup();

@@ -215,12 +215,44 @@ describe('LibrarySearchService', () => {
       title: '大纲',
       contentMarkdown: '林澈的故事从雾港开始。',
     });
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 8; index += 1) {
       library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' });
     }
     expect(() => library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' })).toThrow(
       /LIBRARY_BUDGET_EXCEEDED|budget|上限/,
     );
+  });
+
+  it('explains an empty document filter and reads the actual novel-reference without a novel profile', async () => {
+    const { content, novels, library, projects } = await setup();
+    const document = content.saveDocument({
+      kind: 'character',
+      title: '二狗角色设定',
+      contentMarkdown: '# 二狗\n普通家庭出身，气运之子。',
+    });
+    novels.saveBinding({ documentId: document.id, role: 'character-bible', domainScope: 'novel' });
+    projects.access(false, (db) =>
+      expect(db.prepare('SELECT COUNT(*) AS n FROM novel_profiles').get()).toEqual({ n: 0 }),
+    );
+    const identity = { taskId: 'task', attemptId: 'attempt' };
+    const empty = library.search({ ...identity, query: '二狗', sourceTypes: ['document'] });
+    expect(empty.resultCount).toBe(0);
+    expect(empty.guidance).toContain('novel-reference');
+    expect(empty.guidance).toContain('omit sourceTypes');
+    expect(() => library.read({ ...identity, sourceHandle: document.id })).toThrow('document IDs');
+    const found = library.search({ ...identity, query: '二狗', sourceTypes: ['novel-reference'] });
+    expect(found.sources[0]).toMatchObject({
+      sourceId: document.id,
+      sourceType: 'novel-reference',
+      status: 'draft',
+    });
+    expect(
+      library.read({
+        ...identity,
+        sourceHandle: found.sources[0]!.sourceHandle,
+        readMode: 'source',
+      }).content,
+    ).toBe('# 二狗\n普通家庭出身，气运之子。');
   });
 
   it('indexes memories, constraints, conversations, and asset aliases', async () => {

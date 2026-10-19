@@ -86,6 +86,12 @@ export function DetachedPanelApp({ config }: { config: DetachedPanelConfig }) {
       setSnapshot((current) =>
         current?.panelId === 'conversation' ? { ...current, composer: action.value } : current,
       );
+    } else if (action.type === 'conversation-prompt-template') {
+      setSnapshot((current) =>
+        current?.panelId === 'conversation'
+          ? { ...current, promptTemplate: action.value }
+          : current,
+      );
     } else if (action.type === 'conversation-research-mode') {
       setSnapshot((current) =>
         current?.panelId === 'conversation' ? { ...current, researchMode: action.mode } : current,
@@ -311,6 +317,15 @@ function DetachedConversationPanel({
       }
       onComposerChange={(value) =>
         onAction({ panelId: 'conversation', type: 'conversation-composer', value })
+      }
+      onPromptTemplateChange={(value) =>
+        onAction({ panelId: 'conversation', type: 'conversation-prompt-template', value })
+      }
+      onSavePromptTemplate={() =>
+        onAction({ panelId: 'conversation', type: 'conversation-prompt-template-save' })
+      }
+      onReloadPromptTemplate={() =>
+        onAction({ panelId: 'conversation', type: 'conversation-prompt-template-reload' })
       }
       onCancelGeneration={() => onAction({ panelId: 'conversation', type: 'conversation-cancel' })}
       onSendMessage={() =>

@@ -21,8 +21,10 @@ import type {
   TaskLogItem,
   VideoGenerationJobInfo,
   DubbingJobInfo,
+  NovelBatchInfo,
 } from '@ai-video/contracts';
-import { callWorker } from './worker-client';
+import { projectWorker } from './worker-scope';
+import { FileTaskList } from './FileTaskList';
 import {
   generationErrorFeedback,
   generationEventSummary,
@@ -44,6 +46,13 @@ const kindLabel: Record<TaskLogItem['kind'], string> = {
   image: '图片',
   video: '视频',
   dubbing: '配音制作',
+};
+const scheduleWaitLabel: Record<string, string> = {
+  capacity: '等待执行名额',
+  dependency: '等待前置任务',
+  dependency_failed: '前置任务未完成',
+  snapshot_history: '导出历史，未自动执行',
+  recovery: '正在核对运行状态',
 };
 
 const statusLabel: Record<string, string> = {
@@ -168,6 +177,7 @@ function AgentTaskDetailPanel({
   onOpenConversation?: (conversationId: string) => void;
   onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
 }) {
+  const callWorker = projectWorker();
   const { task, events, documents, providerSteps, researchSources, librarySources = [] } = detail;
   const [partials, setPartials] = useState<AgentPartialArtifactInfo[]>([]);
   const [partialBusy, setPartialBusy] = useState<string>();
@@ -238,6 +248,7 @@ function AgentTaskDetailPanel({
   };
   return (
     <div className="task-log-detail-body">
+      {detail.chapterBatch && <ChapterBatchProgress batchId={detail.chapterBatch.batchId} />}
       <TaskLogStatus status={task.status} outcome={task.outcome} />
 
       <dl className="task-log-detail-meta">
@@ -563,6 +574,66 @@ function AgentTaskDetailPanel({
   );
 }
 
+function ChapterBatchProgress({ batchId }: { batchId: string }) {
+  const callWorker = projectWorker();
+  const [batch, setBatch] = useState<NovelBatchInfo>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true,
+      pending = false;
+    const refresh = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const next = await callWorker('novel.batch.get', { batchId });
+        if (active) setBatch(next);
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : '批次读取失败');
+      } finally {
+        pending = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [batchId]);
+  return (
+    <section className="task-log-detail-section" aria-label="章节批次">
+      <strong>章节批次</strong>
+      <p>任务接纳、草稿生成和发布分别记录；停止助理回复后，独立章节任务继续运行。</p>
+      {batch?.children.map((child) => (
+        <div key={child.taskId}>
+          {child.key} · {child.status === 'conflict' ? '待合并' : statusText(child.status)}
+          {child.dependsOn.length
+            ? ` · 等待 ${child.dependsOn.map((entry) => `${entry.key} ${entry.milestone === 'published' ? '发布' : '草稿'}`).join('、')}`
+            : ''}
+        </div>
+      ))}
+      {batch?.children.some((child) =>
+        ['prepared', 'streaming'].includes(child.generationStatus),
+      ) && (
+        <button
+          type="button"
+          onClick={() => {
+            if (!window.confirm('取消此章节批次中尚未完成的任务？已保存的草稿会保留。')) return;
+            void callWorker('novel.batch.cancel', { batchId })
+              .then(setBatch)
+              .catch((reason: unknown) =>
+                setError(reason instanceof Error ? reason.message : '批次取消失败'),
+              );
+          }}
+        >
+          取消此批次未完成任务
+        </button>
+      )}
+      {error && <p role="alert">{error}</p>}
+    </section>
+  );
+}
+
 function SourceHint({ item }: { item: TaskLogItem }) {
   const SourceIcon = item.kind === 'image' ? ImageIcon : Video;
   return (
@@ -740,6 +811,7 @@ export function TaskLogView({
   onOpenConversation,
   onOpenLibrarySource,
 }: TaskLogViewProps) {
+  const callWorker = projectWorker();
   const [items, setItems] = useState<TaskLogItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<TaskLogItem>();
   const [detail, setDetail] = useState<AgentTaskDetail | null>(null);
@@ -904,6 +976,7 @@ export function TaskLogView({
 
   return (
     <section className="task-log-workspace">
+      <FileTaskList projectId={projectId} />
       <div className="workspace-toolbar">
         <div>
           <span className="eyebrow">项目执行记录</span>
@@ -986,7 +1059,11 @@ export function TaskLogView({
                   <small>{formatDate(item.createdAt)}</small>
                 </div>
                 <span className={`task-status task-status-${item.status}`}>
-                  {statusText(item.status)}
+                  {!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(item.status) &&
+                  item.scheduling?.waitReason &&
+                  scheduleWaitLabel[item.scheduling.waitReason]
+                    ? scheduleWaitLabel[item.scheduling.waitReason]
+                    : statusText(item.status)}
                 </span>
               </button>
             ))}
