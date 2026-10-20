@@ -88,6 +88,139 @@ const wan = () =>
   )!;
 
 describe('production execution in the project store', () => {
+  it('prepares the final form without imposing saved story facts, duration or required references', async () => {
+    const f = await setup();
+    const scene = { kind: 'scene' as const, id: f.scene.id };
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    f.service.execute({
+      executionKey: 'form-authoring',
+      operations: [
+        operation(
+          scene,
+          f.scene.rowVersion,
+          instruction({
+            continuity: {
+              predecessors: [],
+              before: [],
+              after: [],
+              constraints: [],
+              locked: [{ key: '沈孤鸿外观', value: '暗青长袍、束发' }],
+            },
+          }),
+        ),
+        operation(
+          target,
+          f.shot.rowVersion,
+          instruction({
+            summary: '原制作说明',
+            timing: { estimatedDurationSeconds: 20, rationale: '原剧情时长' },
+            resources: [
+              {
+                kind: 'character-image',
+                documentId: f.actor.id,
+                required: true,
+                purpose: '原角色参考图',
+              },
+            ],
+            continuity: {
+              predecessors: [],
+              after: [],
+              constraints: [],
+              before: [{ key: '沈孤鸿状态', value: '长剑出鞘' }],
+              locked: [{ key: '沈孤鸿外观', value: '暗青长袍、披发' }],
+            },
+          }),
+        ),
+      ],
+    });
+    const read = f.service.read(target);
+    expect(read.issues.map((issue) => issue.code)).toContain('LOCKED_FACT_CHANGED');
+    const form: ProductionSource = { ...read.source!, mode: 'form' };
+    f.content.saveShot({
+      shotId: f.shot.id,
+      sceneId: f.scene.id,
+      title: f.shot.title,
+      prompt: '修改过的镜头正文',
+      expectedRowVersion: read.rowVersion,
+    });
+    const parameters = {
+      prompt: '江晚继续打铁，老瞎子离去',
+      duration: 5,
+      resolution: '720P',
+      ratio: '9:16',
+      audio: false,
+    };
+    const videos = new VideoGenerationService(f.projects);
+    const prepare = (patch = {}) =>
+      videos.prepare({
+        adapterKey: wan().key,
+        shotId: f.shot.id,
+        parameters,
+        providerRegion: 'cn',
+        productionSource: form,
+        ...patch,
+      });
+    const job = prepare();
+    expect(job.request).toEqual(parameters);
+    expect(job.request.prompt).not.toContain('沈孤鸿');
+    const snapshot = f.projects.access(false, (db) =>
+      db.prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?').get(job.id),
+    ) as { task_snapshot_json: string };
+    expect(
+      (JSON.parse(snapshot.task_snapshot_json) as { productionSource: ProductionSource })
+        .productionSource,
+    ).toEqual(form);
+    expect(() => prepare({ parameters: { ...parameters, duration: 999 } })).toThrow(
+      'parameters are invalid',
+    );
+    expect(() => prepare({ productionSource: { mode: 'form', target: scene } })).toThrow(
+      '目标对象不匹配',
+    );
+    expect(() =>
+      f.service.assertSource(
+        { mode: 'form', target: { kind: 'shot', id: 'missing' } },
+        { kind: 'shot', id: 'missing' },
+      ),
+    ).toThrow('镜头不存在');
+  });
+
+  it('validates explicit form provenance while retaining strict instruction-source validation', async () => {
+    const f = await setup();
+    const params = {
+      adapterKey: wan().key,
+      shotId: f.shot.id,
+      parameters: {},
+      providerRegion: 'cn',
+      providerProfileId: 'profile',
+      modelId: 'model',
+      productionSource: { mode: 'form', target: { kind: 'shot', id: f.shot.id } },
+    };
+    expect(() => validateSessionRequestParams('video.generate.prepare', params)).not.toThrow();
+    expect(() =>
+      validateSessionRequestParams('image.generate.prepare', {
+        adapterKey: 'image',
+        shotId: f.shot.id,
+        parameters: {},
+        productionSource: params.productionSource,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateSessionRequestParams('video.generate.prepare', {
+        ...params,
+        productionSource: { target: params.productionSource.target },
+      }),
+    ).toThrow();
+    for (const invalid of [{ mode: 'unchecked' }, { token: 'invalid' }, { revision: 0 }])
+      expect(() =>
+        validateSessionRequestParams('video.generate.prepare', {
+          ...params,
+          productionSource: { ...params.productionSource, ...invalid },
+        }),
+      ).toThrow();
+  });
+
   it('includes resource documents outside the scene cast in provenance and no-op checks', async () => {
     const f = await setup();
     const resource = f.content.saveDocument({

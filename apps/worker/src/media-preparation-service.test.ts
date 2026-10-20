@@ -110,6 +110,30 @@ async function setup(attachments: LlmInputAttachment[] = []) {
 }
 
 describe('MediaPreparationService', () => {
+  it('still rejects an unavailable image in the final form before creating a generation job', async () => {
+    const f = await setup();
+    const content = new ContentService(f.projectsService);
+    const scene = content.saveScene({ title: '铁匠铺' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '拒绝' });
+    expect(() =>
+      f.service.prepareImage({
+        adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
+        shotId: shot.id,
+        productionSource: { mode: 'form', target: { kind: 'shot', id: shot.id } },
+        parameters: {
+          prompt: '用户填写的镜头',
+          images: ['project-asset://missing'],
+          resolution: '1080p',
+        },
+      }),
+    ).toThrow('Every media input asset must be an active image in the current project');
+    expect(
+      f.projectsService.access(false, (db) =>
+        db.prepare('SELECT count(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
   it('uses the production source and authored duration when Agent prepares an existing shot', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);

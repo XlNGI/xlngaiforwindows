@@ -388,7 +388,7 @@ export function ProductionPanel({
   const compiledSceneInputsRef = useRef(compiledSceneInputs);
   compiledSceneInputsRef.current = compiledSceneInputs;
   const compiledReferenceBindings = useMemo<SceneMaterialBindingInfo[] | undefined>(() => {
-    if (!compiledSceneInputs || productionInstructions.result?.issues.length) return undefined;
+    if (!compiledSceneInputs) return undefined;
     const { scene: latest, media } = compiledSceneInputs;
     return [
       ...(latest.materialBindings ?? []).filter((b) => b.role !== 'character'),
@@ -412,9 +412,9 @@ export function ProductionPanel({
           : [];
       }),
     ];
-  }, [compiledSceneInputs, productionInstructions.result?.issues]);
+  }, [compiledSceneInputs]);
   useEffect(() => {
-    if (!compiledSceneInputs || productionInstructions.result?.issues.length) return;
+    if (!compiledSceneInputs) return;
     const { scene: latest, media } = compiledSceneInputs;
     setSceneInputsLoading(false);
     setSceneInputsError('');
@@ -449,12 +449,7 @@ export function ProductionPanel({
         active = false;
       };
     }
-  }, [
-    compiledSceneInputs,
-    productionInstructions.result?.issues,
-    needsVoiceInput,
-    needsDialogueInput,
-  ]);
+  }, [compiledSceneInputs, needsVoiceInput, needsDialogueInput]);
   useEffect(() => {
     let active = true;
     setVoiceReferences([]);
@@ -1108,7 +1103,11 @@ export function ProductionPanel({
             parameters,
             selectedVoices,
             needsDialogueInput ? dialogueAudio?.id : undefined,
-            compiledReferenceBindings ?? seedReferenceBindings,
+            productionInstructions.overriddenFields.some((field) =>
+              ['prompt', 'content'].includes(field),
+            )
+              ? []
+              : (compiledReferenceBindings ?? seedReferenceBindings),
           )
         : parameters;
       if (!isCurrent()) return;
@@ -1550,18 +1549,16 @@ export function ProductionPanel({
                         {productionInstructions.overriddenFields.length > 0 && (
                           <p>已保留修改或保存的参数；重新填入将覆盖这些值。</p>
                         )}
+                        <p>制作说明仅供参考，可自由修改表单；生成时以当前表单为准。</p>
                         <div className="production-adaptation-actions">
-                          <p
-                            role={
-                              productionInstructions.error ||
-                              productionInstructions.result?.issues.length
-                                ? 'alert'
-                                : 'status'
-                            }
-                          >
+                          <p role="status">
                             {productionInstructions.error ||
                               productionInstructions.result?.issues
-                                .map((issue) => issue.message)
+                                .map((issue) =>
+                                  issue.targetTitle
+                                    ? `「${issue.targetTitle}」：${issue.message}`
+                                    : issue.message,
+                                )
                                 .join('；') ||
                               `已填入制作内容 · 版本 ${productionInstructions.result?.source?.revision}`}
                           </p>

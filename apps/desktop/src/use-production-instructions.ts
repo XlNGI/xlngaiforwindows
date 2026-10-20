@@ -79,7 +79,7 @@ export function useProductionInstructions(input: {
       .then((compiled) => {
         if (!active || currentKey.current !== contextKey) return;
         setResult(compiled);
-        if (!compiled || (compiled.issues.length && !compiled.compiledPrompt)) return;
+        if (!compiled) return;
         if (!shotIds && !overrides.current.has(contextKey) && initialOverrides.current) {
           const initial = { ...initialOverrides.current };
           if (compiled.continuity?.binding) {
@@ -129,11 +129,12 @@ export function useProductionInstructions(input: {
             latest?.source?.token !== result.source?.token
           ) {
             setResult(latest);
-            setError('来源内容或素材绑定已更新，请重新填入制作内容。');
+            setError('制作说明或参考资料已更新，已保留当前表单；生成时以表单内容为准。');
           }
         })
         .catch(() => {
-          if (active) setError('制作来源暂时不可用，请重新读取。');
+          if (active && currentKey.current === contextKey)
+            setError('制作说明暂时无法读取，仍可编辑当前表单并生成。');
         });
     };
     window.addEventListener('production-source-updated', inspect);
@@ -161,23 +162,17 @@ export function useProductionInstructions(input: {
       overrides.current.set(contextKey, {});
       setRefresh((value) => value + 1);
     },
-    beforeSubmit: async (): Promise<ProductionSource | undefined> => {
-      if (loading || error || result?.issues.length)
-        throw new Error(
-          error ||
-            result?.issues.map((issue) => issue.message).join('\n') ||
-            '正在适配制作内容，请稍后提交。',
-        );
-      if (!target || !adapter) return undefined;
-      const latest = await callWorker('production.compile', {
-        ...compileRequest(target, adapter, shotIds, inputImages),
-        ...(result?.source ? { expectedToken: result.source.token } : {}),
+    beforeSubmit: (): Promise<ProductionSource | undefined> => {
+      if (!target) return Promise.resolve(undefined);
+      return Promise.resolve({
+        ...(result?.source?.target.kind === target.kind && result.source.target.id === target.id
+          ? result.source
+          : {}),
+        mode: 'form',
+        target,
+        ...(shotIds ? { shotIds } : {}),
+        ...(inputImages !== undefined ? { inputImages } : {}),
       });
-      if (latest?.source?.token !== result?.source?.token)
-        throw new Error('制作来源已变化，请重新填入制作内容。');
-      if (latest?.issues.length)
-        throw new Error(latest.issues.map((issue) => issue.message).join('\n'));
-      return latest?.source;
     },
   };
 }

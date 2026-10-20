@@ -1126,6 +1126,14 @@ export class ProductionService {
     adapterKey?: string,
     actual?: { parameters: AdapterParameters; inputs?: MediaInputReferenceV1[] },
   ): void {
+    if (source?.mode === 'form') {
+      if (!source.target || key(source.target) !== key(target))
+        throw new Error('生成表单的目标对象不匹配。');
+      // Final parameters and actual inputs are validated by media preparation and
+      // frozen in the paid-submission snapshot. Authored story facts are advisory.
+      this.targetState(target);
+      return;
+    }
     const exists = this.projects.access(
       false,
       (db, project) =>

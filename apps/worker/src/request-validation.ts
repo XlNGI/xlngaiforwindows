@@ -2455,7 +2455,16 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
 function validateProductionSource(params: Record<string, unknown>): void {
   if (params.productionSource === undefined) return;
   const source = requireObject(params.productionSource, 'productionSource');
-  rejectUnknown(source, ['target', 'instructionId', 'revision', 'token', 'shotIds', 'inputImages']);
+  rejectUnknown(source, [
+    'mode',
+    'target',
+    'instructionId',
+    'revision',
+    'token',
+    'shotIds',
+    'inputImages',
+  ]);
+  optionalEnum(source, 'mode', new Set(['instruction', 'form']));
   validateProductionImages(source);
   if (
     source.shotIds !== undefined &&
@@ -2470,8 +2479,15 @@ function validateProductionSource(params: Record<string, unknown>): void {
   rejectUnknown(target, ['kind', 'id']);
   requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
   requireId(target, 'id');
-  requireId(source, 'instructionId');
-  requireInteger(source, 'revision', 1, Number.MAX_SAFE_INTEGER);
+  if (source.mode === 'form') {
+    optionalId(source, 'instructionId');
+    if (source.revision !== undefined)
+      requireInteger(source, 'revision', 1, Number.MAX_SAFE_INTEGER);
+    if (source.token === undefined) return;
+  } else {
+    requireId(source, 'instructionId');
+    requireInteger(source, 'revision', 1, Number.MAX_SAFE_INTEGER);
+  }
   requireString(source, 'token', 64);
   if (typeof source.token !== 'string' || !/^[a-f0-9]{64}$/u.test(source.token))
     throw new RequestValidationError('制作来源标识无效。');

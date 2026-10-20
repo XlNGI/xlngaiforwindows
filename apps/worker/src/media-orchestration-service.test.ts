@@ -168,6 +168,75 @@ function prepareVideo(videos: VideoGenerationService) {
 }
 
 describe('MediaOrchestrationService', () => {
+  it('submits the frozen final form after saved production notes change during paid confirmation', async () => {
+    const f = await setup();
+    const content = new ContentService(f.projectsService);
+    const scene = content.saveScene({ title: '铁匠铺' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '拒绝' });
+    const target = { kind: 'shot' as const, id: shot.id };
+    const production = new ProductionService(f.projectsService);
+    production.execute({
+      executionKey: 'saved-notes',
+      operations: [
+        {
+          action: 'set_prompt',
+          target,
+          expectedRowVersion: shot.rowVersion,
+          instruction: {
+            version: 1,
+            summary: '原制作说明',
+            subjects: [],
+            visual: {},
+            beats: [],
+            audio: { mode: 'silent' },
+            generation: { duration: 20 },
+            resources: [],
+            continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
+          },
+        },
+      ],
+    });
+    const parameters = {
+      prompt: '江晚继续打铁，老瞎子走入雾中',
+      duration: 5,
+      aspect_ratio: '9:16',
+      resolution: '720p',
+      audio: true,
+    };
+    const job = f.videos.prepare({
+      adapterKey: videoSelection.adapterKey,
+      shotId: shot.id,
+      productionSource: { ...production.read(target).source!, mode: 'form' },
+      parameters,
+      providerRegion: 'global',
+      providerProfileId,
+      modelId: videoSelection.modelId,
+      mediaModelSelection: videoSelection,
+    });
+    const pending = f.service.requestSubmission({ jobId: job.id });
+    expect(f.request).not.toHaveBeenCalled();
+    content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: shot.title,
+      prompt: '另行修订的沈孤鸿剧情',
+      expectedRowVersion: production.read(target).rowVersion,
+    });
+    f.request.mockResolvedValue({ status: 200, taskId: 'final-form-task' });
+    await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.request.mock.calls[0])).toContain(parameters.prompt);
+    expect(JSON.stringify(f.request.mock.calls[0])).not.toContain('沈孤鸿');
+    expect(f.videos.get(job.id)).toMatchObject({
+      providerTaskId: 'final-form-task',
+      request: parameters,
+    });
+  });
+
   it('coalesces duplicate confirmed requests into one execution and one paid submission', async () => {
     const f = await setup(true);
     const job = prepareVideo(f.videos);

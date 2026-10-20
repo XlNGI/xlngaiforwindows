@@ -125,7 +125,7 @@ describe('production form local compilation', () => {
     { inputImages: [] },
     { inputImages: [{ assetId: 'selected-frame', role: 'first-frame' as const }] },
   ])(
-    'keeps the same selected images in preview, refresh and pre-submit verification (%j)',
+    'keeps image-selection provenance without recompiling the submitted form (%j)',
     async ({ inputImages }) => {
       const token = 'b'.repeat(64);
       vi.mocked(callWorker).mockImplementation((method, params) => {
@@ -164,13 +164,14 @@ describe('production form local compilation', () => {
       );
       await expect(result.current.beforeSubmit()).resolves.toEqual({
         ...source,
+        mode: 'form',
         inputImages,
         token,
       });
       const calls = vi
         .mocked(callWorker)
         .mock.calls.filter(([method]) => method === 'production.compile');
-      expect(calls).toHaveLength(3);
+      expect(calls).toHaveLength(2);
       for (const [, request] of calls)
         expect((request as ProductionCompileParams).inputImages).toEqual(inputImages);
     },
@@ -210,7 +211,7 @@ describe('production form local compilation', () => {
     expect(result.current.parameters.prompt).toBe('保留剧情与声音描述');
     expect(result.current.parameters).not.toHaveProperty('old_model_only');
     expect(result.current.result?.notices).toHaveLength(1);
-    await expect(result.current.beforeSubmit()).resolves.toEqual(source);
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ ...source, mode: 'form' });
   });
   it('projects a changed model schema while preserving each model manual values', async () => {
     const first: AdapterDescriptor = {
@@ -270,7 +271,15 @@ describe('production form local compilation', () => {
     await waitFor(() => expect(result.current.parameters.prompt).toContain('镜头02：决定离开'));
     expect(result.current.parameters.ratio).toBe('9:16');
     expect(result.current.result?.estimatedDurationSeconds).toBe(23);
-    await expect(result.current.beforeSubmit()).rejects.toThrow('超过当前模型');
+    act(() => {
+      result.current.edit('prompt', '用户重新安排的一段动作');
+      result.current.edit('duration', 5);
+    });
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ ...source, mode: 'form' });
+    expect(result.current.parameters).toMatchObject({
+      prompt: '用户重新安排的一段动作',
+      duration: 5,
+    });
   });
   it('fills automatically, preserves a manual edit arriving before compilation, and clears it only on explicit refill', async () => {
     let resolve!: (value: ProductionCompileResult) => void;
@@ -332,20 +341,26 @@ describe('production form local compilation', () => {
     rerender({ selected: target });
     await waitFor(() => expect(result.current.parameters.prompt).toBe('第一场人工稿'));
   });
-  it('reports source changes and checks again before submission', async () => {
+  it('reports source changes without blocking the final form or recompiling on submission', async () => {
     vi.mocked(callWorker).mockResolvedValue(compiled());
     const { result } = renderHook(() => useForm());
     await waitFor(() => expect(result.current.result?.source).toEqual(source));
-    await expect(result.current.beforeSubmit()).resolves.toEqual(source);
+    act(() => result.current.edit('prompt', '只有江晚与老瞎子的镜头'));
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ ...source, mode: 'form' });
     vi.mocked(callWorker).mockResolvedValue(
       compiled({ source: { ...source, token: 'b'.repeat(64) } }),
     );
-    await expect(result.current.beforeSubmit()).rejects.toThrow('制作来源已变化');
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ ...source, mode: 'form' });
+    expect(callWorker).toHaveBeenCalledTimes(1);
     act(() => {
       window.dispatchEvent(new Event('production-source-updated'));
     });
-    await waitFor(() => expect(result.current.error).toContain('来源内容或素材绑定已更新'));
-    await expect(result.current.beforeSubmit()).rejects.toThrow('来源内容');
+    await waitFor(() => expect(result.current.error).toContain('已保留当前表单'));
+    expect(result.current.parameters.prompt).toBe('只有江晚与老瞎子的镜头');
+    await expect(result.current.beforeSubmit()).resolves.toMatchObject({
+      mode: 'form',
+      token: 'b'.repeat(64),
+    });
   });
   it('shows stale dependency details after an update event without overwriting manual form edits', async () => {
     vi.mocked(callWorker).mockResolvedValue(compiled());
@@ -370,7 +385,7 @@ describe('production form local compilation', () => {
     });
     await waitFor(() => expect(result.current.result?.issues).toEqual([issue]));
     expect(result.current.parameters.prompt).toBe('保留我的表单修改');
-    await expect(result.current.beforeSubmit()).rejects.toThrow('来源内容');
+    await expect(result.current.beforeSubmit()).resolves.toMatchObject({ mode: 'form' });
     vi.mocked(callWorker).mockResolvedValue(
       compiled({ source: { ...source, revision: 2, token: 'c'.repeat(64) } }),
     );
@@ -379,20 +394,36 @@ describe('production form local compilation', () => {
     expect(result.current.parameters.prompt).toBe('保留我的表单修改');
     await expect(result.current.beforeSubmit()).resolves.toMatchObject({ revision: 2 });
   });
-  it('does not fill conflicting requirements and supports legacy targets without instructions', async () => {
+  it('keeps continuity warnings advisory and supports targets without structured instructions', async () => {
     vi.mocked(callWorker).mockResolvedValue(
-      compiled({ issues: [{ code: 'CONFLICT', message: '剧情冲突' }] }),
+      compiled({
+        issues: [
+          { code: 'CONTINUITY_UNVERIFIED', message: '沈孤鸿状态缺少前置证据' },
+          { code: 'LOCKED_FACT_CHANGED', message: '江晚外观锁定值发生变化' },
+        ],
+      }),
     );
     const { result } = renderHook(() => useForm());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.parameters.prompt).toBeUndefined();
-    await expect(result.current.beforeSubmit()).rejects.toThrow('剧情冲突');
+    expect(result.current.parameters.prompt).toBe('系统填入');
+    act(() => result.current.edit('prompt', '江晚继续打铁，老瞎子离去'));
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ ...source, mode: 'form' });
+    expect(result.current.parameters.prompt).not.toContain('沈孤鸿');
     vi.mocked(callWorker).mockResolvedValue(
       compiled({ source: undefined, parameters: {}, issues: [] }),
     );
     act(() => result.current.refill());
     await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.result?.source).toBeUndefined());
-    await expect(result.current.beforeSubmit()).resolves.toBeUndefined();
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ target, mode: 'form' });
+  });
+  it('allows a completed manual form when instruction compilation is unavailable', async () => {
+    vi.mocked(callWorker).mockRejectedValue(new Error('制作说明暂时不可用'));
+    const { result } = renderHook(() => useForm());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toContain('制作说明暂时不可用');
+    act(() => result.current.edit('prompt', '手工填写的镜头'));
+    await expect(result.current.beforeSubmit()).resolves.toEqual({ target, mode: 'form' });
+    expect(result.current.parameters.prompt).toBe('手工填写的镜头');
   });
 });

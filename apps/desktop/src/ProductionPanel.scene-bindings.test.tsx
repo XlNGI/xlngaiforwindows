@@ -273,7 +273,7 @@ describe('scene production bindings', () => {
       .mock.calls.find(
         ([method]) => method === 'video.generate.prepare',
       )![1] as VideoGenerationPrepareParams;
-    expect(prepared.productionSource).toEqual(source);
+    expect(prepared.productionSource).toEqual({ ...source, mode: 'form' });
     expect(prepared.parameters.media).toEqual(
       inputImages.map((image) => ({
         type: 'reference_image',
@@ -352,7 +352,7 @@ describe('scene production bindings', () => {
       )![1] as VideoGenerationPrepareParams;
     expect(JSON.stringify(prepared.parameters)).not.toContain('character-voice://');
     expect(JSON.stringify(prepared.parameters)).not.toContain('project-audio://');
-    expect(prepared.productionSource).toEqual(result.source);
+    expect(prepared.productionSource).toEqual({ ...result.source, mode: 'form' });
   });
   it('lets a UniComp Wan user enter a public audio reference separately from the audio switch', async () => {
     const contract = officialVideoAudioContracts.find(
@@ -393,7 +393,7 @@ describe('scene production bindings', () => {
     expect(screen.queryByText('角色声音参考')).not.toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
   });
-  it('offers an actionable conversation update for stale instructions and keeps media submission blocked', async () => {
+  it('keeps stale and unrelated character facts advisory and submits the final prompt unchanged', async () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
     const update = vi.fn();
@@ -408,7 +408,10 @@ describe('scene production bindings', () => {
               revision: 1,
               token: 'a'.repeat(64),
             },
-            parameters: { prompt: '已有手写提示词' },
+            parameters: {
+              prompt: '已有手写提示词',
+              media: [{ type: 'reference_image', url: 'project-asset://unused-image' }],
+            },
             issues: [
               {
                 code: 'STALE_INSTRUCTION',
@@ -416,6 +419,14 @@ describe('scene production bindings', () => {
                 target: { kind: 'shot', id: 'shot' },
                 targetTitle: '入场',
                 changedReferences: [{ target: { kind: 'character', id: 'actor' }, title: '林澈' }],
+              },
+              {
+                code: 'CONTINUITY_UNVERIFIED',
+                message: '开始状态「沈孤鸿状态」缺少可比较的前置证据。',
+              },
+              {
+                code: 'LOCKED_FACT_CHANGED',
+                message: '前置对象对状态「江晚外观」的锁定值发生变化。',
               },
             ],
           })
@@ -426,6 +437,15 @@ describe('scene production bindings', () => {
         capability="REFERENCE_TO_VIDEO"
         projectId="project"
         shotId="shot"
+        seedReferenceBindings={[
+          {
+            id: 'unused',
+            role: 'character',
+            label: '沈孤鸿',
+            assetId: 'unused-image',
+            source: 'auto',
+          },
+        ]}
         writable
         onUpdateProductionInstructions={update}
       />,
@@ -437,10 +457,30 @@ describe('scene production bindings', () => {
     expect(update.mock.calls[0]![0]).toContain('入场（shot:shot）');
     expect(update.mock.calls[0]![0]).toContain('林澈');
     expect(update.mock.calls[0]![0]).toContain('手工修改');
+    const prompt = screen.getByRole('textbox', { name: '提示词' });
+    fireEvent.change(prompt, { target: { value: '江晚继续打铁，老瞎子走入门外雾中' } });
+    expect(screen.getByText(/制作说明仅供参考/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
-    await waitFor(() => expect(screen.getByText(/引用的角色林澈已有新版本/)).toBeVisible());
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      ).toBe(true),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(
+        ([method]) => method === 'video.generate.prepare',
+      )![1] as VideoGenerationPrepareParams;
+    expect(prepared.productionSource).toMatchObject({
+      mode: 'form',
+      target: { kind: 'shot', id: 'shot' },
+    });
+    expect(prepared.parameters.prompt).toBe('江晚继续打铁，老瞎子走入门外雾中');
+    expect(JSON.stringify(prepared.parameters)).not.toContain('沈孤鸿');
     expect(
-      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+      vi
+        .mocked(callWorker)
+        .mock.calls.some(([method]) => method === 'media.generation.confirmSubmission'),
     ).toBe(false);
   });
 
@@ -491,7 +531,7 @@ describe('scene production bindings', () => {
     await screen.findByText(/已填入制作内容 · 版本 1/);
     latest = result('new-image', 2);
     window.dispatchEvent(new Event('production-source-updated'));
-    expect(await screen.findByText(/来源内容或素材绑定已更新/)).toBeVisible();
+    expect(await screen.findByText(/制作说明或参考资料已更新/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '重新填入制作内容' }));
     await screen.findByText(/已填入制作内容 · 版本 2/);
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));

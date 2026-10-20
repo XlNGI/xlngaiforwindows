@@ -181,21 +181,35 @@ export interface ProductionImageSelection {
   label?: string;
 }
 
-export interface ProductionSource {
+interface ProductionSourceTarget {
   target: ProductionTarget;
-  instructionId: string;
-  revision: number;
-  token: string;
   /** A contiguous production unit; the narrative scene itself stays intact. */
   shotIds?: string[];
   inputImages?: ProductionImageSelection[];
 }
 
+export interface ProductionInstructionSource extends ProductionSourceTarget {
+  mode?: 'instruction';
+  instructionId: string;
+  revision: number;
+  token: string;
+}
+
+/** The submitted form is authoritative; instruction metadata is provenance only. */
+export interface ProductionFormSource extends ProductionSourceTarget {
+  mode: 'form';
+  instructionId?: string;
+  revision?: number;
+  token?: string;
+}
+
+export type ProductionSource = ProductionInstructionSource | ProductionFormSource;
+
 export interface ProductionReadResult {
   target: ProductionTarget;
   rowVersion: number;
   instruction?: ProductionInstruction;
-  source?: ProductionSource;
+  source?: ProductionInstructionSource;
   issues: ProductionIssue[];
   /** Model-specific preferences that were adapted; never block submission. */
   notices?: ProductionIssue[];
