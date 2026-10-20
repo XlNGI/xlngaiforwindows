@@ -1230,8 +1230,15 @@ export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
   },
 ];
 
-for (const tool of SYSTEM_AGENT_TOOLS) {
-  if (['scene.structure.stage', 'scene.submit_structure', 'production.execute'].includes(tool.name))
+for (const tool of [...DOCUMENT_AGENT_TOOLS, ...SYSTEM_AGENT_TOOLS]) {
+  if (
+    [
+      'novel.episode.submit_structure',
+      'scene.structure.stage',
+      'scene.submit_structure',
+      'production.execute',
+    ].includes(tool.name)
+  )
     tool.description += PRODUCTION_AUTHORING_GUIDANCE;
 }
 

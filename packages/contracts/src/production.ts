@@ -371,7 +371,11 @@ export const productionInstructionSchema = object(
       },
       ['estimatedDurationSeconds', 'rationale'],
     ),
-    stillFrame: text,
+    stillFrame: {
+      ...text,
+      description:
+        '本镜单幅关键画面，说明人物位置、动作与构图；人物服装、发型沿用已确认设定或对应参考图，不因夜景、打斗或整体色调重设计。',
+    },
     transition: object({
       entry: text,
       exit: text,
@@ -381,15 +385,31 @@ export const productionInstructionSchema = object(
       object(
         {
           documentId: id,
-          description: text,
-          wardrobe: text,
+          description: {
+            ...text,
+            description:
+              '本镜人物身份及必要特征。沿用实际读取的角色设定与所选参考图；不能把创作补写的造型声称为“按角色设定板”，不整段复述设定板。',
+          },
+          wardrobe: {
+            ...text,
+            description:
+              '仅填写已有资料确认的服装款式、材质与固有色，或用户/原文明确要求的本场换装。默认沿用对应角色参考图；未知则省略，不因冷峻、夜景或画面色调改成黑衣。',
+          },
           position: {
             ...text,
             description:
               '本镜画面中的前中后景、左右、朝向、与门/工作台的关系及可通行路线；区分初始站位和后续移动，不仅填写地点名称。',
           },
-          appearance: text,
-          hairMakeup: text,
+          appearance: {
+            ...text,
+            description:
+              '沿用已确认的人物外观和身体特征，不根据本镜情绪或类型擅自添加疤痕、布带、残缺等设定；未知细节省略。',
+          },
+          hairMakeup: {
+            ...text,
+            description:
+              '发型、发色、发饰与妆容沿用已确认设定或所选参考图；只有用户/原文明确建立变化时才改动，不能为打斗自行改扎高马尾。',
+          },
           expression: text,
           gaze: text,
           action: {

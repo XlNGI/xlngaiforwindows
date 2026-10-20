@@ -9,11 +9,13 @@ import {
   type AgentProviderToolExecutor,
 } from './agent-provider-tool-gateway.js';
 import {
+  DOCUMENT_AGENT_TOOLS,
   SYSTEM_AGENT_TOOLS,
   LIBRARY_AGENT_TOOLS,
   MEDIA_AGENT_TOOLS,
   RESEARCH_AGENT_TOOLS,
 } from './agent-tool-definitions.js';
+import { PRODUCTION_AUTHORING_GUIDANCE } from './production-authoring-guidance.js';
 
 const identity: LlmGenerationIdentity = {
   generationId: 'generation',
@@ -144,6 +146,47 @@ describe('AgentProviderToolGateway', () => {
       'authorized',
     );
   });
+  it.each([true, false])(
+    'delivers the same appearance-source guidance through every authoring entry (lazy=%s)',
+    async (lazy) => {
+      const authoringNames = [
+        'novel.episode.submit_structure',
+        'scene.structure.stage',
+        'scene.submit_structure',
+        'production.execute',
+      ];
+      const definitions = [...DOCUMENT_AGENT_TOOLS, ...SYSTEM_AGENT_TOOLS].map((tool) => ({
+        ...tool,
+        authorizationHandle: 'private-worker-capability',
+      }));
+      const worker = executor({});
+      const gateway = new AgentProviderToolGateway(
+        worker,
+        identity,
+        definitions,
+        vi.fn(),
+        vi.fn(),
+        undefined,
+        undefined,
+        lazy,
+      );
+      if (lazy)
+        await gateway
+          .tools()
+          .find((tool) => tool.name === 'tools.load')!
+          .execute('load-looks', {
+            names: authoringNames,
+          });
+      const received = gateway.currentDefinitions();
+      for (const name of authoringNames) {
+        const tool = received.find((entry) => entry.name === name);
+        expect(tool).toBeDefined();
+        expect(tool!.description.split(PRODUCTION_AUTHORING_GUIDANCE)).toHaveLength(2);
+        expect(tool!.authorizationHandle).toBe('private-worker-capability');
+      }
+      expect(worker.executeTools).not.toHaveBeenCalled();
+    },
+  );
   it('keeps the authorization handle outside Provider arguments and returns the Worker result', async () => {
     const nextDefinition = definition('research.search', 'next-handle');
     const worker = executor({
