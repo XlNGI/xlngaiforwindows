@@ -174,6 +174,17 @@ created -> streaming -> complete
 
 详细状态见 [配音实施记录](./code-traces/2026-10-14-character-voice-dubbing.md)。真实付费样片由用户明确延期，声音与口型质量、真实账号可用性、正式签名和旧版本升级继续为待验收项。
 
+2026-10-20 Agent 业务可靠性新增追踪：
+
+| 不变量 | 负责模块 | 验证证据 |
+| --- | --- | --- |
+| 每次实际模型请求发送前统一计数，24 次终止成功，不发送第 25 次 | Pi Runtime / Native Bridge | 两协议 Native/Pi/SQLite：工具加载、写入、无变化重放和输出修复后边界 stop／继续；取消边界 |
+| 同内容同来源不增加业务版本，所有 CAS 先校验，引用更新先于消费对象 | Production Service / SQLite | 重开、同键冲突、换键 unchanged、额外素材文档来源、倒序混合清单、注入异常整体回滚 |
+| 自由文本差异不能冒充确定矛盾，缺少证据不能自动清除；图与整场检查一致 | Contracts 连续性规则 / Production / Scene Compiler | 真实对象状态、共享初始／锁定事实、混合旧格式、外部前置和生成来源拦截 |
+| Agent 默认读取不重复展开正文，长内容可续读，缓存不能跨版本／会话 | Agent Production Query / Tool Gateway | 中文 JSON 无损分页、不同视图、子镜头／引用／前置／默认值／素材文件失效、旧会话拒绝、LRU 淘汰 |
+
+方案与完整验证记录见 [Agent 业务可靠性计划](./AGENT-BUSINESS-RELIABILITY-IMPLEMENTATION-PLAN.md)。
+
 ## 6. 本轮复验状态
 
 2026-09-22 请求风暴与网络故障防护：`pnpm.cmd test` 820 项、Rust 113 项通过；TypeScript 类型、Lint、格式、生产构建及 Rust fmt/check 通过。覆盖熔断、限流、有界排队、跨出口共享、整流许可、取消、媒体提交状态保护和本地错误分类，详见 [网络韧性实现记录](./NETWORK-RESILIENCE-IMPLEMENTATION.md)。未验证真实 Provider、断网/休眠、安装包及跨进程共享限额；本记录不改变既有发布 `HOLD`。

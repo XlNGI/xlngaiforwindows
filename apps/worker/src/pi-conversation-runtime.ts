@@ -292,7 +292,19 @@ export class PiConversationRuntime implements ConversationRuntime {
       aggregate = appendAssistantText(aggregateState, message);
       return aggregate;
     };
-    const streamFn = this.options.streamFn ?? this.createNativeStream(identity);
+    const providerStream = this.options.streamFn ?? this.createNativeStream(identity);
+    // Pi invokes prepareNextTurn even for the final stop response, and does
+    // not invoke it before the first request. Count at the send boundary so
+    // initial, loader and output-repair requests share exactly one budget.
+    const streamFn: StreamFn = (model, context, options) => {
+      this.options.generation.runtime(identity);
+      if (turnCount >= this.maxTurns)
+        throw new Error(`Pi runtime exceeded the ${this.maxTurns}-turn limit.`);
+      this.options.onEvent?.({ type: 'turn_started', taskId: request.taskId, turn: turnCount + 1 });
+      this.options.generation.runtime(identity);
+      turnCount += 1;
+      return providerStream(model, context, options);
+    };
     const agent = new Agent({
       streamFn,
       initialState: {
@@ -344,11 +356,6 @@ export class PiConversationRuntime implements ConversationRuntime {
           providerGateway?.advanceTextTurn(message.responseId, usageFromPi(message));
         for (const supplement of supplements)
           agent.steer({ role: 'user', content: supplement.content, timestamp: Date.now() });
-        turnCount += 1;
-        this.options.onEvent?.({ type: 'turn_started', taskId: request.taskId, turn: turnCount });
-        if (turnCount > this.maxTurns) {
-          throw new Error(`Pi runtime exceeded the ${this.maxTurns}-turn limit.`);
-        }
         if (message.role === 'assistant') {
           lastResponseId = message.responseId;
           lastUsage = usageFromPi(message);
@@ -436,10 +443,6 @@ export class PiConversationRuntime implements ConversationRuntime {
         const current = this.options.generation.runtime(identity);
         providerGateway?.assertRepairBudget();
         gateway?.assertRepairBudget();
-        turnCount += 1;
-        if (turnCount >= this.maxTurns)
-          throw new Error(`Pi runtime exceeded the ${this.maxTurns}-turn limit.`);
-        this.options.onEvent?.({ type: 'turn_started', taskId: request.taskId, turn: turnCount });
         const staged =
           ['scene.submit_structure', 'scene.structure.stage'].includes(failure.operation) &&
           providerGateway?.preferStagedSceneAuthoring();
@@ -881,6 +884,8 @@ export class PiConversationRuntime implements ConversationRuntime {
 }
 
 function unifiedAgentInstruction(base: string): string {
+  base +=
+    '\nProduction reads use bounded views: scene.read defaults to IDs/bindings; production.read defaults to one saved authored instruction. Read text when missing an instruction or when stale to preserve manual edits. Follow contentPage.nextOffset with expectedVersion until complete; concatenate JSON pages before parsing. Reuse current results across tools and use ifVersion for dependency-aware unchanged responses. Batch related revisions. executionKey may be omitted so Worker derives a stable task command; changed=false means the current content and sources already match. CONTINUITY_UNVERIFIED means evidence is absent or prose cannot be compared: report it without inventing prior actions or rewriting every predecessor. Use comparison.entity/attribute/state only with real saved IDs and supported stable states; keep action detail in key/value. Saved needs_attention drafts remain saved and blocked for media until issues are resolved.';
   base +=
     '\nFor revisions, batch independent read-only calls in one response and reuse successful results. Read tools can be reused within the authorized task budget; tools.load only selects schemas and does not renew or expand authorization. For a production update, read the current shared scene and affected shot instructions, then use production.execute to update existing targets together (at most 30 operations and 512 KiB per list). When reference documents change, update their drafts first, then revise affected existing scene/shot instructions against the latest references and rowVersions; never recreate scenes, erase manual edits, or merely stamp old instructions as current. STALE_INSTRUCTION issues identify affected targets and changed references. Refreshing a production form does not repair saved instructions. Production tasks have at most 32 business calls and 24 model turns; batch independent reads and writes, keep saved progress, and report unfinished work clearly if a limit or network failure interrupts the task.';
   base +=

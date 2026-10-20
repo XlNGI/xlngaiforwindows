@@ -88,6 +88,253 @@ const wan = () =>
   )!;
 
 describe('production execution in the project store', () => {
+  it('includes resource documents outside the scene cast in provenance and no-op checks', async () => {
+    const f = await setup();
+    const resource = f.content.saveDocument({
+      kind: 'scene',
+      title: '道具资料',
+      contentMarkdown: '旧道具设定',
+    });
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    const spec = instruction({
+      resources: [
+        { kind: 'prop-image', documentId: resource.id, required: false, purpose: '道具参考' },
+      ],
+    });
+    f.service.execute({
+      executionKey: 'resource-before',
+      operations: [operation(target, f.shot.rowVersion, spec)],
+    });
+    const before = f.service.read(target);
+    f.content.saveDocument({
+      documentId: resource.id,
+      kind: 'scene',
+      title: resource.title,
+      contentMarkdown: '新道具设定',
+    });
+    const stale = f.service.read(target);
+    expect(stale.issues.map((issue) => issue.code)).toContain('STALE_INSTRUCTION');
+    expect(stale.source?.token).not.toBe(before.source?.token);
+    expect(
+      f.service.execute({
+        executionKey: 'resource-after',
+        operations: [operation(target, before.rowVersion, spec)],
+      }),
+    ).toMatchObject({ changedCount: 1 });
+    expect(f.service.read(target)).toMatchObject({ source: { revision: 2 }, issues: [] });
+  });
+
+  it('compares real entity states, inherits shared initial facts and retains unresolved prose as unverified', async () => {
+    const f = await setup();
+    const scene = { kind: 'scene' as const, id: f.scene.id };
+    const first = { kind: 'shot' as const, id: f.shot.id };
+    const second = f.content.saveShot({ sceneId: f.scene.id, title: '后镜' });
+    const target = { kind: 'shot' as const, id: second.id };
+    const fact = (value: string, state = 'held') => ({
+      key: '物品位置',
+      value,
+      comparison: { entity: scene, attribute: 'prop.letter.location', state },
+    });
+    const spec = (patch: Partial<ProductionInstruction['continuity']>) =>
+      instruction({
+        continuity: {
+          predecessors: [],
+          before: [],
+          after: [],
+          locked: [],
+          constraints: [],
+          ...patch,
+        },
+      });
+    f.service.execute({
+      executionKey: 'comparable',
+      operations: [
+        operation(scene, f.scene.rowVersion, spec({ before: [fact('在手中')] })),
+        operation(
+          first,
+          f.shot.rowVersion,
+          spec({ before: [fact('拿在手中观察')], after: [fact('依然拿着信封')] }),
+        ),
+        operation(target, second.rowVersion, spec({ before: [fact('在手中，正在展开')] })),
+      ],
+    });
+    expect(f.service.read(scene).issues).toEqual([]);
+    expect(f.service.read(target).issues).toEqual([]);
+    const result = f.service.execute({
+      executionKey: 'conflict',
+      operations: [
+        operation(
+          target,
+          f.service.read(target).rowVersion,
+          spec({ before: [fact('桌上', 'table')] }),
+        ),
+      ],
+    });
+    expect(result).toMatchObject({
+      status: 'applied',
+    });
+    expect(result.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'CONTINUITY_CONFLICT', target })]),
+    );
+    expect(f.service.read(scene).issues.map((issue) => issue.code)).toContain(
+      'CONTINUITY_CONFLICT',
+    );
+    expect(() => f.service.assertSource(f.service.read(target).source, target)).toThrow();
+    f.service.execute({
+      executionKey: 'unknown',
+      operations: [
+        operation(
+          target,
+          f.service.read(target).rowVersion,
+          spec({ before: [{ key: '炭灰盆', value: '墙角' }] }),
+        ),
+      ],
+    });
+    expect(f.service.read(target).issues.map((issue) => issue.code)).toContain(
+      'CONTINUITY_UNVERIFIED',
+    );
+    expect(f.service.read(target).issues.map((issue) => issue.code)).not.toContain(
+      'CONTINUITY_CONFLICT',
+    );
+    expect(() =>
+      f.service.execute({
+        executionKey: 'fake-entity',
+        operations: [
+          operation(
+            target,
+            f.service.read(target).rowVersion,
+            spec({
+              after: [
+                {
+                  ...fact('手中'),
+                  comparison: {
+                    entity: { kind: 'scene', id: 'invented' },
+                    attribute: 'location',
+                    state: 'held',
+                  },
+                },
+              ],
+            }),
+          ),
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it('saves references first even when listed last and snapshots every consumer against the final batch', async () => {
+    const f = await setup();
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    f.service.execute({
+      executionKey: 'mixed-order',
+      operations: [
+        operation(target, f.shot.rowVersion),
+        operation({ kind: 'scene', id: f.scene.id }, f.scene.rowVersion),
+        operation(
+          { kind: 'character', id: f.actor.id },
+          f.actor.rowVersion,
+          instruction({ summary: '更新角色' }),
+        ),
+      ],
+    });
+    expect(f.service.read(target).issues).toEqual([]);
+    expect(f.service.read({ kind: 'scene', id: f.scene.id }).issues).toEqual([]);
+  });
+
+  it('keeps business versions on no-op, survives reopen, validates CAS, and refreshes changed sources', async () => {
+    const f = await setup();
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    const first = f.service.execute({
+      executionKey: 'first',
+      operations: [operation(target, f.shot.rowVersion)],
+    });
+    const saved = f.service.read(target);
+    f.projects.close();
+    f.projects.open(join(fixtures.at(-1)!.directory, 'project'));
+    const repeated = f.service.execute({
+      executionKey: 'second',
+      operations: [operation(target, saved.rowVersion)],
+    });
+    expect(repeated).toMatchObject({
+      status: 'applied',
+      changedCount: 0,
+      unchangedCount: 1,
+      operations: [
+        expect.objectContaining({ changed: false, revision: 1, rowVersion: saved.rowVersion }),
+      ],
+    });
+    expect(f.service.read(target).source).toEqual(saved.source);
+    expect(() =>
+      f.service.execute({
+        executionKey: 'old-cas',
+        operations: [operation(target, f.shot.rowVersion)],
+      }),
+    ).toThrow('已被修改');
+    expect(
+      f.service.execute({
+        executionKey: 'first',
+        operations: [operation(target, f.shot.rowVersion)],
+      }),
+    ).toEqual(first);
+    expect(() =>
+      f.service.execute({
+        executionKey: 'first',
+        operations: [operation(target, saved.rowVersion)],
+      }),
+    ).toThrow('执行键');
+    f.content.saveDocument({
+      documentId: f.actor.id,
+      kind: 'character',
+      title: f.actor.title,
+      contentMarkdown: '新资料',
+    });
+    expect(
+      f.service.execute({
+        executionKey: 'source-change',
+        operations: [operation(target, saved.rowVersion)],
+      }),
+    ).toMatchObject({ changedCount: 1 });
+    expect(f.service.read(target).source?.revision).toBe(2);
+  });
+
+  it('derives replay keys from task payload and rolls back a mixed batch on persistence failure', async () => {
+    const f = await setup();
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    const identity = {
+      projectId: f.project.id,
+      projectSessionId: 'test',
+      conversationId: 'test',
+      taskId: 'test',
+    };
+    const input = { operations: [operation(target, f.shot.rowVersion)] };
+    const first = f.service.execute(input, identity);
+    expect(f.service.execute(input, identity)).toEqual(first);
+    const before = f.service.read(target);
+    const other = f.content.saveShot({ sceneId: f.scene.id, title: '第二镜' });
+    f.projects.access(true, (db) =>
+      db.exec(
+        "CREATE TEMP TRIGGER fail_instruction BEFORE INSERT ON production_instruction_versions BEGIN SELECT RAISE(ABORT,'injected persistence failure'); END",
+      ),
+    );
+    expect(() =>
+      f.service.execute({
+        executionKey: 'rollback',
+        operations: [
+          operation(target, before.rowVersion),
+          operation({ kind: 'shot', id: other.id }, other.rowVersion),
+        ],
+      }),
+    ).toThrow('injected persistence failure');
+    expect(f.service.read(target).source).toEqual(before.source);
+    expect(f.content.listShots(f.scene.id).find((s) => s.id === other.id)?.rowVersion).toBe(
+      other.rowVersion,
+    );
+    f.projects.access(false, (db) =>
+      expect(
+        db.prepare("SELECT 1 FROM production_execution_lists WHERE execution_key='rollback'").get(),
+      ).toBeUndefined(),
+    );
+  });
+
   it('identifies changed references and repairs parent and shot instructions without losing manual edits', async () => {
     const f = await setup();
     const sceneTarget = { kind: 'scene' as const, id: f.scene.id };
@@ -564,7 +811,8 @@ describe('production execution in the project store', () => {
     const current = f.service.read({ kind: 'scene', id: sceneId });
     expect(current.compiledPrompt).toContain('手工修改后的当前剧情');
     expect(current.issues.map((issue) => issue.code)).toContain('STALE_INSTRUCTION');
-    expect(current.estimatedDurationSeconds).toBeUndefined();
+    expect(current.estimatedDurationSeconds).toBe(23);
+    expect(current.issues.map((issue) => issue.code)).not.toContain('MISSING_SHOT_TIMING');
   });
   it('tracks edits, added/reordered/deleted shots and project style in the whole-scene source without rewriting story timing', async () => {
     const f = await setup();
@@ -867,7 +1115,7 @@ describe('production execution in the project store', () => {
       ],
     });
     expect(branch).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
-    expect(f.service.read(c).issues.map((i) => i.code)).toContain('CONTINUITY_CONFLICT');
+    expect(f.service.read(c).issues.map((i) => i.code)).toContain('CONTINUITY_UNVERIFIED');
     expect(() => f.service.assertSource(f.service.read(c).source, c)).toThrow();
     f.content.saveScene({
       sceneId: f.scene.id,

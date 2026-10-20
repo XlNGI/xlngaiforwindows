@@ -33,6 +33,7 @@ import { compileProjectResourceMap } from './project-resource-map.js';
 import { SceneStructureSubmissionService } from './scene-structure-submission-service.js';
 import { splitConversationRequest } from './conversation-request.js';
 import { ProductionService } from './production-service.js';
+import { AgentProductionQueryService } from './agent-production-query-service.js';
 import type { ProductionTarget } from '@ai-video/contracts';
 import type { NovelBatchService } from './novel-batch-service.js';
 
@@ -95,6 +96,7 @@ export interface AgentSystemToolIdentity {
 
 /** Executes bounded system tools through the same services used by the Desktop UI. */
 export class AgentSystemToolService {
+  private readonly productionQueries: AgentProductionQueryService;
   constructor(
     private readonly projects: ProjectService,
     private readonly content: ContentService,
@@ -106,7 +108,9 @@ export class AgentSystemToolService {
     private readonly structureCompiler?: ProjectStructureCompiler,
     private readonly novels?: AgentNovelToolService,
     private readonly batches?: Pick<NovelBatchService, 'submit' | 'get' | 'readSource'>,
-  ) {}
+  ) {
+    this.productionQueries = new AgentProductionQueryService(new ProductionService(projects));
+  }
 
   availableOperations(): SystemAgentToolOperation[] {
     return SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation).filter(
@@ -160,11 +164,13 @@ export class AgentSystemToolService {
           unknown
         >;
       case 'production.read':
-        rejectUnknown(args, ['target']);
-        return {
-          ...new ProductionService(this.projects).read(args.target as ProductionTarget),
-          source: undefined,
-        };
+        rejectUnknown(args, ['target', 'view', 'offset', 'limit', 'expectedVersion', 'ifVersion']);
+        return this.productionQueries.read(
+          args.target as ProductionTarget,
+          args,
+          identity,
+          'instruction',
+        );
       case 'production.execute': {
         const executing = this.projects.access(false, (db) =>
           db
@@ -183,19 +189,16 @@ export class AgentSystemToolService {
         return new ProductionService(this.projects).execute(args, identity);
       }
       case 'scene.read': {
-        rejectUnknown(args, ['sceneId']);
+        rejectUnknown(args, ['sceneId', 'view', 'offset', 'limit', 'expectedVersion', 'ifVersion']);
         const sceneId = requiredString(args.sceneId, 'sceneId', 200);
         const scene = this.content.listScenes().find((item) => item.id === sceneId);
         if (!scene) throw new Error('Scene was not found in the current project.');
-        return {
-          status: 'read',
-          scene,
-          shots: this.content.listShots(sceneId),
-          production: {
-            ...new ProductionService(this.projects).read({ kind: 'scene', id: sceneId }),
-            source: undefined,
-          },
-        };
+        return this.productionQueries.read(
+          { kind: 'scene', id: sceneId },
+          args,
+          identity,
+          'structure',
+        );
       }
       case 'scene.submit_structure':
         return new SceneStructureSubmissionService(this.projects).submit(args, identity);

@@ -1,5 +1,7 @@
 import {
   renderProductionInstruction,
+  seedProductionFacts,
+  applyProductionFacts,
   type AdapterDescriptor,
   type ProductionInstruction,
   type ProductionIssue,
@@ -58,9 +60,13 @@ export function emptyProductionInstruction(summary: string): ProductionInstructi
 export function compileSceneSequence(
   scene: SceneInfo,
   shared: ProductionInstruction,
-  shots: Array<{ shot: ShotInfo; instruction?: ProductionInstruction }>,
+  shots: Array<{ shot: ShotInfo; instruction?: ProductionInstruction; promptText?: string }>,
   names: Record<string, string>,
-  options: { sharedText?: string; isSegment?: boolean } = {},
+  options: {
+    sharedText?: string;
+    isSegment?: boolean;
+    continuityIssues?: (shotId: string) => ProductionIssue[];
+  } = {},
 ) {
   const timeline: ProductionTimelineEntry[] = [];
   const issues: ProductionIssue[] = [];
@@ -68,9 +74,8 @@ export function compileSceneSequence(
   const resources = [...shared.resources];
   let audio = shared.audio;
   const modes = ['auto', 'silent', 'native', 'voice-reference', 'dialogue-driven'];
-  const states = new Map(shared.continuity.before.map((fact) => [fact.key, fact.value]));
-  const locked = new Map(shared.continuity.locked.map((fact) => [fact.key, fact.value]));
-  for (const { shot, instruction } of shots) {
+  const facts = seedProductionFacts(shared.continuity);
+  for (const { shot, instruction, promptText } of shots) {
     const effective = instruction ? inheritProductionInstruction(shared, instruction) : undefined;
     const seconds =
       instruction?.timing?.estimatedDurationSeconds ?? instruction?.generation.duration;
@@ -90,6 +95,8 @@ export function compileSceneSequence(
       issues.push({
         code: 'INVALID_TRANSITION_TIMING',
         message: `分镜「${shot.title}」的转场重叠时间无效。`,
+        target: { kind: 'shot', id: shot.id },
+        targetTitle: shot.title,
       });
     const start: number | undefined =
       cursor === undefined ? undefined : Math.max(0, cursor - overlap);
@@ -103,35 +110,40 @@ export function compileSceneSequence(
       startSeconds: start,
       endSeconds: end,
       estimatedDurationSeconds: seconds,
-      prompt: effective
-        ? renderProductionInstruction(effective, names)
-        : (shot.prompt ?? '分镜内容待补充'),
+      prompt:
+        promptText ??
+        (effective
+          ? renderProductionInstruction(effective, names)
+          : (shot.prompt ?? '分镜内容待补充')),
     });
     cursor = end;
     if (shared.version === 2 && !instruction?.timing)
       issues.push({
         code: 'MISSING_SHOT_TIMING',
         message: `分镜「${shot.title}」缺少结构化剧情时长，请补充，系统不会按固定秒数凑时长。`,
+        target: { kind: 'shot', id: shot.id },
+        targetTitle: shot.title,
       });
     if (effective) {
       resources.push(...effective.resources);
       if (modes.indexOf(effective.audio.mode) > modes.indexOf(audio.mode))
         audio = { ...shared.audio, ...effective.audio };
-      for (const fact of effective.continuity.before)
-        if (states.has(fact.key) && states.get(fact.key) !== fact.value)
-          issues.push({
-            code: 'CONTINUITY_CONFLICT',
-            message: `分镜「${shot.title}」的开始状态 ${fact.key} 与前镜结束状态冲突。`,
-          });
-      for (const fact of [...effective.continuity.before, ...effective.continuity.after]) {
-        if (locked.has(fact.key) && locked.get(fact.key) !== fact.value)
-          issues.push({
-            code: 'LOCKED_FACT_CHANGED',
-            message: `分镜「${shot.title}」改变了整场锁定状态 ${fact.key}。`,
-          });
-        states.set(fact.key, fact.value);
-      }
-      for (const fact of effective.continuity.locked) locked.set(fact.key, fact.value);
+      issues.push(
+        ...(options.continuityIssues
+          ? options.continuityIssues(shot.id)
+          : applyProductionFacts(
+              facts,
+              effective.continuity,
+              timeline.length > 1 || effective.continuity.predecessors.length > 0,
+            )
+        ).map((issue) => ({
+          ...issue,
+          target: issue.target ?? { kind: 'shot' as const, id: shot.id },
+          targetTitle:
+            issue.targetTitle ??
+            (!issue.target || issue.target.id === shot.id ? shot.title : undefined),
+        })),
+      );
     }
   }
   const estimatedDurationSeconds = timeline.length

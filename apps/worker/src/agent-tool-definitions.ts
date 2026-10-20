@@ -11,6 +11,14 @@ import {
   shotProductionInstructionSchema,
 } from '@ai-video/contracts';
 
+const PRODUCTION_QUERY_PROPERTIES = {
+  view: { type: 'string', enum: ['structure', 'instruction', 'text', 'issues'] },
+  offset: { type: 'integer', minimum: 0 },
+  limit: { type: 'integer', minimum: 1, maximum: 4096 },
+  expectedVersion: { type: 'string', minLength: 64, maxLength: 64 },
+  ifVersion: { type: 'string', minLength: 64, maxLength: 64 },
+};
+
 export type SystemAgentToolOperation =
   | 'conversation.task.route'
   | 'production.execute'
@@ -508,12 +516,12 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'production.read',
     description:
-      'Read structured production instructions, target rowVersion, source version and continuity issues on demand. kind=character/setting refers to production documents, scene/shot to the actual scene/shot. Read before updating. No content is automatically injected.',
+      'Read ONE saved authored instruction and current rowVersion/version on demand (default view=instruction). view=text reads current editable text, including manual edits; issues reads all readiness issues; structure is scene-only and lists IDs/bindings without bodies. Stale instructions remain readable with authored timing but cannot generate media. Large values return contentPage as JSON/text: continue at nextOffset with expectedVersion until complete, then parse the assembled JSON. limit is 1–4096 UTF-16 characters. ifVersion returns unchanged when dependencies match. Reuse read results; read changed targets again. No content is automatically injected.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       required: ['target'],
-      properties: { target: productionTargetSchema },
+      properties: { target: productionTargetSchema, ...PRODUCTION_QUERY_PROPERTIES },
     },
   },
   {
@@ -525,12 +533,15 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.read',
     description:
-      'Read an existing scene on demand by its actual ID, including its shared videoPrompt, ALL ordered shots with their IDs/rowVersions, aggregated production prompt and timeline, sceneDocumentId and character/media bindings. Use before revising an existing scene; never infer the current prompt or relationships from its title.',
+      'Read an existing scene by actual ID. Default view=structure returns bindings and ordered shot IDs/rowVersions without repeated prompt bodies. Use view=instruction for the one shared scene instruction, view=text for current shared editable text (including manual changes), view=issues for full readiness issues. Read each affected shot instruction with production.read; inspect text when stale before revising. Long results return contentPage: continue nextOffset with expectedVersion until complete; parse assembled JSON. ifVersion returns unchanged when dependencies match. Never infer relationships from titles.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       required: ['sceneId'],
-      properties: { sceneId: { type: 'string', minLength: 1, maxLength: 200 } },
+      properties: {
+        sceneId: { type: 'string', minLength: 1, maxLength: 200 },
+        ...PRODUCTION_QUERY_PROPERTIES,
+      },
     },
   },
   {

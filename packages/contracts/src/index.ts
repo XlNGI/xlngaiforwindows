@@ -19,6 +19,7 @@ import type { FileTaskWorkerMethodMap } from './file-tasks.js';
 export * from './file-tasks.js';
 export * from './task-schedule.js';
 export * from './production.js';
+export * from './production-continuity.js';
 export * from './production-schema.js';
 export * from './production-inputs.js';
 export * from './shot-continuity.js';

@@ -3,6 +3,8 @@
 版本：1.0
 日期：2026-09-19
 状态：已实施（P0–P6 核心功能及测试门禁已全部完成；P7 检索核源与标题优先已完成）
+
+2026-10-20 后续可靠性改造：Agent 的制作查询改为显式视图与版本分页；`scene.read` 默认仅返回关系／镜头目录，`production.read` 默认一份已保存指令。完整问题与当前可编辑文字按需读取；复用在 Worker 原授权和调用额度检查之后生效。不改变 library.search/read 索引、草稿／正式状态、聊天附件和正文不自动注入的既定规则。实施及验证见 [Agent 业务可靠性计划 P4/P5](./AGENT-BUSINESS-RELIABILITY-IMPLEMENTATION-PLAN.md)。
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、Pi Runtime。Native Research Bridge 不在本计划范围内。
 
 > 本文档是后续项目检索与召回改造的单一事实来源。确认规则变化时，先改本文，再改代码；若后续增加 DOCX 版本，必须与本 Markdown 同步。

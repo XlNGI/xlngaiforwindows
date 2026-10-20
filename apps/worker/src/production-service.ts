@@ -5,6 +5,12 @@ import {
   renderProductionInstruction,
   seedProductionInputs,
   addProductionRoleVoices,
+  applyProductionFacts,
+  emptyProductionFacts,
+  seedProductionFacts,
+  mergeProductionFacts,
+  productionFactKey,
+  type ProductionFactState,
   type ProductionTarget,
   type ProductionInstruction,
   type ProductionReadResult,
@@ -53,6 +59,7 @@ const key = (target: ProductionTarget) => `${target.kind}:${target.id}`;
 // These are production readiness problems, not reasons to discard editable work.
 const readinessIssues = new Set([
   'CONTINUITY_CONFLICT',
+  'CONTINUITY_UNVERIFIED',
   'LOCKED_FACT_CHANGED',
   'DEPENDENCY_INSTRUCTION_MISSING',
   'STALE_INSTRUCTION',
@@ -70,10 +77,20 @@ export function summarizeProductionReadiness<T extends ProductionIssue>(issues: 
   return {
     readiness: issues.length ? 'needs_attention' : 'ready',
     issueCount: issues.length,
-    issuesTruncated: issues.length > 20,
-    issues: issues
-      .slice(0, 20)
-      .map((issue) => ({ ...issue, message: issue.message.slice(0, 500) })),
+    issuesTruncated:
+      issues.length > 8 ||
+      issues.some(
+        (issue) => issue.message.length > 240 || (issue.changedReferences?.length ?? 0) > 2,
+      ),
+    issues: issues.slice(0, 8).map((issue) => ({
+      ...issue,
+      message: issue.message.slice(0, 240),
+      targetTitle: issue.targetTitle?.slice(0, 120),
+      changedReferenceCount: issue.changedReferences?.length,
+      changedReferences: issue.changedReferences
+        ?.slice(0, 2)
+        .map((reference) => ({ ...reference, title: reference.title.slice(0, 120) })),
+    })),
   };
 }
 
@@ -123,29 +140,53 @@ export class ProductionService {
       throw new Error('制作清单超过 512 KiB。');
     return this.projects.access(true, (db, project) =>
       db.transaction(() => {
+        const executionKey =
+          list.executionKey ??
+          (identity?.taskId
+            ? `worker:${hash([project.id, identity.projectSessionId, identity.taskId, list.operations])}`
+            : undefined);
+        if (!executionKey) throw new Error('制作清单需要执行键或 Worker 任务身份。');
         const requestHash = hash(list);
         const previous = db
           .prepare(
             'SELECT request_hash,result_json FROM production_execution_lists WHERE project_id=? AND execution_key=?',
           )
-          .get(project.id, list.executionKey) as
+          .get(project.id, executionKey) as
           { request_hash: string; result_json: string } | undefined;
         if (previous) {
           if (previous.request_hash !== requestHash) throw new Error('执行键已用于其他制作清单。');
           return JSON.parse(previous.result_json) as Record<string, unknown>;
         }
         const targets = new Set<string>();
+        const names = this.names(db, project.id);
+        const prompts = new Map<string, string>();
         for (const operation of list.operations) {
           if (targets.has(key(operation.target))) throw new Error('同一清单不能重复更新同一对象。');
           targets.add(key(operation.target));
           const state = this.targetState(operation.target);
           if (state.rowVersion !== operation.expectedRowVersion)
             throw new Error('制作对象已被修改，请读取最新版本后重试。');
+          const detailIssues = inspectProductionTargetInstruction(
+            operation.instruction,
+            operation.target.kind,
+          );
+          if (detailIssues.length)
+            throw new Error(detailIssues.map((issue) => issue.message).join('\n'));
+          const prompt = renderProductionInstruction(operation.instruction, names);
+          if (['scene', 'shot'].includes(operation.target.kind) && prompt.length > 20000)
+            throw new Error('制作提示词超过 20000 字符，请精简指令后重试。');
+          prompts.set(key(operation.target), prompt);
           requireProductionCharacters(
             db,
             project.id,
             operation.instruction.subjects.map((s) => s.documentId),
           );
+          for (const fact of [
+            ...operation.instruction.continuity.before,
+            ...operation.instruction.continuity.after,
+            ...operation.instruction.continuity.locked,
+          ])
+            if (fact.comparison) this.targetState(fact.comparison.entity);
           if (operation.target.kind === 'scene' || operation.target.kind === 'shot') {
             const cast =
               new ContentService(this.projects).listScenes().find((s) => s.id === state.sceneId)
@@ -187,27 +228,30 @@ export class ProductionService {
         const now = new Date().toISOString();
         db.prepare(
           'INSERT INTO production_execution_lists(id,project_id,execution_key,request_hash,request_json,result_json,created_at) VALUES(?,?,?,?,?,?,?)',
-        ).run(
-          executionId,
-          project.id,
-          list.executionKey,
-          requestHash,
-          JSON.stringify(list),
-          '{}',
-          now,
-        );
+        ).run(executionId, project.id, executionKey, requestHash, JSON.stringify(list), '{}', now);
         const content = new ContentService(this.projects);
-        const names = this.names(db, project.id);
         const outputs = [];
-        for (const operation of list.operations) {
+        const changed = new Set<string>();
+        // References must be saved before their consumers, independent of
+        // model array order. All CAS checks above still precede every write.
+        const ordered = [...list.operations].sort(
+          (a, b) =>
+            Number(['scene', 'shot'].includes(a.target.kind)) -
+            Number(['scene', 'shot'].includes(b.target.kind)),
+        );
+        for (const operation of ordered) {
           const { target, instruction } = operation;
-          const detailIssues = inspectProductionTargetInstruction(instruction, target.kind);
-          if (detailIssues.length)
-            throw new Error(detailIssues.map((issue) => issue.message).join('\n'));
           const state = this.targetState(target);
-          const prompt = renderProductionInstruction(instruction, names);
-          if ((target.kind === 'scene' || target.kind === 'shot') && prompt.length > 20000)
-            throw new Error('制作提示词超过 20000 字符，请精简指令后重试。');
+          const latest = this.latest(db, project.id, target);
+          if (
+            latest &&
+            hash(latest.instruction) === hash(instruction) &&
+            latest.row.source_hash ===
+              this.instructionSourceHash(db, project.id, target, instruction)
+          )
+            continue;
+          changed.add(key(target));
+          const prompt = prompts.get(key(target))!;
           if (target.kind === 'scene') {
             const scene = content.listScenes().find((s) => s.id === target.id)!;
             content.saveScene({
@@ -256,6 +300,26 @@ export class ProductionService {
         }
         // Snapshot the final batch state, including canonical character/setting versions.
         for (const { target, instruction } of list.operations) {
+          const previous = this.latest(db, project.id, target);
+          // A reference document earlier in the list may itself depend on a
+          // document saved later. Recheck against the complete final batch.
+          if (
+            previous &&
+            previous.row.source_hash !==
+              this.instructionSourceHash(db, project.id, target, instruction)
+          )
+            changed.add(key(target));
+          if (!changed.has(key(target))) {
+            const latest = this.latest(db, project.id, target)!;
+            outputs.push({
+              target,
+              instructionId: latest.row.id,
+              revision: latest.row.revision,
+              rowVersion: this.targetState(target).rowVersion,
+              changed: false,
+            });
+            continue;
+          }
           const revision = (this.latest(db, project.id, target)?.row.revision ?? 0) + 1;
           const instructionId = randomUUID();
           db.prepare(
@@ -267,12 +331,13 @@ export class ProductionService {
             target.id,
             revision,
             JSON.stringify(instruction),
-            this.targetState(target).semanticHash,
+            this.instructionSourceHash(db, project.id, target, instruction),
             executionId,
             now,
           );
           outputs.push({
             target,
+            changed: true,
             instructionId,
             revision,
             rowVersion: this.targetState(target).rowVersion,
@@ -284,12 +349,14 @@ export class ProductionService {
           if (invalid.length) throw new Error(invalid.map((issue) => issue.message).join('\n'));
         }
         const issues = list.operations.flatMap(({ target }) =>
-          this.read(target).issues.map((issue) => ({ ...issue, target })),
+          this.read(target).issues.map((issue) => ({ ...issue, target: issue.target ?? target })),
         );
         const result = {
           status: 'applied',
           executionId,
           operations: outputs,
+          changedCount: changed.size,
+          unchangedCount: list.operations.length - changed.size,
           ...summarizeProductionReadiness(issues),
           paidRequests: 0,
         };
@@ -300,6 +367,118 @@ export class ProductionService {
         return result;
       })(),
     );
+  }
+
+  /** Conservative dependency version for bounded Agent query reuse. Tool-call
+   * audit writes do not invalidate it; business/reference/file changes do. */
+  queryVersion(target: ProductionTarget): string {
+    return this.projects.access(false, (db, project) => {
+      this.targetState(target);
+      const dependencies: unknown[] = [];
+      const visited = new Set<string>();
+      const queue = [target];
+      while (queue.length) {
+        const current = queue.shift()!;
+        if (visited.has(key(current))) continue;
+        visited.add(key(current));
+        if (visited.size > 200) throw new Error('制作读取依赖超过 200 个对象。');
+        let state: ReturnType<ProductionService['targetState']>;
+        try {
+          state = this.targetState(current);
+        } catch {
+          dependencies.push([current, 'missing']);
+          continue;
+        }
+        const latest = this.latest(db, project.id, current);
+        dependencies.push([current, state, latest?.row.id]);
+        dependencies.push(this.resourceDocumentState(db, project.id, latest?.instruction));
+        queue.push(...(latest?.instruction.continuity.predecessors ?? []));
+        for (const fact of [
+          ...(latest?.instruction.continuity.before ?? []),
+          ...(latest?.instruction.continuity.after ?? []),
+          ...(latest?.instruction.continuity.locked ?? []),
+        ])
+          if (fact.comparison) queue.push(fact.comparison.entity);
+        const continuity =
+          current.kind === 'shot' ? readShotContinuity(db, project.id, current.id) : undefined;
+        dependencies.push(continuity);
+        const assets = new Set(
+          [
+            ...(latest?.instruction.resources.flatMap((resource) =>
+              resource.assetId ? [resource.assetId] : [],
+            ) ?? []),
+            ...(continuity?.binding
+              ? [
+                  continuity.binding.sourceVideoAssetId,
+                  continuity.binding.anchorAssetId,
+                  continuity.binding.firstFrameAssetId,
+                  ...continuity.binding.frames.map((f) => f.assetId),
+                ]
+              : []),
+          ].filter((id): id is string => Boolean(id)),
+        );
+        for (const id of assets) {
+          const asset = createRepositories(db).assets.get(id);
+          dependencies.push([
+            id,
+            asset,
+            asset &&
+              !asset.deletedAt &&
+              existsSync(resolveProjectRelativePath(project.rootPath, asset.relativePath)),
+          ]);
+        }
+        if (current.kind === 'shot' && state.sceneId)
+          queue.push({ kind: 'scene', id: state.sceneId });
+        if (current.kind === 'scene') {
+          const content = new ContentService(this.projects);
+          queue.push(
+            ...content
+              .listShots(current.id)
+              .map((shot) => ({ kind: 'shot' as const, id: shot.id })),
+          );
+          const scene = content.listScenes().find((scene) => scene.id === current.id)!;
+          if (scene.sceneDocumentId) queue.push({ kind: 'setting', id: scene.sceneDocumentId });
+          queue.push(
+            ...(scene.characterBindings ?? []).map((binding) => ({
+              kind: 'character' as const,
+              id: binding.characterDocumentId,
+            })),
+          );
+        }
+      }
+      return hash([project.id, this.getDefaults(), dependencies]);
+    });
+  }
+
+  /** One authored instruction and current editable text, without a second
+   * rendering of the whole scene. UI read/compile contracts remain complete. */
+  readForAgent(target: ProductionTarget) {
+    const result = this.read(target);
+    return this.projects.access(false, (db, project) => {
+      const content = new ContentService(this.projects);
+      const state = this.targetState(target);
+      const scene = state.sceneId
+        ? content.listScenes().find((s) => s.id === state.sceneId)
+        : undefined;
+      const shots = scene ? content.listShots(scene.id) : [];
+      const currentText =
+        target.kind === 'scene'
+          ? scene?.videoPrompt
+          : target.kind === 'shot'
+            ? shots.find((s) => s.id === target.id)?.prompt
+            : content.getDocument(target.id).currentVersion?.contentMarkdown;
+      return {
+        target,
+        rowVersion: result.rowVersion,
+        instruction: this.latest(db, project.id, target)?.instruction,
+        currentText: currentText ?? '',
+        issues: result.issues,
+        revision: result.source?.revision,
+        estimatedDurationSeconds: result.estimatedDurationSeconds,
+        scene: scene && { ...scene, videoPrompt: undefined, hasPrompt: Boolean(scene.videoPrompt) },
+        shots: shots.map(({ prompt, ...shot }) => ({ ...shot, hasPrompt: Boolean(prompt) })),
+      };
+    });
   }
 
   read(target: ProductionTarget, shotIds?: string[]): ProductionReadResult {
@@ -345,10 +524,19 @@ export class ProductionService {
           return {
             shot,
             hasStoredInstruction: Boolean(saved),
-            instruction:
+            // Stale instructions still carry useful authored timing/content.
+            // inspectGraph below blocks generation until sources are repaired.
+            instruction: saved?.instruction,
+            promptText:
               saved &&
-              saved.row.source_hash === this.targetState({ kind: 'shot', id: shot.id }).semanticHash
-                ? saved.instruction
+              saved.row.source_hash !==
+                this.instructionSourceHash(
+                  db,
+                  project.id,
+                  { kind: 'shot', id: shot.id },
+                  saved.instruction,
+                )
+                ? shot.prompt
                 : undefined,
           };
         },
@@ -365,7 +553,8 @@ export class ProductionService {
         : { issues: [] as ProductionIssue[], dependencies: [] as unknown[] };
       if (target.kind === 'shot' && state.sceneId) {
         const parent = this.inspectGraph(db, project.id, { kind: 'scene', id: state.sceneId });
-        issues.push(...parent.issues.filter((issue) => issue.code === 'STALE_INSTRUCTION'));
+        if (this.latest(db, project.id, { kind: 'scene', id: state.sceneId }))
+          issues.push(...parent.issues);
         dependencies.push(...parent.dependencies);
       }
       const continuityAssets = continuity?.binding
@@ -427,15 +616,21 @@ export class ProductionService {
       if (shotIds) {
         const generation = { ...instruction.generation };
         delete generation.duration;
-        const before = new Map(instruction.continuity.before.map((fact) => [fact.key, fact.value]));
-        const locked = new Map(instruction.continuity.locked.map((fact) => [fact.key, fact.value]));
+        const before = new Map(
+          instruction.continuity.before.map((fact) => [productionFactKey(fact), fact]),
+        );
+        const locked = new Map(
+          instruction.continuity.locked.map((fact) => [productionFactKey(fact), fact]),
+        );
         for (const previous of allShots.slice(
           0,
           allShots.findIndex((shot) => shot.id === shotIds[0]),
         )) {
           const prior = this.latest(db, project.id, { kind: 'shot', id: previous.id })?.instruction;
-          for (const fact of prior?.continuity.after ?? []) before.set(fact.key, fact.value);
-          for (const fact of prior?.continuity.locked ?? []) locked.set(fact.key, fact.value);
+          for (const fact of prior?.continuity.after ?? [])
+            before.set(productionFactKey(fact), fact);
+          for (const fact of prior?.continuity.locked ?? [])
+            locked.set(productionFactKey(fact), fact);
         }
         instruction = {
           ...instruction,
@@ -443,8 +638,8 @@ export class ProductionService {
           generation,
           continuity: {
             ...instruction.continuity,
-            before: [...before].map(([key, value]) => ({ key, value })),
-            locked: [...locked].map(([key, value]) => ({ key, value })),
+            before: [...before.values()],
+            locked: [...locked.values()],
             after: shots.at(-1)?.instruction?.continuity.after ?? [],
           },
         };
@@ -452,19 +647,24 @@ export class ProductionService {
       const sequence = scene
         ? compileSceneSequence(scene, instruction, shots, this.names(db, project.id), {
             isSegment: Boolean(shotIds),
+            // Use the same graph (including explicit external predecessors)
+            // for single-shot reads and whole-scene compilation.
+            continuityIssues: (shotId) => {
+              if (!shots.find((entry) => entry.shot.id === shotId)?.hasStoredInstruction) return [];
+              const graph = this.inspectGraph(db, project.id, { kind: 'shot', id: shotId });
+              dependencies.push(...graph.dependencies);
+              return graph.issues;
+            },
             sharedText:
-              latest && latest.row.source_hash !== state.semanticHash
+              latest &&
+              latest.row.source_hash !==
+                this.instructionSourceHash(db, project.id, target, latest.instruction)
                 ? scene.videoPrompt
                 : undefined,
           })
         : undefined;
       if (sequence) {
         issues.push(...sequence.issues);
-        for (const entry of shots)
-          if (entry.hasStoredInstruction)
-            issues.push(
-              ...this.inspectGraph(db, project.id, { kind: 'shot', id: entry.shot.id }).issues,
-            );
       }
       const referenceState = (sequence?.instruction ?? instruction).resources
         .filter((resource) => resource.assetId)
@@ -515,7 +715,10 @@ export class ProductionService {
             }
           : {
               estimatedDurationSeconds: instruction.timing?.estimatedDurationSeconds,
-              ...(latest && latest.row.source_hash !== state.semanticHash && legacyPrompt
+              ...(latest &&
+              latest.row.source_hash !==
+                this.instructionSourceHash(db, project.id, target, latest.instruction) &&
+              legacyPrompt
                 ? { compiledPrompt: legacyPrompt }
                 : {}),
             }),
@@ -1084,17 +1287,14 @@ export class ProductionService {
   ) {
     const issues: ProductionIssue[] = [];
     const dependencies: unknown[] = [];
-    type Facts = { ending: Map<string, string>; locked: Map<string, string> };
+    type Facts = ProductionFactState;
     const cache = new Map<string, Facts>();
     const expanded = new Set<string>();
     const visit = (current: ProductionTarget, path: Set<string>): Facts => {
       const id = key(current);
-      const empty = () => ({
-        ending: new Map<string, string>(),
-        locked: new Map<string, string>(),
-      });
+      const empty = emptyProductionFacts;
       const fail = (code: string, message: string) => {
-        issues.push({ code, message });
+        issues.push({ code, message, target: current });
         return empty();
       };
       if (path.has(id)) return fail('DEPENDENCY_CYCLE', '制作指令的连续性依赖存在循环。');
@@ -1110,10 +1310,20 @@ export class ProductionService {
       }
       const latest = this.latest(db, projectId, current);
       const instruction = pending.get(id) ?? latest?.instruction;
-      dependencies.push([current, latest?.row.id, state.semanticHash]);
+      dependencies.push([
+        current,
+        latest?.row.id,
+        state.semanticHash,
+        this.resourceDocumentState(db, projectId, instruction),
+      ]);
       if (!instruction)
         return fail('DEPENDENCY_INSTRUCTION_MISSING', `前置场次/镜头 ${id} 尚无结构化制作指令。`);
-      if (!pending.has(id) && latest && latest.row.source_hash !== state.semanticHash) {
+      if (
+        !pending.has(id) &&
+        latest &&
+        latest.row.source_hash !==
+          this.instructionSourceHash(db, projectId, current, latest.instruction)
+      ) {
         const title =
           current.kind === 'scene' || current.kind === 'shot'
             ? (
@@ -1162,19 +1372,29 @@ export class ProductionService {
           ...(changedReferences.length ? { changedReferences } : {}),
         });
       }
-      const facts = empty();
-      const merge = (into: Map<string, string>, values: Map<string, string>) => {
-        for (const [name, value] of values) {
-          if (into.has(name) && into.get(name) !== value)
-            issues.push({
-              code: 'CONTINUITY_CONFLICT',
-              message: `前置对象对状态 ${name} 的值互相冲突。`,
-            });
-          into.set(name, value);
-        }
-      };
+      const parentTarget: ProductionTarget | undefined =
+        current.kind === 'shot' && state.sceneId ? { kind: 'scene', id: state.sceneId } : undefined;
+      const parent = parentTarget
+        ? (pending.get(key(parentTarget)) ?? this.latest(db, projectId, parentTarget)?.instruction)
+        : undefined;
+      const facts = parent ? seedProductionFacts(parent.continuity) : empty();
+      if (parentTarget)
+        dependencies.push([
+          parentTarget,
+          this.latest(db, projectId, parentTarget)?.row.id,
+          parent?.continuity,
+        ]);
+      const predecessors = [...instruction.continuity.predecessors];
+      if (current.kind === 'shot' && !predecessors.length) {
+        const ordered = new ContentService(this.projects).listShots(state.sceneId!);
+        const previous = ordered[ordered.findIndex((shot) => shot.id === current.id) - 1];
+        if (previous) predecessors.push({ kind: 'shot', id: previous.id });
+      }
+      const predecessorFacts = empty();
+      const addIssues = (items: ProductionIssue[]) =>
+        issues.push(...items.map((issue) => ({ ...issue, target: current })));
       const nextPath = new Set([...path, id]);
-      for (const predecessor of instruction.continuity.predecessors) {
+      for (const predecessor of predecessors) {
         if (!['scene', 'shot'].includes(predecessor.kind)) {
           fail(
             'INVALID_CONTINUITY_TARGET',
@@ -1183,26 +1403,12 @@ export class ProductionService {
           continue;
         }
         const previous = visit(predecessor, nextPath);
-        merge(facts.ending, previous.ending);
-        merge(facts.locked, previous.locked);
+        addIssues(mergeProductionFacts(predecessorFacts.ending, previous.ending));
+        addIssues(mergeProductionFacts(predecessorFacts.locked, previous.locked, true));
       }
-      for (const fact of instruction.continuity.before) {
-        if (instruction.continuity.predecessors.length && facts.ending.get(fact.key) !== fact.value)
-          issues.push({
-            code: 'CONTINUITY_CONFLICT',
-            message: `前置状态无法满足 ${fact.key}=${fact.value}。`,
-          });
-      }
-      merge(facts.locked, new Map(instruction.continuity.locked.map((f) => [f.key, f.value])));
-      for (const fact of [...instruction.continuity.before, ...instruction.continuity.after]) {
-        if (facts.locked.has(fact.key) && facts.locked.get(fact.key) !== fact.value)
-          issues.push({
-            code: 'LOCKED_FACT_CHANGED',
-            message: `锁定状态 ${fact.key} 在后续制作指令中被改变。`,
-          });
-        facts.ending.set(fact.key, fact.value);
-      }
-      for (const [name, value] of facts.locked) facts.ending.set(name, value);
+      for (const [id, fact] of predecessorFacts.ending) facts.ending.set(id, fact);
+      addIssues(mergeProductionFacts(facts.locked, predecessorFacts.locked, true));
+      addIssues(applyProductionFacts(facts, instruction.continuity, predecessors.length > 0));
       cache.set(id, facts);
       return facts;
     };
@@ -1219,6 +1425,36 @@ export class ProductionService {
     return row
       ? { row, instruction: JSON.parse(row.instruction_json) as ProductionInstruction }
       : undefined;
+  }
+
+  private resourceDocumentState(
+    db: Database.Database,
+    projectId: string,
+    instruction?: ProductionInstruction,
+  ) {
+    return [
+      ...new Set(instruction?.resources.flatMap((r) => (r.documentId ? [r.documentId] : [])) ?? []),
+    ]
+      .sort()
+      .map((id) => [
+        id,
+        db
+          .prepare(
+            'SELECT current_version_id,lifecycle_status FROM documents WHERE id=? AND project_id=?',
+          )
+          .get(id, projectId),
+      ]);
+  }
+
+  private instructionSourceHash(
+    db: Database.Database,
+    projectId: string,
+    target: ProductionTarget,
+    instruction: ProductionInstruction,
+  ) {
+    const state = this.targetState(target);
+    const references = this.resourceDocumentState(db, projectId, instruction);
+    return references.length ? hash([state.semanticHash, references]) : state.semanticHash;
   }
 
   private names(db: Database.Database, projectId: string): Record<string, string> {

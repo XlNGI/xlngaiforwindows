@@ -6,6 +6,9 @@ import {
   sceneProductionInstructionSchema,
   shotProductionInstructionSchema,
   productionAudioSupport,
+  productionFactKey,
+  applyProductionFacts,
+  emptyProductionFacts,
   type ProductionDefaults,
   renderProductionInstruction,
   type ProductionInstruction,
@@ -63,9 +66,9 @@ export function inspectProductionInstruction(input: unknown): ProductionIssue[] 
   for (const [name, values] of Object.entries({
     subjects: instruction.subjects.map((s) => s.documentId),
     beats: instruction.beats.map((b) => b.id),
-    before: instruction.continuity.before.map((f) => f.key),
-    after: instruction.continuity.after.map((f) => f.key),
-    locked: instruction.continuity.locked.map((f) => f.key),
+    before: instruction.continuity.before.map(productionFactKey),
+    after: instruction.continuity.after.map(productionFactKey),
+    locked: instruction.continuity.locked.map(productionFactKey),
   }))
     if (new Set(values).size !== values.length) add('DUPLICATE_KEY', `${name} 存在重复标识。`);
   let end = 0;
@@ -91,13 +94,13 @@ export function inspectProductionInstruction(input: unknown): ProductionIssue[] 
     add('DURATION_CONFLICT', '节拍结束时间超过要求的视频时长。');
   if (instruction.timing && end > instruction.timing.estimatedDurationSeconds)
     add('DURATION_CONFLICT', '镜头内动作节拍超过剧情预计时长。');
-  for (const fact of instruction.continuity.locked)
-    if (
-      [...instruction.continuity.before, ...instruction.continuity.after].some(
-        (value) => value.key === fact.key && value.value !== fact.value,
-      )
-    )
-      add('LOCKED_FACT_CHANGED', `锁定状态 ${fact.key} 被改变。`);
+  issues.push(
+    ...applyProductionFacts(emptyProductionFacts(), {
+      ...instruction.continuity,
+      before: [],
+      after: [...instruction.continuity.before, ...instruction.continuity.after],
+    }),
+  );
   return issues;
 }
 

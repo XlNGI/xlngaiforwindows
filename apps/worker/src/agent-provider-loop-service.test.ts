@@ -716,7 +716,7 @@ describe('AgentProviderLoopService', () => {
       const production = await invoke('production.read', {
         target: { kind: 'scene', id: courtyardScene.id },
       });
-      expect(production.compiledPrompt).toContain('清晨的庭院');
+      expect(production.instruction).toMatchObject({ summary: '他走过院落。' });
       expect(production.source).toBeUndefined();
       expect(courtyardScene.videoPrompt).toContain('他走过院落。');
       expect(courtyardScene.characterBindings).toEqual([
@@ -726,7 +726,7 @@ describe('AgentProviderLoopService', () => {
       expect(await invoke('scene.read', { sceneId: courtyardScene.id })).toMatchObject({
         scene: {
           id: courtyardScene.id,
-          videoPrompt: courtyardScene.videoPrompt,
+          hasPrompt: true,
           characterBindings: courtyardScene.characterBindings,
         },
       });

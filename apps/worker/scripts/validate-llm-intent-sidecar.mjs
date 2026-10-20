@@ -418,6 +418,41 @@ try {
             ),
           );
         }
+        const sceneTarget = appliedScenes.find((item) => item.title === '庭院');
+        const compact = await execute('scene.read', { sceneId: sceneTarget.id });
+        assert.equal(compact.scene.id, sceneTarget.id);
+        assert.equal(compact.shots.length, 2);
+        assert.equal(compact.scene.videoPrompt, undefined);
+        assert.equal(compact.production, undefined);
+        assert.ok(compact.shots.every((shot) => shot.prompt === undefined));
+        const target = { kind: 'shot', id: compact.shots[0].id };
+        const authored = await execute('production.read', { target });
+        assert.equal(authored.instruction.summary, '清晨的庭院');
+        assert.equal(authored.source, undefined);
+        const operations = [
+          {
+            action: 'set_prompt',
+            target,
+            expectedRowVersion: authored.rowVersion,
+            instruction: authored.instruction,
+          },
+        ];
+        const noOp = await execute('production.execute', { operations });
+        assert.equal(noOp.status, 'applied');
+        assert.equal(noOp.changedCount, 0);
+        assert.equal(noOp.unchangedCount, 1);
+        assert.equal(noOp.operations[0].rowVersion, authored.rowVersion);
+        assert.equal(noOp.operations[0].revision, authored.revision);
+        const otherKey = await execute('production.execute', {
+          executionKey: 'same-content-other-key',
+          operations,
+        });
+        assert.equal(otherKey.changedCount, 0);
+        assert.equal(otherKey.operations[0].instructionId, noOp.operations[0].instructionId);
+        assert.equal(
+          (await execute('production.read', { target, ifVersion: authored.version })).status,
+          'unchanged',
+        );
         await request('agent.providerStep.start', prepared.stream);
         await request('agent.providerStep.complete', {
           ...prepared.stream,
@@ -450,6 +485,9 @@ try {
           sceneStructureProposalLocated: true,
           sceneStructureAppliedToCorrectParents: true,
           sceneDocumentBindingsPreserved: true,
+          compactProductionRead: true,
+          noOpVersionsPreserved: true,
+          dependencyVersionReused: true,
         });
       }
     }

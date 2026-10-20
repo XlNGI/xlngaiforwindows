@@ -90,6 +90,128 @@ function instruction(shot = false): ProductionInstruction {
   };
 }
 
+it.each([
+  ['openai-responses', true],
+  ['openai-responses', false],
+  ['openai-chat-completions', true],
+  ['openai-chat-completions', false],
+] as const)(
+  'keeps saved progress and one shared 24-request budget across reads, no-ops, loaders and repair (%s, stop=%s)',
+  async (protocol, finalStop) => {
+    const f = await setup(protocol);
+    const scene = f.content.saveScene({ title: '已保存场次', sceneDocumentId: f.setting.id });
+    const shots = Array.from({ length: 4 }, (_, i) =>
+      f.content.saveShot({ sceneId: scene.id, title: `镜头${i}` }),
+    );
+    const targets = [
+      { kind: 'scene' as const, id: scene.id },
+      ...shots.map((shot) => ({ kind: 'shot' as const, id: shot.id })),
+    ];
+    const production = new ProductionService(f.project);
+    const operations = () =>
+      targets.map((target) => ({
+        action: 'set_prompt',
+        target,
+        expectedRowVersion: production.read(target).rowVersion,
+        instruction: instruction(target.kind === 'shot'),
+      }));
+    const run = f.prepare('更新已有场次的制作指令');
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `boundary-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `boundary-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      if (index === 0)
+        return tool('tools.load', {
+          names: ['scene.read', 'production.read', 'production.execute'],
+        });
+      if (index === 1 || index === 4 || index === 22)
+        return tool('production.execute', { operations: operations() });
+      if (index === 2) return tool('scene.read', { sceneId: scene.id });
+      if (index === 3) return tool('production.read', { target: targets[1] });
+      if (index === 5)
+        expect(lastOutput(params)).toMatchObject({
+          status: 'applied',
+          changedCount: 0,
+          unchangedCount: 5,
+        });
+      if (index === 21 || (index === 23 && !finalStop))
+        return [
+          {
+            ...common,
+            type: 'failed',
+            error: {
+              code: 'PROVIDER_FAILED',
+              retryable: false,
+              message:
+                'INVALID_TOOL_ARGUMENTS: production.execute returned invalid object JSON (100 bytes); finishReason=tool_calls. No tool was executed.',
+            },
+          },
+        ];
+      if (index === 23) {
+        expect(lastOutput(params)).toMatchObject({ status: 'applied' });
+        return [
+          { ...common, type: 'text_delta', delta: '制作指令已保存。' },
+          {
+            ...common,
+            type: 'complete',
+            providerResponseId: 'boundary-final',
+            finishReason: 'stop',
+          },
+        ];
+      }
+      if (index > 23) throw new Error('Must not send request 25');
+      return tool('tools.load', { names: ['production.read', 'production.execute'] });
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '更新已有场次的制作指令',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status, result.error).toBe(finalStop ? 'complete' : 'failed');
+    if (!finalStop) expect(result.error).toContain('24-turn limit');
+    expect(requests).toHaveLength(24);
+    expect(f.content.listScenes()).toHaveLength(1);
+    expect(f.content.listShots(scene.id)).toHaveLength(4);
+    f.project.access(false, (db) => {
+      expect(db.prepare('SELECT COUNT(*) n FROM production_instruction_versions').get()).toEqual({
+        n: 5,
+      });
+      expect(db.prepare('SELECT COUNT(*) n FROM production_execution_lists').get()).toEqual({
+        n: 2,
+      });
+      expect(db.prepare('SELECT COUNT(*) n FROM generation_jobs').get()).toEqual({ n: 0 });
+    });
+    f.project.close();
+    f.project.open(join(f.directory, 'project'));
+    for (const target of targets)
+      expect(production.read(target)).toMatchObject({ source: { revision: 1 }, issues: [] });
+  },
+);
+
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'renews read batches across Native/Pi and updates existing scenes and shots in one production task (%s)',
   async (protocol) => {
@@ -221,7 +343,17 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     });
     const sceneInstruction = instruction();
     sceneInstruction.subjects = [{ documentId: actor.id }];
-    sceneInstruction.continuity.before = [{ key: 'door', value: 'closed' }];
+    sceneInstruction.continuity.before = [
+      {
+        key: 'door',
+        value: 'closed',
+        comparison: {
+          entity: { kind: 'setting', id: f.setting.id },
+          attribute: 'door.state',
+          state: 'closed',
+        },
+      },
+    ];
     const scene = {
       title: '测试场次',
       sceneDocumentId: f.setting.id,
@@ -231,7 +363,17 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const shot = instruction(true);
     shot.subjects = [{ documentId: actor.id }];
     shot.beats[0]!.characterDocumentIds = [actor.id];
-    shot.continuity.before = [{ key: 'door', value: 'open' }];
+    shot.continuity.before = [
+      {
+        key: 'door',
+        value: 'open',
+        comparison: {
+          entity: { kind: 'setting', id: f.setting.id },
+          attribute: 'door.state',
+          state: 'open',
+        },
+      },
+    ];
     const run = f.prepare('按资料生成场次');
     const { bridge, requests } = scriptedBridge((params, index) => {
       const common = { projectSessionId: params.projectSessionId };
@@ -336,7 +478,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const production = new ProductionService(f.project);
     const read = production.read({ kind: 'scene', id: saved.id });
     expect(read.issues.map((i) => i.code)).toContain('CONTINUITY_CONFLICT');
-    expect(() => production.assertSource(read.source, read.target)).toThrow('冲突');
+    expect(() => production.assertSource(read.source, read.target)).toThrow('矛盾');
     expect(
       f.project.access(
         false,
@@ -1047,7 +1189,8 @@ it('stops output recovery before sending another request when cancelled at the r
       throw new Error('No planning');
     },
     onEvent: (event) => {
-      if (event.type === 'turn_started') runtime.cancel(run.prepared.stream.generationId);
+      if (event.type === 'turn_started' && event.turn === 2)
+        runtime.cancel(run.prepared.stream.generationId);
     },
   });
   await runtime.start({

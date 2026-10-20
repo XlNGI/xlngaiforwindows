@@ -300,14 +300,16 @@ describe('AgentSystemToolService', () => {
     const result = service.execute('scene.read', { sceneId: scene.id }, identity);
     expect(result).toMatchObject({
       status: 'read',
-      scene,
+      scene: { id: scene.id, characterBindings: scene.characterBindings, hasPrompt: true },
       shots: [],
-      production: {
-        target: { kind: 'scene', id: scene.id },
-        rowVersion: scene.rowVersion,
-        issues: [],
-      },
+      target: { kind: 'scene', id: scene.id },
+      rowVersion: scene.rowVersion,
+      issues: [],
     });
+    expect(JSON.stringify(result)).not.toContain(scene.videoPrompt);
+    expect(
+      service.execute('scene.read', { sceneId: scene.id, view: 'text' }, identity),
+    ).toMatchObject({ text: scene.videoPrompt });
     expect(JSON.stringify(result)).not.toContain('"token"');
     expect(() => service.execute('scene.read', { sceneId: 'missing' }, identity)).toThrow(
       'current project',

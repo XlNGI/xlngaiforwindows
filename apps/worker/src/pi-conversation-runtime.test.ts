@@ -164,6 +164,62 @@ function fakeGateway(plans: FakePlanService): DomainToolGateway {
 }
 
 describe('PiConversationRuntime', () => {
+  it.each([true, false])(
+    'counts actual requests before sending; final stop=%s',
+    async (finalStop) => {
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      faux.setResponses([
+        ...Array.from({ length: finalStop ? 23 : 24 }, (_, index) =>
+          fauxAssistantMessage(
+            [fauxToolCall('tools.load', { names: ['library.read'] }, { id: `load-${index}` })],
+            { stopReason: 'toolUse', responseId: `response-${index}` },
+          ),
+        ),
+        fauxAssistantMessage('Finished at the boundary.'),
+      ]);
+      const generation = {
+        runtime: vi.fn(() => ({
+          ...runtimeRequest,
+          tools: [providerDefinition('library.read', 'read')],
+        })),
+        configureAgentTools: vi.fn(),
+        observe: vi.fn(),
+        complete: vi.fn(),
+        failNative: vi.fn(),
+        cancel: vi.fn(),
+        get: vi.fn(),
+      };
+      const turns: number[] = [];
+      const runtime = new PiConversationRuntime({
+        generation: generation as never,
+        plans: new FakePlanService() as never,
+        providerTools: fakeProviderExecutor(),
+        streamFn: faux.streamSimple,
+        createGateway: () => {
+          throw new Error('No planning');
+        },
+        onEvent: (event) => {
+          if (event.type === 'turn_started') turns.push(event.turn);
+        },
+      });
+      await runtime.start({
+        ...identity,
+        identity,
+        taskId: 'task',
+        mode: 'document',
+        prompt: 'Continue',
+      });
+      await runtime.wait(identity.generationId);
+      expect(faux.state.callCount).toBe(24);
+      expect(turns).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
+      expect(generation.complete).toHaveBeenCalledTimes(finalStop ? 1 : 0);
+      if (!finalStop)
+        expect(generation.failNative).toHaveBeenCalledWith(
+          expect.objectContaining({ error: expect.stringContaining('24-turn limit') }),
+        );
+    },
+  );
+
   it('runs the short-drama plan and all four deliverables before waiting_review', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([

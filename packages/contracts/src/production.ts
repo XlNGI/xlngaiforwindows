@@ -11,6 +11,8 @@ export type ProductionPredecessor = ProductionTarget & { kind: 'scene' | 'shot' 
 export interface ProductionFact {
   key: string;
   value: string;
+  /** Stable state for comparison; key/value remain human-readable descriptions. */
+  comparison?: { entity: ProductionTarget; attribute: string; state: string };
 }
 
 /** Creative content is provider independent. Runtime state never comes from the model. */
@@ -149,7 +151,8 @@ export interface ProductionInstruction {
 }
 
 export interface ProductionExecuteParams {
-  executionKey: string;
+  /** Optional for Agent calls: Worker derives a stable key from the task and payload. */
+  executionKey?: string;
   operations: Array<{
     action: 'set_prompt';
     target: ProductionTarget;
@@ -261,12 +264,29 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
   required,
 });
 const array = (items: unknown, maxItems = 50) => ({ type: 'array', maxItems, items });
-const facts = array(object({ key: id, value: text }, ['key', 'value']));
 const textFields = (keys: string[], required: string[] = []) =>
   object(Object.fromEntries(keys.map((key) => [key, text])), required);
 export const productionTargetSchema = object(
   { kind: { type: 'string', enum: ['character', 'setting', 'scene', 'shot'] }, id },
   ['kind', 'id'],
+);
+const facts = array(
+  object(
+    {
+      key: id,
+      value: text,
+      comparison: {
+        ...object({ entity: productionTargetSchema, attribute: id, state: id }, [
+          'entity',
+          'attribute',
+          'state',
+        ]),
+        description:
+          '可比较事实：entity 必须引用已保存的真实对象；attribute 和 state 使用前镜相同的稳定值，key/value 可补充动作说明。道具没有独立对象时引用所属场次，attribute 明确道具和属性。无法确认时省略 comparison 并报告待核实，不编造状态或 ID。',
+      },
+    },
+    ['key', 'value'],
+  ),
 );
 
 const productionPredecessorSchema = {
@@ -523,7 +543,7 @@ export const productionExecuteSchema = object(
       minItems: 1,
     },
   },
-  ['executionKey', 'operations'],
+  ['operations'],
 );
 
 export function productionImageReference(
