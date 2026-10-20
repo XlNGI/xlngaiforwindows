@@ -608,33 +608,28 @@ describe('AgentProviderLoopService', () => {
       const scenes = [
         {
           title: '庭院',
-          videoPrompt: '他走过院落。',
           instruction: productionFixture('他走过院落。'),
           characterDocumentIds: [driver.documentId, colleague.documentId],
           sceneDocumentId: courtyard.documentId,
           shots: [
             {
               title: '远景',
-              prompt: '清晨的庭院',
               instruction: productionFixture('清晨的庭院', 'shot'),
             },
             {
               title: '近景',
-              prompt: '门上的霜',
               instruction: productionFixture('门上的霜', 'shot'),
             },
           ],
         },
         {
           title: '书房',
-          videoPrompt: '书桌上的信。',
           instruction: productionFixture('书桌上的信。'),
           characterDocumentIds: [],
           sceneDocumentId: study.documentId,
           shots: [
             {
               title: '特写',
-              prompt: '桌上的信',
               instruction: productionFixture('桌上的信', 'shot'),
             },
           ],
@@ -754,7 +749,6 @@ describe('AgentProviderLoopService', () => {
             sceneId: courtyardScene.id,
             expectedRowVersion: courtyardScene.rowVersion,
             title: courtyardScene.title,
-            videoPrompt: '前同事独自留下。',
             instruction: productionFixture('前同事独自留下。'),
             sceneDocumentId: study.documentId,
             characterDocumentIds: [colleague.documentId],
@@ -779,7 +773,10 @@ describe('AgentProviderLoopService', () => {
         status: 'rejected',
       });
       loop.startProviderStep(prepared.stream);
-      loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' });
+      expect(() => loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+        'AGENT_SCENE_NOT_SAVED',
+      );
+      expect(content.listScenes()).toHaveLength(2);
       expect(workflow.getTask({ taskId: agent.taskId }).task.outcome).not.toBe('read-only');
     },
   );
@@ -1030,6 +1027,109 @@ describe('AgentProviderLoopService', () => {
       foreign.workflow.getDocument(foreignChapter.documentId).currentVersion?.contentMarkdown,
     ).toBe('外部正文');
   });
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'reads multiple scenes and instructions before a batch revision beyond sixteen calls (%s)',
+    async (protocol) => {
+      const { conversation, generations, project, workflow } = await setup(protocol);
+      const content = new ContentService(project);
+      const scenes = Array.from({ length: 3 }, (_, i) =>
+        content.saveScene({ title: `场 ${i + 1}` }),
+      );
+      const shots = scenes.flatMap((scene) =>
+        Array.from({ length: 4 }, (_, i) =>
+          content.saveShot({ sceneId: scene.id, title: `镜 ${i + 1}` }),
+        ),
+      );
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: '更新已有场镜',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      let tools = loop.prepare(prepared.stream, '更新已有场镜', undefined, {
+        operation: 'document.list',
+      }).tools;
+      let ordinal = 0;
+      const invoke = async (name: string, argumentsList: unknown[]) => {
+        loop.startProviderStep(prepared.stream);
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: `revision-${ordinal}`,
+          calls: argumentsList.map((args) => ({
+            id: `revision-${ordinal++}`,
+            name,
+            argumentsJson: JSON.stringify(args),
+            authorizationHandle: tools.find((tool) => tool.name === name)!.authorizationHandle,
+          })),
+        });
+        tools =
+          name === 'scene.read' || name === 'production.read'
+            ? loop.advanceTextTurn({
+                ...prepared.stream,
+                providerResponseId: `read-response-${ordinal}`,
+                finishReason: 'tool_calls',
+              })
+            : result.tools!;
+        return result.continuation!.outputs.map(
+          (entry) => JSON.parse(entry.output) as Record<string, unknown>,
+        );
+      };
+      expect(
+        await invoke(
+          'scene.read',
+          scenes.slice(0, 2).map((scene) => ({ sceneId: scene.id })),
+        ),
+      ).toHaveLength(2);
+      expect(await invoke('scene.read', [{ sceneId: scenes[2]!.id }])).toHaveLength(1);
+      const targets = [
+        ...scenes.map((scene) => ({ kind: 'scene' as const, id: scene.id })),
+        ...shots.map((shot) => ({ kind: 'shot' as const, id: shot.id })),
+      ];
+      const versions: number[] = [];
+      for (let offset = 0; offset < targets.length; offset += 6) {
+        const read = await invoke(
+          'production.read',
+          targets.slice(offset, offset + 6).map((target) => ({ target })),
+        );
+        versions.push(...read.map((entry) => entry.rowVersion as number));
+      }
+      const saved = await invoke('production.execute', [
+        {
+          executionKey: 'revise-existing',
+          operations: targets.map((target, i) => ({
+            action: 'set_prompt',
+            target,
+            expectedRowVersion: versions[i],
+            instruction: productionFixture('保持已有剧情与对白', target.kind),
+          })),
+        },
+      ]);
+      expect(saved[0]).toMatchObject({ status: 'applied' });
+      expect(content.listScenes()).toHaveLength(3);
+      expect(content.listScenes().flatMap((scene) => content.listShots(scene.id))).toHaveLength(12);
+      project.access(false, (db) => {
+        expect(
+          db
+            .prepare(
+              "SELECT tool_call_count,tool_call_limit FROM agent_tasks WHERE status='running'",
+            )
+            .get(),
+        ).toEqual({ tool_call_count: 19, tool_call_limit: 32 });
+        expect(
+          db.prepare('SELECT COUNT(*) AS n FROM production_instruction_versions').get(),
+        ).toEqual({ n: 15 });
+        expect(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM agent_task_events WHERE event_type='agent.policy.rejected'",
+            )
+            .get(),
+        ).toEqual({ n: 0 });
+      });
+    },
+  );
 
   it('enforces the actual task quota and rejects old handles for model selected draft tools', async () => {
     const { conversation, generations, project, workflow } = await setup();
@@ -4279,13 +4379,11 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '旧码头 · 台风前夜',
                 sceneDocumentId: sceneDoc.id,
-                videoPrompt: '林澈站在旧码头。',
                 instruction: productionFixture('林澈站在旧码头。'),
                 characterDocumentIds: [character.id],
                 shots: [
                   {
                     title: '海雾中的码头',
-                    prompt: '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
                     instruction: productionFixture(
                       '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
                       'shot',
@@ -4296,13 +4394,11 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '街道',
                 sceneDocumentId: sceneDoc.id,
-                videoPrompt: '雨中的街道。',
                 instruction: productionFixture('雨中的街道。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '雨中街道',
-                    prompt: '街道上的雨。',
                     instruction: productionFixture('街道上的雨。', 'shot'),
                   },
                 ],
@@ -4310,13 +4406,11 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '房间',
                 sceneDocumentId: sceneDoc.id,
-                videoPrompt: '房间内的信件。',
                 instruction: productionFixture('房间内的信件。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '信件特写',
-                    prompt: '桌上的信件。',
                     instruction: productionFixture('桌上的信件。', 'shot'),
                   },
                 ],
@@ -4389,13 +4483,11 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '场次 01',
                 sceneDocumentId: 'missing-scene-id',
-                videoPrompt: '他转身。',
                 instruction: productionFixture('他转身。'),
                 characterDocumentIds: ['missing-character-id'],
                 shots: [
                   {
                     title: '镜头 01',
-                    prompt: '[角色:不存在的人物] 出现在画面中。',
                     instruction: productionFixture('[角色:不存在的人物] 出现在画面中。', 'shot'),
                   },
                 ],
@@ -4603,13 +4695,11 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '白家三房 · 午后',
                 sceneDocumentId: scenePrompt.id,
-                videoPrompt: '午后的白家三房。',
                 instruction: productionFixture('午后的白家三房。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '屋檐下全景',
-                    prompt: '[场景:白家三房] 屋檐下全景，白小弟在学医。',
                     instruction: productionFixture(
                       '[场景:白家三房] 屋檐下全景，白小弟在学医。',
                       'shot',

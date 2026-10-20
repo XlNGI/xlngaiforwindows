@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { imageAssetId, ParameterImagePreview } from './ParameterImagePreview';
 import { useProductionInstructions } from './use-production-instructions';
+import { productionInstructionUpdateRequest } from './production-instruction-update';
 import { ProjectProductionDefaults } from './ProjectProductionDefaults';
 import { ParameterHelp } from './ParameterHelp';
 import type { ProductionSegment } from '@ai-video/contracts';
@@ -75,6 +76,7 @@ import {
 } from './local-image-input';
 
 interface ProductionPanelProps {
+  onUpdateProductionInstructions?: (request: string) => void;
   onRequestSubmissionApproval?: (
     confirmation: MediaSubmissionConfirmationRequest,
   ) => Promise<boolean>;
@@ -277,6 +279,7 @@ export function ProductionPanel({
   onOpenProviderSettings,
   providerSettingsRevision = 0,
   onRequestSubmissionApproval,
+  onUpdateProductionInstructions,
 }: ProductionPanelProps) {
   const callWorker = projectWorker();
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
@@ -1562,14 +1565,33 @@ export function ProductionPanel({
                                 .join('；') ||
                               `已填入制作内容 · 版本 ${productionInstructions.result?.source?.revision}`}
                           </p>
-                          <button
-                            type="button"
-                            className="button secondary"
-                            disabled={busy || productionInstructions.loading}
-                            onClick={productionInstructions.refill}
-                          >
-                            重新填入制作内容
-                          </button>
+                          {productionInstructions.result?.issues.some(
+                            (issue) => issue.code === 'STALE_INSTRUCTION',
+                          ) ? (
+                            <button
+                              type="button"
+                              className="button secondary"
+                              disabled={busy || !writable || !onUpdateProductionInstructions}
+                              onClick={() =>
+                                onUpdateProductionInstructions?.(
+                                  productionInstructionUpdateRequest(
+                                    productionInstructions.result!,
+                                  ),
+                                )
+                              }
+                            >
+                              到会话更新制作指令
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="button secondary"
+                              disabled={busy || productionInstructions.loading}
+                              onClick={productionInstructions.refill}
+                            >
+                              重新填入制作内容
+                            </button>
+                          )}
                         </div>
                       </div>
                     </details>

@@ -88,6 +88,112 @@ const wan = () =>
   )!;
 
 describe('production execution in the project store', () => {
+  it('identifies changed references and repairs parent and shot instructions without losing manual edits', async () => {
+    const f = await setup();
+    const sceneTarget = { kind: 'scene' as const, id: f.scene.id };
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    f.service.execute({
+      executionKey: 'before-reference-edit',
+      operations: [
+        operation(sceneTarget, f.scene.rowVersion),
+        operation(target, f.shot.rowVersion),
+      ],
+    });
+    const old = f.service.read(target);
+    const updated = f.content.saveShot({
+      shotId: f.shot.id,
+      sceneId: f.scene.id,
+      title: f.shot.title,
+      prompt: '手工保留的对白和动作',
+      expectedRowVersion: old.rowVersion,
+    });
+    f.content.saveDocument({
+      documentId: f.actor.id,
+      kind: 'character',
+      title: f.actor.title,
+      contentMarkdown: '更新后的角色设定，仍保留原人物身份',
+    });
+    // Keep the reference update ordering deterministic on fast clocks.
+    f.projects.access(true, (db) =>
+      db
+        .prepare(
+          "UPDATE document_versions SET created_at='2099-01-01T00:00:00.000Z' WHERE id=(SELECT current_version_id FROM documents WHERE id=?)",
+        )
+        .run(f.actor.id),
+    );
+    const before = f.service.read(target);
+    const stale = before.issues.filter((issue) => issue.code === 'STALE_INSTRUCTION');
+    expect(stale.map((issue) => issue.target)).toEqual([target, sceneTarget]);
+    expect(stale[0]).toMatchObject({
+      targetTitle: '入场',
+      changedReferences: [{ target: { kind: 'character', id: f.actor.id }, title: '林澈' }],
+    });
+    expect(stale[0]!.message).toContain('林澈');
+    expect(stale[0]!.message).not.toContain(f.shot.id);
+    expect(() => f.service.assertSource(before.source, target)).toThrow('更新制作指令');
+    expect(f.service.compile({ target, adapterKey: wan().key }).issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'STALE_INSTRUCTION' })]),
+    );
+    expect(f.service.read(target).source).toEqual(before.source);
+    expect(f.content.listShots(f.scene.id)[0]!.prompt).toBe('手工保留的对白和动作');
+    // The author reads the current text and explicitly incorporates it in the new revision.
+    const result = f.service.execute({
+      executionKey: 'after-reference-edit',
+      operations: [
+        operation(
+          sceneTarget,
+          f.service.read(sceneTarget).rowVersion,
+          instruction({ summary: '保留原场次，只同步角色新设定' }),
+        ),
+        operation(target, updated.rowVersion, instruction({ summary: '手工保留的对白和动作' })),
+      ],
+    });
+    expect(result).toMatchObject({ status: 'applied', readiness: 'ready' });
+    const current = f.service.read(target);
+    expect(current.issues).toEqual([]);
+    expect(current.source?.revision).toBe(2);
+    expect(f.content.listShots(f.scene.id)[0]!.prompt).toContain('手工保留的对白和动作');
+    expect(() => f.service.assertSource(old.source, target)).toThrow('制作来源已变化');
+    f.projects.access(false, (db) =>
+      expect(db.prepare('SELECT COUNT(*) AS n FROM generation_jobs').get()).toEqual({ n: 0 }),
+    );
+  });
+
+  it('preserves drafts with an unprepared real predecessor but rejects nonexistent IDs atomically', async () => {
+    const f = await setup();
+    const next = f.content.saveShot({ sceneId: f.scene.id, title: '后镜' });
+    const target = { kind: 'shot' as const, id: next.id };
+    const spec = instruction({
+      continuity: {
+        predecessors: [{ kind: 'shot', id: f.shot.id }],
+        before: [],
+        after: [],
+        locked: [],
+        constraints: [],
+      },
+    });
+    const result = f.service.execute({
+      executionKey: 'unprepared',
+      operations: [operation(target, next.rowVersion, spec)],
+    });
+    expect(result).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
+    expect(f.service.read(target).issues.map((i) => i.code)).toContain(
+      'DEPENDENCY_INSTRUCTION_MISSING',
+    );
+    expect(() => f.service.assertSource(f.service.read(target).source, target)).toThrow(
+      '尚无结构化',
+    );
+    const version = f.service.read(target).rowVersion;
+    spec.continuity.predecessors[0]!.id = 'missing';
+    expect(() =>
+      f.service.execute({
+        executionKey: 'invalid-reference',
+        operations: [operation(target, version, spec)],
+      }),
+    ).toThrow('不存在');
+    expect(f.service.read(target).rowVersion).toBe(version);
+    expect(f.service.read(target).instruction?.continuity.predecessors[0]?.id).toBe(f.shot.id);
+  });
   it('adapts an unselected recording preference without rewriting the creative instruction', async () => {
     const f = await setup();
     const target = { kind: 'shot' as const, id: f.shot.id };
@@ -657,7 +763,7 @@ describe('production execution in the project store', () => {
       }),
     ).toThrow();
   });
-  it('combines predecessor states, inherits locks transitively and rejects cycles or ambiguous branch states', async () => {
+  it('saves continuity issues with drafts, inherits locks and still rejects dependency cycles', async () => {
     const f = await setup();
     const a = { kind: 'scene' as const, id: f.scene.id };
     const b = { kind: 'shot' as const, id: f.shot.id };
@@ -705,35 +811,38 @@ describe('production execution in the project store', () => {
       ],
     });
     expect(f.service.read(c).issues).toEqual([]);
-    expect(() =>
-      f.service.execute({
-        executionKey: 'changed-canonical-dependency',
-        operations: [
-          operation(
-            { kind: 'character', id: f.actor.id },
-            f.actor.rowVersion,
-            instruction({ summary: '角色的新设定' }),
-          ),
-          operation(c, f.service.read(c).rowVersion, f.service.read(c).instruction),
-        ],
-      }),
-    ).toThrow('角色/场景资料');
-    expect(f.content.getDocument(f.actor.id).currentVersion?.contentMarkdown).toBe('角色设定');
+    const updated = f.service.execute({
+      executionKey: 'changed-canonical-dependency',
+      operations: [
+        operation(
+          { kind: 'character', id: f.actor.id },
+          f.actor.rowVersion,
+          instruction({ summary: '角色的新设定' }),
+        ),
+        operation(c, f.service.read(c).rowVersion, f.service.read(c).instruction),
+      ],
+    });
+    expect(updated).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
+    expect(f.content.getDocument(f.actor.id).currentVersion?.contentMarkdown).toContain(
+      '角色的新设定',
+    );
     const fourth = f.content.saveShot({ sceneId: f.scene.id, title: '破坏锁定' });
-    expect(() =>
-      f.service.execute({
-        executionKey: 'lock',
-        operations: [
-          operation(
-            { kind: 'shot', id: fourth.id },
-            fourth.rowVersion,
-            instruction({
-              continuity: continuity({ predecessors: [c], after: [{ key: 'coat', value: 'red' }] }),
-            }),
-          ),
-        ],
-      }),
-    ).toThrow('锁定');
+    const locked = f.service.execute({
+      executionKey: 'lock',
+      operations: [
+        operation(
+          { kind: 'shot', id: fourth.id },
+          fourth.rowVersion,
+          instruction({
+            continuity: continuity({ predecessors: [c], after: [{ key: 'coat', value: 'red' }] }),
+          }),
+        ),
+      ],
+    });
+    expect(locked).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
+    expect(f.service.read({ kind: 'shot', id: fourth.id }).issues.map((i) => i.code)).toContain(
+      'LOCKED_FACT_CHANGED',
+    );
     expect(() =>
       f.service.execute({
         executionKey: 'cycle',
@@ -746,19 +855,20 @@ describe('production execution in the project store', () => {
         ],
       }),
     ).toThrow('循环');
-    expect(() =>
-      f.service.execute({
-        executionKey: 'branch',
-        operations: [
-          operation(
-            b,
-            f.service.read(b).rowVersion,
-            instruction({ continuity: continuity({ after: [{ key: 'door', value: 'closed' }] }) }),
-          ),
-          operation(c, f.service.read(c).rowVersion, f.service.read(c).instruction),
-        ],
-      }),
-    ).toThrow('冲突');
+    const branch = f.service.execute({
+      executionKey: 'branch',
+      operations: [
+        operation(
+          b,
+          f.service.read(b).rowVersion,
+          instruction({ continuity: continuity({ after: [{ key: 'door', value: 'closed' }] }) }),
+        ),
+        operation(c, f.service.read(c).rowVersion, f.service.read(c).instruction),
+      ],
+    });
+    expect(branch).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
+    expect(f.service.read(c).issues.map((i) => i.code)).toContain('CONTINUITY_CONFLICT');
+    expect(() => f.service.assertSource(f.service.read(c).source, c)).toThrow();
     f.content.saveScene({
       sceneId: f.scene.id,
       title: f.scene.title,

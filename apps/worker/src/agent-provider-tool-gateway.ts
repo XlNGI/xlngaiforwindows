@@ -83,6 +83,7 @@ export class AgentProviderToolGateway {
   };
   private activeReads = 0;
   private validationFailures = 0;
+  private completionError?: string;
   private readonly selectedTools = new Set<string>();
   private readonly readWaiters: Array<() => void> = [];
 
@@ -196,6 +197,15 @@ export class AgentProviderToolGateway {
     return this.definitions.some((definition) => definition.name === operation);
   }
 
+  preferStagedSceneAuthoring(): boolean {
+    if (!this.hasDefinition('scene.structure.stage')) return false;
+    // Load only an already authorized schema. Existing-scene revisions can
+    // still explicitly load submit_structure and use its ID/CAS update path.
+    this.selectedTools.delete('scene.submit_structure');
+    this.selectedTools.add('scene.structure.stage');
+    return true;
+  }
+
   freezeProviderResponse(calls: Array<{ id: string; name: string }>): void {
     if (calls.some((call) => call.name === 'tools.load')) return;
     const key = calls.map((call) => call.id).join(':');
@@ -218,7 +228,15 @@ export class AgentProviderToolGateway {
   finishProviderResponse(): void {
     const batch = this.batch;
     if (!batch) return;
-    if (this.executor.refreshTools)
+    if (this.executor.advanceTextTurn && this.readBatchContext)
+      this.definitions = cloneDefinitions(
+        this.executor.advanceTextTurn({
+          ...this.identity,
+          ...this.readBatchContext,
+          finishReason: 'tool_calls',
+        }),
+      );
+    else if (this.executor.refreshTools)
       this.definitions = cloneDefinitions(this.executor.refreshTools(this.identity));
     else if (batch.updates.length)
       this.definitions = cloneDefinitions(
@@ -233,7 +251,10 @@ export class AgentProviderToolGateway {
         ),
       );
     this.batch = undefined;
+    this.readBatchContext = undefined;
   }
+
+  private readBatchContext?: { providerResponseId?: string; usage?: NormalizedLlmUsage };
 
   advanceTextTurn(providerResponseId: string | undefined, usage?: NormalizedLlmUsage): void {
     const tools = this.executor.advanceTextTurn?.({
@@ -250,6 +271,7 @@ export class AgentProviderToolGateway {
     providerResponseId: string | undefined,
     usage?: NormalizedLlmUsage,
   ): void {
+    if (this.batch) this.readBatchContext = { providerResponseId, usage };
     this.calls.set(toolCallId, {
       definition: this.batch?.definitions.get(toolCallId),
       providerResponseId:
@@ -274,6 +296,7 @@ export class AgentProviderToolGateway {
     finishReason: string | undefined,
     usage: NormalizedLlmUsage | undefined,
   ): void {
+    if (this.completionError) throw new Error(this.completionError);
     this.executor.completeProviderStep({
       ...this.identity,
       providerResponseId,
@@ -314,6 +337,7 @@ export class AgentProviderToolGateway {
       return validated;
     } catch (error) {
       this.validationFailures += 1;
+      if (isNewSceneAuthoring(definition.name, args)) this.preferStagedSceneAuthoring();
       const reason = boundedValidationError(error);
       this.executor.recordValidationFailure?.(
         this.identity,
@@ -404,6 +428,15 @@ export class AgentProviderToolGateway {
       if (output === undefined)
         throw new Error('Worker tool continuation omitted the Pi tool result.');
       unifiedAgentToolRegistry.assertResultText(output);
+      const result = JSON.parse(output) as {
+        status?: string;
+        error?: { code?: string; message?: string };
+      };
+      if (result?.status === 'rejected') {
+        if (result.error?.code === 'AGENT_TOOL_ARGUMENTS_INVALID') this.validationFailures += 1;
+        if (isNewSceneAuthoring(name, args)) this.preferStagedSceneAuthoring();
+        throw new Error(boundedValidationError(new Error(output)));
+      }
       this.validationFailures = 0;
       if (stepId && !this.planHooks!.succeed(stepId, definition.name, output)) {
         throw new Error(`Planned operation ${definition.name} did not succeed.`);
@@ -413,6 +446,8 @@ export class AgentProviderToolGateway {
         details: { status: 'completed', toolName: definition.name },
       };
     } catch (error) {
+      if (error instanceof Error && /AGENT_TOOL_QUOTA_EXHAUSTED/.test(error.message))
+        this.completionError = error.message;
       if (stepId) this.planHooks?.fail(stepId, definition.name, error);
       throw error;
     } finally {
@@ -428,6 +463,13 @@ export class AgentProviderToolGateway {
 export function boundedValidationError(error: unknown): string {
   const message = error instanceof Error ? error.message : 'Invalid tool arguments.';
   return message.split('Received arguments:')[0]!.trim().slice(0, 1600);
+}
+
+function isNewSceneAuthoring(name: string, args: unknown): boolean {
+  if (name === 'scene.structure.stage') return true;
+  if (name !== 'scene.submit_structure') return false;
+  const scenes = (args as { scenes?: Array<{ sceneId?: string }> } | undefined)?.scenes;
+  return !Array.isArray(scenes) || scenes.some((scene) => !scene?.sceneId);
 }
 
 export function isLibraryRetrievalOperation(operation: string): boolean {

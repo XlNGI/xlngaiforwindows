@@ -3765,6 +3765,12 @@ export function App() {
       projectId={project?.id}
       projectSessionId={workerScope(project?.id)?.projectSessionId}
       onRequestSubmissionApproval={requestMediaSubmissionApproval}
+      onUpdateProductionInstructions={(request) => {
+        setComposer((current) => (current.trim() ? `${current}\n\n${request}` : request));
+        setChatMessage('更新请求已填入会话，发送后按最新资料修订制作指令。');
+        workspaceDispatch({ type: 'open', panelId: 'conversation' });
+        if (detachedPanels.conversation) void focusDetachedPanelWindow(detachedPanels.conversation);
+      }}
       projectViewEpoch={project}
       shotId={
         productionSeed?.documentId || productionSeed?.sceneId

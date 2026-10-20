@@ -50,11 +50,31 @@ const hash = (value: unknown) =>
     )
     .digest('hex');
 const key = (target: ProductionTarget) => `${target.kind}:${target.id}`;
+// These are production readiness problems, not reasons to discard editable work.
+const readinessIssues = new Set([
+  'CONTINUITY_CONFLICT',
+  'LOCKED_FACT_CHANGED',
+  'DEPENDENCY_INSTRUCTION_MISSING',
+  'STALE_INSTRUCTION',
+]);
 interface VersionRow {
   id: string;
   revision: number;
   instruction_json: string;
   source_hash: string;
+  created_at: string;
+}
+
+/** Tool summaries stay bounded; read/compile retains the complete issue list. */
+export function summarizeProductionReadiness<T extends ProductionIssue>(issues: T[]) {
+  return {
+    readiness: issues.length ? 'needs_attention' : 'ready',
+    issueCount: issues.length,
+    issuesTruncated: issues.length > 20,
+    issues: issues
+      .slice(0, 20)
+      .map((issue) => ({ ...issue, message: issue.message.slice(0, 500) })),
+  };
 }
 
 /** One project store, immutable instruction history, synchronous local execution. */
@@ -160,8 +180,8 @@ export class ProductionService {
         const pending = new Map(list.operations.map((op) => [key(op.target), op.instruction]));
         for (const operation of list.operations) {
           const checked = this.inspectGraph(db, project.id, operation.target, pending);
-          if (checked.issues.length)
-            throw new Error(checked.issues.map((issue) => issue.message).join('\n'));
+          const invalid = checked.issues.filter((issue) => !readinessIssues.has(issue.code));
+          if (invalid.length) throw new Error(invalid.map((issue) => issue.message).join('\n'));
         }
         const executionId = randomUUID();
         const now = new Date().toISOString();
@@ -260,10 +280,19 @@ export class ProductionService {
         }
         for (const operation of list.operations) {
           const final = this.inspectGraph(db, project.id, operation.target);
-          if (final.issues.length)
-            throw new Error(final.issues.map((issue) => issue.message).join('\n'));
+          const invalid = final.issues.filter((issue) => !readinessIssues.has(issue.code));
+          if (invalid.length) throw new Error(invalid.map((issue) => issue.message).join('\n'));
         }
-        const result = { status: 'applied', executionId, operations: outputs, paidRequests: 0 };
+        const issues = list.operations.flatMap(({ target }) =>
+          this.read(target).issues.map((issue) => ({ ...issue, target })),
+        );
+        const result = {
+          status: 'applied',
+          executionId,
+          operations: outputs,
+          ...summarizeProductionReadiness(issues),
+          paidRequests: 0,
+        };
         db.prepare('UPDATE production_execution_lists SET result_json=? WHERE id=?').run(
           JSON.stringify(result),
           executionId,
@@ -334,6 +363,11 @@ export class ProductionService {
       const { issues, dependencies } = latest
         ? this.inspectGraph(db, project.id, target)
         : { issues: [] as ProductionIssue[], dependencies: [] as unknown[] };
+      if (target.kind === 'shot' && state.sceneId) {
+        const parent = this.inspectGraph(db, project.id, { kind: 'scene', id: state.sceneId });
+        issues.push(...parent.issues.filter((issue) => issue.code === 'STALE_INSTRUCTION'));
+        dependencies.push(...parent.dependencies);
+      }
       const continuityAssets = continuity?.binding
         ? [
             continuity.binding.sourceVideoAssetId,
@@ -1077,12 +1111,57 @@ export class ProductionService {
       const latest = this.latest(db, projectId, current);
       const instruction = pending.get(id) ?? latest?.instruction;
       dependencies.push([current, latest?.row.id, state.semanticHash]);
-      if (!instruction) return fail('MISSING_DEPENDENCY', `制作依赖 ${id} 缺少结构化制作指令。`);
-      if (!pending.has(id) && latest?.row.source_hash !== state.semanticHash)
+      if (!instruction)
+        return fail('DEPENDENCY_INSTRUCTION_MISSING', `前置场次/镜头 ${id} 尚无结构化制作指令。`);
+      if (!pending.has(id) && latest && latest.row.source_hash !== state.semanticHash) {
+        const title =
+          current.kind === 'scene' || current.kind === 'shot'
+            ? (
+                db
+                  .prepare(
+                    `SELECT title FROM ${current.kind === 'scene' ? 'scenes' : 'shots'} WHERE id=?`,
+                  )
+                  .get(current.id) as { title: string }
+              ).title
+            : new ContentService(this.projects).getDocument(current.id).title;
+        const changedReferences: NonNullable<ProductionIssue['changedReferences']> = [];
+        if (state.sceneId) {
+          const scene = new ContentService(this.projects)
+            .listScenes()
+            .find((item) => item.id === state.sceneId)!;
+          const references = [
+            scene.sceneDocumentId,
+            ...(scene.characterBindings ?? []).map((binding) => binding.characterDocumentId),
+          ].filter((value): value is string => Boolean(value));
+          for (const documentId of new Set(references)) {
+            const reference = db
+              .prepare(
+                `SELECT d.id,d.kind,d.title FROM documents d
+                 JOIN document_versions v ON v.id=d.current_version_id
+                 WHERE d.project_id=? AND d.id=? AND v.created_at>?`,
+              )
+              .get(projectId, documentId, latest.row.created_at) as
+              { id: string; kind: string; title: string } | undefined;
+            if (reference)
+              changedReferences.push({
+                target: {
+                  kind: reference.kind === 'character' ? 'character' : 'setting',
+                  id: reference.id,
+                },
+                title: reference.title,
+              });
+          }
+        }
         issues.push({
           code: 'STALE_INSTRUCTION',
-          message: `${id} 的提示词、角色/场景资料或出场关系已变化，需要更新结构化制作指令。`,
+          message: changedReferences.length
+            ? `「${title}」引用的资料已有新版本：${changedReferences.map((reference) => reference.title).join('、')}。请在会话中更新制作指令；重新填表不能更新旧指令。`
+            : `「${title}」的提示词或出场关系已变化，请在会话中更新制作指令；重新填表不能更新旧指令。`,
+          target: current,
+          targetTitle: title,
+          ...(changedReferences.length ? { changedReferences } : {}),
         });
+      }
       const facts = empty();
       const merge = (into: Map<string, string>, values: Map<string, string>) => {
         for (const [name, value] of values) {
@@ -1096,6 +1175,13 @@ export class ProductionService {
       };
       const nextPath = new Set([...path, id]);
       for (const predecessor of instruction.continuity.predecessors) {
+        if (!['scene', 'shot'].includes(predecessor.kind)) {
+          fail(
+            'INVALID_CONTINUITY_TARGET',
+            '连续性前置对象只能是场次或镜头；角色和场景设定请作为资料引用。',
+          );
+          continue;
+        }
         const previous = visit(predecessor, nextPath);
         merge(facts.ending, previous.ending);
         merge(facts.locked, previous.locked);
@@ -1127,7 +1213,7 @@ export class ProductionService {
   private latest(db: Database.Database, projectId: string, target: ProductionTarget) {
     const row = db
       .prepare(
-        'SELECT id,revision,instruction_json,source_hash FROM production_instruction_versions WHERE project_id=? AND target_kind=? AND target_id=? ORDER BY revision DESC LIMIT 1',
+        'SELECT id,revision,instruction_json,source_hash,created_at FROM production_instruction_versions WHERE project_id=? AND target_kind=? AND target_id=? ORDER BY revision DESC LIMIT 1',
       )
       .get(projectId, target.kind, target.id) as VersionRow | undefined;
     return row

@@ -1214,6 +1214,22 @@ function policyRejectionDetail(summary: string): string {
 
 function readableAgentTaskError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  if (/AGENT_SCENE_NOT_SAVED|AGENT_PRODUCTION_NOT_SAVED/.test(error))
+    return (
+      error.replace(/^AGENT_(?:SCENE|PRODUCTION)_NOT_SAVED:\s*/, '') +
+      ' 已保存的草稿和分段会保留，可以继续处理。'
+    );
+  if (/AGENT_TOOL_QUOTA_EXHAUSTED/.test(error))
+    return '本轮工具调用额度已用完，任务未完成。已保存的草稿和分段会保留，可以继续处理。';
+  if (
+    /^(TOOL_OUTPUT_REPAIR_LIMIT|INVALID_TOOL_ARGUMENTS|INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT):/.test(
+      error,
+    )
+  ) {
+    return error.startsWith('TOOL_OUTPUT_REPAIR_LIMIT:')
+      ? '自动修正后仍未能完成提交，任务未完成。失败的这次提交未执行，已保存的草稿和分段会保留，可以继续完成。'
+      : '生成的提交内容格式有误或不完整，本次提交未执行。已保存的草稿和分段会保留，可以继续完成。';
+  }
   if (/application is closing|worker was restarting/i.test(error)) {
     return '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或恢复未完成产物。';
   }
@@ -1245,6 +1261,10 @@ type AgentActionRow = {
 const AGENT_TOOL_ACTION_LABELS: Record<string, string> = {
   'library.search': '检索项目资料',
   'library.read': '阅读资料正文',
+  'scene.submit_structure': '保存场次与镜头',
+  'scene.structure.stage': '分段编排场次与镜头',
+  'scene.read': '读取已有场次',
+  'model.request': '模型请求',
   'document.create_draft': '创建文档草稿',
   'document.update_draft': '更新文档草稿',
   'document.list': '列出项目文档',
@@ -1341,6 +1361,12 @@ function agentActionRows(
       }
       continue;
     }
+    if (event.eventType === 'agent.tool.failed') {
+      if (pending.length > 0) flushPending('error', event.summary);
+      else
+        rows.push({ id: event.id, title: '工具调用失败', detail: event.summary, status: 'error' });
+      continue;
+    }
     if (
       event.eventType === 'agent.library.completed' ||
       event.eventType === 'agent.tool.succeeded' ||
@@ -1351,6 +1377,16 @@ function agentActionRows(
     }
     if (event.eventType === 'document.draft.created') {
       rows.push({ id: event.id, title: '已写入文档草稿', status: 'ok' });
+      continue;
+    }
+    if (event.eventType === 'scene.structure.saved') {
+      rows.push({
+        id: event.id,
+        title: '已保存场次与镜头草稿',
+        ...(event.summary.includes('待处理')
+          ? { detail: '存在待处理的制作问题', status: 'warn' as const }
+          : { status: 'ok' as const }),
+      });
       continue;
     }
     if (
@@ -1408,7 +1444,8 @@ function mergeLiveAgentActions(
     if (
       merged.some(
         (row) =>
-          (row.toolName === live.toolName && live.phase !== 'tool_arguments') ||
+          (row.toolName === live.toolName &&
+            !['tool_arguments', 'repairing_tool_output'].includes(live.phase ?? '')) ||
           row.id === `live:${live.id}`,
       )
     ) {
@@ -1416,27 +1453,38 @@ function mergeLiveAgentActions(
     }
     merged.push({
       id: `live:${live.id}`,
-      title: agentToolActionLabel(live.toolName),
+      title:
+        live.phase === 'repairing_tool_output'
+          ? '自动修正提交内容'
+          : agentToolActionLabel(live.toolName),
       toolName: live.toolName,
       detail:
-        live.phase === 'tool_arguments'
-          ? `正在生成参数 · ${Math.ceil((live.argumentBytes ?? 0) / 1024)} KB · 最近接收 ${live.lastActivityAt ? new Date(live.lastActivityAt).toLocaleTimeString() : ''}`
-          : live.phase
-            ? (
-                {
-                  native_queued: '等待网络准入',
-                  admitted: '准备发送',
-                  sent: '等待响应',
-                  headers: '已收到响应头',
-                  first_byte: '已收到首字节',
-                  thinking: '模型推理中',
-                  visible_text: '正在回复',
-                  complete: '本轮接收完成',
-                  failed: '本轮请求失败',
-                  cancelled: '已取消',
-                } as Record<string, string>
-              )[live.phase]
-            : undefined,
+        live.phase === 'repairing_tool_output'
+          ? live.status === 'running'
+            ? live.toolName === 'scene.structure.stage'
+              ? '正在改为分段提交，按进度恢复未完成内容'
+              : '正在重新生成完整的提交内容'
+            : live.status === 'succeeded'
+              ? '恢复流程已完成'
+              : '这次修正未完成'
+          : live.phase === 'tool_arguments'
+            ? `正在生成参数 · ${Math.ceil((live.argumentBytes ?? 0) / 1024)} KB · 最近接收 ${live.lastActivityAt ? new Date(live.lastActivityAt).toLocaleTimeString() : ''}`
+            : live.phase
+              ? (
+                  {
+                    native_queued: '等待网络准入',
+                    admitted: '准备发送',
+                    sent: '等待响应',
+                    headers: '已收到响应头',
+                    first_byte: '已收到首字节',
+                    thinking: '模型推理中',
+                    visible_text: '正在回复',
+                    complete: '本轮接收完成',
+                    failed: '本轮请求失败',
+                    cancelled: '已取消',
+                  } as Record<string, string>
+                )[live.phase]
+              : undefined,
       status:
         live.status === 'failed'
           ? 'error'
@@ -1488,8 +1536,21 @@ function AgentToolTimeline({
     liveActions,
     running && !generationFailed,
   );
+  const rawError = generationError ?? detail?.task.errorMessage;
+  const readableError = readableAgentTaskError(rawError);
+  // A completed request may still contain a rejected read. Only persisted
+  // read citations prove that project source content was actually retrieved.
+  const readCompleted = detail?.librarySources?.some(
+    (source) => source.toolName === 'library.read',
+  );
   const errorMessage =
-    readableAgentTaskError(generationError) ?? readableAgentTaskError(detail?.task.errorMessage);
+    readableError &&
+    readCompleted &&
+    /^(TOOL_OUTPUT_REPAIR_LIMIT|INVALID_TOOL_ARGUMENTS|INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT):/.test(
+      rawError ?? '',
+    )
+      ? `资料已读取；${readableError}`
+      : readableError;
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
   const expanded = expandedOverride ?? true;
 

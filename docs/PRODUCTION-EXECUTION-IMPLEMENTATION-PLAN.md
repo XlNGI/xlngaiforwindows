@@ -164,3 +164,33 @@
 - [x] 自动保存实施完成：生成内容通过 Worker 校验后立即保存为可编辑草稿；移除场次审批面板；旧版待确认内容自动保存；保留后期修改、真实 ID、CAS、事务回滚和审计。
 
 验证完成：全仓共 1,609 项通过（Worker 827、Desktop 504、Persistence 75、Generation Adapters 139、LLM 32、Contracts 24、Context 8）；最终 Pi 系统提示词回归 13 项通过。覆盖两种会话协议、场次与镜头自动保存、绑定修订、分段生成和重复完成、草稿重开与后期编辑、旧方案自动保存、只读及版本冲突回滚。typecheck、lint、format:check、build 和 git diff --check 通过。打包 Worker 离线验证通过，两协议共 8 种入口组合自动保存，providerRequests=0；未启动安装程序或修改用户项目。
+
+## 2026-10-20 创作契约与草稿制作就绪状态
+
+用户确认当前为开发阶段，测试资料无需成为改造的兼容负担。本次现场记录中，角色/场景文档有正文却被当作 continuity.predecessors，触发缺少指令；重复正文与结构冲突；连续失败后未保存任何场次，任务仍显示完成。
+
+- 资料引用使用 sceneDocumentId、characterDocumentIds、subjects 和素材需求；连续性 predecessors 仅指真实场次/镜头。首场、独立创作或没有前镜 ID 时为空，不自动生成或编造前置关系。
+- 新创作仅提交 instruction，系统渲染文本；已有场次按 ID/CAS 更新，人工文字编辑保留原入口。
+- 草稿写入严格校验结构、ID、版本、依赖循环与容量，仍在同一事务保存文本/结构/关系。跨对象连续性冲突、前镜尚无指令和陈旧依赖作为制作就绪问题随草稿返回，生成前继续拦截；不清除事实或伪造依赖来通过校验。
+- 任务完成依据真实调用结果；失败事件不记成功；未解决的场次/制作写入失败及未 finalize 的分段不能变成 completed/read-only。普通查询与明确澄清仍可正常结束。
+- 不引入自动正文注入、运行时云存储或付费自动重试。当前改造复用项目 SQLite JSON 结构，不需要新增表。
+
+顺序实施及验证：
+
+- [x] D1：引用/前置类型及单一创作输入，共用 Schema/Worker 校验。两协议模拟 Native→Pi→真实临时 SQLite 验证引用普通文字角色/场景资料，非法前置类型在执行前拒绝，修正后分段保存成功；重复文本在工具 Schema 和直接 Worker 入口均拒绝。
+- [x] D2：草稿保存返回有界 readiness/issues；真实连续性冲突及尚无指令的有效前镜仍可保留草稿，读取、重开和提交前检查均保留问题。无效 ID、CAS、循环及故障写入继续原子回滚。制作服务 16 项通过。
+- [x] D3：错误传播、分段修复、失败事件与任务终态一致。两协议分别覆盖 Schema 拒绝、业务拒绝和未完成分段后模型正常结束仍为 failed；单任务多个分段不被其他成功保存掩盖。网关 16 项、场次链路 31 项、Desktop 会话 34 项通过；已有场次版本冲突后保留保存内容且禁止 completed/read-only。
+- [x] D4：现场条件回归、全仓门禁及生产 Worker 重建验证。`pnpm test` 全仓 1,643 项通过（Context 8、Contracts 24、LLM 32、Generation Adapters 139、Persistence 75、Desktop 511、Worker 854）；typecheck、lint、format:check、build、git diff --check 通过。Rust fmt/check/test 通过，163 项通过、1 项既有忽略；保留既有 Rust 未用变量和 Vite 大包提示。
+
+生产 Worker 已重建，打包后的 `validate-llm-intent-sidecar.mjs` 八种组合通过（两协议 × 两入口 × 有/无 UI hint），providerRequests=0。报告：`C:/Users/MSI/AppData/Local/Temp/unicomp-llm-intent-sgmUiI/report.json`。普通角色/场景文档引用、错误后的分段修复、草稿问题保留与提交拦截由模拟 Native/Pi 和真实临时 SQLite 集成覆盖；打包测试验证实际本地保存及真实场镜绑定，不代表真实模型输出成功率。未重发用户失败任务，未清空或重写运行时项目资料；重新打开开发版后加载新版 Worker。
+
+## 2026-10-20 资料变更后的制作指令修订入口
+
+现场三场十三镜指令在 13:18 保存；阿铁、不杠资料在 13:38 更新后，会话中断，原指令来源失效。哈希复核确认触发因素是角色资料版本变化。重新填表是只读编译，不能冒充已修订结构化剧情。
+
+- [x] U1：过期问题返回真实目标、可读名称及已知更新资料；镜头同时检查共享场次指令，不因只修镜头而漏掉过期的共享设定。未知差异使用通用说明，不按名字推断关系。
+- [x] U2：过期时显示“到会话更新制作指令”，把受影响对象的真实 ID 和资料名称填入现有会话，保留已有输入，由用户发送更新任务。Agent 按需读取最新文本／指令和 CAS，在已有对象上保存修订；不重建目录、不自动声明旧指令已就绪、不自动提交媒体任务。普通素材变化仍走重新填表。
+- [x] U3：来源事件重新核对本地编译结果，显示新的具体问题，异步旧项目结果丢弃，表单人工覆盖不被事件改写。真实 SQLite 回归验证资料变更、手写镜头文本、父场次与镜头批量修订、旧来源拒绝及零媒体任务；Desktop 过期入口与来源刷新回归通过，包含 App 的聚焦三文件共 110 项。
+- [x] U4：全仓门禁及打包离线验证。全仓 1,650 项通过（Desktop 513、Worker 859，其余包共 278）；typecheck、lint、format:check、build、git diff --check 通过。Rust fmt/check/test 通过，163 项通过、1 项既有忽略。生产 Worker 已重建，打包八组合离线验证通过，providerRequests=0；报告：`C:/Users/MSI/AppData/Local/Temp/unicomp-llm-intent-x6nrOD/report.json`。打包验证覆盖实际工具保存与绑定，过期诊断、手工内容保留和修订入口由 U3 的服务及 UI 回归覆盖；未进行真实模型或媒体生成验收。
+
+本次不改写用户正在使用的项目资料，不以批量重置 source_hash 清除错误。已保存的旧任务通过新入口发起明确修订；没有读取证据时不自动重写剧情。会话授权与有界预算验证见 [Agent 链路修复](./AGENT-PIPELINE-REMEDIATION-PLAN.md#2026-10-20-连续读取授权与制作修订预算)。

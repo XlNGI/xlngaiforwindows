@@ -120,14 +120,17 @@ export function useProductionInstructions(input: {
     if (!target || !result?.source) return;
     let active = true;
     const inspect = () => {
-      void (
-        (shotIds || inputImages) && adapter
-          ? callWorker('production.compile', compileRequest(target, adapter, shotIds, inputImages))
-          : callWorker('production.read', { target })
-      )
+      if (!adapter) return;
+      void callWorker('production.compile', compileRequest(target, adapter, shotIds, inputImages))
         .then((latest) => {
-          if (active && latest?.source?.token !== result.source?.token)
+          if (
+            active &&
+            currentKey.current === contextKey &&
+            latest?.source?.token !== result.source?.token
+          ) {
+            setResult(latest);
             setError('来源内容或素材绑定已更新，请重新填入制作内容。');
+          }
         })
         .catch(() => {
           if (active) setError('制作来源暂时不可用，请重新读取。');

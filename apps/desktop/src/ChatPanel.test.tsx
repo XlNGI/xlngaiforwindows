@@ -9,8 +9,218 @@ import type {
   ProductionContextInfo,
 } from '@ai-video/contracts';
 import { ChatPanel } from './ChatPanel';
+import type { ComponentProps } from 'react';
 
 afterEach(cleanup);
+
+describe('ChatPanel output recovery', () => {
+  function props(error?: string, read = false): ComponentProps<typeof ChatPanel> {
+    const conversation: ConversationInfo = {
+      id: 'conversation',
+      projectId: 'project',
+      scopeType: 'project',
+      title: '恢复提交',
+      createdAt: '2026-10-20T00:00:00.000Z',
+      updatedAt: '2026-10-20T00:00:00.000Z',
+    };
+    const userMessage: ChatMessageInfo = {
+      id: 'user',
+      conversationId: conversation.id,
+      role: 'user',
+      content: '生成场次',
+      status: 'complete',
+      createdAt: conversation.createdAt,
+    };
+    const assistantMessage: ChatMessageInfo = {
+      id: 'assistant',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '正在提交',
+      status: error ? 'failed' : 'streaming',
+      createdAt: conversation.createdAt,
+    };
+    return {
+      scopeType: 'project',
+      scopeAvailable: true,
+      writable: true,
+      conversations: [conversation],
+      conversation,
+      messages: [userMessage, assistantMessage],
+      composer: '',
+      statusMessage: '',
+      legacyLlmConfigured: false,
+      llmProfiles: [],
+      llmModels: [],
+      selectedLlmProfileId: '',
+      selectedLlmModelId: '',
+      generation: {
+        generationId: 'generation',
+        conversationId: conversation.id,
+        snapshotId: 'snapshot',
+        status: error ? 'failed' : 'streaming',
+        userMessage,
+        assistantMessage,
+        sources: [],
+        error,
+      },
+      agentTask: {
+        task: {
+          id: 'task',
+          projectId: 'project',
+          conversationId: conversation.id,
+          userMessageId: 'user',
+          taskType: 'document-create',
+          scopeType: 'project',
+          title: '生成场次',
+          status: 'running',
+          phase: 'model_running',
+          rowVersion: 1,
+          createdAt: conversation.createdAt,
+          updatedAt: conversation.updatedAt,
+        },
+        documents: [],
+        providerSteps: [],
+        researchSources: [],
+        librarySources: read
+          ? [
+              {
+                citationLabel: 'L1',
+                title: '庭院',
+                sourceType: 'document',
+                sourceId: 'setting',
+                status: 'draft',
+                toolName: 'library.read',
+              },
+            ]
+          : [],
+        events: read
+          ? [
+              {
+                id: 'start',
+                taskId: 'task',
+                sequence: 0,
+                eventType: 'agent.tool.started',
+                level: 'info',
+                summary: '正在调用工具：library.read',
+                createdAt: conversation.createdAt,
+              },
+              {
+                id: 'read',
+                taskId: 'task',
+                sequence: 1,
+                eventType: 'agent.library.completed',
+                level: 'info',
+                summary: '已读取',
+                createdAt: conversation.createdAt,
+              },
+            ]
+          : [],
+      },
+      onSelectConversation: vi.fn(),
+      onCreateConversation: vi.fn(),
+      onRetryGeneration: vi.fn(),
+      onLlmProfileChange: vi.fn(),
+      onLlmModelChange: vi.fn(),
+      onOpenProviderSettings: vi.fn(),
+      onComposerChange: vi.fn(),
+      onCancelGeneration: vi.fn(),
+      onSendMessage: vi.fn(),
+    };
+  }
+
+  it.each([true, false])(
+    'explains unsaved output without inventing completed reads (read=%s)',
+    (read) => {
+      const error =
+        'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (18610 bytes); finishReason=tool_calls. No tool was executed.';
+      render(<ChatPanel {...props(error, read)} />);
+      const message = screen.getByText(/生成的提交内容格式有误或不完整/);
+      expect(message).toHaveTextContent('本次提交未执行');
+      expect(message.textContent?.includes('资料已读取')).toBe(read);
+      expect(screen.queryByText(error)).not.toBeInTheDocument();
+      expect(message.closest('.agent-tool-timeline')).toHaveAttribute('data-state', 'settled');
+    },
+  );
+
+  it('shows the repair limit and preserves saved drafts instead of claiming everything failed to save', () => {
+    render(<ChatPanel {...props('TOOL_OUTPUT_REPAIR_LIMIT: retries=2', true)} />);
+    expect(screen.getByText(/资料已读取；自动修正后仍未能完成提交，任务未完成/)).toHaveTextContent(
+      '已保存的草稿和分段会保留',
+    );
+  });
+
+  it('shows an ongoing staged recovery while keeping cancellation available', () => {
+    render(
+      <ChatPanel
+        {...props()}
+        liveAgentActions={[
+          {
+            id: 'output-repair:1',
+            toolName: 'scene.structure.stage',
+            phase: 'repairing_tool_output',
+            status: 'running',
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText('自动修正提交内容')).toBeInTheDocument();
+    expect(screen.getByText('正在改为分段提交，按进度恢复未完成内容')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /停止|取消/ })).toBeEnabled();
+  });
+
+  it('shows scene saving only when the Worker confirms it, including drafts saved before a later failure', () => {
+    const value = props('TOOL_OUTPUT_REPAIR_LIMIT: retries=2');
+    value.agentTask!.events.push({
+      id: 'saved',
+      taskId: 'task',
+      sequence: 0,
+      eventType: 'scene.structure.saved',
+      level: 'info',
+      summary: '已保存场次与镜头草稿。',
+      createdAt: '2026-10-20T00:00:00.000Z',
+    });
+    render(<ChatPanel {...value} />);
+    expect(screen.getByText('已保存场次与镜头草稿')).toBeInTheDocument();
+    expect(screen.getByText(/自动修正后仍未能完成提交/)).toBeInTheDocument();
+  });
+
+  it('does not label a completed read request as successful source retrieval without read evidence', () => {
+    const value = props('INVALID_TOOL_ARGUMENTS: failed', true);
+    value.agentTask!.librarySources = [];
+    render(<ChatPanel {...value} />);
+    expect(screen.queryByText(/资料已读取；/)).not.toBeInTheDocument();
+  });
+
+  it('shows rejected scene calls as failures while distinguishing saved drafts with readiness issues', () => {
+    const value = props('AGENT_SCENE_NOT_SAVED: 任务未完成：提交未成功。');
+    const events = [
+      ['agent.tool.started', '正在调用工具：scene.submit_structure'],
+      [
+        'agent.tool.failed',
+        '调用失败：scene.submit_structure（AGENT_TOOL_ARGUMENTS_INVALID）：无效引用',
+      ],
+      ['scene.structure.saved', '已保存场次与镜头草稿，存在待处理的制作问题。'],
+    ];
+    value.agentTask!.events = events.map(([eventType, summary], sequence) => ({
+      id: `state-${sequence}`,
+      taskId: 'task',
+      sequence,
+      eventType: eventType!,
+      summary: summary!,
+      level: 'info',
+      createdAt: '2026-10-20T00:00:00.000Z',
+    }));
+    render(<ChatPanel {...value} />);
+    expect(screen.getByText(/调用失败：scene.submit_structure/).closest('li')).toHaveAttribute(
+      'data-status',
+      'error',
+    );
+    expect(screen.getByText('存在待处理的制作问题')).toBeInTheDocument();
+    expect(screen.getByText(/任务未完成：提交未成功/)).toHaveTextContent(
+      '已保存的草稿和分段会保留',
+    );
+  });
+});
 
 describe('ChatPanel attempt metadata', () => {
   it('lets the user edit and save the conversation prompt contract', () => {

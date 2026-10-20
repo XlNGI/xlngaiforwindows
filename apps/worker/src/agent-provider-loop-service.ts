@@ -37,6 +37,7 @@ import {
   rebuildLibraryChunksForDocument,
 } from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
+import { ProductionService, summarizeProductionReadiness } from './production-service.js';
 import { DocumentWorkflowService, DocumentWorkflowError } from './document-workflow-service.js';
 import { PartialArtifactService } from './partial-artifact-service.js';
 import { ProjectService } from './project-service.js';
@@ -86,7 +87,7 @@ import {
 const TOOL_SCHEMA_VERSION = 'agent-tools.v2';
 const POLICY_VERSION = 'agent-policy.v2';
 // Long provider turns can spend several minutes reading project sources before
-// issuing a write tool call. Each step is still single-use and step-scoped;
+// issuing a write tool call. Writes remain single-use and step-scoped;
 // the longer lease prevents a valid in-flight turn from expiring mid-reasoning.
 const AUTHORIZATION_TTL_MS = 30 * 60_000;
 const AGENT_TASK_TOOL_CALL_DEFAULT = 16;
@@ -317,14 +318,28 @@ export class AgentProviderLoopService {
         const task = this.requireTask(database, project.id, params.generationId);
         const step = this.requireOpenStep(database, params.attemptId);
         const now = new Date().toISOString();
+        const reads =
+          params.finishReason === 'tool_calls'
+            ? (database
+                .prepare('SELECT tool_name FROM agent_tool_calls WHERE provider_step_id=?')
+                .all(step.id) as Array<{ tool_name: string }>)
+            : [];
+        if (
+          reads.some(
+            (call) => unifiedAgentToolRegistry.executionMode(call.tool_name) !== 'parallel',
+          )
+        )
+          throw new Error(
+            'Only a completed read-only response can advance its authorization step.',
+          );
         this.completeStep(
           database,
           step,
           params.providerResponseId,
-          0,
+          reads.length,
           params.usage,
           now,
-          'supplement',
+          params.finishReason === 'tool_calls' ? 'tool_calls' : 'supplement',
         );
         const next = this.createStep(
           database,
@@ -1570,6 +1585,14 @@ export class AgentProviderLoopService {
             });
             continue;
           }
+          if (
+            ['scene.read', 'production.read', 'production.execute'].includes(call.name) &&
+            task.tool_call_limit === AGENT_TASK_TOOL_CALL_DEFAULT
+          ) {
+            database
+              .prepare('UPDATE agent_tasks SET tool_call_limit=? WHERE id=? AND tool_call_limit=?')
+              .run(AGENT_TASK_TOOL_CALL_HARD_LIMIT, task.id, AGENT_TASK_TOOL_CALL_DEFAULT);
+          }
           const registration = unifiedAgentToolRegistry.require(call.name);
           const awaitsConfirmation =
             registration.confirmationPolicy === 'always' ||
@@ -1753,6 +1776,14 @@ export class AgentProviderLoopService {
                 toolCallId,
               );
             outputs.push({ callId: call.id, output: failedOutput });
+            this.appendEvent(
+              database,
+              project.id,
+              task.id,
+              'agent.tool.failed',
+              `调用失败：${operation}（${policyError.code}）：${policyError.message.slice(0, 500)}`,
+              now,
+            );
             if (
               error instanceof AgentToolPolicyError &&
               operation !== 'document.submit_draft' &&
@@ -1765,6 +1796,8 @@ export class AgentProviderLoopService {
             documentId?: string;
             documentVersionId?: string;
             chapterId?: string;
+            status?: string;
+            readiness?: string;
           };
           database
             .prepare(
@@ -1782,15 +1815,30 @@ export class AgentProviderLoopService {
               toolCallId,
             );
           outputs.push({ callId: call.id, output });
+          if (
+            ['scene.submit_structure', 'scene.structure.stage'].includes(operation) &&
+            artifact.status === 'scene_structure_saved'
+          ) {
+            this.appendEvent(
+              database,
+              project.id,
+              task.id,
+              'scene.structure.saved',
+              artifact.readiness === 'needs_attention'
+                ? '已保存场次与镜头草稿，存在待处理的制作问题。'
+                : '已保存场次与镜头草稿。',
+              now,
+            );
+          }
+          this.appendEvent(
+            database,
+            project.id,
+            task.id,
+            'agent.tool.succeeded',
+            `已完成：${operation}`,
+            now,
+          );
         }
-        this.appendEvent(
-          database,
-          project.id,
-          task.id,
-          'agent.tool.succeeded',
-          `已完成：${params.calls.map((call) => call.name).join('、')}`,
-          now,
-        );
         const readonlySystemStep = params.calls.every(
           (call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel',
         );
@@ -2302,6 +2350,14 @@ export class AgentProviderLoopService {
                 now,
                 toolCallId,
               );
+            this.appendEvent(
+              database,
+              project.id,
+              task.id,
+              'agent.tool.failed',
+              `调用失败：${call.name}：${error instanceof Error ? error.message.slice(0, 500) : 'Invalid episode structure.'}`,
+              now,
+            );
             return toolErrorContinuation(activeGeneration.protocol, params, call, error);
           }
           const items: AgentChangeSetItemDraft[] = [];
@@ -2335,14 +2391,41 @@ export class AgentProviderLoopService {
             title: structure.episodeTitle,
             items,
           });
+          const sceneIds = changeSet.items
+            .filter((item) => item.entityType === 'scene')
+            .map((item) => item.appliedEntityId!);
+          const shotIds = changeSet.items
+            .filter((item) => item.entityType === 'shot')
+            .map((item) => item.appliedEntityId!);
+          const issues = sceneIds.flatMap((id) =>
+            new ProductionService(this.projects)
+              .read({ kind: 'scene', id })
+              .issues.map((issue) => ({
+                ...issue,
+                sceneId: id,
+              })),
+          );
           result = JSON.stringify({
             status: 'episode_structure_saved',
             changeSetId: changeSet.id,
+            sceneIds,
+            shotIds,
+            ...summarizeProductionReadiness(issues),
             itemCount: changeSet.items.length,
             reviewRequired: false,
             applied: true,
           });
           resultSummary = result;
+          this.appendEvent(
+            database,
+            project.id,
+            task.id,
+            'scene.structure.saved',
+            issues.length
+              ? '已保存场次与镜头草稿，存在待处理的制作问题。'
+              : '已保存场次与镜头草稿。',
+            now,
+          );
         } else if (
           call.name === 'document.update_draft' ||
           call.name === 'novel.chapter.submit_draft' ||
@@ -3587,6 +3670,7 @@ export class AgentProviderLoopService {
         }
         // A normal assistant response may be an answer, a query, or a model
         // selected write. Do not make completion depend on Worker regexes.
+        assertSceneAuthoringCompleted(database, task.id);
         const now = new Date().toISOString();
         this.completeStep(
           database,
@@ -3601,7 +3685,7 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'scene.submit_structure', 'scene.structure.stage', 'production.execute')
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'production.execute')
                  AND (tool_name NOT IN ('scene.submit_structure', 'scene.structure.stage') OR json_extract(result_summary_json,'$.status')='scene_structure_saved')
              ) THEN NULL ELSE 'read-only' END,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
@@ -3794,6 +3878,9 @@ export class AgentProviderLoopService {
         identity.generationId,
       );
     const authorizationHandles = new Map<AgentToolOperation, string>();
+    const task = database
+      .prepare('SELECT tool_call_count FROM agent_tasks WHERE id=?')
+      .get(taskId) as { tool_call_count: number };
     const insert = database.prepare(
       `INSERT INTO agent_tool_authorizations
        (id, project_id, task_id, generation_id, attempt_id, provider_step_id, project_session_id,
@@ -3824,7 +3911,13 @@ export class AgentProviderLoopService {
         POLICY_VERSION,
         TOOL_SCHEMA_VERSION,
         hash(handle),
-        authorization.maxCallUses ?? (isResearchOperation(authorization.operation) ? 8 : 1),
+        authorization.maxCallUses ??
+          (unifiedAgentToolRegistry.executionMode(authorization.operation) === 'parallel' &&
+          isSystemOperation(authorization.operation)
+            ? Math.max(1, Math.min(8, AGENT_TASK_TOOL_CALL_HARD_LIMIT - task.tool_call_count))
+            : isResearchOperation(authorization.operation)
+              ? 8
+              : 1),
         new Date(Date.now() + AUTHORIZATION_TTL_MS).toISOString(),
         now,
         taskId,
@@ -3861,8 +3954,19 @@ export class AgentProviderLoopService {
       ).map((spec) => spec.operation),
     );
     const usable = new Map<AgentToolOperation, string>();
+    const issued = new Set(
+      (
+        database
+          .prepare(
+            `SELECT allowed_operation FROM agent_tool_authorizations
+             WHERE provider_step_id=? AND status='issued' AND used_call_count<max_call_uses
+               AND expires_at>?`,
+          )
+          .all(stepId, new Date().toISOString()) as Array<{ allowed_operation: AgentToolOperation }>
+      ).map((row) => row.allowed_operation),
+    );
     for (const [operation, handle] of handles) {
-      if (remaining.has(operation)) usable.set(operation, handle);
+      if (remaining.has(operation) && issued.has(operation)) usable.set(operation, handle);
     }
     return this.toolsForStep(usable);
   }
@@ -4010,7 +4114,11 @@ export class AgentProviderLoopService {
          WHERE id = ? AND status = 'running' AND tool_call_count < tool_call_limit`,
       )
       .run(phase, now, taskId);
-    if (taskReserved.changes !== 1) throw new Error('Agent task tool-call quota is exhausted.');
+    if (taskReserved.changes !== 1)
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_QUOTA_EXHAUSTED',
+        'Agent task tool-call quota is exhausted; unfinished work must not be reported as complete.',
+      );
   }
 
   private resolveAuthorization(
@@ -4261,6 +4369,80 @@ export class AgentProviderLoopService {
       )
       .run(randomUUID(), taskId, projectId, next.value, type, summary, now);
   }
+}
+
+/** A model ending its response does not resolve a rejected or unfinished write. */
+function assertSceneAuthoringCompleted(database: Database.Database, taskId: string): void {
+  const calls = database
+    .prepare(
+      `SELECT tool_name,status,error_message,result_summary_json,created_at FROM agent_tool_calls
+       WHERE task_id=? AND tool_name IN ('scene.submit_structure','scene.structure.stage','novel.episode.submit_structure','production.execute')
+       ORDER BY created_at,rowid`,
+    )
+    .all(taskId) as Array<{
+    tool_name: string;
+    status: string;
+    error_message: string | null;
+    result_summary_json: string | null;
+    created_at: string;
+  }>;
+  const unresolved = new Map<string, string>();
+  const resolvedAt = new Map<string, string>();
+  for (const call of calls) {
+    const group = call.tool_name === 'production.execute' ? 'production' : 'scene';
+    const result = JSON.parse(call.result_summary_json ?? '{}') as {
+      status?: string;
+      stageOperation?: string;
+      stageId?: string;
+    };
+    if (call.status !== 'succeeded') {
+      unresolved.set(group, call.error_message ?? '提交未成功。');
+    } else if (
+      [
+        'scene_structure_saved',
+        'episode_structure_saved',
+        'scene_bindings_need_clarification',
+        'applied',
+      ].includes(result.status ?? '')
+    ) {
+      unresolved.delete(group);
+      if (result.stageId) unresolved.delete(`scene-stage:${result.stageId}`);
+      resolvedAt.set(group, call.created_at);
+    } else if (
+      result.status === 'scene_structure_staging' &&
+      ['begin', 'put_scene', 'put_shots', 'finalize'].includes(result.stageOperation ?? '')
+    ) {
+      unresolved.set(
+        `scene-stage:${result.stageId}`,
+        '分段内容已暂存，尚未 finalize 保存为完整场次。',
+      );
+    }
+  }
+  const failures = database
+    .prepare(
+      `SELECT summary,created_at FROM agent_task_events
+       WHERE task_id=? AND event_type='tool_validation_failed' ORDER BY sequence`,
+    )
+    .all(taskId) as Array<{ summary: string; created_at: string }>;
+  for (const event of failures) {
+    const failure = JSON.parse(event.summary) as { operation?: string; reason?: string };
+    if (
+      ![
+        'scene.submit_structure',
+        'scene.structure.stage',
+        'novel.episode.submit_structure',
+        'production.execute',
+      ].includes(failure.operation ?? '')
+    )
+      continue;
+    const group = failure.operation === 'production.execute' ? 'production' : 'scene';
+    if (!resolvedAt.has(group) || resolvedAt.get(group)! < event.created_at)
+      unresolved.set(group, failure.reason?.slice(0, 500) ?? '提交参数校验未通过。');
+  }
+  for (const [group, reason] of unresolved)
+    throw new Error(
+      `${group === 'production' ? 'AGENT_PRODUCTION_NOT_SAVED' : 'AGENT_SCENE_NOT_SAVED'}: 任务未完成：${reason}`,
+    );
 }
 
 function excerptArguments(value: string, maximum = 120): string {

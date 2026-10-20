@@ -393,6 +393,57 @@ describe('scene production bindings', () => {
     expect(screen.queryByText('角色声音参考')).not.toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
   });
+  it('offers an actionable conversation update for stale instructions and keeps media submission blocked', async () => {
+    mock(scene);
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    const update = vi.fn();
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
+      method === 'production.compile' || method === 'production.read'
+        ? Promise.resolve({
+            target: { kind: 'shot', id: 'shot' },
+            rowVersion: 1,
+            source: {
+              target: { kind: 'shot', id: 'shot' },
+              instructionId: 'old',
+              revision: 1,
+              token: 'a'.repeat(64),
+            },
+            parameters: { prompt: '已有手写提示词' },
+            issues: [
+              {
+                code: 'STALE_INSTRUCTION',
+                message: '「入场」引用的角色林澈已有新版本，请在会话中更新制作指令。',
+                target: { kind: 'shot', id: 'shot' },
+                targetTitle: '入场',
+                changedReferences: [{ target: { kind: 'character', id: 'actor' }, title: '林澈' }],
+              },
+            ],
+          })
+        : fallback(method as never, params)) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        shotId="shot"
+        writable
+        onUpdateProductionInstructions={update}
+      />,
+    );
+    const button = await screen.findByRole('button', { name: '到会话更新制作指令' });
+    expect(screen.queryByRole('button', { name: '重新填入制作内容' })).not.toBeInTheDocument();
+    fireEvent.click(button);
+    expect(update).toHaveBeenCalledOnce();
+    expect(update.mock.calls[0]![0]).toContain('入场（shot:shot）');
+    expect(update.mock.calls[0]![0]).toContain('林澈');
+    expect(update.mock.calls[0]![0]).toContain('手工修改');
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() => expect(screen.getByText(/引用的角色林澈已有新版本/)).toBeVisible());
+    expect(
+      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+    ).toBe(false);
+  });
+
   it('refills current images and bindings together after a structured source changes', async () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;

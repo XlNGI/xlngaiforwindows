@@ -22,6 +22,35 @@ import { PiConversationRuntime, compactRepeatedResults } from './pi-conversation
 import { parseEpisodeStructureArguments } from './episode-structure.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { splitConversationRequest } from './conversation-request.js';
+import { NativeProviderBridge } from './native-provider-bridge.js';
+import { ProductionService } from './production-service.js';
+import type { NativeProviderHostEvent, NativeProviderStreamStartParams } from '@ai-video/contracts';
+
+function scriptedBridge(
+  script: (params: NativeProviderStreamStartParams, index: number) => NativeProviderHostEvent[],
+) {
+  const requests: NativeProviderStreamStartParams[] = [];
+  const bridge = new NativeProviderBridge({
+    async send(envelope) {
+      if (envelope.method !== 'provider.stream.start') return;
+      const params = envelope.params as NativeProviderStreamStartParams;
+      const index = requests.push(params) - 1;
+      await Promise.resolve();
+      for (const [sequence, event] of script(params, index).entries())
+        bridge.handleEnvelope({
+          kind: 'host.event',
+          requestId: envelope.requestId,
+          sequence,
+          event,
+        });
+    },
+  });
+  return { bridge, requests };
+}
+
+function lastOutput(params: NativeProviderStreamStartParams): Record<string, unknown> {
+  return JSON.parse(params.continuation!.outputs[0]!.output) as Record<string, unknown>;
+}
 
 const fixtures: Array<{ project: ProjectService; directory: string }> = [];
 afterEach(async () => {
@@ -61,7 +90,516 @@ function instruction(shot = false): ProductionInstruction {
   };
 }
 
-async function setup() {
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'renews read batches across Native/Pi and updates existing scenes and shots in one production task (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const scenes = Array.from({ length: 3 }, (_, i) =>
+      f.content.saveScene({ title: `已有场 ${i + 1}`, sceneDocumentId: f.setting.id }),
+    );
+    const shots = scenes.flatMap((scene) =>
+      Array.from({ length: 4 }, (_, i) =>
+        f.content.saveShot({ sceneId: scene.id, title: `已有镜 ${i + 1}` }),
+      ),
+    );
+    const targets = [
+      ...scenes.map((scene) => ({ kind: 'scene' as const, id: scene.id })),
+      ...shots.map((shot) => ({ kind: 'shot' as const, id: shot.id })),
+    ];
+    const run = f.prepare('更新已有场次和镜头的制作指令');
+    const reads = new Map<string, number>();
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>[]) => [
+        ...args.map((args, i): NativeProviderHostEvent => ({
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `read-${index}-${i}`, name, argumentsJson: JSON.stringify(args) },
+        })),
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `batch-${index}`,
+          finishReason: 'tool_calls',
+        } as NativeProviderHostEvent,
+      ];
+      if (index === 0)
+        return tool('tools.load', [
+          { names: ['scene.read', 'production.read', 'production.execute'] },
+        ]);
+      if (index === 1)
+        return tool(
+          'scene.read',
+          scenes.map((scene) => ({ sceneId: scene.id })),
+        );
+      if (index > 2 && index <= 4)
+        for (const output of params.continuation!.outputs) {
+          const result = JSON.parse(output.output) as {
+            target: { kind: string; id: string };
+            rowVersion: number;
+          };
+          reads.set(`${result.target.kind}:${result.target.id}`, result.rowVersion);
+        }
+      if (index === 2)
+        return tool(
+          'production.read',
+          targets.slice(0, 8).map((target) => ({ target })),
+        );
+      if (index === 3)
+        return tool(
+          'production.read',
+          targets.slice(8).map((target) => ({ target })),
+        );
+      if (index === 4) {
+        expect(reads.size).toBe(15);
+        return tool('production.execute', [
+          {
+            executionKey: 'existing-revision',
+            operations: targets.map((target) => ({
+              action: 'set_prompt',
+              target,
+              expectedRowVersion: reads.get(`${target.kind}:${target.id}`),
+              instruction: instruction(target.kind === 'shot'),
+            })),
+          },
+        ]);
+      }
+      expect(index).toBe(5);
+      expect(lastOutput(params)).toMatchObject({ status: 'applied', readiness: 'ready' });
+      return [
+        { ...common, type: 'text_delta', delta: '已有场次与镜头已更新。' },
+        { ...common, type: 'complete', providerResponseId: 'done', finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '更新已有场次和镜头的制作指令',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    expect(f.generations.get(run.prepared.stream.generationId)).toMatchObject({
+      status: 'complete',
+    });
+    expect(requests).toHaveLength(6);
+    expect(f.content.listScenes()).toHaveLength(3);
+    expect(f.content.listScenes().flatMap((scene) => f.content.listShots(scene.id))).toHaveLength(
+      12,
+    );
+    f.project.access(false, (db) => {
+      expect(
+        db
+          .prepare('SELECT tool_call_count,tool_call_limit FROM agent_tasks WHERE id=?')
+          .get(run.agent.taskId),
+      ).toEqual({ tool_call_count: 19, tool_call_limit: 32 });
+      expect(db.prepare('SELECT COUNT(*) n FROM production_instruction_versions').get()).toEqual({
+        n: 15,
+      });
+      expect(db.prepare('SELECT COUNT(*) n FROM generation_jobs').get()).toEqual({ n: 0 });
+    });
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'repairs a reference-as-predecessor error through staged authoring with ordinary reference documents (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const actor = f.content.saveDocument({
+      kind: 'character',
+      title: '角色',
+      contentMarkdown: '普通角色资料',
+    });
+    const sceneInstruction = instruction();
+    sceneInstruction.subjects = [{ documentId: actor.id }];
+    sceneInstruction.continuity.before = [{ key: 'door', value: 'closed' }];
+    const scene = {
+      title: '测试场次',
+      sceneDocumentId: f.setting.id,
+      characterDocumentIds: [actor.id],
+      instruction: sceneInstruction,
+    };
+    const shot = instruction(true);
+    shot.subjects = [{ documentId: actor.id }];
+    shot.beats[0]!.characterDocumentIds = [actor.id];
+    shot.continuity.before = [{ key: 'door', value: 'open' }];
+    const run = f.prepare('按资料生成场次');
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const complete: NativeProviderHostEvent = {
+        ...common,
+        type: 'complete',
+        providerResponseId: `reference-${index}`,
+        finishReason: 'tool_calls',
+      };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `reference-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        complete,
+      ];
+      if (index === 0) return tool('tools.load', { names: ['scene.submit_structure'] });
+      if (index === 1) {
+        const invalid = structuredClone(scene);
+        Reflect.set(invalid.instruction.continuity, 'predecessors', [
+          { kind: 'setting', id: f.setting.id },
+        ]);
+        return tool('scene.submit_structure', {
+          resourceId: 'workspace:shots',
+          resolution: 'resolved',
+          episodeTitle: '测试',
+          scenes: [{ ...invalid, shots: [{ title: '镜头', instruction: shot }] }],
+        });
+      }
+      if (index === 2) {
+        expect(params.tools?.map((t) => t.name)).toContain('scene.structure.stage');
+        expect(params.tools?.map((t) => t.name)).not.toContain('scene.submit_structure');
+        return tool('scene.structure.stage', {
+          resourceId: 'workspace:shots',
+          operation: 'begin',
+          executionKey: 'reference-repair',
+          episodeTitle: '测试',
+          sceneShotCounts: [1],
+        });
+      }
+      const previous = lastOutput(params);
+      const base = {
+        resourceId: 'workspace:shots',
+        stageId: previous.stageId,
+        expectedRowVersion: previous.rowVersion,
+      };
+      if (index === 3)
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'put_scene',
+          sceneIndex: 0,
+          scene,
+        });
+      if (index === 4)
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'put_shots',
+          sceneIndex: 0,
+          shotOffset: 0,
+          shots: [{ title: '镜头', instruction: shot }],
+        });
+      if (index === 5) return tool('scene.structure.stage', { ...base, operation: 'finalize' });
+      expect(index).toBe(6);
+      expect(previous).toMatchObject({
+        status: 'scene_structure_saved',
+        applied: true,
+        readiness: 'needs_attention',
+      });
+      expect(previous.issues).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: 'CONTINUITY_CONFLICT' })]),
+      );
+      return [
+        { ...common, type: 'text_delta', delta: '已保存草稿，连续性问题待处理。' },
+        { ...complete, finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '按资料生成场次',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    expect(f.generations.get(run.prepared.stream.generationId)).toMatchObject({
+      status: 'complete',
+    });
+    expect(requests).toHaveLength(7);
+    const saved = f.content.listScenes()[0]!;
+    expect(f.content.listShots(saved.id)).toHaveLength(1);
+    expect(saved.characterBindings?.map((c) => c.characterDocumentId)).toEqual([actor.id]);
+    const production = new ProductionService(f.project);
+    const read = production.read({ kind: 'scene', id: saved.id });
+    expect(read.issues.map((i) => i.code)).toContain('CONTINUITY_CONFLICT');
+    expect(() => production.assertSource(read.source, read.target)).toThrow('冲突');
+    expect(
+      f.project.access(
+        false,
+        (db) =>
+          db
+            .prepare(
+              "SELECT COUNT(*) n FROM production_instruction_versions WHERE target_kind IN ('character','setting')",
+            )
+            .get() as { n: number },
+      ),
+    ).toEqual({ n: 0 });
+    const root = join(f.directory, 'project');
+    f.project.close();
+    f.project.open(root);
+    expect(production.read(read.target).issues.map((i) => i.code)).toContain('CONTINUITY_CONFLICT');
+  },
+);
+
+it('rejects duplicate authored text in both tool Schema and direct Worker parsing', () => {
+  const tool = SYSTEM_AGENT_TOOLS.find((t) => t.name === 'scene.submit_structure')!;
+  const base = {
+    resourceId: 'workspace:shots',
+    resolution: 'resolved',
+    episodeTitle: '测试',
+    scenes: [
+      {
+        title: '场次',
+        sceneDocumentId: 'setting',
+        characterDocumentIds: [],
+        instruction: instruction(),
+        shots: [{ title: '镜头', instruction: instruction(true) }],
+      },
+    ],
+  };
+  for (const field of ['videoPrompt', 'prompt']) {
+    const args = structuredClone(base);
+    if (field === 'videoPrompt') Reflect.set(args.scenes[0]!, field, '重复正文');
+    else Reflect.set(args.scenes[0]!.shots[0]!, field, '重复正文');
+    expect(() => {
+      validateToolArguments(tool, {
+        type: 'toolCall',
+        id: 'schema',
+        name: tool.name,
+        arguments: args,
+      });
+    }).toThrow();
+    expect(() =>
+      parseEpisodeStructureArguments(
+        JSON.stringify({ episodeTitle: args.episodeTitle, scenes: args.scenes }),
+        true,
+      ),
+    ).toThrow('instruction only');
+  }
+});
+
+it('does not complete a rejected scene write, and records failure instead of tool success', async () => {
+  const f = await setup();
+  const run = f.prepare('创建场次');
+  expect(
+    await run.invoke('scene.submit_structure', {
+      resourceId: 'workspace:shots',
+      resolution: 'resolved',
+      episodeTitle: '失败',
+      scenes: [
+        {
+          title: '场次',
+          sceneDocumentId: 'missing',
+          characterDocumentIds: [],
+          instruction: instruction(),
+          shots: [{ title: '镜头', instruction: instruction(true) }],
+        },
+      ],
+    }),
+  ).toMatchObject({ status: 'rejected' });
+  const events = f.workflow.getTask({ taskId: run.agent.taskId }).events;
+  expect(
+    events.some(
+      (e) => e.eventType === 'agent.tool.failed' && e.summary.includes('scene.submit_structure'),
+    ),
+  ).toBe(true);
+  expect(
+    events.some(
+      (e) => e.eventType === 'agent.tool.succeeded' && e.summary.includes('scene.submit_structure'),
+    ),
+  ).toBe(false);
+  f.loop.startProviderStep(run.prepared.stream);
+  expect(() =>
+    f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
+  ).toThrow('AGENT_SCENE_NOT_SAVED');
+  expect(f.content.listScenes()).toHaveLength(0);
+  const repaired = await run.invoke('scene.submit_structure', {
+    resourceId: 'workspace:shots',
+    resolution: 'resolved',
+    episodeTitle: '修正',
+    scenes: [
+      {
+        title: '场次',
+        sceneDocumentId: f.setting.id,
+        characterDocumentIds: [],
+        instruction: instruction(),
+        shots: [{ title: '镜头', instruction: instruction(true) }],
+      },
+    ],
+  });
+  expect(repaired.status).toBe('scene_structure_saved');
+  f.loop.startProviderStep(run.prepared.stream);
+  expect(() =>
+    f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
+  ).not.toThrow();
+});
+
+it.each(['schema', 'stage'] as const)(
+  'keeps an unfinished %s submission from becoming read-only completion',
+  async (kind) => {
+    const f = await setup();
+    const run = f.prepare('创建场次');
+    if (kind === 'schema')
+      f.loop.recordValidationFailure(
+        run.prepared.stream,
+        'scene.submit_structure',
+        100,
+        'stillFrame is missing',
+      );
+    else
+      await run.invoke('scene.structure.stage', {
+        resourceId: 'workspace:shots',
+        operation: 'begin',
+        executionKey: 'unfinished',
+        episodeTitle: '未完成',
+        sceneShotCounts: [1],
+      });
+    f.loop.startProviderStep(run.prepared.stream);
+    expect(() =>
+      f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
+    ).toThrow('AGENT_SCENE_NOT_SAVED');
+  },
+);
+
+it.each([
+  ['openai-responses', 'schema'],
+  ['openai-responses', 'business'],
+  ['openai-responses', 'stage'],
+  ['openai-chat-completions', 'schema'],
+  ['openai-chat-completions', 'business'],
+  ['openai-chat-completions', 'stage'],
+] as const)(
+  'ends the generation as failed after an unresolved %s/%s write',
+  async (protocol, kind) => {
+    const f = await setup(protocol);
+    const run = f.prepare('生成场次');
+    const { bridge } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const complete: NativeProviderHostEvent = {
+        ...common,
+        type: 'complete',
+        providerResponseId: `unfinished-${index}`,
+        finishReason: 'tool_calls',
+      };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `unfinished-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        complete,
+      ];
+      if (index === 0)
+        return tool('tools.load', {
+          names: [kind === 'stage' ? 'scene.structure.stage' : 'scene.submit_structure'],
+        });
+      if (index === 1) {
+        if (kind === 'stage')
+          return tool('scene.structure.stage', {
+            resourceId: 'workspace:shots',
+            operation: 'begin',
+            executionKey: 'abandoned',
+            episodeTitle: '未完成',
+            sceneShotCounts: [1],
+          });
+        const shot = instruction(true);
+        if (kind === 'schema') delete shot.stillFrame;
+        return tool('scene.submit_structure', {
+          resourceId: 'workspace:shots',
+          resolution: 'resolved',
+          episodeTitle: '未完成',
+          scenes: [
+            {
+              title: '场次',
+              sceneDocumentId: kind === 'business' ? 'missing' : f.setting.id,
+              characterDocumentIds: [],
+              instruction: instruction(),
+              shots: [{ title: '镜头', instruction: shot }],
+            },
+          ],
+        });
+      }
+      expect(index).toBe(2);
+      return [
+        { ...common, type: 'text_delta', delta: '本次尚未生成场次。' },
+        { ...complete, finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '生成场次',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('AGENT_SCENE_NOT_SAVED');
+    const detail = f.workflow.getTask({ taskId: run.agent.taskId });
+    expect(detail.task.status).toBe('failed');
+    expect(detail.events.some((e) => e.eventType === 'agent.task.completed')).toBe(false);
+    expect(f.content.listScenes()).toHaveLength(0);
+  },
+);
+
+it('does not hide a second unfinished stage behind another saved stage in the same task', async () => {
+  const f = await setup();
+  const run = f.prepare('创建多个场次');
+  await run.invoke('scene.structure.stage', {
+    resourceId: 'workspace:shots',
+    operation: 'begin',
+    executionKey: 'pending-second',
+    episodeTitle: '第二场',
+    sceneShotCounts: [1],
+  });
+  const saved = await run.invoke('scene.submit_structure', {
+    resourceId: 'workspace:shots',
+    resolution: 'resolved',
+    episodeTitle: '第一场',
+    scenes: [
+      {
+        title: '第一场',
+        sceneDocumentId: f.setting.id,
+        characterDocumentIds: [],
+        instruction: instruction(),
+        shots: [{ title: '镜头', instruction: instruction(true) }],
+      },
+    ],
+  });
+  expect(saved.status).toBe('scene_structure_saved');
+  f.loop.startProviderStep(run.prepared.stream);
+  expect(() =>
+    f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
+  ).toThrow('尚未 finalize');
+});
+
+async function setup(
+  protocol: NativeProviderStreamStartParams['protocol'] = 'openai-chat-completions',
+) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-pipeline-remediation-'));
   const project = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
   project.create(join(directory, 'project'), '隔离回归');
@@ -109,7 +647,7 @@ async function setup() {
           modelId: 'model',
           modelName: 'Mock',
           remoteModelId: 'mock',
-          protocol: 'openai-chat-completions',
+          protocol,
           baseUrl: 'https://mock.invalid',
         }),
       },
@@ -158,6 +696,372 @@ async function setup() {
     prepare,
   };
 }
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'recovers Native and bridge JSON failures into one saved scene without repeating reads or saved parts (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('【本会话要求约束】\n固定清晨水墨风格\n\n【用户本次请求】\n生成庭院镜头');
+    let stageId: unknown;
+    let savedVersion: unknown;
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const complete: NativeProviderHostEvent = {
+        ...common,
+        type: 'complete',
+        providerResponseId: `response-${index}`,
+        finishReason: 'tool_calls',
+      };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `call-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        complete,
+      ];
+      const base = { resourceId: 'workspace:shots' };
+      if (index === 0) return tool('library.search', { query: '庭院', sourceTypes: ['document'] });
+      if (index === 1) {
+        const sources = lastOutput(params).sources as Array<{ sourceHandle: string }>;
+        return tool('library.read', { sourceHandle: sources[0]!.sourceHandle, readMode: 'source' });
+      }
+      if (index === 2) return tool('tools.load', { names: ['scene.submit_structure'] });
+      if (index === 3)
+        return [
+          {
+            ...common,
+            type: 'failed',
+            error: {
+              code: 'PROVIDER_FAILED',
+              retryable: false,
+              message:
+                'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (18610 bytes); finishReason=tool_calls. No tool was executed. jsonError=syntax; line=10; column=42',
+            },
+          },
+        ];
+      if (index === 4 || index === 8) {
+        expect(params.systemInstruction).toContain('[TOOL OUTPUT RECOVERY]');
+        expect(params.prompt).toContain('固定清晨水墨风格');
+        expect(params.tools!.some((item) => item.name === 'scene.structure.stage')).toBe(true);
+        expect(params.tools!.some((item) => item.name === 'scene.submit_structure')).toBe(false);
+        expect(params.continuation!.outputs[0]!.callId).toBe(index === 4 ? 'call-2' : 'call-6');
+        if (index === 8) {
+          expect(lastOutput(params).stageId).toBe(stageId);
+          expect(lastOutput(params).rowVersion).toBe(savedVersion);
+        }
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'get',
+          ...(index === 8 ? { stageId } : {}),
+        });
+      }
+      if (index === 5)
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'begin',
+          executionKey: 'recovery-scene',
+          episodeTitle: '庭院',
+          sceneShotCounts: [1],
+        });
+      if (index === 6) {
+        const state = lastOutput(params);
+        stageId = state.stageId;
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'put_scene',
+          stageId,
+          expectedRowVersion: state.rowVersion,
+          sceneIndex: 0,
+          scene: {
+            title: '庭院',
+            sceneDocumentId: f.setting.id,
+            characterDocumentIds: [],
+            instruction: instruction(),
+          },
+        });
+      }
+      if (index === 7) {
+        savedVersion = lastOutput(params).rowVersion;
+        return [
+          {
+            ...common,
+            type: 'tool_call_end',
+            call: {
+              id: 'malformed',
+              name: 'scene.structure.stage',
+              argumentsJson: '{"PRIVATE_BODY":',
+            },
+          },
+          complete,
+        ];
+      }
+      if (index === 9)
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'put_shots',
+          stageId,
+          expectedRowVersion: lastOutput(params).rowVersion,
+          sceneIndex: 0,
+          shotOffset: 0,
+          shots: [{ title: '转身', instruction: instruction(true) }],
+        });
+      if (index === 10)
+        return tool('scene.structure.stage', {
+          ...base,
+          operation: 'finalize',
+          stageId,
+          expectedRowVersion: lastOutput(params).rowVersion,
+        });
+      expect(index).toBe(11);
+      expect(lastOutput(params)).toMatchObject({ status: 'scene_structure_saved', applied: true });
+      return [
+        { ...common, type: 'text_delta', delta: '场次和镜头已保存。' },
+        { ...complete, finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '生成庭院镜头',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe('complete');
+    expect(requests).toHaveLength(12);
+    expect(f.content.listScenes()).toHaveLength(1);
+    expect(f.content.listShots(f.content.listScenes()[0]!.id)).toHaveLength(1);
+    expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(1);
+    const detail = f.workflow.getTask({ taskId: run.agent.taskId });
+    const failures = detail.events.filter((item) => item.eventType === 'tool_validation_failed');
+    expect(failures).toHaveLength(2);
+    expect(detail.events.filter((item) => item.eventType === 'scene.structure.saved')).toHaveLength(
+      1,
+    );
+    expect(failures[0]!.summary).toContain('jsonError=syntax; line=10; column=42');
+    expect(failures.every((item) => !item.summary.includes('PRIVATE_BODY'))).toBe(true);
+    const tools = f.project.access(false, (db) =>
+      db
+        .prepare('SELECT tool_name FROM agent_tool_calls WHERE generation_id=?')
+        .all(run.prepared.stream.generationId),
+    ) as Array<{ tool_name: string }>;
+    expect(tools.filter((item) => item.tool_name === 'library.read')).toHaveLength(1);
+    expect(tools.some((item) => item.tool_name === 'scene.submit_structure')).toBe(false);
+    const failedRequests = f.project.access(false, (db) =>
+      db
+        .prepare("SELECT id FROM llm_provider_requests WHERE generation_id=? AND stage='failed'")
+        .all(run.prepared.stream.generationId),
+    );
+    expect(failedRequests).toHaveLength(2);
+  },
+);
+
+it('preserves existing scene identity and prompt when a binding update needs output recovery', async () => {
+  const f = await setup();
+  const scene = f.content.saveScene({
+    title: '已有场次',
+    sceneDocumentId: f.setting.id,
+    videoPrompt: '保留原有提示词',
+    characterBindings: [],
+  });
+  const run = f.prepare('修订已有场次的绑定');
+  const { bridge, requests } = scriptedBridge((params, index) => {
+    const common = { projectSessionId: params.projectSessionId };
+    const complete: NativeProviderHostEvent = {
+      ...common,
+      type: 'complete',
+      providerResponseId: `update-${index}`,
+      finishReason: 'tool_calls',
+    };
+    const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+      {
+        ...common,
+        type: 'tool_call_end',
+        call: { id: `update-call-${index}`, name, argumentsJson: JSON.stringify(args) },
+      },
+      complete,
+    ];
+    if (index === 0) return tool('tools.load', { names: ['scene.submit_structure'] });
+    if (index === 1)
+      return [
+        {
+          ...common,
+          type: 'failed',
+          error: {
+            code: 'PROVIDER_FAILED',
+            retryable: false,
+            message:
+              'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (100 bytes); finishReason=tool_calls. No tool was executed.',
+          },
+        },
+      ];
+    if (index === 2) {
+      expect(params.systemInstruction).toContain('For EXISTING scene revisions');
+      return tool('tools.load', { names: ['scene.read', 'scene.submit_structure'] });
+    }
+    if (index === 3) return tool('scene.read', { sceneId: scene.id });
+    if (index === 4)
+      return tool('scene.submit_structure', {
+        resourceId: 'workspace:shots',
+        resolution: 'resolved',
+        episodeTitle: '已有场次',
+        scenes: [
+          {
+            sceneId: scene.id,
+            expectedRowVersion: scene.rowVersion,
+            title: scene.title,
+            sceneDocumentId: null,
+            characterDocumentIds: [],
+            shots: [],
+          },
+        ],
+      });
+    expect(index).toBe(5);
+    expect(lastOutput(params).status).toBe('scene_structure_saved');
+    return [
+      { ...common, type: 'text_delta', delta: '绑定已更新。' },
+      { ...complete, finishReason: 'stop' },
+    ];
+  });
+  const runtime = new PiConversationRuntime({
+    generation: f.generations,
+    providerTools: f.loop,
+    bridge,
+    plans: {} as never,
+    createGateway: () => {
+      throw new Error('No planning');
+    },
+  });
+  await runtime.start({
+    ...run.prepared.stream,
+    identity: run.prepared.stream,
+    taskId: run.agent.taskId,
+    prompt: '修订已有场次的绑定',
+    mode: 'document',
+  });
+  await runtime.wait(run.prepared.stream.generationId);
+  const result = f.generations.get(run.prepared.stream.generationId);
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe('complete');
+  expect(requests).toHaveLength(6);
+  expect(f.content.listScenes()).toEqual([
+    expect.objectContaining({ id: scene.id, videoPrompt: '保留原有提示词' }),
+  ]);
+});
+
+it.each([
+  [
+    'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (18610 bytes); finishReason=tool_calls. No tool was executed.',
+    3,
+  ],
+  [
+    'INCOMPLETE_PROVIDER_OUTPUT: finishReason=length; 1 tool calls, 18000 argument bytes. No tool was executed.',
+    3,
+  ],
+  [
+    'INCOMPLETE_TOOL_OUTPUT: finishReason=max_tokens. No tool was executed; use smaller staged submissions.',
+    3,
+  ],
+  [
+    'INCOMPLETE_PROVIDER_OUTPUT: finishReason=content_filter; 1 tool calls, 100 argument bytes. No tool was executed.',
+    1,
+  ],
+  ['LLM stream ended before a protocol success event.', 1],
+  ['Provider rejected the configured credential.', 1],
+  ['STALE_SESSION: project switched.', 1],
+] as const)(
+  'bounds safe output repair and never retries other failures: %s',
+  async (message, count) => {
+    const f = await setup();
+    const run = f.prepare('生成庭院镜头');
+    const { bridge, requests } = scriptedBridge((params) => [
+      {
+        type: 'failed',
+        projectSessionId: params.projectSessionId,
+        error: { code: 'PROVIDER_FAILED', retryable: false, message },
+      },
+    ]);
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '生成庭院镜头',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const failed = f.generations.get(run.prepared.stream.generationId);
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toContain(count === 3 ? 'TOOL_OUTPUT_REPAIR_LIMIT' : message);
+    expect(requests).toHaveLength(count);
+    expect(f.content.listScenes()).toHaveLength(0);
+    expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(0);
+    const failures = f.workflow
+      .getTask({ taskId: run.agent.taskId })
+      .events.filter((item) => item.eventType === 'tool_validation_failed');
+    expect(failures).toHaveLength(count === 3 ? 3 : 0);
+  },
+);
+
+it('stops output recovery before sending another request when cancelled at the repair boundary', async () => {
+  const f = await setup();
+  const run = f.prepare('生成庭院镜头');
+  const { bridge, requests } = scriptedBridge((params) => [
+    {
+      type: 'failed',
+      projectSessionId: params.projectSessionId,
+      error: {
+        code: 'PROVIDER_FAILED',
+        retryable: false,
+        message:
+          'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (100 bytes); finishReason=tool_calls. No tool was executed.',
+      },
+    },
+  ]);
+  const runtime = new PiConversationRuntime({
+    generation: f.generations,
+    providerTools: f.loop,
+    bridge,
+    plans: {} as never,
+    createGateway: () => {
+      throw new Error('No planning');
+    },
+    onEvent: (event) => {
+      if (event.type === 'turn_started') runtime.cancel(run.prepared.stream.generationId);
+    },
+  });
+  await runtime.start({
+    ...run.prepared.stream,
+    identity: run.prepared.stream,
+    taskId: run.agent.taskId,
+    prompt: '生成庭院镜头',
+    mode: 'document',
+  });
+  await runtime.wait(run.prepared.stream.generationId);
+  expect(f.generations.get(run.prepared.stream.generationId).status).toBe('cancelled');
+  expect(requests).toHaveLength(1);
+  expect(f.content.listScenes()).toHaveLength(0);
+});
 
 it('resumes staged authoring across a cancelled task and saves one editable draft with real IDs without approval', async () => {
   const f = await setup();
@@ -332,7 +1236,7 @@ it('shares create/update validation, retains binding text, rejects conflicting t
         }),
         true,
       ),
-    ).toThrow('instruction renders beyond');
+    ).toThrow(prompt === undefined ? 'instruction renders beyond' : 'instruction only');
   }
 });
 

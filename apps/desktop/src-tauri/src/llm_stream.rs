@@ -2056,13 +2056,26 @@ impl SseParser {
         }
         let mut provider_response_id = self.provider_response_id;
         for call in &tool_calls {
-            if !serde_json::from_str::<serde_json::Value>(&call.arguments_json)
-                .is_ok_and(|value| value.is_object())
-            {
+            let diagnostic = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+                Ok(value) if value.is_object() => None,
+                Ok(_) => Some("jsonError=non_object; line=0; column=0".to_string()),
+                Err(error) => Some(format!(
+                    "jsonError={}; line={}; column={}",
+                    match error.classify() {
+                        serde_json::error::Category::Io => "io",
+                        serde_json::error::Category::Syntax => "syntax",
+                        serde_json::error::Category::Data => "data",
+                        serde_json::error::Category::Eof => "eof",
+                    },
+                    error.line(),
+                    error.column(),
+                )),
+            };
+            if let Some(diagnostic) = diagnostic {
                 return Err(StreamFailure::new(format!(
-                    "INVALID_TOOL_ARGUMENTS: {} returned invalid object JSON ({} bytes); finishReason={}. No tool was executed.",
+                    "INVALID_TOOL_ARGUMENTS: {} returned invalid object JSON ({} bytes); finishReason={}. No tool was executed. {}",
                     call.name.chars().take(128).collect::<String>(), call.arguments_json.len(),
-                    self.finish_reason.as_deref().unwrap_or("unknown")
+                    self.finish_reason.as_deref().unwrap_or("unknown"), diagnostic
                 ), false));
             }
         }
@@ -3093,6 +3106,13 @@ mod tests {
                     .expect("incomplete arguments must fail");
                 assert!(error.message.contains("No tool was executed"));
                 assert!(!error.message.contains("private"));
+                if arguments == "[]" {
+                    assert!(error
+                        .message
+                        .contains("jsonError=non_object; line=0; column=0"));
+                } else if reason == "tool_calls" {
+                    assert!(error.message.contains("jsonError=eof; line=1; column="));
+                }
             }
         }
     }

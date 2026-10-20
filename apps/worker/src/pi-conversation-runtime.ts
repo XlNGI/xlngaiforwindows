@@ -86,6 +86,42 @@ type PendingMediaSubmission = {
 
 const MAX_FROZEN_CONTEXT_CHARACTERS = 400_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_TOOL_OUTPUT_REPAIRS = 2;
+
+type ToolOutputFailure = {
+  operation: string;
+  argumentBytes: number;
+  reason: string;
+};
+
+function toolOutputFailure(error: string): ToolOutputFailure | undefined {
+  // Only these terminal errors guarantee that none of this response's tools
+  // executed. Network interruptions and business failures must not be replayed.
+  const invalid = error.match(
+    /^INVALID_TOOL_ARGUMENTS: ([a-zA-Z][\w.]{0,127}) returned invalid object JSON \((\d{1,8}) bytes\)/,
+  );
+  if (invalid && error.includes('No tool was executed.')) {
+    const diagnostic = error.match(
+      /jsonError=(syntax|eof|data|io|non_object); line=(\d+); column=(\d+)/,
+    );
+    return {
+      operation: invalid[1]!,
+      argumentBytes: Number(invalid[2]),
+      reason: `INVALID_TOOL_ARGUMENTS${diagnostic ? `; ${diagnostic[0]}` : ''}`,
+    };
+  }
+  const truncated = error.match(
+    /^(?:INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT): finishReason=(length|max_tokens|max_output_tokens)[;.]/,
+  );
+  if (truncated && /No tool was executed[.;]/.test(error)) {
+    return {
+      operation: 'model.request',
+      argumentBytes: Number(error.match(/(\d{1,8}) argument bytes/)?.[1] ?? 0),
+      reason: `INCOMPLETE_TOOL_OUTPUT; finishReason=${truncated[1]}`,
+    };
+  }
+  return undefined;
+}
 
 /**
  * Worker-owned Pi runtime. Pi owns only the in-memory loop; project data,
@@ -251,6 +287,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     };
     let lastResponseId: string | undefined;
     let lastUsage: NormalizedLlmUsage | undefined;
+    let outputRecoveryInstruction = '';
     const captureAssistantText = (message: AssistantMessage): string => {
       aggregate = appendAssistantText(aggregateState, message);
       return aggregate;
@@ -353,7 +390,7 @@ export class PiConversationRuntime implements ConversationRuntime {
                     this.options.generation.runtime(identity).systemInstruction,
                   ),
                   this.options.generation.runtime(identity).context,
-                ),
+                ) + outputRecoveryInstruction,
             tools:
               plan?.status === 'succeeded'
                 ? []
@@ -393,6 +430,48 @@ export class PiConversationRuntime implements ConversationRuntime {
       () => this.active.get(identity.generationId)?.cancelled === true,
       plannedWorkflow,
       providerGateway,
+      (failure) => {
+        // runtime() fences cancellation, stale attempts and project switches
+        // before changing schemas or issuing another model request.
+        const current = this.options.generation.runtime(identity);
+        providerGateway?.assertRepairBudget();
+        gateway?.assertRepairBudget();
+        turnCount += 1;
+        if (turnCount >= this.maxTurns)
+          throw new Error(`Pi runtime exceeded the ${this.maxTurns}-turn limit.`);
+        this.options.onEvent?.({ type: 'turn_started', taskId: request.taskId, turn: turnCount });
+        const staged =
+          ['scene.submit_structure', 'scene.structure.stage'].includes(failure.operation) &&
+          providerGateway?.preferStagedSceneAuthoring();
+        outputRecoveryInstruction =
+          `\n\n[TOOL OUTPUT RECOVERY]\nThe last response failed before any tool was executed: ${failure.reason}. ` +
+          'Continue the original user request with the same constraints and completed tool results. ' +
+          'Retry only unfinished work; never repeat successful writes or invent saved IDs. ' +
+          'Return complete JSON objects matching the loaded schemas. Do not repeat prompt text alongside instruction. ' +
+          (staged
+            ? 'For NEW scene/shot authoring use the loaded scene.structure.stage tool: get resumable stages first, resume the matching stage or begin with a stable executionKey, put_scene, put_shots (one or two shots per call during recovery), get missing ranges, then finalize. Reuse the returned stageId and latest rowVersion. Never restart a saved stage or claim it is saved before finalize returns scene_structure_saved. For EXISTING scene revisions load scene.read and scene.submit_structure, preserve sceneId/CAS and use the update contract; never create a replacement scene. '
+            : 'Reduce each submission where the tool supports it, preserving every required field and existing IDs. ') +
+          'If saving still fails, say the task is unfinished and distinguish already saved drafts/parts from the failed submission.';
+        agent.state.systemPrompt =
+          withFrozenContext(
+            planningRound
+              ? planning!.systemInstruction
+              : unifiedAgentInstruction(current.systemInstruction),
+            current.context,
+          ) + outputRecoveryInstruction;
+        const grants = planningRound
+          ? planningGrants
+          : plannedWorkflow
+            ? this.options.plans.availableToolGrants(request.taskId)
+            : [];
+        const definitions = providerGateway
+          ? providerGateway.currentDefinitions()
+          : grants.map((grant) => grant.tool);
+        agent.state.tools = providerGateway ? providerGateway.tools() : gateway!.tools(grants);
+        // Keep the last successful continuation, never the malformed response.
+        this.options.generation.configureAgentTools(identity, definitions, current.continuation);
+        return staged ? 'scene.structure.stage' : 'model.request';
+      },
     );
     this.active.set(identity.generationId, {
       identity,
@@ -708,6 +787,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     isCancelled: () => boolean,
     plannedWorkflow: boolean,
     providerGateway?: AgentProviderToolGateway,
+    prepareOutputRepair?: (failure: ToolOutputFailure) => string,
   ): Promise<void> {
     const observed = { aggregate: '', responseId: undefined as string | undefined, segment: '' };
     agent.subscribe((event) => {
@@ -718,19 +798,57 @@ export class PiConversationRuntime implements ConversationRuntime {
     });
     try {
       await agent.prompt(prompt);
+      let repairs = 0;
+      let repairLimitError: string | undefined;
+      while (agent.state.errorMessage && !isCancelled()) {
+        const failure = toolOutputFailure(agent.state.errorMessage);
+        if (!failure || !prepareOutputRepair) break;
+        this.options.providerTools?.recordValidationFailure?.(
+          identity,
+          failure.operation,
+          failure.argumentBytes,
+          failure.reason,
+        );
+        if (repairs >= MAX_TOOL_OUTPUT_REPAIRS) {
+          repairLimitError = `TOOL_OUTPUT_REPAIR_LIMIT: ${failure.reason}; operation=${failure.operation}; argumentBytes=${failure.argumentBytes}; retries=${MAX_TOOL_OUTPUT_REPAIRS}. No tool from the failed response was executed.`;
+          break;
+        }
+        // Drop failed assistant messages (including any partial tool calls).
+        // Preserve the user request and every completed tool/result pair.
+        const messages = agent.state.messages.filter(
+          (message) =>
+            message.role !== 'assistant' || !['error', 'aborted'].includes(message.stopReason),
+        );
+        const last = messages.at(-1);
+        if (!last || (last.role !== 'user' && last.role !== 'toolResult')) break;
+        agent.state.messages = messages;
+        const toolName = prepareOutputRepair(failure);
+        if (isCancelled()) return;
+        const repair: ConversationRuntimeLiveAction = {
+          id: `output-repair:${++repairs}`,
+          toolName,
+          phase: 'repairing_tool_output',
+          status: 'running',
+          lastActivityAt: new Date().toISOString(),
+        };
+        this.active.get(identity.generationId)?.liveActions.push(repair);
+        await agent.continue();
+        repair.status = agent.state.errorMessage ? 'failed' : 'succeeded';
+      }
       if (isCancelled()) return;
       const state = agent.state;
       const final = snapshot();
       const plan = plannedWorkflow ? this.options.plans.getByTask(taskId) : undefined;
-      if (state.errorMessage) {
-        providerGateway?.terminate('failed', state.errorMessage);
+      const error = repairLimitError ?? state.errorMessage;
+      if (error) {
+        providerGateway?.terminate('failed', error);
         this.options.generation.failNative({
           ...identity,
           content: final.aggregate || observed.aggregate,
-          error: state.errorMessage,
+          error,
           retryable: true,
         });
-        this.options.onEvent?.({ type: 'failed', taskId, message: state.errorMessage });
+        this.options.onEvent?.({ type: 'failed', taskId, message: error });
         return;
       }
       const completed: LlmGenerationCompleteParams = {
@@ -764,8 +882,10 @@ export class PiConversationRuntime implements ConversationRuntime {
 
 function unifiedAgentInstruction(base: string): string {
   base +=
+    '\nFor revisions, batch independent read-only calls in one response and reuse successful results. Read tools can be reused within the authorized task budget; tools.load only selects schemas and does not renew or expand authorization. For a production update, read the current shared scene and affected shot instructions, then use production.execute to update existing targets together (at most 30 operations and 512 KiB per list). When reference documents change, update their drafts first, then revise affected existing scene/shot instructions against the latest references and rowVersions; never recreate scenes, erase manual edits, or merely stamp old instructions as current. STALE_INSTRUCTION issues identify affected targets and changed references. Refreshing a production form does not repair saved instructions. Production tasks have at most 32 business calls and 24 model turns; batch independent reads and writes, keep saved progress, and report unfinished work clearly if a limit or network failure interrupts the task.';
+  base +=
     '\nFor production prompt authoring, use production.read on demand and production.execute with a structured execution list for existing saved character/setting/scene/shot IDs. Fill only relevant fields, including explicit continuity before/after/locked facts and predecessor IDs when supported by the story. These are authored requirements, never proof that a generated video followed them. Read the target rowVersion first; stable executionKey retries identical content only. Do not fabricate resource IDs or system statuses. Create documents with the existing draft tools, and save scene/cast/shot relationships through scene.submit_structure as editable drafts without requesting user approval before updating production instructions. A manual prompt/cast edit makes the old instruction stale; read the current state and write a new instruction revision preserving that edit. The user chooses the Provider/model after entering the production form. Do not change official model contracts or make paid submissions from this checklist.';
-  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. Before saving text, retrieve project.structure.get or project.get_context and choose the resourceMap destination by the user's goal. Echo the resourceId in the write call. Novel chapter bodies and novel outlines/settings belong to the 小说 workspace; short-drama outlines/plans belong to 剧本, and production character/scene prompts belong to 角色与场景. 场次与镜头 is a scene → shot tree with an independent prompt per shot. Choose needed tools with tools.load from the compact catalog; this only loads schemas and never grants authorization. For scene/shot authoring submit instruction only; the system renders prompts. Use scene.structure.stage for multi-scene or long plans: save shared scene setup then at most four shots per call, query missing ranges after interruptions and finalize one complete editable draft without user confirmation. For a small scene.submit_structure call use resourceId:workspace:shots, resolution:resolved and real reference IDs. You must semantically identify ALL appearing characters, including silent characters, aliases and pronouns, and the scene from project resources read on demand. Return actual document IDs; the system never infers relationships from names or prompt placeholders. Read existing scenes with scene.read on demand before revising them. For existing scenes include sceneId/current expectedRowVersion and shots:[] instead of creating duplicates; return the full updated cast and preserve prompt text unless asked to rewrite. If a reference is ambiguous or missing return resolution:needs_clarification, scenes:[], feedback, and no binding changes. Create missing character/scene documents first only if authorized. A changeSetId is an audit locator. When the result confirms scene_structure_saved/applied, scenes, shots and bindings are already saved as editable drafts in the directory; never request user approval to save them. The user may edit them later. A standalone storyboard document never creates scene/shot entries. Report the actual returned state. A document kind such as outline does not determine whether it is a novel or screenplay. The project name and current visible page do not override the user's goal. For existing resources echo their actual document/node ID and current version/CAS. Check the returned locator.workspace, resourceId and documentVersionId before reporting where content was saved. For an explicit image or video generation request, call media.image.prepare or media.video.prepare; do not merely write a prompt or claim the application cannot generate media. The user, never the Agent or Worker, chooses the concrete media Provider/model from compatible candidates. A media prepare result creates only a local draft and never means that a paid Provider request was submitted. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
+  return `${base}\n\nYou are the unified project Agent. Understand the user's natural-language goal yourself. Answer directly when no business operation is needed, and call only the Worker-authorized tools when an operation is needed. Capability hints are non-authoritative. Before saving text, retrieve project.structure.get or project.get_context and choose the resourceMap destination by the user's goal. Echo the resourceId in the write call. Novel chapter bodies and novel outlines/settings belong to the 小说 workspace; short-drama outlines/plans belong to 剧本, and production character/scene prompts belong to 角色与场景. 场次与镜头 is a scene → shot tree with an independent prompt per shot. Choose needed tools with tools.load from the compact catalog; this only loads schemas and never grants authorization. For scene/shot authoring submit instruction only; the system renders prompts. Reference documents belong in sceneDocumentId/characterDocumentIds/subjects, never in continuity.predecessors; predecessors may only name real prior scenes/shots and otherwise stay empty. If scene validation fails, load scene.structure.stage, query existing progress, and replace only the rejected scene setup or shot range instead of repeating the whole plan. Saved drafts with readiness:needs_attention remain saved; report their issues and do not claim they are ready for media generation. Use scene.structure.stage for multi-scene or long plans: save shared scene setup then at most four shots per call, query missing ranges after interruptions and finalize one complete editable draft without user confirmation. For a small scene.submit_structure call use resourceId:workspace:shots, resolution:resolved and real reference IDs. You must semantically identify ALL appearing characters, including silent characters, aliases and pronouns, and the scene from project resources read on demand. Return actual document IDs; the system never infers relationships from names or prompt placeholders. Read existing scenes with scene.read on demand before revising them. For existing scenes include sceneId/current expectedRowVersion and shots:[] instead of creating duplicates; return the full updated cast and preserve prompt text unless asked to rewrite. If a reference is ambiguous or missing return resolution:needs_clarification, scenes:[], feedback, and no binding changes. Create missing character/scene documents first only if authorized. A changeSetId is an audit locator. When the result confirms scene_structure_saved/applied, scenes, shots and bindings are already saved as editable drafts in the directory; never request user approval to save them. The user may edit them later. A standalone storyboard document never creates scene/shot entries. Report the actual returned state. A document kind such as outline does not determine whether it is a novel or screenplay. The project name and current visible page do not override the user's goal. For existing resources echo their actual document/node ID and current version/CAS. Check the returned locator.workspace, resourceId and documentVersionId before reporting where content was saved. For an explicit image or video generation request, call media.image.prepare or media.video.prepare; do not merely write a prompt or claim the application cannot generate media. The user, never the Agent or Worker, chooses the concrete media Provider/model from compatible candidates. A media prepare result creates only a local draft and never means that a paid Provider request was submitted. Never claim that an image, video, document, or system change was completed unless the corresponding tool result confirms it.`;
 }
 
 function withFrozenContext(instruction: string, context: string): string {

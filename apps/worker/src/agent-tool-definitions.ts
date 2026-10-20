@@ -254,7 +254,12 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
             required: ['title', 'sceneDocumentId', 'characterDocumentIds', 'shots'],
             if: { required: ['sceneId'] },
             then: { required: ['expectedRowVersion'], properties: { shots: { maxItems: 0 } } },
-            else: { required: ['instruction'], properties: { shots: { minItems: 1 } } },
+            else: {
+              required: ['instruction'],
+              not: { required: ['videoPrompt'] },
+              properties: { shots: { minItems: 1 } },
+            },
+            not: { required: ['instruction', 'videoPrompt'] },
             properties: {
               instruction: sceneProductionInstructionSchema,
               title: { type: 'string', minLength: 1, maxLength: 200 },
@@ -281,7 +286,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
                 minLength: 1,
                 maxLength: 20000,
                 description:
-                  'Complete scene video prompt. Identify ALL appearing characters semantically and return their real IDs separately.',
+                  'Text update for an existing scene only; forbidden for new scenes or together with instruction. Omit for binding-only updates to preserve current text.',
               },
               characterDocumentIds: {
                 type: 'array',
@@ -301,7 +306,6 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
                   required: ['title', 'instruction'],
                   properties: {
                     title: { type: 'string', minLength: 1, maxLength: 200 },
-                    prompt: { type: 'string', minLength: 1, maxLength: 20000 },
                     instruction: shotProductionInstructionSchema,
                   },
                 },
@@ -532,7 +536,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.submit_structure',
     description:
-      'Resolve scene/cast intent and save editable scene/shot drafts directly in 场次与镜头 without user confirmation. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,instruction,sceneDocumentId,characterDocumentIds,shots}]. Submit instruction only; do not repeat it as videoPrompt/prompt. At most 100 total scenes + shots per proposal. Use staged submissions for large plans. Read production.defaults.get first. Arrange scene boundaries and shots by narrative logic, conflict, information and emotional progression; never pad or compress to 15 seconds or provider limits. For each new scene include a version-2 instruction with narrative purpose, storyTime (at least timeOfDay), location, detailed style and shared cast/audio/output intent. Provide all ordered shots, each with a version-2 instruction, narrative purpose, timing.estimatedDurationSeconds and rationale derived AFTER planning dialogue/actions/pauses, camera framing and movement, stillFrame, detailed subjects, beats, dialogue, sound, transitions and continuity. Beat seconds are relative to that shot. The system calculates whole-scene time and compiles every shot into the production form. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; omit instruction/videoPrompt for binding-only changes to preserve the current text and instruction; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved submissions are validated and saved atomically, including bindings. Report scene_structure_saved and the returned real IDs; the user can edit prompts and bindings later. Never request approval to save a draft.',
+      'Resolve scene/cast intent and save editable scene/shot drafts directly in 场次与镜头 without user confirmation. First retrieve project.structure.get and select workspace:shots. Read the full prompt and relevant character/scene definitions with library.search/read. You, the LLM, must choose the scene document and ALL appearing characters (including non-speaking characters, aliases and pronouns) and return real IDs; the system will not parse names or placeholders. With resolution:resolved return scenes:[{title,instruction,sceneDocumentId,characterDocumentIds,shots}]. Submit instruction only; do not repeat it as videoPrompt/prompt. Role and setting documents are references, never continuity.predecessors. Predecessors are actual earlier scenes/shots; use [] for an independent scene or unknown prior IDs. Saved drafts may have readiness:needs_attention; report the returned issues before media generation. At most 100 total scenes + shots per proposal. Use staged submissions for large plans. Read production.defaults.get first. Arrange scene boundaries and shots by narrative logic, conflict, information and emotional progression; never pad or compress to 15 seconds or provider limits. For each new scene include a version-2 instruction with narrative purpose, storyTime (at least timeOfDay), location, detailed style and shared cast/audio/output intent. Provide all ordered shots, each with a version-2 instruction, narrative purpose, timing.estimatedDurationSeconds and rationale derived AFTER planning dialogue/actions/pauses, camera framing and movement, stillFrame, detailed subjects, beats, dialogue, sound, transitions and continuity. Beat seconds are relative to that shot. The system calculates whole-scene time and compiles every shot into the production form. To revise an existing scene include sceneId and current expectedRowVersion, and shots:[]; omit instruction/videoPrompt for binding-only changes to preserve the current text and instruction; never create a duplicate. Return the full updated cast, not only additions. Null sceneDocumentId explicitly clears a scene binding on update. Preserve prompt wording unless asked to rewrite it. If identities are missing or ambiguous return resolution:needs_clarification, scenes:[], feedback explaining the unresolved references; this makes no proposal or binding change. Create missing production character/scene documents first only when authorized. Resolved submissions are validated and saved atomically, including bindings. Report scene_structure_saved and the returned real IDs; the user can edit prompts and bindings later. Never request approval to save a draft.',
     parameters: {
       ...DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
         .parameters,

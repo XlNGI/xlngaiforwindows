@@ -12,9 +12,18 @@ import { inspectProductionTargetInstruction } from '@ai-video/generation-adapter
 import { renderProductionInstruction, type ProductionInstruction } from '@ai-video/contracts';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
+import { ProductionService, summarizeProductionReadiness } from './production-service.js';
 
 export class SceneStructureSubmissionService {
   constructor(private readonly projects: ProjectService) {}
+
+  private readiness(sceneIds: string[]) {
+    const production = new ProductionService(this.projects);
+    const issues = sceneIds.flatMap((id) =>
+      production.read({ kind: 'scene', id }).issues.map((issue) => ({ ...issue, sceneId: id })),
+    );
+    return summarizeProductionReadiness(issues);
+  }
 
   stage(args: Record<string, unknown>, identity: AgentSystemToolIdentity): Record<string, unknown> {
     try {
@@ -144,6 +153,7 @@ export class SceneStructureSubmissionService {
                 : 'scene_structure_conflicted'
               : 'scene_structure_staging',
             stageId: row.id,
+            stageOperation: args.operation,
             rowVersion: row.row_version,
             changeSetId: row.change_set_id,
             applied: saved?.status === 'applied',
@@ -154,6 +164,13 @@ export class SceneStructureSubmissionService {
             shotIds: saved?.items
               .filter((item) => item.entityType === 'shot' && item.status === 'applied')
               .map((item) => item.appliedEntityId),
+            ...(saved?.status === 'applied'
+              ? this.readiness(
+                  saved.items
+                    .filter((item) => item.entityType === 'scene')
+                    .map((item) => item.appliedEntityId!),
+                )
+              : {}),
             scenes: parts.map((part, index) => ({
               index,
               setupSaved: Boolean(part.scene),
@@ -331,6 +348,9 @@ export class SceneStructureSubmissionService {
           title: structure.episodeTitle,
           items,
         });
+        const sceneIds = proposal.items
+          .filter((item) => item.entityType === 'scene')
+          .map((item) => item.appliedEntityId!);
         return {
           version: 1,
           status: 'scene_structure_saved',
@@ -342,9 +362,8 @@ export class SceneStructureSubmissionService {
           shotCount: items.length - structure.scenes.length,
           reviewRequired: false,
           applied: true,
-          sceneIds: proposal.items
-            .filter((item) => item.entityType === 'scene')
-            .map((item) => item.appliedEntityId),
+          sceneIds,
+          ...this.readiness(sceneIds),
           shotIds: proposal.items
             .filter((item) => item.entityType === 'shot')
             .map((item) => item.appliedEntityId),

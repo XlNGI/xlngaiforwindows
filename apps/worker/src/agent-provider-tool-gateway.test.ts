@@ -57,6 +57,53 @@ function executor(
 }
 
 describe('AgentProviderToolGateway', () => {
+  it('propagates business rejections as tool errors and bounds repeated invalid submissions', async () => {
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'rejected-response',
+        outputs: [
+          {
+            callId: 'bad',
+            output: JSON.stringify({
+              status: 'rejected',
+              error: { code: 'AGENT_TOOL_ARGUMENTS_INVALID', message: 'Invalid reference' },
+            }),
+          },
+        ],
+      },
+    });
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition('scene.submit_structure')],
+      vi.fn(),
+      vi.fn(),
+    );
+    for (let index = 0; index < 3; index++) {
+      gateway.captureProviderCall('bad', `response-${index}`);
+      await expect(gateway.tools()[0]!.execute('bad', {})).rejects.toThrow('Invalid reference');
+    }
+    expect(() => gateway.assertRepairBudget()).toThrow('TOOL_REPAIR_LIMIT');
+  });
+
+  it('does not report completion after exhausting the Worker quota', async () => {
+    const worker = executor({});
+    worker.executeTools.mockRejectedValue(new Error('AGENT_TOOL_QUOTA_EXHAUSTED: quota exhausted'));
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition()],
+      vi.fn(),
+      vi.fn(),
+    );
+    gateway.captureProviderCall('quota', 'response');
+    await expect(gateway.tools()[0]!.execute('quota', {})).rejects.toThrow('QUOTA_EXHAUSTED');
+    expect(() => gateway.completeProviderStep('final', 'stop', undefined)).toThrow(
+      'QUOTA_EXHAUSTED',
+    );
+    expect(worker.completeProviderStep).not.toHaveBeenCalled();
+  });
   it('loads only model-selected schemas from a compact catalog while retaining Worker authorization', async () => {
     const worker = executor({});
     const definitions = [

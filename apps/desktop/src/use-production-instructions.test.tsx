@@ -347,6 +347,38 @@ describe('production form local compilation', () => {
     await waitFor(() => expect(result.current.error).toContain('来源内容或素材绑定已更新'));
     await expect(result.current.beforeSubmit()).rejects.toThrow('来源内容');
   });
+  it('shows stale dependency details after an update event without overwriting manual form edits', async () => {
+    vi.mocked(callWorker).mockResolvedValue(compiled());
+    const { result } = renderHook(() => useForm());
+    await waitFor(() => expect(result.current.result?.source).toEqual(source));
+    act(() => result.current.edit('prompt', '保留我的表单修改'));
+    const issue = {
+      code: 'STALE_INSTRUCTION',
+      message: '「入场」引用的资料林澈已有新版本',
+      target: { kind: 'shot' as const, id: 'shot' },
+      targetTitle: '入场',
+    };
+    vi.mocked(callWorker).mockResolvedValue(
+      compiled({
+        source: { ...source, token: 'b'.repeat(64) },
+        parameters: { prompt: '新编译内容' },
+        issues: [issue],
+      }),
+    );
+    act(() => {
+      window.dispatchEvent(new Event('production-source-updated'));
+    });
+    await waitFor(() => expect(result.current.result?.issues).toEqual([issue]));
+    expect(result.current.parameters.prompt).toBe('保留我的表单修改');
+    await expect(result.current.beforeSubmit()).rejects.toThrow('来源内容');
+    vi.mocked(callWorker).mockResolvedValue(
+      compiled({ source: { ...source, revision: 2, token: 'c'.repeat(64) } }),
+    );
+    act(() => result.current.refreshKeepingEdits());
+    await waitFor(() => expect(result.current.result?.source?.revision).toBe(2));
+    expect(result.current.parameters.prompt).toBe('保留我的表单修改');
+    await expect(result.current.beforeSubmit()).resolves.toMatchObject({ revision: 2 });
+  });
   it('does not fill conflicting requirements and supports legacy targets without instructions', async () => {
     vi.mocked(callWorker).mockResolvedValue(
       compiled({ issues: [{ code: 'CONFLICT', message: '剧情冲突' }] }),

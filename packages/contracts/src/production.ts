@@ -5,6 +5,9 @@ export interface ProductionTarget {
   id: string;
 }
 
+/** Story order relates scene/shot occurrences, never reusable reference documents. */
+export type ProductionPredecessor = ProductionTarget & { kind: 'scene' | 'shot' };
+
 export interface ProductionFact {
   key: string;
   value: string;
@@ -137,7 +140,7 @@ export interface ProductionInstruction {
     purpose: string;
   }>;
   continuity: {
-    predecessors: ProductionTarget[];
+    predecessors: ProductionPredecessor[];
     before: ProductionFact[];
     after: ProductionFact[];
     locked: ProductionFact[];
@@ -158,6 +161,9 @@ export interface ProductionExecuteParams {
 export interface ProductionIssue {
   code: string;
   message: string;
+  target?: ProductionTarget;
+  targetTitle?: string;
+  changedReferences?: Array<{ target: ProductionTarget; title: string }>;
 }
 
 /** Preserve the business purpose until the selected model assigns an input role. */
@@ -262,6 +268,12 @@ export const productionTargetSchema = object(
   { kind: { type: 'string', enum: ['character', 'setting', 'scene', 'shot'] }, id },
   ['kind', 'id'],
 );
+
+const productionPredecessorSchema = {
+  ...object({ kind: { type: 'string', enum: ['scene', 'shot'] }, id }, ['kind', 'id']),
+  description:
+    '剧情上承接的已保存场次或镜头。角色和场景设定是资料引用，不是前置剧情；通过 subjects、sceneDocumentId、characterDocumentIds 引用。首场、独立创作或没有真实前镜 ID 时使用空数组，不编造依赖。',
+};
 
 export const productionInstructionSchema = object(
   {
@@ -425,7 +437,7 @@ export const productionInstructionSchema = object(
     ),
     continuity: object(
       {
-        predecessors: array(productionTargetSchema, 30),
+        predecessors: array(productionPredecessorSchema, 30),
         before: facts,
         after: facts,
         locked: facts,

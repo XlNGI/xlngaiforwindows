@@ -62,6 +62,10 @@ export function parseEpisodeStructureArguments(
     if (sceneUnknown)
       throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
     const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
+    if (requireDetailed && scene.videoPrompt !== undefined && (!scene.sceneId || scene.instruction))
+      throw new Error(
+        `scenes[${sceneIndex}].videoPrompt conflicts with authoring input; submit instruction only.`,
+      );
     const sceneInstruction = parseInstruction(scene.instruction, 'scene');
     if (requireDetailed && !scene.sceneId && sceneInstruction?.version !== 2)
       throw new Error(
@@ -139,6 +143,10 @@ export function parseEpisodeStructureArguments(
           `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
         );
       const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
+      if (requireDetailed && shot.prompt !== undefined)
+        throw new Error(
+          `scenes[${sceneIndex}].shots[${shotIndex}].prompt conflicts with authoring input; submit instruction only.`,
+        );
       const shotInstruction = parseInstruction(shot.instruction, 'shot');
       if (requireDetailed && shotInstruction?.version !== 2)
         throw new Error('每个新分镜必须提供v2结构化指令和依据剧情推导的预计时长。');
