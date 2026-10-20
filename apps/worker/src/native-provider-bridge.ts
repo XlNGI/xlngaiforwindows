@@ -360,6 +360,10 @@ export function createPiStreamFunction(
   bridge: NativeProviderBridge,
   resolveParams: NativeProviderParamsResolver,
   observe?: (requestId: string, stage: string, metadata: Record<string, unknown>) => void,
+  onUsage?: (
+    requestId: string,
+    usage: Extract<NativeProviderHostEvent, { type: 'usage' }>['usage'],
+  ) => void,
 ): StreamFunction {
   return (model, context, options) => {
     const stream = createAssistantMessageEventStream();
@@ -385,6 +389,7 @@ export function createPiStreamFunction(
           {
             onEvent: (event) => {
               if (terminalObserved) return;
+              if (event.type === 'usage') onUsage?.(requestId, event.usage);
               applyPiEvent(stream, message, event);
               if (message.stopReason === 'error' || message.stopReason === 'aborted') {
                 terminalObserved = true;

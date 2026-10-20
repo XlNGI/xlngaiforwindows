@@ -406,7 +406,10 @@ describe('AgentProviderLoopService', () => {
       });
       generations.configureAgentTools(prepared.stream, agent.tools);
       expect(generations.runtime(prepared.stream).prompt).toBe(prompt);
-      expect(generations.runtime(prepared.stream).systemInstruction).toContain('可选 UI 目标提示');
+      expect(generations.runtime(prepared.stream).context).toContain('可选 UI 目标提示');
+      expect(generations.runtime(prepared.stream).systemInstruction).not.toContain(
+        '可选 UI 目标提示',
+      );
       expect(novels.listChapters()).toHaveLength(0);
       expect(workflow.listDocuments()).toHaveLength(0);
       const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });

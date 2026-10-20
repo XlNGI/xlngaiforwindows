@@ -28,6 +28,7 @@ import type { NativeProviderHostEvent, NativeProviderStreamStartParams } from '@
 
 function scriptedBridge(
   script: (params: NativeProviderStreamStartParams, index: number) => NativeProviderHostEvent[],
+  reportUsage = false,
 ) {
   const requests: NativeProviderStreamStartParams[] = [];
   const bridge = new NativeProviderBridge({
@@ -36,7 +37,22 @@ function scriptedBridge(
       const params = envelope.params as NativeProviderStreamStartParams;
       const index = requests.push(params) - 1;
       await Promise.resolve();
-      for (const [sequence, event] of script(params, index).entries())
+      const events: NativeProviderHostEvent[] = reportUsage
+        ? [
+            {
+              type: 'usage',
+              projectSessionId: params.projectSessionId,
+              usage: {
+                inputTokens: 1000 + index * 100,
+                cachedInputTokens: index * 10,
+                outputTokens: 10,
+                totalTokens: 1010 + index * 100,
+              },
+            },
+            ...script(params, index),
+          ]
+        : script(params, index);
+      for (const [sequence, event] of events.entries())
         bridge.handleEnvelope({
           kind: 'host.event',
           requestId: envelope.requestId,
@@ -172,7 +188,7 @@ it.each([
       }
       if (index > 23) throw new Error('Must not send request 25');
       return tool('tools.load', { names: ['production.read', 'production.execute'] });
-    });
+    }, true);
     const runtime = new PiConversationRuntime({
       generation: f.generations,
       providerTools: f.loop,
@@ -194,6 +210,18 @@ it.each([
     expect(result.status, result.error).toBe(finalStop ? 'complete' : 'failed');
     if (!finalStop) expect(result.error).toContain('24-turn limit');
     expect(requests).toHaveLength(24);
+    expect(result.assistantMessage.attempt?.usage).toMatchObject({
+      inputTokens: 51_600,
+      cachedInputTokens: 2_760,
+      outputTokens: 240,
+      totalTokens: 51_840,
+    });
+    // Tool selections change repeatedly before the first output repair;
+    // their policies and frozen context must remain byte-identical.
+    for (const request of requests.slice(0, 22))
+      expect(request.systemInstruction).toBe(requests[0]!.systemInstruction);
+    expect(requests[0]!.systemInstruction).toContain('# Agent document');
+    expect(requests[0]!.tools!.some((tool) => tool.name === 'production.execute')).toBe(false);
     expect(f.content.listScenes()).toHaveLength(1);
     expect(f.content.listShots(scene.id)).toHaveLength(4);
     f.project.access(false, (db) => {
@@ -1467,8 +1495,8 @@ it('shows actual request/status candidates, inspects cancelled artifacts without
   await f.generations.cancel(first.prepared.stream.generationId);
   f.loop.terminateGeneration(first.prepared.stream.generationId, 'cancelled');
   const second = f.prepare('没有生成成功吗');
-  expect(f.generations.runtime(second.prepared.stream).systemInstruction).toContain('重新生成场次');
-  expect(f.generations.runtime(second.prepared.stream).systemInstruction).toContain('cancelled');
+  expect(f.generations.runtime(second.prepared.stream).context).toContain('重新生成场次');
+  expect(f.generations.runtime(second.prepared.stream).context).toContain('cancelled');
   const result = await second.invoke('conversation.task.route', {
     decision: 'inspect',
     targetGenerationId: first.prepared.stream.generationId,

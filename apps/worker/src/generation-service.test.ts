@@ -566,8 +566,10 @@ describe('GenerationService', () => {
       },
     ]);
     const runtime = generations.runtime(prepared.stream);
-    expect(runtime.systemInstruction).toContain('selected-hint-only');
-    expect(runtime.systemInstruction).toContain('可选 UI 目标提示');
+    expect(runtime.context).toContain('selected-hint-only');
+    expect(runtime.context).toContain('可选 UI 目标提示');
+    expect(runtime.systemInstruction).not.toContain('selected-hint-only');
+    expect(runtime.systemInstruction).not.toContain('可选 UI 目标提示');
     expect(runtime.systemInstruction).toContain('工作助理');
     expect(runtime.systemInstruction).toContain('library.search');
     expect(runtime.systemInstruction).toContain('Do not repeat a successful library.search');
@@ -592,6 +594,24 @@ describe('GenerationService', () => {
     expect(runtime.systemInstruction).not.toContain('至多读取 1~2 个');
     expect(runtime.context).toContain('林澈');
     expect(runtime.context).not.toContain('这段正文不应进入普通会话');
+    generations.complete({ ...prepared.stream, content: '已完成' });
+    const next = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '继续讨论角色',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+      agentMode: 'document',
+      selectedChapterIds: ['another-hint'],
+    });
+    generations.configureAgentTools(next.stream, runtime.tools!);
+    const nextRuntime = generations.runtime(next.stream);
+    expect(nextRuntime.systemInstruction).toBe(runtime.systemInstruction);
+    expect(nextRuntime.systemInstruction).not.toContain(prepared.stream.generationId);
+    expect(nextRuntime.context).toContain(prepared.stream.generationId);
+    expect(nextRuntime.context).toContain('another-hint');
+    expect(nextRuntime.context.indexOf('可选 UI 目标提示')).toBeGreaterThan(
+      nextRuntime.context.indexOf('当前会话最近任务'),
+    );
   });
 
   it('ignores a delayed shorter observe snapshot instead of failing the generation', async () => {
@@ -736,6 +756,65 @@ describe('GenerationService', () => {
     expect(() => generations.observe({ ...prepared.stream, content: 'Stale' })).toThrow(
       'Project session changed',
     );
+    expect(() =>
+      generations.recordProviderUsage(prepared.stream, 'stale-request', {
+        inputTokens: 999,
+      }),
+    ).toThrow('Project session changed');
+  });
+
+  it('retains reported request totals across interruption and rejects a mismatched attempt', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'mock', name: 'Mock', model: 'mock', configured: false }),
+      stream: () => Promise.reject(new Error('No external calls')),
+    };
+    const { projects, content, conversation, generations } = await setup(provider, {
+      resolveLlmSelection: () => ({
+        providerProfileId: 'profile',
+        providerName: 'Mock',
+        modelId: 'model',
+        modelName: 'Mock',
+        remoteModelId: 'mock',
+        protocol: 'openai-responses',
+        baseUrl: 'https://mock.invalid',
+      }),
+    });
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Interrupted task',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const usage = {
+      inputTokens: 100,
+      cachedInputTokens: 32,
+      outputTokens: 10,
+      totalTokens: 110,
+      providerReportedCost: { amount: '0.123456789012', currency: 'USD' },
+    };
+    generations.recordProviderUsage(prepared.stream, 'request-1', usage);
+    generations.recordProviderUsage(prepared.stream, 'request-1', usage);
+    generations.recordProviderUsage(prepared.stream, 'request-2', usage);
+    expect(() =>
+      generations.recordProviderUsage(
+        { ...prepared.stream, attemptId: 'wrong' },
+        'request-3',
+        usage,
+      ),
+    ).toThrow('Stale LLM generation callback');
+    const reloaded = new GenerationService(
+      projects,
+      content,
+      new ContextService(projects),
+      provider,
+    );
+    reloaded.recoverInterrupted();
+    expect(reloaded.get(prepared.stream.generationId).assistantMessage.attempt).toMatchObject({
+      status: 'failed',
+      errorCode: 'worker-restarted',
+      usage: { inputTokens: 200, cachedInputTokens: 64, outputTokens: 20, totalTokens: 220 },
+      providerReportedCost: { amount: '0.246913578024', currency: 'USD' },
+    });
   });
 
   it('cancels and retries managed generations without duplicating the user message', async () => {
@@ -983,7 +1062,12 @@ it('freezes concurrent task inputs and excludes another active branch even after
   const a = generations.prepare({ ...params, prompt: 'branch A isolated_secret' });
   generations.observe({ ...a.stream, content: 'A partial isolated_secret' });
   const b = generations.prepare({ ...params, prompt: 'Independent B input' });
-  expect(generations.runtime(b.stream).context).not.toContain('isolated_secret');
+  const frozenB = generations.runtime(b.stream).context;
+  // Routing metadata retains the user-request preview; it is not branch
+  // output evidence and comes after the frozen catalog/history context.
+  expect(frozenB.split('\n\n当前会话最近任务')[0]).not.toContain('isolated_secret');
+  expect(frozenB).not.toContain('A partial isolated_secret');
+  expect(frozenB).toContain('用户请求="branch A isolated_secret"');
   projects.access(true, (database, project) => {
     const insert = database.prepare(
       `INSERT INTO agent_tasks(id,project_id,project_session_id,conversation_id,user_message_id,task_type,scope_type,title,request_snapshot_json,request_hash,status,created_at,updated_at)VALUES(?,?,?,?,?,'document-create','project',?,?,'hash','running','now','now')`,
@@ -1050,7 +1134,9 @@ it('freezes concurrent task inputs and excludes another active branch even after
       sourceTypes: ['conversation'],
     }).sources,
   ).toEqual([]);
-  expect(generations.runtime(b.stream).context).not.toContain('isolated_secret');
+  expect(generations.runtime(b.stream).context).toBe(frozenB);
+  expect(frozenB).not.toContain('A supplemental isolated_secret');
+  expect(frozenB).not.toContain('A partial isolated_secret complete');
   const rows = projects.access(false, (db) =>
     db.prepare('SELECT * FROM generation_branches ORDER BY created_at,branch_id').all(),
   );

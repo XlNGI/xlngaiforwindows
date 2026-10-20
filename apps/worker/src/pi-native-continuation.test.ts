@@ -17,19 +17,33 @@ import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js
 
 describe('Pi native continuation', () => {
   it.each([
-    { protocol: 'openai-chat-completions', responseIds: true, failRead: false },
-    { protocol: 'openai-chat-completions', responseIds: false, failRead: false },
-    { protocol: 'openai-chat-completions', responseIds: true, failRead: true },
-    { protocol: 'openai-responses', responseIds: true, failRead: false },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: false,
+      outcome: 'complete',
+    },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: false,
+      failRead: false,
+      outcome: 'complete',
+    },
+    { protocol: 'openai-chat-completions', responseIds: true, failRead: true, outcome: 'complete' },
+    { protocol: 'openai-responses', responseIds: true, failRead: false, outcome: 'complete' },
+    { protocol: 'openai-chat-completions', responseIds: true, failRead: false, outcome: 'failed' },
+    { protocol: 'openai-responses', responseIds: true, failRead: false, outcome: 'cancelled' },
+    { protocol: 'openai-chat-completions', responseIds: true, failRead: false, outcome: 'missing' },
   ] as const)(
-    'preserves tool context through the real bridge: $protocol, IDs=$responseIds, error=$failRead',
-    async ({ protocol, responseIds, failRead }) => {
+    'preserves context and request usage: $protocol, IDs=$responseIds, error=$failRead, $outcome',
+    async ({ protocol, responseIds, failRead, outcome }) => {
       const directory = await mkdtemp(join(tmpdir(), 'pi-native-continuation-'));
       const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
       try {
         projects.create(join(directory, 'project'), 'Continuation test');
         const content = new ContentService(projects);
         const conversation = content.createConversation({ scopeType: 'project' });
+        const indexLlmAttempt = vi.fn();
         const generations = new GenerationService(
           projects,
           content,
@@ -39,6 +53,7 @@ describe('Pi native continuation', () => {
             stream: () => Promise.reject(new Error('No external requests in this test')),
           },
           {
+            usageIndexer: { indexLlmAttempt },
             selectionResolver: {
               resolveLlmSelection: () => ({
                 providerProfileId: 'profile',
@@ -48,6 +63,14 @@ describe('Pi native continuation', () => {
                 remoteModelId: 'test-model',
                 protocol,
                 baseUrl: 'https://example.invalid/v1',
+                pricingSnapshot: {
+                  currency: 'USD',
+                  unitTokens: 1000,
+                  inputPrice: '1',
+                  cachedInputPrice: '0.1',
+                  outputPrice: '2',
+                  configuredAt: '2026-10-20T00:00:00.000Z',
+                },
               }),
             },
           },
@@ -84,6 +107,20 @@ describe('Pi native continuation', () => {
             };
             const session = { projectSessionId: prepared.stream.projectSessionId };
             emit({ type: 'started', ...session });
+            if (outcome !== 'missing') {
+              const usage = {
+                inputTokens: ordinal * 100 - 1,
+                cachedInputTokens: ordinal * 32,
+                outputTokens: ordinal * 10,
+                reasoningTokens: ordinal,
+                totalTokens: ordinal * 110,
+              };
+              emit({ type: 'usage', usage, ...session });
+              emit({ type: 'usage', usage, ...session });
+              // Partial updates replace the same request's snapshot, even
+              // without a response ID. Two tools in response one count once.
+              emit({ type: 'usage', usage: { inputTokens: ordinal * 100 }, ...session });
+            }
             emit({
               type: 'text_delta',
               delta:
@@ -118,6 +155,25 @@ describe('Pi native continuation', () => {
                     ]
                   : [];
             for (const call of calls) emit({ type: 'tool_call_end', call, ...session });
+            if (ordinal === 3 && outcome === 'failed') {
+              emit({
+                type: 'failed',
+                error: {
+                  code: 'PROVIDER_FAILED',
+                  message: 'Test interrupted stream',
+                  retryable: true,
+                },
+                ...session,
+              });
+              return Promise.resolve();
+            }
+            if (ordinal === 3 && outcome === 'cancelled') {
+              void generations.cancel(prepared.stream.generationId);
+              // Some providers report final usage while abort is in flight.
+              emit({ type: 'usage', usage: { inputTokens: 301 }, ...session });
+              emit({ type: 'cancelled', ...session });
+              return Promise.resolve();
+            }
             emit({
               type: 'complete',
               providerResponseId: responseIds ? `response-${ordinal}` : undefined,
@@ -168,10 +224,40 @@ describe('Pi native continuation', () => {
         });
         await runtime.wait(prepared.stream.generationId);
 
-        expect(generations.get(prepared.stream.generationId).status).toBe('complete');
+        const expectedStatus = ['complete', 'missing'].includes(outcome) ? 'complete' : outcome;
+        const result = generations.get(prepared.stream.generationId);
+        expect(result.status).toBe(expectedStatus);
+        const expectedUsage = {
+          inputTokens: outcome === 'cancelled' ? 601 : 600,
+          cachedInputTokens: 192,
+          outputTokens: 60,
+          reasoningTokens: 6,
+          totalTokens: 660,
+        };
+        if (outcome === 'missing') {
+          expect(result.assistantMessage.attempt?.usage).toBeUndefined();
+          expect(result.assistantMessage.attempt?.estimatedCost).toBeUndefined();
+        } else {
+          const estimatedCost = outcome === 'cancelled' ? '0.5482' : '0.5472';
+          expect(result.assistantMessage.attempt).toMatchObject({
+            usage: expectedUsage,
+            estimatedCost,
+          });
+          expect(indexLlmAttempt.mock.lastCall?.[1]).toMatchObject({
+            ...expectedUsage,
+            status: expectedStatus,
+            estimatedCost,
+          });
+          expect(
+            content
+              .listMessages({ conversationId: conversation.id })
+              .items.find((message) => message.id === result.assistantMessage.id)?.attempt,
+          ).toMatchObject({ usage: expectedUsage, estimatedCost });
+        }
         expect(requests).toHaveLength(3);
         expect(providerTools.executeTools).toHaveBeenCalledTimes(3);
         for (const request of requests) {
+          expect(request.systemInstruction).toBe(requests[0]?.systemInstruction);
           expect(request.systemInstruction).toContain('unified project Agent');
           expect(request.systemInstruction).toContain('# Agent project library policy');
           expect(request.systemInstruction).toContain(initial.context);

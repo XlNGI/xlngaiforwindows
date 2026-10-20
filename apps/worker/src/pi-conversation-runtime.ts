@@ -39,7 +39,12 @@ export interface PiConversationRuntimeOptions {
     GenerationService,
     'runtime' | 'configureAgentTools' | 'observe' | 'complete' | 'failNative' | 'cancel' | 'get'
   > &
-    Partial<Pick<GenerationService, 'waitUntilReady' | 'supplement' | 'consumeSupplements'>>;
+    Partial<
+      Pick<
+        GenerationService,
+        'waitUntilReady' | 'supplement' | 'consumeSupplements' | 'recordProviderUsage'
+      >
+    >;
   plans: TaskPlanService;
   /** Production uses the NativeProviderBridge; tests may inject a faux Pi stream. */
   bridge?: NativeProviderBridge;
@@ -275,7 +280,15 @@ export class PiConversationRuntime implements ConversationRuntime {
     const initialDefinitions = plannedWorkflow
       ? [...planningGrants.map((grant) => grant.tool)]
       : providerGateway!.currentDefinitions();
-    this.options.generation.configureAgentTools(identity, initialDefinitions);
+    // Establish policies for all currently authorized tools before sending the
+    // first request. Lazy loading changes schemas, not the frozen policy prefix.
+    this.options.generation.configureAgentTools(
+      identity,
+      initialDefinitions,
+      undefined,
+      plannedWorkflow ? initialDefinitions : (runtime.tools ?? initialDefinitions),
+    );
+    const configuredRuntime = this.options.generation.runtime(identity);
 
     let planningRound = plannedWorkflow;
     let turnCount = 0;
@@ -309,8 +322,9 @@ export class PiConversationRuntime implements ConversationRuntime {
       streamFn,
       initialState: {
         systemPrompt: withFrozenContext(
-          planning?.systemInstruction ?? unifiedAgentInstruction(runtime.systemInstruction),
-          runtime.context,
+          planning?.systemInstruction ??
+            unifiedAgentInstruction(configuredRuntime.systemInstruction),
+          configuredRuntime.context,
         ),
         model,
         thinkingLevel: 'off',
@@ -778,6 +792,9 @@ export class PiConversationRuntime implements ConversationRuntime {
             active.liveActions.splice(0, active.liveActions.length - 80);
         }
       },
+      (requestId, usage) => {
+        this.options.generation.recordProviderUsage?.(identity, requestId, usage);
+      },
     );
   }
 
@@ -859,7 +876,9 @@ export class PiConversationRuntime implements ConversationRuntime {
         content: final.aggregate || observed.aggregate,
         providerResponseId: final.lastResponseId,
         finishReason: plan?.status === 'succeeded' ? 'task_package_complete' : 'stop',
-        usage: final.lastUsage,
+        // Native usage is captured at the request boundary, including loader
+        // and failed responses. Pi's default zero usage is not a provider report.
+        usage: this.options.streamFn ? final.lastUsage : undefined,
       };
       providerGateway?.completeProviderStep(
         final.lastResponseId,

@@ -38,11 +38,17 @@ import { ContentService } from './content-service.js';
 import { ContextService, toContextInfo } from './context-service.js';
 import type { NovelContextService } from './novel-context-service.js';
 import { ProjectService } from './project-service.js';
-import { calculateEstimatedCost, normalizeCurrency, normalizeDecimalPrice } from './usage-cost.js';
+import {
+  addDecimalStrings,
+  calculateEstimatedCost,
+  normalizeCurrency,
+  normalizeDecimalPrice,
+} from './usage-cost.js';
 import { assertProjectTaskAdmission } from './task-admission.js';
 
 interface GenerationState extends LlmGenerationInfo {
   supplementContextBase?: string;
+  providerUsage?: Map<string, NormalizedLlmUsage>;
   attemptId: string;
   projectId: string;
   projectSessionId: string;
@@ -183,7 +189,7 @@ export class GenerationService {
     if (Object.values(hints).some((value) => value !== undefined)) {
       const state = this.requireNativeState(prepared.stream);
       if (state.runtimeRequest)
-        state.runtimeRequest.systemInstruction += `\n可选 UI 目标提示（按用户本轮语义决定是否采用，须用工具验证真实目标）：${JSON.stringify(hints)}`;
+        state.runtimeRequest.context += `\n\n可选 UI 目标提示（按用户本轮语义决定是否采用，须用工具验证真实目标）：${JSON.stringify(hints)}`;
     }
     return prepared;
   }
@@ -498,6 +504,7 @@ export class GenerationService {
     identity: LlmGenerationIdentity,
     tools: LlmToolDefinition[],
     continuation?: LlmToolContinuation,
+    policyTools: LlmToolDefinition[] = tools,
   ): void {
     const state = this.requireNativeState(identity);
     if (!isActive(state.status) || !state.runtimeRequest) {
@@ -505,10 +512,51 @@ export class GenerationService {
     }
     state.runtimeRequest = {
       ...state.runtimeRequest,
-      systemInstruction: withAgentToolInstructions(state.runtimeRequest.systemInstruction, tools),
+      systemInstruction: withAgentToolInstructions(
+        state.runtimeRequest.systemInstruction,
+        policyTools,
+      ),
       tools: tools.map((tool) => ({ ...tool, parameters: structuredClone(tool.parameters) })),
       continuation: continuation ? cloneToolContinuation(continuation) : undefined,
     };
+  }
+
+  /** Usage events are snapshots for one actual request, not increments or business steps. */
+  recordProviderUsage(
+    identity: LlmGenerationIdentity,
+    requestId: string,
+    usage: NormalizedLlmUsage,
+  ): void {
+    const state = this.requireNativeState(identity);
+    // Cancellation is persisted before aborting the stream. Retain any final
+    // reported charge from that in-flight request without changing its status.
+    if (!isActive(state.status) && state.status !== 'cancelled') return;
+    const normalized = normalizeUsage(usage);
+    if (!normalized) return;
+    const requests = new Map(state.providerUsage);
+    const previous = requests.get(requestId);
+    const snapshot = { ...previous };
+    for (const key of USAGE_TOKEN_FIELDS)
+      if (normalized[key] !== undefined) snapshot[key] = normalized[key];
+    if (normalized.providerReportedCost)
+      snapshot.providerReportedCost = normalized.providerReportedCost;
+    if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) return;
+    requests.set(requestId, snapshot);
+    const total = sumProviderUsage(requests);
+    const pricing = pricingSnapshotOf(state.attempt);
+    const estimatedCost = calculateEstimatedCost(total, pricing);
+    const attempt = {
+      ...state.attempt,
+      ...usageFields(total),
+      estimatedCost,
+      currency: estimatedCost ? pricing?.currency : undefined,
+    };
+    this.projects.access(true, (database) => {
+      createRepositories(database).llmGenerationAttempts.save(attempt);
+    });
+    state.providerUsage = requests;
+    state.attempt = attempt;
+    if (!isActive(state.status)) this.indexAttemptBestEffort(attempt);
   }
 
   observe(params: LlmGenerationObserveParams): LlmGenerationInfo {
@@ -547,7 +595,7 @@ export class GenerationService {
     const state = this.requireNativeState(params);
     if (!isActive(state.status)) return publicState(state);
     const content = this.resolveMonotonicContent(state.assistantMessage.content, params.content);
-    const usage = normalizeUsage(params.usage);
+    const usage = sumProviderUsage(state.providerUsage) ?? normalizeUsage(params.usage);
     const pricing = pricingSnapshotOf(state.attempt);
     const estimatedCost = calculateEstimatedCost(usage, pricing);
     const providerResponseId = normalizeOptionalText(params.providerResponseId, 256);
@@ -1119,8 +1167,8 @@ export class GenerationService {
     });
     return {
       state,
-      systemInstruction: `${compiled.systemInstruction}${activeTaskContext}`,
-      context: compiled.rendered,
+      systemInstruction: compiled.systemInstruction,
+      context: `${compiled.rendered}${activeTaskContext}`,
     };
   }
 
@@ -1229,7 +1277,7 @@ export class GenerationService {
     usageInput?: NormalizedLlmUsage,
   ): void {
     try {
-      const usage = normalizeUsage(usageInput);
+      const usage = sumProviderUsage(state.providerUsage) ?? normalizeUsage(usageInput);
       const pricing = pricingSnapshotOf(state.attempt);
       const estimatedCost = calculateEstimatedCost(usage, pricing);
       const attempt: LlmGenerationAttemptRecord = {
@@ -1549,6 +1597,34 @@ function publicState(state: GenerationState): LlmGenerationInfo {
     error: state.error,
     retryable: state.retryable,
   };
+}
+
+const USAGE_TOKEN_FIELDS = [
+  'inputTokens',
+  'cachedInputTokens',
+  'outputTokens',
+  'reasoningTokens',
+  'totalTokens',
+] as const;
+
+function sumProviderUsage(
+  requests: Map<string, NormalizedLlmUsage> | undefined,
+): NormalizedLlmUsage | undefined {
+  if (!requests?.size) return undefined;
+  const snapshots = [...requests.values()];
+  const total: NormalizedLlmUsage = {};
+  for (const key of USAGE_TOKEN_FIELDS) {
+    const values = snapshots.map((usage) => usage[key]).filter((value) => value !== undefined);
+    if (values.length)
+      total[key] = normalizeTokenCount(values.reduce((sum, value) => sum + value, 0));
+  }
+  const costs = snapshots.map((usage) => usage.providerReportedCost);
+  if (costs.every((cost) => cost && cost.currency === costs[0]?.currency))
+    total.providerReportedCost = {
+      amount: addDecimalStrings(costs.map((cost) => cost!.amount)),
+      currency: costs[0]?.currency,
+    };
+  return total;
 }
 
 function normalizeUsage(usage: NormalizedLlmUsage | undefined): NormalizedLlmUsage | undefined {
