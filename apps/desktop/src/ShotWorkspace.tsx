@@ -7,6 +7,7 @@ import type {
   SceneInfo,
   SceneCharacterBindingInfo,
 } from '@ai-video/contracts';
+import { productionCharacterIds } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
 import { AssetImagePreview } from './AssetImagePreview';
 import { ReferenceCard, referenceAssetName } from './ReferenceCard';
@@ -328,8 +329,19 @@ function ShotWorkspaceContent({
       }
     }
     if (characters.length && projectId) {
-      const media = await readSceneMedia(projectId, sceneMediaParams(characters));
-      const ids = effectiveSceneCast(characters, media).flatMap((c) =>
+      const production = await callWorker('production.read', {
+        target: { kind: 'shot', id: shotId },
+      }).catch(() => undefined);
+      if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
+      const characterIds = production?.issues?.some((issue) => issue.code === 'STALE_INSTRUCTION')
+        ? undefined
+        : productionCharacterIds(production?.instruction);
+      const shotCharacters = characters.filter(
+        (character) =>
+          characterIds === undefined || characterIds.includes(character.characterDocumentId),
+      );
+      const media = await readSceneMedia(projectId, sceneMediaParams(shotCharacters));
+      const ids = effectiveSceneCast(shotCharacters, media).flatMap((c) =>
         c.imageAssetId ? [c.imageAssetId] : [],
       );
       next.characterAssetIds = [...new Set(ids)];

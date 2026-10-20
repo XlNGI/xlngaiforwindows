@@ -9,6 +9,7 @@ import {
   type ProductionTimelineEntry,
   type SceneInfo,
   type ShotInfo,
+  productionCharacterIds,
 } from '@ai-video/contracts';
 import { resolveProductionDuration } from '@ai-video/generation-adapters';
 
@@ -18,6 +19,7 @@ export function inheritProductionInstruction(
 ): ProductionInstruction {
   const defaults = { ...parent.generation };
   delete defaults.duration;
+  const characterIds = productionCharacterIds(shot);
   return {
     ...shot,
     storyTime: shot.storyTime ?? parent.storyTime,
@@ -30,8 +32,18 @@ export function inheritProductionInstruction(
       ...parent.subjects.find((item) => item.documentId === subject.documentId),
       ...subject,
     })),
+    reviewNotes: [...new Set([...(parent.reviewNotes ?? []), ...(shot.reviewNotes ?? [])])],
     generation: { ...defaults, ...shot.generation },
-    resources: [...parent.resources, ...shot.resources].filter(
+    resources: [
+      ...parent.resources.filter(
+        (resource) =>
+          characterIds === undefined ||
+          !['character-image', 'voice-reference'].includes(resource.kind) ||
+          !resource.documentId ||
+          characterIds.includes(resource.documentId),
+      ),
+      ...shot.resources,
+    ].filter(
       (item, index, all) =>
         all.findIndex(
           (other) =>

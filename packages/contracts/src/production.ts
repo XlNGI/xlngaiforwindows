@@ -19,6 +19,8 @@ export interface ProductionFact {
 export interface ProductionInstruction {
   version: 1 | 2;
   summary: string;
+  /** Authoring uncertainties shown for review, never sent as visual instructions. */
+  reviewNotes?: string[];
   narrative?: { purpose: string; conflict?: string; emotionalProgression?: string };
   storyTime?: {
     era?: string;
@@ -313,6 +315,11 @@ export const productionInstructionSchema = object(
   {
     version: { type: 'integer', enum: [1, 2] },
     summary: text,
+    reviewNotes: {
+      ...strings,
+      description:
+        '资料之间存在无法确定的冲突或动作/对白归属不明时，逐项说明原文与待核实点。只作可编辑提醒，不擅自补造事实或台词，不写入画面描述。',
+    },
     narrative: textFields(['purpose', 'conflict', 'emotionalProgression'], ['purpose']),
     storyTime: textFields(
       ['era', 'season', 'storyDay', 'date', 'timeOfDay', 'clockTime'],
@@ -376,12 +383,20 @@ export const productionInstructionSchema = object(
           documentId: id,
           description: text,
           wardrobe: text,
-          position: text,
+          position: {
+            ...text,
+            description:
+              '本镜画面中的前中后景、左右、朝向、与门/工作台的关系及可通行路线；区分初始站位和后续移动，不仅填写地点名称。',
+          },
           appearance: text,
           hairMakeup: text,
           expression: text,
           gaze: text,
-          action: text,
+          action: {
+            ...text,
+            description:
+              '本镜可见动作概述；关键动作先后、停顿和反应放入 beats。行动符合已确认的视力、断肢、跛足及持物手设定；不凭身份标签自动补造动作。',
+          },
           props: text,
           initialState: text,
           endState: text,
@@ -597,85 +612,9 @@ export function productionImageReference(
   return undefined;
 }
 
-/** Render authoring text without provider-specific numbering or hidden JSON. */
-export function renderProductionInstruction(
-  instruction: ProductionInstruction,
-  names: Record<string, string> = {},
-  options: { includeAudio?: boolean } = {},
-): string {
-  const name = (documentId: string) => names[documentId] ?? '角色';
-  return [
-    instruction.summary,
-    instruction.narrative
-      ? `叙事目的：${instruction.narrative.purpose}${instruction.narrative.conflict ? `；冲突：${instruction.narrative.conflict}` : ''}${instruction.narrative.emotionalProgression ? `；情绪变化：${instruction.narrative.emotionalProgression}` : ''}`
-      : undefined,
-    instruction.storyTime
-      ? `故事时间：${Object.values(instruction.storyTime).filter(Boolean).join('，')}`
-      : undefined,
-    instruction.location
-      ? `地点环境：${Object.values(instruction.location).filter(Boolean).join('，')}`
-      : undefined,
-    Object.values(instruction.style ?? {}).some(Boolean)
-      ? `视觉风格：${Object.values(instruction.style!).filter(Boolean).join('，')}`
-      : undefined,
-    instruction.timing
-      ? `剧情预计时长：${instruction.timing.estimatedDurationSeconds}秒；节奏依据：${instruction.timing.rationale}`
-      : undefined,
-    instruction.stillFrame ? `画面定格：${instruction.stillFrame}` : undefined,
-    ...instruction.subjects.map((subject) =>
-      [
-        name(subject.documentId),
-        subject.description,
-        subject.appearance,
-        subject.wardrobe,
-        subject.hairMakeup,
-        subject.position,
-        subject.expression,
-        subject.gaze,
-        subject.action,
-        subject.props,
-        subject.initialState,
-        subject.endState,
-      ]
-        .filter(Boolean)
-        .join('，'),
-    ),
-    ...Object.entries(instruction.visual)
-      .filter(([key]) => key !== 'negative')
-      .map(([, value]) => value),
-    Object.values(instruction.camera ?? {}).some(Boolean)
-      ? `镜头设计：${Object.values(instruction.camera!).filter(Boolean).join('，')}`
-      : undefined,
-    Object.values(instruction.lightingDesign ?? {}).some(Boolean)
-      ? `灯光设计：${Object.values(instruction.lightingDesign!).filter(Boolean).join('，')}`
-      : undefined,
-    ...instruction.beats.map((beat) =>
-      [
-        beat.startSeconds === undefined ? undefined : `${beat.startSeconds}—${beat.endSeconds}秒`,
-        beat.action,
-        ...Object.values(beat.camera ?? {}),
-        ...beat.dialogue.map(
-          (line) =>
-            `${name(line.characterDocumentId)}${[line.emotion, line.delivery].filter(Boolean).join('，')}说：“${line.text}”`,
-        ),
-      ]
-        .filter(Boolean)
-        .join('。'),
-    ),
-    options.includeAudio === false
-      ? undefined
-      : instruction.audio.mode === 'silent'
-        ? '无声音。'
-        : [instruction.audio.ambience, instruction.audio.music, instruction.audio.effects]
-            .filter(Boolean)
-            .join('。'),
-    ...instruction.continuity.before.map((fact) => `开始状态：${fact.key}=${fact.value}`),
-    ...instruction.continuity.after.map((fact) => `结束状态：${fact.key}=${fact.value}`),
-    ...instruction.continuity.locked.map((fact) => `保持不变：${fact.key}=${fact.value}`),
-    ...instruction.continuity.constraints,
-    instruction.transition?.entry ? `入镜衔接：${instruction.transition.entry}` : undefined,
-    instruction.transition?.exit ? `出镜衔接：${instruction.transition.exit}` : undefined,
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
+export {
+  renderProductionInstruction,
+  renderProductionNegative,
+  productionCharacterIds,
+  inspectProductionPrompt,
+} from './production-prompt.js';

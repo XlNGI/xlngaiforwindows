@@ -1,5 +1,5 @@
 import type { ProductionTarget } from '@ai-video/contracts';
-import { ProductionService } from './production-service.js';
+import { ProductionService, summarizeProductionNotices } from './production-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
 
 type Snapshot = ReturnType<ProductionService['readForAgent']>;
@@ -114,6 +114,7 @@ export class AgentProductionQueryService {
           (issue) => issue.message.length > 240 || issue.changedReferences?.length,
         ),
       issueCodes: [...new Set(snapshot.issues.map((issue) => issue.code))],
+      ...summarizeProductionNotices(snapshot.notices ?? []),
       estimatedDurationSeconds: snapshot.estimatedDurationSeconds,
       views: ['instruction', 'text', 'issues', ...(target.kind === 'scene' ? ['structure'] : [])],
     };

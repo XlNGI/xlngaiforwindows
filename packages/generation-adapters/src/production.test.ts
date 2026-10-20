@@ -254,7 +254,7 @@ describe('structured production compiler', () => {
     });
     expect(wan.issues).toEqual([]);
     expect(wan.parameters).toMatchObject({ duration: 5, ratio: '16:9', audio: false });
-    expect(wan.parameters.prompt).toContain('林澈，蓝色外套');
+    expect(wan.parameters.prompt).toContain('人物「林澈」：外观与服装：蓝色外套');
     expect(wan.parameters.prompt).toContain('结束状态：door=open');
     expect(wan.parameters.prompt).toContain('保持不变：coat=blue');
     spec.generation.resolution = '720p';

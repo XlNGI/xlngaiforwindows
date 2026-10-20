@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import type Database from 'better-sqlite3';
 import {
   renderProductionInstruction,
+  inspectProductionPrompt,
+  productionCharacterIds,
   seedProductionInputs,
   addProductionRoleVoices,
   applyProductionFacts,
@@ -92,6 +94,19 @@ export function summarizeProductionReadiness<T extends ProductionIssue>(issues: 
         .map((reference) => ({ ...reference, title: reference.title.slice(0, 120) })),
     })),
   };
+}
+
+export function summarizeProductionNotices(notices: ProductionIssue[]) {
+  return notices.length
+    ? {
+        noticeCount: notices.length,
+        notices: notices
+          .slice(0, 5)
+          .map(({ code, message, target }) => ({ code, message: message.slice(0, 240), target })),
+        noticesTruncated:
+          notices.length > 5 || notices.some((notice) => notice.message.length > 240),
+      }
+    : {};
 }
 
 /** One project store, immutable instruction history, synchronous local execution. */
@@ -348,9 +363,11 @@ export class ProductionService {
           const invalid = final.issues.filter((issue) => !readinessIssues.has(issue.code));
           if (invalid.length) throw new Error(invalid.map((issue) => issue.message).join('\n'));
         }
-        const issues = list.operations.flatMap(({ target }) =>
-          this.read(target).issues.map((issue) => ({ ...issue, target: issue.target ?? target })),
+        const reads = list.operations.map(({ target }) => ({ target, read: this.read(target) }));
+        const issues = reads.flatMap(({ target, read }) =>
+          read.issues.map((issue) => ({ ...issue, target: issue.target ?? target })),
         );
+        const notices = reads.flatMap(({ read }) => read.notices ?? []);
         const result = {
           status: 'applied',
           executionId,
@@ -358,6 +375,7 @@ export class ProductionService {
           changedCount: changed.size,
           unchangedCount: list.operations.length - changed.size,
           ...summarizeProductionReadiness(issues),
+          ...summarizeProductionNotices(notices),
           paidRequests: 0,
         };
         db.prepare('UPDATE production_execution_lists SET result_json=? WHERE id=?').run(
@@ -473,6 +491,7 @@ export class ProductionService {
         instruction: this.latest(db, project.id, target)?.instruction,
         currentText: currentText ?? '',
         issues: result.issues,
+        ...(result.notices?.length ? { notices: result.notices } : {}),
         revision: result.source?.revision,
         estimatedDurationSeconds: result.estimatedDurationSeconds,
         scene: scene && { ...scene, videoPrompt: undefined, hasPrompt: Boolean(scene.videoPrompt) },
@@ -705,6 +724,23 @@ export class ProductionService {
         target,
         rowVersion: state.rowVersion,
         instruction: sequence?.instruction ?? instruction,
+        notices: sequence
+          ? shots.flatMap((entry) =>
+              entry.instruction
+                ? inspectProductionPrompt(
+                    inheritProductionInstruction(instruction, entry.instruction),
+                    this.names(db, project.id),
+                  ).map((notice) => ({
+                    ...notice,
+                    target: { kind: 'shot' as const, id: entry.shot.id },
+                    targetTitle: entry.shot.title,
+                  }))
+                : [],
+            )
+          : inspectProductionPrompt(instruction, this.names(db, project.id)).map((notice) => ({
+              ...notice,
+              target,
+            })),
         ...(sequence
           ? {
               compiledPrompt: shotIds
@@ -775,7 +811,7 @@ export class ProductionService {
     if (!adapter) throw new Error('制作模型不存在。');
     return this.projects.access(false, (db, project) => {
       let effective = structuredClone(read.instruction!);
-      const notices: ProductionIssue[] = [];
+      const notices: ProductionIssue[] = [...(read.notices ?? [])];
       const issues = [...read.issues];
       const continuityState =
         params.target.kind === 'shot'
@@ -826,11 +862,35 @@ export class ProductionService {
           });
       }
       const state = this.targetState(params.target);
+      const scopedShots = params.shotIds?.map((id) =>
+        productionCharacterIds(this.latest(db, project.id, { kind: 'shot', id })?.instruction),
+      );
+      const characterIds = read.issues.some((issue) => issue.code === 'STALE_INSTRUCTION')
+        ? undefined
+        : params.target.kind === 'shot'
+          ? productionCharacterIds(effective)
+          : scopedShots?.every((ids) => ids !== undefined)
+            ? [...new Set(scopedShots.flat())]
+            : undefined;
+      if (characterIds !== undefined)
+        effective.resources = effective.resources.filter(
+          (resource) =>
+            !['character-image', 'voice-reference'].includes(resource.kind) ||
+            !resource.documentId ||
+            characterIds.includes(resource.documentId),
+        );
       let sceneInputs: ProductionCompileResult['sceneInputs'];
       if (state.sceneId) {
-        const scene = new ContentService(this.projects)
+        const storedScene = new ContentService(this.projects)
           .listScenes()
           .find((s) => s.id === state.sceneId)!;
+        const scene = {
+          ...storedScene,
+          characterBindings: storedScene.characterBindings?.filter(
+            (binding) =>
+              characterIds === undefined || characterIds.includes(binding.characterDocumentId),
+          ),
+        };
         const styleReferences = effective.resources.filter(
           (resource) => resource.kind === 'style-image' && resource.assetId,
         );

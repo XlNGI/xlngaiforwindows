@@ -10,6 +10,7 @@ import {
   sceneProductionInstructionSchema,
   shotProductionInstructionSchema,
 } from '@ai-video/contracts';
+import { PRODUCTION_AUTHORING_GUIDANCE } from './production-authoring-guidance.js';
 
 const PRODUCTION_QUERY_PROPERTIES = {
   view: { type: 'string', enum: ['structure', 'instruction', 'text', 'issues'] },
@@ -1228,6 +1229,11 @@ export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
 ];
+
+for (const tool of SYSTEM_AGENT_TOOLS) {
+  if (['scene.structure.stage', 'scene.submit_structure', 'production.execute'].includes(tool.name))
+    tool.description += PRODUCTION_AUTHORING_GUIDANCE;
+}
 
 export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {

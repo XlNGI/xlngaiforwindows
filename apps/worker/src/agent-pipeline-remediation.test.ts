@@ -1367,7 +1367,7 @@ it('shares create/update validation, retains binding text, rejects conflicting t
   huge.visual = Object.fromEntries(
     ['environment', 'lighting', 'palette', 'lens', 'negative', 'composition'].map((key) => [
       key,
-      '字'.repeat(4000),
+      key + '字'.repeat(4000 - key.length),
     ]),
   );
   for (const prompt of [undefined, huge.summary]) {

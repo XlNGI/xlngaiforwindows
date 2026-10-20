@@ -376,6 +376,12 @@ export function ProductionPanel({
   const [sceneInputsLoading, setSceneInputsLoading] = useState(false);
   const [sceneInputsError, setSceneInputsError] = useState('');
   const compiledSceneInputs = productionInstructions.result?.sceneInputs;
+  const promptReviewNotices = (productionInstructions.result?.notices ?? []).filter(
+    (notice) => notice.code.endsWith('_REVIEW') || notice.code === 'AUTHORING_REVIEW_NOTE',
+  );
+  const adaptationNotices = (productionInstructions.result?.notices ?? []).filter(
+    (notice) => !promptReviewNotices.includes(notice),
+  );
   const productionInstruction = productionInstructions.result?.instruction;
   const needsVoiceInput =
     !productionInstruction ||
@@ -1435,15 +1441,29 @@ export function ProductionPanel({
                       aria-label="制作内容适配"
                       open={Boolean(
                         productionInstructions.error ||
-                        productionInstructions.result?.issues.length,
+                        productionInstructions.result?.issues.length ||
+                        promptReviewNotices.length,
                       )}
                     >
                       <summary>制作说明</summary>
                       <div className="production-adaptation-body">
-                        {Boolean(productionInstructions.result?.notices?.length) && (
+                        {promptReviewNotices.length > 0 && (
+                          <div className="production-notes" role="status" aria-label="镜头内容提醒">
+                            <ul>
+                              {promptReviewNotices.map((notice, index) => (
+                                <li key={`${notice.code}:${index}`}>
+                                  {notice.targetTitle
+                                    ? `「${notice.targetTitle}」：${notice.message}`
+                                    : notice.message}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {adaptationNotices.length > 0 && (
                           <div className="production-notes" role="status" aria-label="模型适配说明">
                             <ul>
-                              {productionInstructions.result!.notices!.map((notice, index) => (
+                              {adaptationNotices.map((notice, index) => (
                                 <li key={`${notice.code}:${index}`}>{notice.message}</li>
                               ))}
                             </ul>

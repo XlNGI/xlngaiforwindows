@@ -88,6 +88,143 @@ const wan = () =>
   )!;
 
 describe('production execution in the project store', () => {
+  it('uses only the declared shot cast for automatic images, keeps warnings advisory and preserves manual inputs', async () => {
+    const f = await setup();
+    const blind = f.content.saveDocument({
+      kind: 'character',
+      title: '老瞎子',
+      contentMarkdown: '左臂自肘部断缺，双目失明',
+    });
+    const absent = f.content.saveDocument({
+      kind: 'character',
+      title: '烛阴',
+      contentMarkdown: '本场后镜才出现',
+    });
+    const actors = [f.actor, blind, absent];
+    for (const actor of actors) {
+      await writeFile(join(f.project.rootPath, `assets/${actor.id}.png`), 'fixture');
+      f.projects.access(true, (db, p) =>
+        db
+          .prepare(
+            "INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,'generated-image',?,'original',7,'now')",
+          )
+          .run(actor.id, p.id, `assets/${actor.id}.png`),
+      );
+    }
+    const scene = f.content.saveScene({
+      sceneId: f.scene.id,
+      title: f.scene.title,
+      expectedRowVersion: f.scene.rowVersion,
+      characterBindings: actors.map((actor) => ({
+        characterDocumentId: actor.id,
+        imageAssetId: actor.id,
+      })),
+    });
+    const second = f.content.saveShot({ sceneId: scene.id, title: '烛阴现身' });
+    const target = { kind: 'shot' as const, id: f.shot.id };
+    const shotSpec = (ids: string[]): ProductionInstruction =>
+      instruction({
+        version: 2,
+        narrative: { purpose: '收束开场' },
+        camera: { framing: '中远景' },
+        stillFrame: '门外雾气渐浓',
+        timing: { estimatedDurationSeconds: 8, rationale: '转身、探路、落锤' },
+        subjects: ids.map((id) => ({ documentId: id })),
+        beats: [
+          {
+            id: 'leave',
+            startSeconds: 0,
+            endSeconds: 8,
+            action: '人物离去，江晚停锤片刻',
+            characterDocumentIds: ids,
+            dialogue: [],
+          },
+        ],
+        generation: { duration: 8 },
+      });
+    const first = shotSpec([f.actor.id, blind.id]);
+    first.reviewNotes = ['老资料的断臂侧别有差异，保留待核实。'];
+    first.subjects[1]!.appearance = '右肩空荡';
+    first.continuity.locked = [
+      {
+        key: '断臂',
+        value: '左臂自肘部断缺',
+        comparison: {
+          entity: { kind: 'character', id: blind.id },
+          attribute: 'arm',
+          state: 'left-elbow',
+        },
+      },
+    ];
+    f.service.execute({
+      executionKey: 'scoped-cast',
+      operations: [
+        operation(
+          { kind: 'scene', id: scene.id },
+          scene.rowVersion,
+          instruction({
+            subjects: actors.map((actor) => ({ documentId: actor.id })),
+            resources: [
+              {
+                kind: 'character-image',
+                documentId: absent.id,
+                required: true,
+                purpose: '后镜烛阴',
+              },
+            ],
+          }),
+        ),
+        operation(target, f.shot.rowVersion, first),
+        operation({ kind: 'shot', id: second.id }, second.rowVersion, shotSpec([absent.id])),
+      ],
+    });
+    const model = getAdapterCatalog().adapters.find(
+      (a) => a.contractId === 'cn.happyhorse.1.1.r2v' && a.provider === 'unicompapi',
+    )!;
+    const compiled = f.service.compile({ target, adapterKey: model.key });
+    expect(compiled.issues).toEqual([]);
+    expect(compiled.notices?.map((notice) => notice.code)).toEqual(
+      expect.arrayContaining(['AUTHORING_REVIEW_NOTE', 'CHARACTER_DETAIL_REVIEW']),
+    );
+    expect(compiled.parameters.images).toEqual([
+      `project-asset://${f.actor.id}`,
+      `project-asset://${blind.id}`,
+    ]);
+    expect(compiled.parameters.prompt).not.toContain('烛阴');
+    expect(compiled.parameters.prompt).not.toContain('老资料的断臂侧别');
+    expect(
+      compiled.sceneInputs?.scene.characterBindings?.map((c) => c.characterDocumentId),
+    ).toEqual([f.actor.id, blind.id]);
+    expect(f.content.listScenes()[0]!.characterBindings).toHaveLength(3);
+    expect(() =>
+      f.service.assertSource(compiled.source, target, model.key, {
+        parameters: compiled.parameters,
+      }),
+    ).not.toThrow();
+    const segment = f.service.compile({
+      target: { kind: 'scene', id: scene.id },
+      adapterKey: model.key,
+      shotIds: [f.shot.id],
+    });
+    expect(segment.parameters.images).toEqual(compiled.parameters.images);
+    const manual = f.service.compile({
+      target,
+      adapterKey: model.key,
+      inputImages: [{ assetId: absent.id, role: 'reference' }],
+    });
+    expect(manual.parameters.images).toEqual([`project-asset://${absent.id}`]);
+    const full = f.service.compile({
+      target: { kind: 'scene', id: scene.id },
+      adapterKey: model.key,
+    });
+    expect(full.parameters.images).toHaveLength(3);
+    expect(
+      f.projects.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
   it('prepares the final form without imposing saved story facts, duration or required references', async () => {
     const f = await setup();
     const scene = { kind: 'scene' as const, id: f.scene.id };
@@ -1123,7 +1260,7 @@ describe('production execution in the project store', () => {
               visual: Object.fromEntries(
                 ['environment', 'composition', 'lighting', 'style', 'palette', 'lens'].map((k) => [
                   k,
-                  '雨'.repeat(4000),
+                  k + '雨'.repeat(4000 - k.length),
                 ]),
               ),
             }),

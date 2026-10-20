@@ -113,6 +113,72 @@ describe('shot reference storage', () => {
 });
 
 describe('ShotWorkspace', () => {
+  it.each(['scoped', 'stale', 'empty'] as const)(
+    'keeps shared cast cards but scopes automatically inherited images (%s)',
+    async (state) => {
+      const otherDoc = { ...characterDoc, id: 'absent', title: '烛阴' };
+      const otherImage = {
+        ...characterAsset,
+        id: 'absent-image',
+        relativePath: 'assets/absent.png',
+      };
+      const scene = {
+        id: 'scene',
+        projectId: 'project',
+        title: '铁匠铺',
+        position: 0,
+        rowVersion: 1,
+        createdAt: 'now',
+        updatedAt: 'now',
+        characterBindings: [
+          { characterDocumentId: characterDoc.id },
+          { characterDocumentId: otherDoc.id },
+        ],
+      };
+      vi.mocked(callWorker).mockImplementation(((method: string, params: { assetId?: string }) => {
+        if (method === 'production.read')
+          return Promise.resolve({
+            instruction: {
+              version: 2,
+              subjects: state === 'empty' ? [] : [{ documentId: characterDoc.id }],
+              beats: [],
+            },
+            issues: state === 'stale' ? [{ code: 'STALE_INSTRUCTION' }] : [],
+          });
+        if (method === 'scene.media.resolve')
+          return Promise.resolve({
+            characters: [
+              { characterDocumentId: characterDoc.id, defaultImage: characterAsset },
+              { characterDocumentId: otherDoc.id, defaultImage: otherImage },
+            ],
+            voices: [],
+            assets: [characterAsset, otherImage],
+          });
+        if (method === 'asset.mediaSource')
+          return Promise.resolve({
+            assetId: params.assetId,
+            path: 'D:/ref.png',
+            contentType: 'image/png',
+          });
+        return Promise.resolve([]);
+      }) as typeof callWorker);
+      const { onGenerateImage } = renderWorkspace({ scene, documents: [characterDoc, otherDoc] });
+      await screen.findByLabelText('烛阴角色参考图');
+      fireEvent.click(screen.getByRole('button', { name: '生成本镜画面' }));
+      const expected =
+        state === 'stale'
+          ? [characterAsset.id, otherImage.id]
+          : state === 'empty'
+            ? []
+            : [characterAsset.id];
+      await waitFor(() =>
+        expect(onGenerateImage).toHaveBeenCalledWith({ characterAssetIds: expected }),
+      );
+      expect(loadShotReferences('project', 'shot')).toEqual({});
+      expect(screen.getByLabelText('烛阴角色参考图')).toBeInTheDocument();
+    },
+  );
+
   it('keeps confirmed continuity frames when opening image production from the ordinary shot action', async () => {
     vi.mocked(callWorker).mockImplementation((method) =>
       Promise.resolve(

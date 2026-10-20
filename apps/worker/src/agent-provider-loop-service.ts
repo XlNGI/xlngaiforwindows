@@ -37,7 +37,11 @@ import {
   rebuildLibraryChunksForDocument,
 } from '@ai-video/persistence';
 import { ChangeSetService } from './change-set-service.js';
-import { ProductionService, summarizeProductionReadiness } from './production-service.js';
+import {
+  ProductionService,
+  summarizeProductionReadiness,
+  summarizeProductionNotices,
+} from './production-service.js';
 import { DocumentWorkflowService, DocumentWorkflowError } from './document-workflow-service.js';
 import { PartialArtifactService } from './partial-artifact-service.js';
 import { ProjectService } from './project-service.js';
@@ -2397,13 +2401,15 @@ export class AgentProviderLoopService {
           const shotIds = changeSet.items
             .filter((item) => item.entityType === 'shot')
             .map((item) => item.appliedEntityId!);
-          const issues = sceneIds.flatMap((id) =>
-            new ProductionService(this.projects)
-              .read({ kind: 'scene', id })
-              .issues.map((issue) => ({
-                ...issue,
-                sceneId: id,
-              })),
+          const reads = sceneIds.map((id) => ({
+            id,
+            read: new ProductionService(this.projects).read({ kind: 'scene', id }),
+          }));
+          const issues = reads.flatMap(({ id, read }) =>
+            read.issues.map((issue) => ({
+              ...issue,
+              sceneId: id,
+            })),
           );
           result = JSON.stringify({
             status: 'episode_structure_saved',
@@ -2411,6 +2417,7 @@ export class AgentProviderLoopService {
             sceneIds,
             shotIds,
             ...summarizeProductionReadiness(issues),
+            ...summarizeProductionNotices(reads.flatMap(({ read }) => read.notices ?? [])),
             itemCount: changeSet.items.length,
             reviewRequired: false,
             applied: true,

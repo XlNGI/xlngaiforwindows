@@ -11,6 +11,7 @@ import {
   emptyProductionFacts,
   type ProductionDefaults,
   renderProductionInstruction,
+  renderProductionNegative,
   type ProductionInstruction,
   type ProductionIssue,
   type ProductionExecuteParams,
@@ -202,7 +203,7 @@ export function compileProductionParameters(
       { includeAudio: !still },
     );
   if (instruction.visual.negative && !properties.negative_prompt) {
-    prompt += `\n画面约束：避免${instruction.visual.negative}`;
+    prompt += `\n画面约束：${renderProductionNegative(instruction.visual.negative)}`;
     notices.push({
       code: 'NEGATIVE_IN_PROMPT',
       message: '当前模型没有独立的负向提示词参数，已将画面约束保留在提示词中。',

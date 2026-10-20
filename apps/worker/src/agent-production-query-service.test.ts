@@ -61,6 +61,37 @@ async function setup() {
   };
 }
 
+it('returns bounded authoring reminders while preserving editable notes and a nonblocking draft', async () => {
+  const f = await setup();
+  const target = { kind: 'shot' as const, id: f.shot.id };
+  const spec = instruction('人物离去');
+  spec.reviewNotes = Array.from(
+    { length: 6 },
+    (_, index) => `${index}：资料侧别待核实。${'原文'.repeat(150)}`,
+  );
+  const saved = f.production.execute({
+    executionKey: 'review-notes',
+    operations: [
+      { action: 'set_prompt', target, expectedRowVersion: f.shot.rowVersion, instruction: spec },
+    ],
+  });
+  expect(saved).toMatchObject({
+    status: 'applied',
+    issueCount: 0,
+    noticeCount: 6,
+    noticesTruncated: true,
+  });
+  const result = f.query.read(target, { view: 'instruction' }, f.identity, 'instruction');
+  expect(result).toMatchObject({
+    noticeCount: 6,
+    noticesTruncated: true,
+    issueCount: 0,
+    instruction: { reviewNotes: spec.reviewNotes },
+  });
+  expect(result.notices as Array<{ message: string }>).toHaveLength(5);
+  expect((result.notices as Array<{ message: string }>)[0]!.message.length).toBe(240);
+});
+
 it('evicts old query snapshots and ignores unrelated chat writes while retaining view isolation', async () => {
   const f = await setup();
   const read = vi.spyOn(f.production, 'readForAgent');

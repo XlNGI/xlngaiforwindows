@@ -12,17 +12,25 @@ import { inspectProductionTargetInstruction } from '@ai-video/generation-adapter
 import { renderProductionInstruction, type ProductionInstruction } from '@ai-video/contracts';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
-import { ProductionService, summarizeProductionReadiness } from './production-service.js';
+import {
+  ProductionService,
+  summarizeProductionReadiness,
+  summarizeProductionNotices,
+} from './production-service.js';
 
 export class SceneStructureSubmissionService {
   constructor(private readonly projects: ProjectService) {}
 
   private readiness(sceneIds: string[]) {
     const production = new ProductionService(this.projects);
-    const issues = sceneIds.flatMap((id) =>
-      production.read({ kind: 'scene', id }).issues.map((issue) => ({ ...issue, sceneId: id })),
+    const reads = sceneIds.map((id) => ({ id, read: production.read({ kind: 'scene', id }) }));
+    const issues = reads.flatMap(({ id, read }) =>
+      read.issues.map((issue) => ({ ...issue, sceneId: id })),
     );
-    return summarizeProductionReadiness(issues);
+    return {
+      ...summarizeProductionReadiness(issues),
+      ...summarizeProductionNotices(reads.flatMap(({ read }) => read.notices ?? [])),
+    };
   }
 
   stage(args: Record<string, unknown>, identity: AgentSystemToolIdentity): Record<string, unknown> {

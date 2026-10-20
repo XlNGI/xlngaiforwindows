@@ -215,6 +215,60 @@ function mock(
 }
 
 describe('scene production bindings', () => {
+  it('shows authoring uncertainties without a blocking issue and submits the editable form', async () => {
+    mock(scene);
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
+      method === 'production.compile'
+        ? Promise.resolve({
+            target: { kind: 'shot', id: 'shot' },
+            rowVersion: 1,
+            source: {
+              target: { kind: 'shot', id: 'shot' },
+              instructionId: 'instruction',
+              revision: 1,
+              token: 'a'.repeat(64),
+            },
+            parameters: { prompt: '人物转身离去' },
+            issues: [],
+            notices: [
+              {
+                code: 'CHARACTER_DETAIL_REVIEW',
+                message: '人物描述与锁定要求的断臂侧别不同，请核实。',
+              },
+            ],
+          })
+        : fallback(method as never, params)) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        shotId="shot"
+        writable
+      />,
+    );
+    expect(await screen.findByLabelText('镜头内容提醒')).toBeVisible();
+    fireEvent.change(screen.getByRole('textbox', { name: '提示词' }), {
+      target: { value: '老瞎子以右手探杖，确认门槛后迈步。' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(callWorker)
+          .mock.calls.find(([method]) => method === 'video.generate.prepare')?.[1],
+      ).toMatchObject({
+        parameters: { prompt: '老瞎子以右手探杖，确认门槛后迈步。' },
+      }),
+    );
+    expect(
+      vi
+        .mocked(callWorker)
+        .mock.calls.some(([method]) => method === 'media.generation.confirmSubmission'),
+    ).toBe(false);
+  });
+
   it('reaches video preparation with the same selected images used to compile a shot', async () => {
     mock({ ...scene, characterBindings: [] });
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
