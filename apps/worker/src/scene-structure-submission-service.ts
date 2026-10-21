@@ -9,7 +9,11 @@ import { resolveWriteResource } from './project-resource-map.js';
 import { ProjectService } from './project-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
 import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
-import { renderProductionInstruction, type ProductionInstruction } from '@ai-video/contracts';
+import {
+  renderProductionInstruction,
+  normalizeProductionAuthoringArguments,
+  type ProductionInstruction,
+} from '@ai-video/contracts';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
 import {
@@ -34,6 +38,10 @@ export class SceneStructureSubmissionService {
   }
 
   stage(args: Record<string, unknown>, identity: AgentSystemToolIdentity): Record<string, unknown> {
+    args = normalizeProductionAuthoringArguments('scene.structure.stage', args) as Record<
+      string,
+      unknown
+    >;
     try {
       validateToolArguments(
         SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!,
@@ -62,6 +70,8 @@ export class SceneStructureSubmissionService {
           count: number;
           scene?: Record<string, unknown>;
           shots: Array<Record<string, unknown> | null>;
+          sources?: Array<{ documentId: string; versionId: string | null; status: string }>;
+          saved?: { changeSetId: string; sceneId: string; shotIds: string[] };
         };
         type Stage = {
           id: string;
@@ -145,51 +155,120 @@ export class SceneStructureSubmissionService {
           .prepare('UPDATE agent_tasks SET tool_call_limit=32 WHERE id=? AND tool_call_limit<32')
           .run(identity.taskId);
         const parts = JSON.parse(row.scenes_json) as Part[];
-        const describe = () => {
+        const describe = (savedSceneThisCall = false) => {
           const changes = new ChangeSetService(this.projects);
-          let saved = row.change_set_id ? changes.get(row.change_set_id) : undefined;
+          // Pre-upgrade completed stages have one change set and no per-part receipts.
+          let saved =
+            row.change_set_id && !parts.some((part) => part.saved)
+              ? changes.get(row.change_set_id)
+              : undefined;
           if (
             saved &&
             ['proposed', 'partially_applied'].includes(saved.status) &&
             saved.items.some((item) => item.status === 'pending')
           )
             saved = changes.apply({ changeSetId: saved.id, expectedRowVersion: saved.rowVersion });
+          const sceneIds =
+            saved?.items
+              .filter((item) => item.entityType === 'scene' && item.status === 'applied')
+              .map((item) => item.appliedEntityId!) ??
+            parts.flatMap((part) => (part.saved ? [part.saved.sceneId] : []));
+          const shotIds =
+            saved?.items
+              .filter((item) => item.entityType === 'shot' && item.status === 'applied')
+              .map((item) => item.appliedEntityId!) ??
+            parts.flatMap((part) => part.saved?.shotIds ?? []);
+          const complete = saved?.status === 'applied' || parts.every((part) => part.saved);
+          const referenceChanges = parts.flatMap((part, sceneIndex) =>
+            (part.sources ?? []).flatMap((source) => {
+              const current = database
+                .prepare(
+                  "SELECT current_version_id FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
+                )
+                .get(source.documentId, project.id) as
+                { current_version_id: string | null } | undefined;
+              return current?.current_version_id === source.versionId
+                ? []
+                : [
+                    {
+                      sceneIndex,
+                      documentId: source.documentId,
+                      versionId: source.versionId,
+                      currentVersionId: current?.current_version_id ?? null,
+                    },
+                  ];
+            }),
+          );
+          const budget = database
+            .prepare('SELECT tool_call_count,tool_call_limit FROM agent_tasks WHERE id=?')
+            .get(identity.taskId) as { tool_call_count: number; tool_call_limit: number };
+          const nextSceneIndex = parts.findIndex((part) => !part.saved);
+          const selected = typeof args.sceneIndex === 'number' ? parts[args.sceneIndex] : undefined;
           return {
             status: saved
               ? saved.status === 'applied'
                 ? 'scene_structure_saved'
                 : 'scene_structure_conflicted'
-              : 'scene_structure_staging',
+              : complete
+                ? 'scene_structure_saved'
+                : sceneIds.length
+                  ? 'scene_structure_partially_saved'
+                  : 'scene_structure_staging',
+            complete,
             stageId: row.id,
             stageOperation: args.operation,
+            savedSceneThisCall,
             rowVersion: row.row_version,
             changeSetId: row.change_set_id,
-            applied: saved?.status === 'applied',
+            applied: sceneIds.length > 0,
+            checkpointReady: parts.some(
+              (part) => part.saved || part.scene || part.shots.some(Boolean),
+            ),
             reviewRequired: false,
-            sceneIds: saved?.items
-              .filter((item) => item.entityType === 'scene' && item.status === 'applied')
-              .map((item) => item.appliedEntityId),
-            shotIds: saved?.items
-              .filter((item) => item.entityType === 'shot' && item.status === 'applied')
-              .map((item) => item.appliedEntityId),
-            ...(saved?.status === 'applied'
-              ? this.readiness(
-                  saved.items
-                    .filter((item) => item.entityType === 'scene')
-                    .map((item) => item.appliedEntityId!),
-                )
+            sceneIds,
+            shotIds,
+            changeSetIds: saved
+              ? [saved.id]
+              : parts.flatMap((part) => (part.saved ? [part.saved.changeSetId] : [])),
+            ...(sceneIds.length ? this.readiness(sceneIds) : {}),
+            businessCallsRemaining: budget.tool_call_limit - budget.tool_call_count,
+            minimumRemainingWrites: parts.reduce((sum, part) => {
+              if (part.saved) return sum;
+              const missingShots = part.shots.filter((shot) => !shot).length;
+              const writes = (part.scene ? 0 : 1) + Math.ceil(missingShots / 4);
+              return sum + (writes || 1);
+            }, 0),
+            nextSceneIndex: complete ? undefined : nextSceneIndex,
+            referenceChanges: referenceChanges.slice(0, 5),
+            referenceChangesTruncated: referenceChanges.length > 5,
+            ...(selected
+              ? {
+                  sources: selected.sources ?? [],
+                  bindings: selected.scene
+                    ? {
+                        sceneDocumentId: selected.scene.sceneDocumentId,
+                        characterDocumentIds: selected.scene.characterDocumentIds,
+                      }
+                    : undefined,
+                  previousSaved: parts
+                    .slice(0, args.sceneIndex as number)
+                    .filter((part) => part.saved)
+                    .at(-1)?.saved,
+                }
               : {}),
             scenes: parts.map((part, index) => ({
               index,
               setupSaved: Boolean(part.scene),
               expectedShots: part.count,
               missingShots: part.shots.flatMap((shot, offset) => (shot ? [] : [offset])),
+              sceneId: part.saved?.sceneId,
+              shotIds: part.saved?.shotIds,
             })),
           };
         };
         if (args.operation === 'get' || args.operation === 'begin') return describe();
-        if (row.change_set_id) {
-          if (args.operation === 'finalize') return describe();
+        if (row.change_set_id && !parts.some((part) => part.saved)) {
+          if (args.operation === 'finalize' || args.operation === 'checkpoint') return describe();
           throw new Error('Finalized stages are immutable.');
         }
         const before = JSON.stringify(parts);
@@ -199,6 +278,11 @@ export class SceneStructureSubmissionService {
           if (args.operation === 'put_scene') {
             if (!args.scene || typeof args.scene !== 'object')
               throw new Error('put_scene requires scene.');
+            if (JSON.stringify(part.scene) === JSON.stringify(args.scene)) return describe();
+            if (part.saved)
+              throw new Error(
+                'STAGE_SCENE_ALREADY_SAVED: revise the returned sceneId with its current CAS; do not recreate it.',
+              );
             part.scene = structuredClone(args.scene as Record<string, unknown>);
             const instruction = part.scene.instruction as ProductionInstruction;
             const issues = inspectProductionTargetInstruction(instruction, 'scene');
@@ -211,6 +295,25 @@ export class SceneStructureSubmissionService {
               part.scene.sceneDocumentId as string,
             );
             requireProductionCharacters(database, project.id, part.scene.characterDocumentIds);
+            const ids = [part.scene.sceneDocumentId as string, ...part.scene.characterDocumentIds];
+            part.sources = [...new Set(ids)].map((documentId) => {
+              const document = database
+                .prepare(
+                  'SELECT current_version_id,published_version_id FROM documents WHERE id=? AND project_id=?',
+                )
+                .get(documentId, project.id) as {
+                current_version_id: string | null;
+                published_version_id: string | null;
+              };
+              return {
+                documentId,
+                versionId: document.current_version_id,
+                status:
+                  document.current_version_id === document.published_version_id
+                    ? 'published'
+                    : 'draft',
+              };
+            });
           } else {
             if (!part.scene) throw new Error('Save shared scene setup before shots.');
             const offset = Number(args.shotOffset);
@@ -221,6 +324,15 @@ export class SceneStructureSubmissionService {
               offset + args.shots.length > part.count
             )
               throw new Error('shotOffset/shots exceeds the manifest.');
+            if (
+              JSON.stringify(part.shots.slice(offset, offset + args.shots.length)) ===
+              JSON.stringify(args.shots)
+            )
+              return describe();
+            if (part.saved)
+              throw new Error(
+                'STAGE_SCENE_ALREADY_SAVED: revise the returned real shot IDs with current CAS.',
+              );
             args.shots.forEach((shot, index) => {
               part.shots[offset + index] = shot as Record<string, unknown>;
             });
@@ -233,33 +345,73 @@ export class SceneStructureSubmissionService {
             );
           }
           if (before === JSON.stringify(parts)) return describe();
-        } else if (args.operation === 'finalize') {
-          if (parts.some((part) => !part.scene || part.shots.some((shot) => !shot)))
-            throw new Error('STAGE_INCOMPLETE: save every shared setup and missing shot first.');
-        } else throw new Error('Unsupported staging operation.');
-        if (args.expectedRowVersion !== row.row_version)
-          throw new Error('STAGE_ROW_VERSION_CONFLICT');
+        } else if (!['finalize', 'checkpoint'].includes(String(args.operation)))
+          throw new Error('Unsupported staging operation.');
+        if (
+          args.operation === 'checkpoint' &&
+          !parts.some((part) => part.saved || part.scene || part.shots.some(Boolean))
+        )
+          throw new Error(
+            'STAGE_CHECKPOINT_EMPTY: checkpoint requires saved or substantively staged scene content.',
+          );
+        const observed =
+          args.expectedRowVersion === undefined
+            ? (database
+                .prepare(
+                  `SELECT json_extract(result_summary_json,'$.rowVersion') AS version
+              FROM agent_tool_calls WHERE task_id=? AND tool_name='scene.structure.stage'
+                AND status='succeeded' AND json_extract(result_summary_json,'$.stageId')=?
+              ORDER BY rowid DESC LIMIT 1`,
+                )
+                .get(identity.taskId, row.id) as { version: number } | undefined)
+            : undefined;
+        const expectedVersion = args.expectedRowVersion ?? observed?.version;
+        if (expectedVersion === undefined)
+          throw new Error(
+            'STAGE_VERSION_REQUIRED: get this stage in the current task before writing, or supply expectedRowVersion.',
+          );
+        if (expectedVersion !== row.row_version) throw new Error('STAGE_ROW_VERSION_CONFLICT');
         if (Buffer.byteLength(JSON.stringify(parts)) > 1024 * 1024)
           throw new Error('Stage exceeds 1 MiB.');
-        if (args.operation === 'finalize') {
+        // Commit at most one complete scene per call, in manifest order. Each
+        // call is its own outer transaction, so a later scene failure cannot
+        // roll back an earlier scene saved by a prior call.
+        const ready = parts.find((part) => !part.saved);
+        let savedSceneThisCall = false;
+        if (ready?.scene && ready.shots.every((shot) => shot)) {
           const result = this.submit(
             {
               resourceId: 'workspace:shots',
               resolution: 'resolved',
               episodeTitle: row.title,
-              scenes: parts.map((part) => ({ ...part.scene, shots: part.shots })),
+              scenes: [{ ...ready.scene, shots: ready.shots }],
             },
             identity,
           );
-          row.change_set_id = result.changeSetId as string;
+          ready.saved = {
+            changeSetId: result.changeSetId as string,
+            sceneId: (result.sceneIds as string[])[0]!,
+            shotIds: result.shotIds as string[],
+          };
+          savedSceneThisCall = true;
         }
+        if (before === JSON.stringify(parts)) {
+          const result = describe();
+          return args.operation === 'checkpoint' && !result.complete
+            ? { ...result, status: 'scene_structure_checkpointed', checkpointed: true }
+            : result;
+        }
+        if (parts.every((part) => part.saved)) row.change_set_id = parts.at(-1)!.saved!.changeSetId;
         database
           .prepare(
             'UPDATE scene_structure_stages SET scenes_json=?,change_set_id=?,row_version=row_version+1,updated_at=? WHERE id=? AND row_version=?',
           )
           .run(JSON.stringify(parts), row.change_set_id, now, row.id, row.row_version);
         row.row_version += 1;
-        return describe();
+        const result = describe();
+        return args.operation === 'checkpoint' && !result.complete
+          ? { ...result, status: 'scene_structure_checkpointed', checkpointed: true }
+          : { ...result, savedSceneThisCall };
       })(),
     );
   }
@@ -268,6 +420,10 @@ export class SceneStructureSubmissionService {
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
   ): Record<string, unknown> {
+    args = normalizeProductionAuthoringArguments('scene.submit_structure', args) as Record<
+      string,
+      unknown
+    >;
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         if (

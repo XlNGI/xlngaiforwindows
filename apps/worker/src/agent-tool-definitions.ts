@@ -434,13 +434,16 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.structure.stage',
     description:
-      'Persist resumable scene/shot drafts in small parts. begin uses executionKey, episodeTitle and sceneShotCounts (total scenes+shots <=100). put_scene writes one shared setup with real references and instruction, without shots. put_shots writes at most four ordered shots at shotOffset. get returns missing ranges and current rowVersion. finalize validates all parts and atomically saves editable scenes/shots, retaining one changeSet as an audit record; no user approval is required. Use stageId and expectedRowVersion from the latest result; identical retries are idempotent. Stages are scoped to this conversation and survive cancellation/restart.',
+      'Persist resumable scene/shot drafts in small parts. begin uses executionKey, episodeTitle and sceneShotCounts (total scenes+shots <=100). put_scene writes one shared setup with real references and instruction, without shots. put_shots writes at most four ordered shots at shotOffset. When the earliest manifest scene has a complete setup and all shots, the same call atomically saves exactly that scene and returns its real sceneId/shotIds; a later scene failure cannot remove earlier saved scenes. Incomplete finalize is an idempotent progress check and never claims whole-plan completion. checkpoint explicitly ends the current task as partial only when real saved or staged content exists; it never marks an incomplete plan complete. get returns saved IDs, missing ranges, nextSceneIndex and current rowVersion. Saved manifest entries are immutable; revise actual IDs through the ordinary CAS update tool. No user approval is required. Use stageId and expectedRowVersion from the latest result; identical retries are idempotent. Stages are scoped to this conversation and survive cancellation/restart.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       required: ['operation', 'resourceId'],
       properties: {
-        operation: { type: 'string', enum: ['begin', 'get', 'put_scene', 'put_shots', 'finalize'] },
+        operation: {
+          type: 'string',
+          enum: ['begin', 'get', 'put_scene', 'put_shots', 'finalize', 'checkpoint'],
+        },
         resourceId: { type: 'string', const: 'workspace:shots' },
         executionKey: { type: 'string', minLength: 1, maxLength: 128 },
         episodeTitle: { type: 'string', minLength: 1, maxLength: 200 },
@@ -456,7 +459,12 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
           maxLength: 128,
           description: 'Omit with get to list resumable stages in this conversation.',
         },
-        expectedRowVersion: { type: 'integer', minimum: 0 },
+        expectedRowVersion: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Optional only when this task has already observed the current stage version through a successful begin/get/write result. Worker checks that observed baseline; otherwise get the stage first. Explicit stale versions are rejected.',
+        },
         sceneIndex: { type: 'integer', minimum: 0, maximum: 19 },
         shotOffset: { type: 'integer', minimum: 0, maximum: 29 },
         scene: {
@@ -490,6 +498,23 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
           },
         },
       },
+      anyOf: [
+        {
+          properties: { operation: { const: 'begin' } },
+          required: ['executionKey', 'episodeTitle', 'sceneShotCounts'],
+        },
+        { properties: { operation: { const: 'get' } } },
+        {
+          properties: { operation: { const: 'put_scene' } },
+          required: ['stageId', 'sceneIndex', 'scene'],
+        },
+        {
+          properties: { operation: { const: 'put_shots' } },
+          required: ['stageId', 'sceneIndex', 'shotOffset', 'shots'],
+        },
+        { properties: { operation: { const: 'finalize' } }, required: ['stageId'] },
+        { properties: { operation: { const: 'checkpoint' } }, required: ['stageId'] },
+      ],
     },
   },
   {

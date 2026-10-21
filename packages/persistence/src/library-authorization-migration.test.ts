@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { getSchemaVersion, migrateDatabase, openProjectDatabase } from './database.js';
+import { CURRENT_SCHEMA_VERSION } from './schema.js';
 
 it('upgrades v56 authorization quotas atomically while preserving audits and other tool limits', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'library-authorization-migration-'));
@@ -30,6 +31,7 @@ it('upgrades v56 authorization quotas atomically while preserving audits and oth
     db.pragma('foreign_keys = ON');
     db.exec(`
       DELETE FROM schema_migrations WHERE version >= 57;
+      ALTER TABLE agent_tasks DROP COLUMN completion_state;
       INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','Legacy','now','now');
       INSERT INTO conversations(id,project_id,scope_type,title,created_at,updated_at) VALUES('c','p','project','Sources','now','now');
       INSERT INTO chat_messages(id,conversation_id,role,content,status,created_at) VALUES('u','c','user','Read sources','complete','now'),('a','c','assistant','','streaming','now');
@@ -48,7 +50,13 @@ it('upgrades v56 authorization quotas atomically while preserving audits and oth
     const snapshot = () => ({
       authorizations: db.prepare('SELECT * FROM agent_tool_authorizations').all(),
       calls: db.prepare('SELECT * FROM agent_tool_calls').all(),
-      tasks: db.prepare('SELECT * FROM agent_tasks').all(),
+      tasks: (db.prepare('SELECT * FROM agent_tasks').all() as Array<Record<string, unknown>>).map(
+        (row) => {
+          const copy = { ...row };
+          delete copy.completion_state;
+          return copy;
+        },
+      ),
     });
     const before = snapshot();
     expect(() => migrateDatabase(db)).toThrow('v57 failure');
@@ -61,7 +69,7 @@ it('upgrades v56 authorization quotas atomically while preserving audits and oth
     );
     expect(() => setQuota.run('library.read', 16)).toThrow();
     db.exec('DROP TRIGGER fail_v57');
-    expect(migrateDatabase(db)).toBe(58);
+    expect(migrateDatabase(db)).toBe(CURRENT_SCHEMA_VERSION);
     expect(snapshot()).toEqual(before);
     expect(db.pragma('foreign_key_check')).toEqual([]);
     expect(
@@ -86,7 +94,7 @@ it('upgrades v56 authorization quotas atomically while preserving audits and oth
         `INSERT INTO agent_tool_authorizations SELECT 'foreign', project_id, task_id, generation_id, attempt_id, provider_step_id, 'wrong-session', allowed_operation, target_document_id, scope_type, scope_id, base_version_id, expected_document_row_version, policy_version, tool_schema_version, authorization_handle_hash, status, max_call_uses, used_call_count, expires_at, revoked_at, row_version, created_at FROM agent_tool_authorizations WHERE id='read'`,
       ),
     ).toThrow('does not match');
-    expect(migrateDatabase(db)).toBe(58);
+    expect(migrateDatabase(db)).toBe(CURRENT_SCHEMA_VERSION);
   } finally {
     db.close();
     await rm(directory, { recursive: true, force: true });

@@ -19,6 +19,7 @@ import { validateToolArguments } from '@earendil-works/pi-ai';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { loadedToolGuidance } from './agent-workflow-guidance.js';
 import { RepeatedReadResults } from './repeated-read-results.js';
+import { normalizeProductionAuthoringArguments } from '@ai-video/contracts';
 
 const CORE_TOOLS = [
   'conversation.task.route',
@@ -389,6 +390,7 @@ export class AgentProviderToolGateway {
   private prepareArguments(definition: LlmToolDefinition, args: unknown): unknown {
     try {
       this.assertRepairBudget();
+      args = normalizeProductionAuthoringArguments(definition.name, args);
       const validated: unknown = validateToolArguments(definition, {
         type: 'toolCall',
         id: 'validation',

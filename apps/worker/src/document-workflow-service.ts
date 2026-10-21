@@ -143,6 +143,7 @@ interface AgentTaskRow {
   title: string;
   status: string;
   outcome: string | null;
+  completion_state: string | null;
   context_snapshot_id: string | null;
   error_code: string | null;
   error_message: string | null;
@@ -377,6 +378,7 @@ function toTask(row: AgentTaskRow): AgentTaskInfo {
     )
       ? (row.outcome as AgentTaskInfo['outcome'])
       : undefined,
+    completionState: row.completion_state === 'partial' ? 'partial' : undefined,
     contextSnapshotId: row.context_snapshot_id ?? undefined,
     errorCode: row.error_code ?? undefined,
     errorMessage: row.error_message ?? undefined,

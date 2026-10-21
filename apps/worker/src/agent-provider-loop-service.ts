@@ -1802,6 +1802,9 @@ export class AgentProviderLoopService {
             chapterId?: string;
             status?: string;
             readiness?: string;
+            stageOperation?: string;
+            sceneIds?: string[];
+            savedSceneThisCall?: boolean;
           };
           database
             .prepare(
@@ -1820,8 +1823,9 @@ export class AgentProviderLoopService {
             );
           outputs.push({ callId: call.id, output });
           if (
-            ['scene.submit_structure', 'scene.structure.stage'].includes(operation) &&
-            artifact.status === 'scene_structure_saved'
+            artifact.status === 'scene_structure_saved' &&
+            (operation === 'scene.submit_structure' ||
+              (operation === 'scene.structure.stage' && artifact.savedSceneThisCall))
           ) {
             this.appendEvent(
               database,
@@ -1831,6 +1835,21 @@ export class AgentProviderLoopService {
               artifact.readiness === 'needs_attention'
                 ? '已保存场次与镜头草稿，存在待处理的制作问题。'
                 : '已保存场次与镜头草稿。',
+              now,
+            );
+          } else if (
+            operation === 'scene.structure.stage' &&
+            artifact.status === 'scene_structure_partially_saved' &&
+            ['put_scene', 'put_shots', 'finalize', 'checkpoint'].includes(
+              artifact.stageOperation ?? '',
+            )
+          ) {
+            this.appendEvent(
+              database,
+              project.id,
+              task.id,
+              'scene.structure.partial_saved',
+              `已保存 ${Array.isArray(artifact.sceneIds) ? artifact.sceneIds.length : 0} 场，制作清单仍未完成。`,
               now,
             );
           }
@@ -3677,7 +3696,7 @@ export class AgentProviderLoopService {
         }
         // A normal assistant response may be an answer, a query, or a model
         // selected write. Do not make completion depend on Worker regexes.
-        assertSceneAuthoringCompleted(database, task.id);
+        const completionState = assertSceneAuthoringCompleted(database, task.id);
         const now = new Date().toISOString();
         this.completeStep(
           database,
@@ -3690,22 +3709,24 @@ export class AgentProviderLoopService {
         );
         const completed = database
           .prepare(
-            `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
+            `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN ? = 'partial' THEN NULL WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
                  AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'production.execute')
                  AND (tool_name NOT IN ('scene.submit_structure', 'scene.structure.stage') OR json_extract(result_summary_json,'$.status')='scene_structure_saved')
-             ) THEN NULL ELSE 'read-only' END,
+             ) THEN NULL ELSE 'read-only' END, completion_state = ?,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
              WHERE id = ? AND status = 'running' AND phase = 'model_running'`,
           )
-          .run(task.id, now, now, task.id);
+          .run(completionState ?? null, task.id, completionState ?? null, now, now, task.id);
         if (completed.changes === 1) {
           this.appendEvent(
             database,
             project.id,
             task.id,
             'agent.task.completed',
-            'Agent completed without a pending review or confirmation.',
+            completionState === 'partial'
+              ? 'Agent checkpointed real authoring progress; the production plan is partial and resumable.'
+              : 'Agent completed without a pending review or confirmation.',
             now,
           );
         }
@@ -4379,7 +4400,10 @@ export class AgentProviderLoopService {
 }
 
 /** A model ending its response does not resolve a rejected or unfinished write. */
-function assertSceneAuthoringCompleted(database: Database.Database, taskId: string): void {
+function assertSceneAuthoringCompleted(
+  database: Database.Database,
+  taskId: string,
+): 'partial' | undefined {
   const calls = database
     .prepare(
       `SELECT tool_name,status,error_message,result_summary_json,created_at FROM agent_tool_calls
@@ -4395,6 +4419,7 @@ function assertSceneAuthoringCompleted(database: Database.Database, taskId: stri
   }>;
   const unresolved = new Map<string, string>();
   const resolvedAt = new Map<string, string>();
+  const checkpointedStages = new Set<string>();
   for (const call of calls) {
     const group = call.tool_name === 'production.execute' ? 'production' : 'scene';
     const result = JSON.parse(call.result_summary_json ?? '{}') as {
@@ -4414,14 +4439,22 @@ function assertSceneAuthoringCompleted(database: Database.Database, taskId: stri
     ) {
       unresolved.delete(group);
       if (result.stageId) unresolved.delete(`scene-stage:${result.stageId}`);
+      if (result.stageId) checkpointedStages.delete(result.stageId);
       resolvedAt.set(group, call.created_at);
+    } else if (result.status === 'scene_structure_checkpointed' && result.stageId) {
+      unresolved.delete(`scene-stage:${result.stageId}`);
+      checkpointedStages.add(result.stageId);
     } else if (
-      result.status === 'scene_structure_staging' &&
+      ['scene_structure_staging', 'scene_structure_partially_saved'].includes(
+        result.status ?? '',
+      ) &&
       ['begin', 'put_scene', 'put_shots', 'finalize'].includes(result.stageOperation ?? '')
     ) {
       unresolved.set(
         `scene-stage:${result.stageId}`,
-        '分段内容已暂存，尚未 finalize 保存为完整场次。',
+        result.status === 'scene_structure_partially_saved'
+          ? '已有场次草稿保存，但制作清单仍未完成；继续创作或显式 checkpoint。'
+          : '分段内容已暂存，尚未保存为完整场次；继续创作或显式 checkpoint。',
       );
     }
   }
@@ -4450,6 +4483,7 @@ function assertSceneAuthoringCompleted(database: Database.Database, taskId: stri
     throw new Error(
       `${group === 'production' ? 'AGENT_PRODUCTION_NOT_SAVED' : 'AGENT_SCENE_NOT_SAVED'}: 任务未完成：${reason}`,
     );
+  return checkpointedStages.size ? 'partial' : undefined;
 }
 
 function excerptArguments(value: string, maximum = 120): string {

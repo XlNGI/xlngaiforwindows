@@ -1104,6 +1104,7 @@ describe('ProductionPanel', () => {
         ['Vidu Q2', 'Vidu Q2'],
       ),
     );
+    await waitFor(() => expect(model).toBeEnabled());
     expect(model).toHaveValue(`21111111-1111-4111-8111-111111111112::${descriptor.key}`);
 
     const v3OptionKey = '21111111-1111-4111-8111-111111111112::' + v3.key;

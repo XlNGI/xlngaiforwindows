@@ -107,6 +107,62 @@ function instruction(shot = false): ProductionInstruction {
   };
 }
 
+it.each(['begin', 'put_scene', 'put_shots', 'finalize', 'checkpoint'])(
+  'declares operation-specific stage requirements (%s)',
+  (operation) => {
+    const definition = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!;
+    expect(() => {
+      validateToolArguments(definition, {
+        type: 'toolCall',
+        id: 'missing',
+        name: definition.name,
+        arguments: { operation, resourceId: 'workspace:shots' },
+      });
+    }).toThrow();
+  },
+);
+
+it('uses a trusted observed zero stage version when omitted and omits unknown optional dates', async () => {
+  const f = await setup();
+  const run = f.prepare('生成场次');
+  const state = await run.invoke('scene.structure.stage', {
+    operation: 'begin',
+    resourceId: 'workspace:shots',
+    executionKey: 'observed-zero',
+    episodeTitle: '清晨',
+    sceneShotCounts: [1],
+  });
+  const setupInstruction = instruction();
+  setupInstruction.storyTime!.date = '';
+  const saved = await run.invoke('scene.structure.stage', {
+    operation: 'put_scene',
+    resourceId: 'workspace:shots',
+    stageId: state.stageId,
+    sceneIndex: 0,
+    scene: {
+      title: '庭院',
+      sceneDocumentId: f.setting.id,
+      characterDocumentIds: [],
+      instruction: setupInstruction,
+    },
+  });
+  expect(saved, JSON.stringify(saved)).toMatchObject({
+    status: 'scene_structure_staging',
+    rowVersion: 1,
+  });
+  const other = f.prepare('另一个独立请求');
+  const result = await other.invoke('scene.structure.stage', {
+    operation: 'put_shots',
+    resourceId: 'workspace:shots',
+    stageId: state.stageId,
+    sceneIndex: 0,
+    shotOffset: 0,
+    shots: [{ title: '镜头', instruction: instruction(true) }],
+  });
+  expect(JSON.stringify(result)).toContain('STAGE_VERSION_REQUIRED');
+  expect(f.content.listScenes()).toHaveLength(0);
+});
+
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'compacts old versioned library text through Native/Pi and retains real SQLite sources (%s)',
   async (protocol) => {
@@ -864,7 +920,49 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
   f.loop.startProviderStep(run.prepared.stream);
   expect(() =>
     f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
-  ).toThrow('尚未 finalize');
+  ).toThrow('尚未保存为完整场次');
+});
+
+it('ends an explicit non-empty checkpoint as visibly partial and keeps normal incomplete tasks unresolved', async () => {
+  const f = await setup();
+  const run = f.prepare('创作第一场并保留续作进度');
+  const base = { resourceId: 'workspace:shots' };
+  let state = await run.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'begin',
+    executionKey: 'explicit-partial-checkpoint',
+    episodeTitle: '第一集',
+    sceneShotCounts: [2],
+  });
+  state = await run.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'put_scene',
+    stageId: state.stageId,
+    expectedRowVersion: state.rowVersion,
+    sceneIndex: 0,
+    scene: {
+      title: '村口',
+      sceneDocumentId: f.setting.id,
+      characterDocumentIds: [],
+      instruction: instruction(),
+    },
+  });
+  const checkpoint = await run.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'checkpoint',
+    stageId: state.stageId,
+    expectedRowVersion: state.rowVersion,
+  });
+  expect(checkpoint).toMatchObject({
+    status: 'scene_structure_checkpointed',
+    checkpointed: true,
+    complete: false,
+  });
+  f.loop.startProviderStep(run.prepared.stream);
+  f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' });
+  const task = f.workflow.getTask({ taskId: run.agent.taskId }).task;
+  expect(task).toMatchObject({ status: 'completed', completionState: 'partial' });
+  expect(task.outcome).toBeUndefined();
 });
 
 async function setup(
@@ -1366,15 +1464,13 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
   const version = state.rowVersion;
   expect((await first.invoke('scene.structure.stage', setupArgs)).rowVersion).toBe(version);
   expect(
-    (
-      await first.invoke('scene.structure.stage', {
-        ...base,
-        operation: 'finalize',
-        stageId,
-        expectedRowVersion: version,
-      })
-    ).status,
-  ).toBe('rejected');
+    await first.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'finalize',
+      stageId,
+      expectedRowVersion: version,
+    }),
+  ).toMatchObject({ status: 'scene_structure_staging', complete: false });
   expect(new ChangeSetService(f.project).list()).toHaveLength(0);
   await f.generations.cancel(first.prepared.stream.generationId);
   f.loop.terminateGeneration(first.prepared.stream.generationId, 'cancelled');
@@ -1418,6 +1514,196 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
   f.loop.startProviderStep(second.prepared.stream);
   f.loop.completeProviderStep({ ...second.prepared.stream, finishReason: 'stop' });
   expect(f.workflow.getTask({ taskId: second.agent.taskId }).task.outcome).not.toBe('read-only');
+});
+
+it('keeps an earlier scene saved when a later staged scene is incomplete or fails', async () => {
+  const f = await setup();
+  const run = f.prepare('依次生成两场');
+  const base = { resourceId: 'workspace:shots' };
+  let state = await run.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'begin',
+    executionKey: 'two-scene-atomicity',
+    episodeTitle: '两场',
+    sceneShotCounts: [1, 1],
+  });
+  const stageId = state.stageId;
+  const putScene = async (sceneIndex: number) => {
+    state = await run.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_scene',
+      stageId,
+      expectedRowVersion: state.rowVersion,
+      sceneIndex,
+      scene: {
+        title: `场次${sceneIndex + 1}`,
+        sceneDocumentId: f.setting.id,
+        characterDocumentIds: [],
+        instruction: instruction(),
+      },
+    });
+  };
+  const putShot = async (sceneIndex: number, shotInstruction: ProductionInstruction) => {
+    state = await run.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_shots',
+      stageId,
+      expectedRowVersion: state.rowVersion,
+      sceneIndex,
+      shotOffset: 0,
+      shots: [{ title: `镜头${sceneIndex + 1}`, instruction: shotInstruction }],
+    });
+  };
+
+  await putScene(0);
+  await putShot(0, instruction(true));
+  expect(state).toMatchObject({
+    status: 'scene_structure_partially_saved',
+    complete: false,
+    sceneIds: [expect.any(String)],
+  });
+  const firstSceneId = (state.sceneIds as string[])[0]!;
+  expect(f.content.listScenes()).toHaveLength(1);
+  await putScene(1);
+  const checkpoint = await run.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'finalize',
+    stageId,
+    expectedRowVersion: state.rowVersion,
+  });
+  expect(checkpoint).toMatchObject({
+    status: 'scene_structure_partially_saved',
+    complete: false,
+    sceneIds: [firstSceneId],
+  });
+  expect(f.content.listScenes()).toHaveLength(1);
+
+  await expect(
+    run.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_shots',
+      stageId,
+      expectedRowVersion: checkpoint.rowVersion,
+      sceneIndex: 1,
+      shotOffset: 0,
+      shots: [{ title: '坏镜头', instruction: { ...instruction(true), unknown: true } }],
+    }),
+  ).resolves.toMatchObject({ status: 'rejected' });
+  expect(f.content.listScenes()).toHaveLength(1);
+  expect(f.content.listShots(firstSceneId)).toHaveLength(1);
+
+  state = await run.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'put_shots',
+    stageId,
+    expectedRowVersion: checkpoint.rowVersion,
+    sceneIndex: 1,
+    shotOffset: 0,
+    shots: [{ title: '镜头2', instruction: instruction(true) }],
+  });
+  expect(state).toMatchObject({
+    status: 'scene_structure_saved',
+    complete: true,
+    sceneIds: [firstSceneId, expect.any(String)],
+  });
+  expect(f.content.listScenes()).toHaveLength(2);
+  expect(f.content.listShots(firstSceneId)).toHaveLength(1);
+});
+
+it('continues a 17-scene, 47-shot manifest across a real tool-budget checkpoint without duplicates', async () => {
+  const f = await setup();
+  const counts = [...Array<number>(13).fill(3), ...Array<number>(4).fill(2)];
+  expect(counts.reduce((sum, count) => sum + count, 0)).toBe(47);
+  const base = { resourceId: 'workspace:shots' };
+  const first = f.prepare('生成 17 场 47 镜');
+  let state = await first.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'begin',
+    executionKey: 'seventeen-scenes-forty-seven-shots',
+    episodeTitle: '17 场测试',
+    sceneShotCounts: counts,
+  });
+  const stageId = state.stageId;
+  for (let sceneIndex = 0; sceneIndex < 15; sceneIndex++) {
+    state = await first.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_scene',
+      stageId,
+      expectedRowVersion: state.rowVersion,
+      sceneIndex,
+      scene: {
+        title: `场${sceneIndex + 1}`,
+        sceneDocumentId: f.setting.id,
+        characterDocumentIds: [],
+        instruction: instruction(),
+      },
+    });
+    state = await first.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_shots',
+      stageId,
+      expectedRowVersion: state.rowVersion,
+      sceneIndex,
+      shotOffset: 0,
+      shots: Array.from({ length: counts[sceneIndex]! }, (_, offset) => ({
+        title: `场${sceneIndex + 1}镜${offset + 1}`,
+        instruction: instruction(true),
+      })),
+    });
+  }
+  expect(f.content.listScenes()).toHaveLength(15);
+  expect(state.businessCallsRemaining).toBe(1);
+  expect(state.minimumRemainingWrites).toBe(4);
+  const partial = await first.invoke('scene.structure.stage', {
+    ...base,
+    operation: 'checkpoint',
+    stageId,
+    expectedRowVersion: state.rowVersion,
+  });
+  expect(partial).toMatchObject({ status: 'scene_structure_checkpointed', complete: false });
+  expect((partial.sceneIds as string[]).length).toBeGreaterThan(0);
+  f.loop.startProviderStep(first.prepared.stream);
+  f.loop.completeProviderStep({ ...first.prepared.stream, finishReason: 'stop' });
+  expect(f.workflow.getTask({ taskId: first.agent.taskId }).task.completionState).toBe('partial');
+
+  const second = f.prepare('继续 17 场测试');
+  state = await second.invoke('scene.structure.stage', { ...base, operation: 'get', stageId });
+  expect(state.nextSceneIndex).toBe(15);
+  for (let sceneIndex = 15; sceneIndex < counts.length; sceneIndex++) {
+    state = await second.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_scene',
+      stageId,
+      expectedRowVersion: state.rowVersion,
+      sceneIndex,
+      scene: {
+        title: `场${sceneIndex + 1}`,
+        sceneDocumentId: f.setting.id,
+        characterDocumentIds: [],
+        instruction: instruction(),
+      },
+    });
+    state = await second.invoke('scene.structure.stage', {
+      ...base,
+      operation: 'put_shots',
+      stageId,
+      expectedRowVersion: state.rowVersion,
+      sceneIndex,
+      shotOffset: 0,
+      shots: Array.from({ length: counts[sceneIndex]! }, (_, offset) => ({
+        title: `场${sceneIndex + 1}镜${offset + 1}`,
+        instruction: instruction(true),
+      })),
+    });
+  }
+  expect(state).toMatchObject({ status: 'scene_structure_saved', complete: true });
+  f.loop.startProviderStep(second.prepared.stream);
+  f.loop.completeProviderStep({ ...second.prepared.stream, finishReason: 'stop' });
+  const scenes = f.content.listScenes();
+  expect(scenes).toHaveLength(17);
+  expect(new Set(state.sceneIds as string[]).size).toBe(17);
+  expect(scenes.reduce((sum, scene) => sum + f.content.listShots(scene.id).length, 0)).toBe(47);
+  expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(17);
 });
 
 it('shares create/update validation, retains binding text, rejects conflicting text and preflights total/rendered limits', async () => {

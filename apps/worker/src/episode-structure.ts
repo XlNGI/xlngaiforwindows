@@ -1,5 +1,9 @@
 import type Database from 'better-sqlite3';
-import { renderProductionInstruction, type ProductionInstruction } from '@ai-video/contracts';
+import {
+  renderProductionInstruction,
+  normalizeProductionAuthoringInstruction,
+  type ProductionInstruction,
+} from '@ai-video/contracts';
 import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
@@ -203,7 +207,7 @@ export function parseEpisodeStructureArguments(
 
 function parseInstruction(value: unknown, kind: string): ProductionInstruction | undefined {
   if (value === undefined) return undefined;
-  const instruction = value as ProductionInstruction;
+  const instruction = normalizeProductionAuthoringInstruction(value) as ProductionInstruction;
   const issues = inspectProductionTargetInstruction(instruction, kind);
   if (issues.length) throw new Error(issues.map((issue) => issue.message).join('\n'));
   return instruction;

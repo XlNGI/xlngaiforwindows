@@ -59,6 +59,7 @@ import { MIGRATION_V55 } from './migration-v55.js';
 import { MIGRATION_V56 } from './migration-v56.js';
 import { widenLibraryReadAuthorizationLimit } from './migration-v57.js';
 import { MIGRATION_V58 } from './migration-v58.js';
+import { MIGRATION_V59 } from './migration-v59.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -624,6 +625,19 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(58, now);
+    })();
+  }
+  if (currentVersion < 59) {
+    database.transaction(() => {
+      const columns = new Set(
+        (database.prepare('PRAGMA table_info(agent_tasks)').all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      );
+      if (!columns.has('completion_state')) database.exec(MIGRATION_V59);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(59, now);
     })();
   }
   return getSchemaVersion(database);

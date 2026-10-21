@@ -185,6 +185,7 @@ export interface AgentTaskRecord {
   contextSnapshotId?: string;
   status: AgentTaskStatus;
   outcome?: AgentTaskOutcome;
+  completionState?: 'partial';
   retryOfTaskId?: string;
   idempotencyKey?: string;
   errorCode?: string;

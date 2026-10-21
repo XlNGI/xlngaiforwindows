@@ -20,18 +20,36 @@ export function inheritProductionInstruction(
   const defaults = { ...parent.generation };
   delete defaults.duration;
   const characterIds = productionCharacterIds(shot);
+  const parentSubjects = new Map(parent.subjects.map((subject) => [subject.documentId, subject]));
+  const shotSubjects = new Map(shot.subjects.map((subject) => [subject.documentId, subject]));
+  const inheritedSubjects =
+    characterIds === undefined
+      ? shot.subjects.map((subject) => ({
+          ...stableSubject(parentSubjects.get(subject.documentId)),
+          ...subject,
+        }))
+      : characterIds.map((documentId) => ({
+          documentId,
+          ...stableSubject(parentSubjects.get(documentId)),
+          ...shotSubjects.get(documentId),
+        }));
+  const inheritedCamera = { ...parent.camera };
+  // Scene camera fields describe one framing/setup unless a shot says more.
+  // One-off movement and frame endpoints belong to the shot that authored them.
+  delete inheritedCamera.movement;
+  delete inheritedCamera.speed;
+  delete inheritedCamera.amplitude;
+  delete inheritedCamera.startFrame;
+  delete inheritedCamera.endFrame;
   return {
     ...shot,
     storyTime: shot.storyTime ?? parent.storyTime,
     location: parent.location ? { ...parent.location, ...shot.location } : shot.location,
     style: { ...parent.style, ...shot.style },
     visual: { ...parent.visual, ...shot.visual },
-    camera: { ...parent.camera, ...shot.camera },
+    camera: { ...inheritedCamera, ...shot.camera },
     lightingDesign: { ...parent.lightingDesign, ...shot.lightingDesign },
-    subjects: shot.subjects.map((subject) => ({
-      ...parent.subjects.find((item) => item.documentId === subject.documentId),
-      ...subject,
-    })),
+    subjects: inheritedSubjects,
     reviewNotes: [...new Set([...(parent.reviewNotes ?? []), ...(shot.reviewNotes ?? [])])],
     generation: { ...defaults, ...shot.generation },
     resources: [
@@ -52,6 +70,18 @@ export function inheritProductionInstruction(
             other.assetId === item.assetId,
         ) === index,
     ),
+  };
+}
+
+function stableSubject<T extends ProductionInstruction['subjects'][number] | undefined>(
+  subject: T,
+): Pick<NonNullable<T>, 'description' | 'wardrobe' | 'appearance' | 'hairMakeup'> | undefined {
+  if (!subject) return undefined;
+  return {
+    description: subject.description,
+    wardrobe: subject.wardrobe,
+    appearance: subject.appearance,
+    hairMakeup: subject.hairMakeup,
   };
 }
 

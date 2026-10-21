@@ -19,6 +19,7 @@ import type { FileTaskWorkerMethodMap } from './file-tasks.js';
 export * from './file-tasks.js';
 export * from './task-schedule.js';
 export * from './production.js';
+export * from './production-authoring.js';
 export * from './production-continuity.js';
 export * from './production-schema.js';
 export * from './production-inputs.js';
@@ -1518,6 +1519,7 @@ export interface AgentTaskInfo {
   title: string;
   status: AgentTaskStatus;
   outcome?: AgentTaskOutcome;
+  completionState?: 'partial';
   contextSnapshotId?: string;
   errorCode?: string;
   errorMessage?: string;

@@ -163,6 +163,41 @@ export interface ProductionExecuteParams {
   }>;
 }
 
+/** Authoring views share one persisted IR; each target has its own requirements. */
+export type SceneProductionInstruction = ProductionInstruction & {
+  version: 2;
+  narrative: NonNullable<ProductionInstruction['narrative']>;
+  storyTime: NonNullable<ProductionInstruction['storyTime']>;
+  location: NonNullable<ProductionInstruction['location']>;
+};
+export type ShotProductionInstruction = ProductionInstruction & {
+  version: 2;
+  narrative: NonNullable<ProductionInstruction['narrative']>;
+  timing: NonNullable<ProductionInstruction['timing']>;
+  stillFrame: string;
+};
+
+/** Shared scene context and references; it does not own shot blocking or action. */
+export interface ProductionSceneAuthoringIR {
+  title: string;
+  sceneDocumentId: string;
+  characterDocumentIds: string[];
+  instruction: SceneProductionInstruction;
+}
+
+/** One shot owns its cast, blocking, dialogue, timing, camera and state changes. */
+export interface ProductionShotAuthoringIR {
+  title: string;
+  instruction: ShotProductionInstruction;
+}
+
+/** Persistence receipt is Worker output, not model-authored creative IR. */
+export interface ProductionSceneSaveReceipt {
+  changeSetId: string;
+  sceneId: string;
+  shotIds: string[];
+}
+
 export interface ProductionIssue {
   code: string;
   message: string;

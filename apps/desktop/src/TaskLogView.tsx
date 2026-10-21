@@ -149,17 +149,25 @@ function statusText(value: string): string {
   return label === value ? value : `${label} (${value})`;
 }
 
-function TaskLogStatus({ status, outcome }: { status: string; outcome?: string }) {
+function TaskLogStatus({
+  status,
+  outcome,
+  completionState,
+}: {
+  status: string;
+  outcome?: string;
+  completionState?: 'partial';
+}) {
   return (
     <div className="task-log-detail-status">
       <div>
         <span>状态</span>
         <strong className={`task-status task-status-${status}`}>{statusText(status)}</strong>
       </div>
-      {outcome && (
+      {(completionState === 'partial' || outcome) && (
         <div>
           <span>结果</span>
-          <strong>{outcome}</strong>
+          <strong>{completionState === 'partial' ? '部分完成' : outcome}</strong>
         </div>
       )}
     </div>
@@ -249,7 +257,11 @@ function AgentTaskDetailPanel({
   return (
     <div className="task-log-detail-body">
       {detail.chapterBatch && <ChapterBatchProgress batchId={detail.chapterBatch.batchId} />}
-      <TaskLogStatus status={task.status} outcome={task.outcome} />
+      <TaskLogStatus
+        status={task.status}
+        outcome={task.outcome}
+        completionState={task.completionState}
+      />
 
       <dl className="task-log-detail-meta">
         <div>

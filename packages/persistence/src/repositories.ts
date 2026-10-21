@@ -1818,11 +1818,11 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
         `INSERT INTO agent_tasks
          (id, project_id, project_session_id, conversation_id, user_message_id,
           task_type, scope_type, scope_id, title, request_snapshot_json, request_hash,
-          context_snapshot_id, status, outcome, retry_of_task_id, idempotency_key,
+          context_snapshot_id, status, outcome, completion_state, retry_of_task_id, idempotency_key,
           error_code, error_message, retryable, created_at, started_at, updated_at,
           completed_at, phase, row_version, tool_call_limit, tool_call_count, lifecycle_status,
           archived_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            project_session_id = excluded.project_session_id,
            conversation_id = excluded.conversation_id,
@@ -1836,6 +1836,7 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
            context_snapshot_id = excluded.context_snapshot_id,
            status = excluded.status,
            outcome = excluded.outcome,
+           completion_state = excluded.completion_state,
            retry_of_task_id = excluded.retry_of_task_id,
            idempotency_key = excluded.idempotency_key,
            error_code = excluded.error_code,
@@ -1866,6 +1867,7 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
         record.contextSnapshotId ?? null,
         record.status,
         record.outcome ?? null,
+        record.completionState ?? null,
         record.retryOfTaskId ?? null,
         record.idempotencyKey ?? null,
         record.errorCode ?? null,
@@ -1919,7 +1921,7 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
            project_session_id = ?, conversation_id = ?, user_message_id = ?,
            task_type = ?, scope_type = ?, scope_id = ?, title = ?,
            request_snapshot_json = ?, request_hash = ?, context_snapshot_id = ?,
-           status = ?, outcome = ?, retry_of_task_id = ?, idempotency_key = ?,
+           status = ?, outcome = ?, completion_state = ?, retry_of_task_id = ?, idempotency_key = ?,
            error_code = ?, error_message = ?, retryable = ?, started_at = ?,
            updated_at = ?, completed_at = ?, phase = ?, row_version = ?, tool_call_limit = ?,
            tool_call_count = ?, lifecycle_status = ?, archived_at = ?
@@ -1938,6 +1940,7 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
         record.contextSnapshotId ?? null,
         record.status,
         record.outcome ?? null,
+        record.completionState ?? null,
         record.retryOfTaskId ?? null,
         record.idempotencyKey ?? null,
         record.errorCode ?? null,
@@ -1974,6 +1977,7 @@ interface AgentTaskRow {
   context_snapshot_id: string | null;
   status: AgentTaskRecord['status'];
   outcome: AgentTaskRecord['outcome'] | null;
+  completion_state: AgentTaskRecord['completionState'] | null;
   retry_of_task_id: string | null;
   idempotency_key: string | null;
   error_code: string | null;
@@ -2007,6 +2011,7 @@ function mapAgentTask(row: AgentTaskRow): AgentTaskRecord {
     contextSnapshotId: row.context_snapshot_id ?? undefined,
     status: row.status,
     outcome: row.outcome ?? undefined,
+    completionState: row.completion_state ?? undefined,
     retryOfTaskId: row.retry_of_task_id ?? undefined,
     idempotencyKey: row.idempotency_key ?? undefined,
     errorCode: row.error_code ?? undefined,

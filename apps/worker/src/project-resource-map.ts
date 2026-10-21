@@ -28,7 +28,7 @@ export function workspaceResource(workspace: Workspace): ProjectStructureResourc
       ? {
           writeTool: 'scene.submit_structure',
           contentModel:
-            'LLM 理解完整视频提示词（videoPrompt）并返回场景文档 ID（sceneDocumentId）和全部出场角色 ID（characterDocumentIds）；系统只校验 ID，不解析姓名。已有场次正文和关系按需用 scene.read 读取；修改需 sceneId、expectedRowVersion 和 shots:[]，新场次包含镜头。提交后自动保存为可编辑草稿并进入目录，无需用户确认，后期可修改提示词和绑定；独立 Markdown 文档不会创建场次或镜头。',
+            'LLM 按 ProductionInstruction 结构创作场次共享内容与镜头专属内容，返回真实场景文档 ID（sceneDocumentId）和全部出场角色 ID（characterDocumentIds）；系统校验 ID，不解析姓名。已有场次正文和关系按需用 scene.read 读取；修改需 sceneId、expectedRowVersion 和 shots:[]，新场次包含镜头。提交后自动保存为可编辑草稿并进入目录，无需用户确认，后期可修改提示词和绑定；独立 Markdown 文档不会创建场次或镜头。',
         }
       : {}),
     locator: { workspace, resourceId: id },
