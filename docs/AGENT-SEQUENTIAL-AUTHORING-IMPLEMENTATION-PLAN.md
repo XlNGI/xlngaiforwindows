@@ -48,7 +48,7 @@
 - [x] 本次未修改 Native/Rust 文件；Rust fmt/check/test 不适用。
 - [x] 重建生产 Worker sidecar，并运行现有 M4/M7 sidecar 离线验证；两种 Provider 协议的恢复用例包含在全仓测试中，不把工具直调当成模型输出验收。
 - [x] 同步实施规则与实际验证；真实模型生成质量和缓存效果留待用户在应用中实测。
-- [ ] 按既有授权上传当前分支，不合并；不安装或重启运行实例。
+- [x] 按既有授权上传当前分支，不合并；不安装或重启运行实例。
 
 ## 需求追踪
 
@@ -68,7 +68,7 @@
 - S2：真实 SQLite 覆盖取消重开、跨任务续作、已保存场次冻结、当前场失败后此前产物保留、17 场 47 镜跨 32 调用 checkpoint 后续作；共 49 项聚焦 Worker 测试通过。migration v59 的回滚/幂等测试通过。
 - S3：场次共享服装继承、本镜出场名单权威、动作/站位/连续状态不继承、单次运镜不继承的回归测试通过；两种 Provider 协议的创作修复流程通过。
 - S4：显式非空 checkpoint 在 AgentTaskInfo/任务详情显示“部分完成”；空清单与未修复错误仍阻断正常完成；既有 24 请求、32 业务调用硬限额未放宽。
-- S5：`pnpm test` 通过（68 个文件、918 项）；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build` 与 `git diff --check` 通过。生产 Worker sidecar 构建通过，M4/M7 sidecar 离线验证通过；Rust 未涉及。前端构建输出现有的大 chunk 提醒，不影响构建成功。分支推送待完成。
+- S5：`pnpm test` 通过（68 个文件、918 项）；`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm build` 与 `git diff --check` 通过。生产 Worker sidecar 构建通过，M4/M7 sidecar 离线验证通过；Rust 未涉及。前端构建输出现有的大 chunk 提醒，不影响构建成功。实现已推送至 `codex/production-form-submission`（`a4a6e9f`），未合并。
 
 ## 实施记录
 
