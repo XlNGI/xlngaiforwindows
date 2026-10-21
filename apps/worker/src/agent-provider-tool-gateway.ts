@@ -17,6 +17,17 @@ import type {
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { validateToolArguments } from '@earendil-works/pi-ai';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
+import { loadedToolGuidance } from './agent-workflow-guidance.js';
+import { RepeatedReadResults } from './repeated-read-results.js';
+
+const CORE_TOOLS = [
+  'conversation.task.route',
+  'project.structure.get',
+  'library.search',
+  'library.read',
+];
+const MAX_LOADED_TOOLS = 16;
+const MAX_LOADED_SCHEMA_BYTES = 128 * 1024;
 
 export interface AgentProviderToolExecutor {
   recordProviderRequest?(
@@ -85,6 +96,10 @@ export class AgentProviderToolGateway {
   private validationFailures = 0;
   private completionError?: string;
   private readonly selectedTools = new Set<string>();
+  private catalog: string;
+  private readonly catalogNames: string[];
+  private readonly repeatedResults = new RepeatedReadResults();
+  private readonly deliveredGuidance = new Set<string>();
   private readonly readWaiters: Array<() => void> = [];
 
   constructor(
@@ -100,36 +115,45 @@ export class AgentProviderToolGateway {
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
     this.definitions.forEach((definition) => unifiedAgentToolRegistry.require(definition.name));
+    this.catalog = this.definitions
+      .filter((tool) => !CORE_TOOLS.includes(tool.name))
+      .map((tool) => `${tool.name}: ${tool.description.split('.')[0]!.slice(0, 80)}`)
+      .join('; ');
+    this.catalogNames = this.definitions.map((tool) => tool.name);
   }
 
   tools(allowedOperations?: readonly string[]): AgentTool[] {
-    const allowed = allowedOperations ? new Set(allowedOperations) : undefined;
-    const tools = this.definitions
-      .filter(
-        (definition) =>
-          (!allowed ||
-            allowed.has(definition.name) ||
-            isLibraryRetrievalOperation(definition.name)) &&
-          this.isLoaded(definition.name),
-      )
-      .map((definition) => this.tool(definition));
-    if (this.lazyTools) tools.push(this.loaderTool());
-    return tools;
+    return this.currentDefinitions(allowedOperations).map((definition) =>
+      definition.name === 'tools.load' ? this.loaderTool() : this.tool(definition),
+    );
   }
 
   currentDefinitions(allowedOperations?: readonly string[]): LlmToolDefinition[] {
+    for (const definition of this.definitions)
+      if (!this.catalogNames.includes(definition.name)) {
+        this.catalogNames.push(definition.name);
+        if (!CORE_TOOLS.includes(definition.name))
+          this.catalog += `; ${definition.name}: ${definition.description.split('.')[0]!.slice(0, 80)}`;
+      }
     const allowed = allowedOperations ? new Set(allowedOperations) : undefined;
-    const definitions = cloneDefinitions(
-      this.definitions.filter(
-        (definition) =>
-          (!allowed ||
-            allowed.has(definition.name) ||
-            isLibraryRetrievalOperation(definition.name)) &&
-          this.isLoaded(definition.name),
-      ),
+    const available = this.definitions.filter(
+      (definition) =>
+        (!allowed ||
+          allowed.has(definition.name) ||
+          isLibraryRetrievalOperation(definition.name)) &&
+        this.isLoaded(definition.name),
     );
-    if (this.lazyTools) definitions.push(this.loaderDefinition());
-    return definitions;
+    if (!this.lazyTools) return cloneDefinitions(available);
+    const byName = new Map(available.map((definition) => [definition.name, definition]));
+    return [
+      ...CORE_TOOLS.flatMap((name) =>
+        byName.has(name) ? [structuredClone(byName.get(name)!)] : [],
+      ),
+      this.loaderDefinition(),
+      ...[...this.selectedTools]
+        .filter((name) => !CORE_TOOLS.includes(name))
+        .flatMap((name) => (byName.has(name) ? [structuredClone(byName.get(name)!)] : [])),
+    ];
   }
 
   private isLoaded(name: string): boolean {
@@ -148,21 +172,22 @@ export class AgentProviderToolGateway {
   private loaderDefinition(): LlmToolDefinition {
     return {
       name: 'tools.load',
-      description: `Choose up to six tools by exact name for the next turn. Replaces the previous selection; authorization remains Worker-owned. Core routing, structure and retrieval stay available. Catalog: ${this.definitions
-        .filter((tool) => !['library.search', 'library.read'].includes(tool.name))
-        .map((tool) => `${tool.name}: ${tool.description.split('.')[0]!.slice(0, 150)}`)
-        .join('; ')}`,
+      description: `Load up to six authorized tools by exact name. Previously loaded tools remain available in stable order (at most ${MAX_LOADED_TOOLS} extra tools / 128 KiB). Use reset=true only to begin a new phase when that budget is exceeded; it rebuilds the prompt cache. Loading never grants authorization. Read the returned workflow instructions. Catalog: ${this.catalog}`,
       parameters: {
         type: 'object',
         additionalProperties: false,
         required: ['names'],
         properties: {
+          reset: {
+            type: 'boolean',
+            description: 'Explicitly replace the loaded phase when its schema budget is exceeded.',
+          },
           names: {
             type: 'array',
             minItems: 1,
             maxItems: 6,
             uniqueItems: true,
-            items: { type: 'string', enum: this.definitions.map((tool) => tool.name) },
+            items: { type: 'string', enum: this.catalogNames },
           },
         },
       },
@@ -176,17 +201,49 @@ export class AgentProviderToolGateway {
       executionMode: 'sequential',
       prepareArguments: (args: unknown) => this.prepareArguments(this.loaderDefinition(), args),
       execute: (_id: string, args: unknown) => {
-        const names = (args as { names: string[] }).names;
+        const { names, reset } = args as { names: string[]; reset?: boolean };
         if (
           !Array.isArray(names) ||
           names.length > 6 ||
           names.some((name) => !this.hasDefinition(name))
         )
           throw new Error('Select at most six authorized tool names from the catalog.');
+        const selection = new Set(reset ? [] : this.selectedTools);
+        names.filter((name) => !CORE_TOOLS.includes(name)).forEach((name) => selection.add(name));
+        const selectedDefinitions = this.definitions.filter((definition) =>
+          selection.has(definition.name),
+        );
+        const schemaBytes = Buffer.byteLength(
+          JSON.stringify(
+            selectedDefinitions.map(({ name, description, parameters }) => ({
+              name,
+              description,
+              parameters,
+            })),
+          ),
+        );
+        if (selection.size > MAX_LOADED_TOOLS || schemaBytes > MAX_LOADED_SCHEMA_BYTES)
+          throw new Error(
+            'Loaded schema budget exceeded. Choose the tools needed for the next phase with reset=true.',
+          );
         this.selectedTools.clear();
-        names.forEach((name) => this.selectedTools.add(name));
+        selection.forEach((name) => this.selectedTools.add(name));
+        const guidance = loadedToolGuidance(names);
+        const instructions = this.deliveredGuidance.has(guidance) ? undefined : guidance;
+        this.deliveredGuidance.add(guidance);
         return Promise.resolve({
-          content: [{ type: 'text', text: JSON.stringify({ status: 'tools_loaded', names }) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                status: 'tools_loaded',
+                names,
+                loaded: [...selection],
+                cacheRebuild: reset === true,
+                instructions,
+              }),
+            },
+          ],
           details: {},
         });
       },
@@ -195,6 +252,10 @@ export class AgentProviderToolGateway {
 
   hasDefinition(operation: string): boolean {
     return this.definitions.some((definition) => definition.name === operation);
+  }
+
+  clearResultReuse(): void {
+    this.repeatedResults.clear();
   }
 
   preferStagedSceneAuthoring(): boolean {
@@ -442,7 +503,9 @@ export class AgentProviderToolGateway {
         throw new Error(`Planned operation ${definition.name} did not succeed.`);
       }
       return {
-        content: [{ type: 'text', text: output }],
+        content: [
+          { type: 'text', text: readonly ? this.repeatedResults.use(toolCallId, output) : output },
+        ],
         details: { status: 'completed', toolName: definition.name },
       };
     } catch (error) {

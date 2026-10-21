@@ -4,6 +4,8 @@
 日期：2026-09-19
 状态：已实施（P0–P6 核心功能及测试门禁已全部完成；P7 检索核源与标题优先已完成）
 
+2026-10-21 用户确认的 Agent 用量/上下文改造：工具按需加载后在有界任务阶段内保留稳定顺序，详细工作流随加载提供；重复读取在新结果处引用先前完整结果，取代旧的改写历史去重。发送前按整份请求预算，必要时只整理有版本定位的旧读取正文并保留核源标记，不改变检索索引、正文按需读取、草稿标记、附件或本地优先规则。实施顺序、预算与验证见 [Agent 用量与上下文计划](./AGENT-USAGE-CONTEXT-IMPLEMENTATION-PLAN.md)。
+
 2026-10-20 后续可靠性改造：Agent 的制作查询改为显式视图与版本分页；`scene.read` 默认仅返回关系／镜头目录，`production.read` 默认一份已保存指令。完整问题与当前可编辑文字按需读取；复用在 Worker 原授权和调用额度检查之后生效。不改变 library.search/read 索引、草稿／正式状态、聊天附件和正文不自动注入的既定规则。实施及验证见 [Agent 业务可靠性计划 P4/P5](./AGENT-BUSINESS-RELIABILITY-IMPLEMENTATION-PLAN.md)。
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、Pi Runtime。Native Research Bridge 不在本计划范围内。
 

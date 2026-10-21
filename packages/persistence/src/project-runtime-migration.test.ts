@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
+import { CURRENT_APP_SCHEMA_VERSION } from './app-schema.js';
 import {
   openAppDatabase,
   migrateAppDatabase,
@@ -14,7 +15,10 @@ it('upgrades application v7 registration metadata atomically without copying pro
   const db = openAppDatabase(join(root, 'app.sqlite'));
   try {
     migrateAppDatabase(db);
-    db.exec(`DROP TABLE project_runtime_registrations;DELETE FROM app_schema_migrations WHERE version>=8;
+    db.exec(`DROP TABLE project_runtime_registrations;
+      ALTER TABLE usage_index DROP COLUMN accounting_json;
+      ALTER TABLE usage_index DROP COLUMN provider_reported_cost_json;
+      DELETE FROM app_schema_migrations WHERE version>=8;
       INSERT INTO provider_profiles(id,name,category,provider_type,access_type,protocol,base_url,enabled,connection_status,created_at,updated_at)
       VALUES('provider','Existing','multi','vidu','official','vidu-v2','https://api.vidu.com',1,'ready','now','now');
       CREATE TRIGGER fail_runtime_registry BEFORE INSERT ON app_schema_migrations WHEN NEW.version=8
@@ -25,8 +29,8 @@ it('upgrades application v7 registration metadata atomically without copying pro
       db.prepare("SELECT 1 FROM sqlite_master WHERE name='project_runtime_registrations'").get(),
     ).toBeUndefined();
     db.exec('DROP TRIGGER fail_runtime_registry');
-    expect(migrateAppDatabase(db)).toBe(8);
-    expect(migrateAppDatabase(db)).toBe(8);
+    expect(migrateAppDatabase(db)).toBe(CURRENT_APP_SCHEMA_VERSION);
+    expect(migrateAppDatabase(db)).toBe(CURRENT_APP_SCHEMA_VERSION);
     expect(db.prepare('SELECT name FROM provider_profiles WHERE id=?').get('provider')).toEqual({
       name: 'Existing',
     });

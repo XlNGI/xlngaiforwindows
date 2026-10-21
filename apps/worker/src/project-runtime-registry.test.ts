@@ -181,7 +181,10 @@ it('backs up a v7 application database before loading runtime registrations', as
   const db = openAppDatabase(join(data, 'app-settings.sqlite'));
   migrateAppDatabase(db);
   db.exec(
-    'DROP TABLE project_runtime_registrations;DELETE FROM app_schema_migrations WHERE version>=8',
+    `DROP TABLE project_runtime_registrations;
+     ALTER TABLE usage_index DROP COLUMN accounting_json;
+     ALTER TABLE usage_index DROP COLUMN provider_reported_cost_json;
+     DELETE FROM app_schema_migrations WHERE version>=8`,
   );
   db.close();
   const settings = new AppSettingsService({ appDataDirectory: data });

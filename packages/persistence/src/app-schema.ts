@@ -1,4 +1,9 @@
-export const CURRENT_APP_SCHEMA_VERSION = 8;
+export const CURRENT_APP_SCHEMA_VERSION = 9;
+
+export const APP_MIGRATION_V9 = `
+ALTER TABLE usage_index ADD COLUMN accounting_json TEXT CHECK(accounting_json IS NULL OR json_valid(accounting_json));
+ALTER TABLE usage_index ADD COLUMN provider_reported_cost_json TEXT CHECK(provider_reported_cost_json IS NULL OR json_valid(provider_reported_cost_json));
+`;
 
 export const APP_MIGRATION_V8 = `
 CREATE TABLE project_runtime_registrations (

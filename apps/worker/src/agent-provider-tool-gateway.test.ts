@@ -59,6 +59,50 @@ function executor(
 }
 
 describe('AgentProviderToolGateway', () => {
+  it('appends loaded schemas in first-load order, keeps the catalog stable and deduplicates workflow guidance', async () => {
+    const worker = executor({});
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [
+        definition('library.read'),
+        definition('research.search'),
+        definition('research.fetch'),
+        definition('document.create_draft'),
+      ],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      true,
+    );
+    const initial = gateway.currentDefinitions();
+    const load = gateway.tools().find((tool) => tool.name === 'tools.load')!;
+    const first = await load.execute('first', { names: ['research.fetch'] });
+    const prefix = gateway.currentDefinitions();
+    await load.execute('next', { names: ['research.search'] });
+    expect(gateway.currentDefinitions().slice(0, prefix.length)).toEqual(prefix);
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).toEqual([
+      'library.read',
+      'tools.load',
+      'research.fetch',
+      'research.search',
+    ]);
+    expect(gateway.currentDefinitions().find((tool) => tool.name === 'tools.load')).toEqual(
+      initial.find((tool) => tool.name === 'tools.load'),
+    );
+    expect(JSON.stringify(first)).toContain('external research policy');
+    const repeated = await load.execute('again', { names: ['research.fetch'] });
+    expect(JSON.stringify(repeated)).not.toContain('external research policy');
+    await load.execute('phase', { names: ['document.create_draft'], reset: true });
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).toEqual([
+      'library.read',
+      'tools.load',
+      'document.create_draft',
+    ]);
+    expect(worker.executeTools).not.toHaveBeenCalled();
+  });
+
   it('propagates business rejections as tool errors and bounds repeated invalid submissions', async () => {
     const worker = executor({
       continuation: {

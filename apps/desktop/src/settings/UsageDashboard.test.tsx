@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { usageClient } from '../usage-client';
 import { UsageDashboard } from './UsageDashboard';
+import type { LlmUsageAccounting } from '@ai-video/contracts';
 
 vi.mock('../usage-client', () => ({
   usageClient: {
@@ -83,6 +84,66 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('UsageDashboard', () => {
+  it('uses reported input weights, distinguishes attempts from requests and shows unknown usage', async () => {
+    const accounting: LlmUsageAccounting = {
+      version: 1,
+      generationId: 'g',
+      conversationId: 'c',
+      requestCount: 3,
+      reportedRequests: 2,
+      completeRequests: 2,
+      coverage: 'partial',
+      cacheInputTokens: 1010,
+      cacheReadTokens: 901,
+      cacheReportedRequests: 2,
+      estimatedCostCoverage: 'partial',
+      requests: [
+        {
+          requestId: 'r1',
+          stage: 'complete',
+          purpose: 'initial',
+          dispatched: true,
+          sent: true,
+          startedAt: '2026-08-03T01:00:00Z',
+          usage: { inputTokens: 1000, cachedInputTokens: 900, outputTokens: 10 },
+          coverage: 'complete',
+        },
+        {
+          requestId: 'r2',
+          stage: 'complete',
+          purpose: 'continuation',
+          dispatched: true,
+          sent: true,
+          startedAt: '2026-08-03T01:00:01Z',
+          usage: { inputTokens: 10, cachedInputTokens: 1, outputTokens: 10 },
+          coverage: 'complete',
+        },
+        {
+          requestId: 'r3',
+          stage: 'failed',
+          purpose: 'repair',
+          dispatched: true,
+          sent: false,
+          startedAt: '2026-08-03T01:00:02Z',
+          coverage: 'unknown',
+        },
+      ],
+    };
+    vi.mocked(usageClient.list).mockResolvedValue({
+      entries: [{ ...entries[0]!, accounting }],
+      summaries: [],
+    });
+    render(<UsageDashboard />);
+    expect(await screen.findByText('89.2%')).toBeInTheDocument();
+    expect(screen.getByText('任务尝试数')).toBeInTheDocument();
+    expect(screen.getByText('实际模型请求数')).toBeInTheDocument();
+    expect(screen.getByText('2 次已报告用量')).toBeInTheDocument();
+    expect(screen.getByText(/部分统计，缺失报告/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('请求明细（3）'));
+    expect(screen.getByText('3. 输出修正 · failed')).toBeInTheDocument();
+    expect(screen.getByText(/输入 未知.*输出 未知.*用量未知/)).toBeInTheDocument();
+  });
+
   it('shows currencies separately and applies usage filters', async () => {
     render(<UsageDashboard />);
 
@@ -105,7 +166,7 @@ describe('UsageDashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: /重建用量索引/ }));
 
     expect(
-      await screen.findByText(/扫描 2 个项目，写入 8 次调用，跳过 1 个项目/),
+      await screen.findByText(/扫描 2 个项目，写入 8 条任务尝试，跳过 1 个项目/),
     ).toBeInTheDocument();
     await waitFor(() => expect(usageClient.list).toHaveBeenCalledTimes(callsBefore + 1));
   });

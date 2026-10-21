@@ -523,8 +523,8 @@ class SqliteUsageIndexRepository implements UsageIndexRepository {
         `INSERT INTO usage_index
          (attempt_id, project_id, project_name, provider_profile_id, provider_name,
           model_id, model_name, status, input_tokens, cached_input_tokens, output_tokens,
-          reasoning_tokens, total_tokens, estimated_cost, currency, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reasoning_tokens, total_tokens, estimated_cost, currency, created_at, accounting_json, provider_reported_cost_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(attempt_id) DO UPDATE SET
            project_id = excluded.project_id,
            project_name = excluded.project_name,
@@ -540,7 +540,9 @@ class SqliteUsageIndexRepository implements UsageIndexRepository {
            total_tokens = excluded.total_tokens,
            estimated_cost = excluded.estimated_cost,
            currency = excluded.currency,
-           created_at = excluded.created_at`,
+           created_at = excluded.created_at,
+           accounting_json = excluded.accounting_json,
+           provider_reported_cost_json = excluded.provider_reported_cost_json`,
       )
       .run(
         record.attemptId,
@@ -559,6 +561,8 @@ class SqliteUsageIndexRepository implements UsageIndexRepository {
         record.estimatedCost ?? null,
         record.currency ?? null,
         record.createdAt,
+        record.accountingJson ?? null,
+        record.providerReportedCostJson ?? null,
       );
   }
 
@@ -708,6 +712,8 @@ function mapAdapterSchemaAudit(row: AdapterSchemaAuditRow): AdapterSchemaAuditRe
 }
 
 interface UsageIndexRow {
+  accounting_json: string | null;
+  provider_reported_cost_json: string | null;
   attempt_id: string;
   project_id: string;
   project_name: string;
@@ -728,6 +734,8 @@ interface UsageIndexRow {
 
 function mapUsageIndex(row: UsageIndexRow): UsageIndexRecord {
   return {
+    accountingJson: row.accounting_json ?? undefined,
+    providerReportedCostJson: row.provider_reported_cost_json ?? undefined,
     attemptId: row.attempt_id,
     projectId: row.project_id,
     projectName: row.project_name,

@@ -92,6 +92,7 @@ export class ProviderProfileValidationError extends Error {}
 export class AdapterSchemaValidationError extends Error {}
 
 export interface ResolvedLlmSelection {
+  contextWindowTokens?: number;
   inferenceSettings?: import('@ai-video/contracts').LlmInferenceSettings;
   providerProfileId: string;
   providerName: string;
@@ -931,6 +932,13 @@ export class AppSettingsService {
       baseUrl: profile.baseUrl,
       pricingSnapshot: toPricingSnapshot(repositories.modelPricing.get(profile.id, model.id)),
       ...(inferenceSettings ? { inferenceSettings } : {}),
+      contextWindowTokens:
+        contract &&
+        ['verified', 'enabled'].includes(contract.status) &&
+        Number.isSafeInteger(contract.capabilities.maxContextTokens) &&
+        (contract.capabilities.maxContextTokens ?? 0) > 0
+          ? contract.capabilities.maxContextTokens
+          : undefined,
     };
   }
 
@@ -1506,7 +1514,23 @@ export function toUsageIndexRecord(
 ): UsageIndexRecord | undefined {
   if (!attempt.providerProfileId || !attempt.modelId) return undefined;
   if (!['complete', 'failed', 'cancelled'].includes(attempt.status)) return undefined;
+  const persisted = (() => {
+    try {
+      return attempt.rawUsageJson
+        ? (JSON.parse(attempt.rawUsageJson) as {
+            accounting?: import('@ai-video/contracts').LlmUsageAccounting;
+            providerReportedCost?: import('@ai-video/contracts').ProviderReportedCostInfo;
+          })
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
   return {
+    accountingJson: persisted?.accounting ? JSON.stringify(persisted.accounting) : undefined,
+    providerReportedCostJson: persisted?.providerReportedCost
+      ? JSON.stringify(persisted.providerReportedCost)
+      : undefined,
     attemptId: attempt.id,
     projectId: project.id,
     projectName: project.name,

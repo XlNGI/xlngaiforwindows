@@ -135,3 +135,9 @@ P5：Schema v58 独立记录每次请求的 generation/attempt/project/session �
 生产 Worker 已重建，SHA-256：`6C7DA3ED5C3135C4EADCA6785617635316EF5715E8420AB34E54E530E192BAFB`。打包离线验证八组通过（两协议 × 两入口 × 有／无 UI hint），`providerRequests=0`；报告：`C:/Users/MSI/AppData/Local/Temp/unicomp-llm-intent-gyRa8Q/report.json`。未手动重启用户应用；重开后加载新版 Worker。
 
 实际缓存是否命中仍取决于后续请求的完整前缀、Provider 缓存策略及路由；离线验证只能证明请求组织与统计正确，不能证明线上命中率提升。本轮不进行真实 Provider 调用或重发用户任务。Windows 12152 流读取失败属于另一问题，本次不宣称已修复。
+
+## 2026-10-21 请求账本、按需工作流与上下文预算
+
+用户确认的后续三阶段改造已完成：请求明细与完整/部分/未知统计落地本地账本及可重建索引；有界工具集合稳定顺序，详细工作流随工具加载提供，重复长读取只在新结果引用旧结果；发送前检查整份上下文预算，仅整理具有版本定位的旧资料，保留用户输入、约束和已保存结果。失败/取消的迟到用量不丢失、不重开终态、不重复计费，旧记录不补造请求明细。
+
+全仓 1,714 项、typecheck/lint/format/build、Native host 合同 4 项及生产 Worker 离线八组合通过，`providerRequests=0`。实现顺序、精确预算、迁移和验证边界统一记录于 [Agent 用量、缓存与上下文预算实施计划](./AGENT-USAGE-CONTEXT-IMPLEMENTATION-PLAN.md)。本次按需工作流策略取代 C1 中预先建立全部工作流策略的做法；资料按需检索和 Worker 授权边界不变。线上缓存效果需实际请求复测，未合并分支或手动重启用户应用。

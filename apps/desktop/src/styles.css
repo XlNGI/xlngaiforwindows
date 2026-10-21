@@ -1721,6 +1721,24 @@ button {
   white-space: nowrap;
 }
 
+.usage-request-details {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.usage-request-details summary {
+  cursor: pointer;
+}
+
+.usage-request {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-color, #80808040);
+}
+
 .usage-status {
   padding: 3px 6px;
   border-radius: 10px;

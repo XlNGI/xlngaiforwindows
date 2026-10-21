@@ -18,7 +18,8 @@ import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { ProjectStructureCompiler } from './structure-compiler.js';
 import { AgentProviderLoopService } from './agent-provider-loop-service.js';
 import { ChangeSetService } from './change-set-service.js';
-import { PiConversationRuntime, compactRepeatedResults } from './pi-conversation-runtime.js';
+import { PiConversationRuntime } from './pi-conversation-runtime.js';
+import { RepeatedReadResults } from './repeated-read-results.js';
 import { parseEpisodeStructureArguments } from './episode-structure.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { splitConversationRequest } from './conversation-request.js';
@@ -105,6 +106,102 @@ function instruction(shot = false): ProductionInstruction {
     },
   };
 }
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'compacts old versioned library text through Native/Pi and retains real SQLite sources (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 40000);
+    const body = '长资料正文'.repeat(4000);
+    const large = f.content.saveDocument({
+      kind: 'note',
+      title: '唯一长资料',
+      contentMarkdown: body,
+    });
+    f.content.saveDocument({
+      kind: 'note',
+      title: '短资料甲',
+      contentMarkdown: '用户手工修改：青色衣服',
+    });
+    f.content.saveDocument({
+      kind: 'note',
+      title: '短资料乙',
+      contentMarkdown: '只核查，不改写。',
+    });
+    const run = f.prepare('核查三份资料，保留用户手工修改，不写入');
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `budget-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `budget-response-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      if (index % 2 === 0 && index < 6)
+        return tool('library.search', {
+          query: ['唯一长资料', '短资料甲', '短资料乙'][index / 2],
+          sourceTypes: ['document'],
+          limit: 1,
+        });
+      if (index < 6) {
+        const result = lastOutput(params) as { sources: Array<{ sourceHandle: string }> };
+        return tool('library.read', {
+          sourceHandle: result.sources[0]!.sourceHandle,
+          readMode: 'source',
+          maxChars: 20000,
+        });
+      }
+      expect(index).toBe(6);
+      return [
+        { ...common, type: 'text_delta', delta: '已核查，手工修改保留。' },
+        { ...common, type: 'complete', providerResponseId: 'budget-final', finishReason: 'stop' },
+      ];
+    }, true);
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '核查三份资料',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status, result.error).toBe('complete');
+    expect(requests).toHaveLength(7);
+    expect(result.assistantMessage.attempt?.accounting).toMatchObject({
+      requestCount: 7,
+      completeRequests: 7,
+      coverage: 'complete',
+    });
+    expect(
+      result.assistantMessage.attempt?.accounting?.requests.some(
+        (request) => request.context?.compactionCount === 1,
+      ),
+    ).toBe(true);
+    const shortened = requests.find((params) => JSON.stringify(params).includes('reread_required'));
+    expect(shortened).toBeDefined();
+    expect(JSON.stringify(shortened)).toContain(large.id);
+    expect(JSON.stringify(shortened)).toContain('draft');
+    if (protocol === 'openai-responses') expect(shortened?.continuation).toBeUndefined();
+    else expect(shortened?.continuation).toMatchObject({ protocol });
+    expect(f.content.getDocument(large.id).currentVersion?.contentMarkdown).toBe(body);
+  },
+);
 
 it.each([
   ['openai-responses', true],
@@ -220,7 +317,10 @@ it.each([
     // their policies and frozen context must remain byte-identical.
     for (const request of requests.slice(0, 22))
       expect(request.systemInstruction).toBe(requests[0]!.systemInstruction);
-    expect(requests[0]!.systemInstruction).toContain('# Agent document');
+    expect(requests[0]!.systemInstruction).not.toContain('# Agent document');
+    expect(requests[1]!.continuation!.outputs[0]!.output).toContain(
+      'Production reads use bounded views',
+    );
     expect(requests[0]!.tools!.some((tool) => tool.name === 'production.execute')).toBe(false);
     expect(f.content.listScenes()).toHaveLength(1);
     expect(f.content.listShots(scene.id)).toHaveLength(4);
@@ -769,6 +869,7 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
 
 async function setup(
   protocol: NativeProviderStreamStartParams['protocol'] = 'openai-chat-completions',
+  contextWindowTokens?: number,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-pipeline-remediation-'));
   const project = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
@@ -818,6 +919,7 @@ async function setup(
           modelName: 'Mock',
           remoteModelId: 'mock',
           protocol,
+          contextWindowTokens,
           baseUrl: 'https://mock.invalid',
         }),
       },
@@ -1569,7 +1671,7 @@ it('records distinct real requests under one authorization step, excludes raw da
     expect(metadata.firstSeen[stage]).toEqual(expect.any(String));
 });
 
-it('keeps unique constraint results intact while deduplicating repeated history results', () => {
+it('keeps the old prefix and unique constraints intact while shortening later repeated reads', () => {
   const body = renderProductionInstruction(instruction()).repeat(100);
   const history = [
     {
@@ -1580,8 +1682,11 @@ it('keeps unique constraint results intact while deduplicating repeated history 
       ],
     },
   ];
-  const compacted = compactRepeatedResults(history, [{ callId: 'latest', output: body }]);
-  expect(compacted[0]!.outputs[0]!.output).toContain('latest');
-  expect(compacted[0]!.outputs[1]!.output).toBe('生产约束必须保留');
+  const reuse = new RepeatedReadResults();
+  expect(reuse.use('old', body)).toBe(body);
+  expect(reuse.use('latest', body)).toContain('"fullResultCallId":"old"');
+  expect(reuse.use('unique', '生产约束必须保留')).toBe('生产约束必须保留');
   expect(history[0]!.outputs[0]!.output).toBe(body);
+  reuse.clear();
+  expect(reuse.use('after-compaction', body)).toBe(body);
 });

@@ -51,6 +51,162 @@ async function setup(
 }
 
 describe('GenerationService', () => {
+  it.each(['failed', 'cancelled'] as const)(
+    'retains late usage after %s without reopening the request or duplicating charges',
+    async (status) => {
+      const indexLlmAttempt = vi.fn();
+      const provider: LlmProvider = {
+        status: () => ({ key: 'test', name: 'Test', model: 'test', configured: false }),
+        stream: () => Promise.reject(new Error('No paid requests')),
+      };
+      const { generations, conversation } = await setup(
+        provider,
+        {
+          resolveLlmSelection: () => ({
+            providerProfileId: 'profile',
+            providerName: 'Test',
+            modelId: 'model',
+            modelName: 'Test',
+            remoteModelId: 'test',
+            protocol: 'openai-chat-completions',
+            baseUrl: 'https://mock.invalid',
+          }),
+        },
+        { indexLlmAttempt },
+      );
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: 'Work',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      generations.recordProviderRequest(prepared.stream, 'request', 'dispatching', {});
+      generations.recordProviderRequest(prepared.stream, 'request', status, {});
+      if (status === 'cancelled') await generations.cancel(prepared.stream.generationId);
+      else
+        generations.failNative({
+          ...prepared.stream,
+          content: '',
+          error: 'Mock failure',
+          retryable: true,
+        });
+      indexLlmAttempt.mockClear();
+      const usage = { inputTokens: 100, outputTokens: 10, totalTokens: 110 };
+      generations.recordProviderUsage(prepared.stream, 'request', usage);
+      generations.recordProviderUsage(prepared.stream, 'request', usage);
+      expect(generations.get(prepared.stream.generationId).assistantMessage.attempt).toMatchObject({
+        status,
+        usage,
+        accounting: {
+          requestCount: 1,
+          reportedRequests: 1,
+          coverage: 'complete',
+          requests: [{ stage: status, usage }],
+        },
+      });
+      expect(indexLlmAttempt).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('persists real request coverage separately from scheduling and retains unknown failed charges', async () => {
+    const indexLlmAttempt = vi.fn();
+    const provider: LlmProvider = {
+      status: () => ({ key: 'test', name: 'Test', model: 'test', configured: false }),
+      stream: () => Promise.reject(new Error('No paid requests')),
+    };
+    const { generations, conversation, projects } = await setup(
+      provider,
+      {
+        resolveLlmSelection: () => ({
+          providerProfileId: 'profile',
+          providerName: 'Test',
+          modelId: 'model',
+          modelName: 'Test',
+          remoteModelId: 'test',
+          protocol: 'openai-chat-completions',
+          baseUrl: 'https://mock.invalid',
+          pricingSnapshot: {
+            currency: 'USD',
+            unitTokens: 1000,
+            inputPrice: '1',
+            cachedInputPrice: '0.1',
+            outputPrice: '2',
+            configuredAt: 'now',
+          },
+        }),
+      },
+      { indexLlmAttempt },
+    );
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: 'Work',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    projects.access(true, (db) =>
+      db
+        .prepare(
+          `INSERT INTO llm_provider_requests
+      (id,project_id,generation_id,attempt_id,project_session_id,stage,created_at,updated_at,metadata_json)
+      VALUES(?,?,?,?,?,'complete','now','now','{"firstSeen":{"capacity_wait":"now"}}')`,
+        )
+        .run(
+          'scheduling',
+          prepared.stream.projectId,
+          prepared.stream.generationId,
+          prepared.stream.attemptId,
+          prepared.stream.projectSessionId,
+        ),
+    );
+    for (const id of ['r1', 'r2'])
+      generations.recordProviderRequest(prepared.stream, id, 'dispatching', {
+        purpose: id === 'r1' ? 'initial' : 'continuation',
+      });
+    generations.recordProviderUsage(prepared.stream, 'r1', {
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      raw: { private: 'discard-me' },
+    });
+    generations.recordProviderUsage(prepared.stream, 'r1', { outputTokens: 10, totalTokens: 110 });
+    generations.recordProviderUsage(prepared.stream, 'r1', { outputTokens: 10, totalTokens: 110 });
+    generations.recordProviderRequest(prepared.stream, 'r1', 'complete', {});
+    generations.recordProviderRequest(prepared.stream, 'r2', 'failed', {
+      errorCode: 'PROVIDER_FAILED',
+    });
+    const complete = generations.complete({ ...prepared.stream, content: 'Saved work' });
+    expect(complete.assistantMessage.attempt).toMatchObject({
+      usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+      accounting: {
+        requestCount: 2,
+        reportedRequests: 1,
+        completeRequests: 1,
+        coverage: 'partial',
+        cacheInputTokens: 100,
+        cacheReadTokens: 20,
+        estimatedCostCoverage: 'partial',
+      },
+    });
+    const rows = projects.access(false, (db) =>
+      db.prepare('SELECT metadata_json FROM llm_provider_requests').all(),
+    );
+    expect(JSON.stringify(rows)).not.toContain('discard-me');
+    expect(indexLlmAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        rawUsageJson: expect.stringContaining('"requestCount":2') as unknown,
+      }),
+    );
+    const reloaded = new GenerationService(
+      projects,
+      new ContentService(projects),
+      new ContextService(projects),
+      provider,
+    );
+    expect(reloaded.get(prepared.stream.generationId).assistantMessage.attempt?.accounting).toEqual(
+      complete.assistantMessage.attempt?.accounting,
+    );
+  });
+
   it('serializes a conversation across callers without duplicating messages or snapshots', async () => {
     const stream = vi.fn(() => Promise.reject(new Error('must not start another Provider')));
     const provider: LlmProvider = {

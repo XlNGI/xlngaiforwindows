@@ -2367,6 +2367,9 @@ export interface LlmGenerationPrepareResult {
 }
 
 export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
+  /** Worker-only context budget, never forwarded as a Provider API parameter. */
+  contextWindowTokens?: number;
+  contextWindowSource?: 'contract' | 'fallback';
   inferenceSettings?: LlmInferenceSettings;
   providerProfileId: string;
   modelId: string;
@@ -3271,6 +3274,7 @@ export interface LlmPricingSnapshotInfo {
 }
 
 export interface LlmAttemptInfo {
+  accounting?: LlmUsageAccounting;
   id: string;
   generationId: string;
   providerProfileId?: string;
@@ -3335,6 +3339,8 @@ export interface UsageQueryParams {
 }
 
 export interface UsageEntryInfo {
+  accounting?: LlmUsageAccounting;
+  providerReportedCost?: ProviderReportedCostInfo;
   attemptId: string;
   projectId: string;
   projectName: string;
@@ -3362,6 +3368,48 @@ export interface UsageCurrencySummary {
   reasoningTokens: number;
   totalTokens: number;
   estimatedCost: string;
+  partial?: boolean;
+}
+
+export interface LlmRequestUsageInfo {
+  requestId: string;
+  stage: string;
+  purpose: 'initial' | 'continuation' | 'repair';
+  dispatched: boolean;
+  sent: boolean;
+  startedAt: string;
+  completedAt?: string;
+  usage?: NormalizedLlmUsage;
+  coverage: 'complete' | 'partial' | 'unknown';
+  usageSource?: 'provider_reported';
+  estimatedCost?: string;
+  currency?: string;
+  context?: LlmRequestContextInfo;
+}
+
+export interface LlmRequestContextInfo {
+  estimatedInputTokens: number;
+  contextWindowTokens: number;
+  windowSource: 'contract' | 'fallback';
+  reservedOutputTokens: number;
+  compactionCount: number;
+  sections: Record<string, { bytes: number; hash: string; estimatedTokens: number }>;
+}
+
+export interface LlmUsageAccounting {
+  version: 1;
+  generationId: string;
+  conversationId: string;
+  requests: LlmRequestUsageInfo[];
+  requestCount: number;
+  reportedRequests: number;
+  completeRequests: number;
+  coverage: 'complete' | 'partial' | 'unknown';
+  /** Only requests reporting both total input and cache-read input contribute. */
+  cacheInputTokens: number;
+  cacheReadTokens: number;
+  cacheReportedRequests: number;
+  estimatedCostCoverage: 'complete' | 'partial' | 'unknown';
 }
 
 export interface UsageQueryResult {

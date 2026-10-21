@@ -69,6 +69,22 @@ export function UsageDashboard() {
     knownEntries.map((entry) => ({ value: entry.projectId, label: entry.projectName })),
   );
   const totalTokens = result.entries.reduce((total, entry) => total + (entry.totalTokens ?? 0), 0);
+  const hasTotalTokens = result.entries.some((entry) => entry.totalTokens !== undefined);
+  const completeTotals = result.entries.every(
+    (entry) => entry.totalTokens !== undefined && entry.accounting?.coverage === 'complete',
+  );
+  const accounted = result.entries.filter((entry) => entry.accounting);
+  const requestCount = accounted.reduce((sum, entry) => sum + entry.accounting!.requestCount, 0);
+  const reportedRequests = accounted.reduce(
+    (sum, entry) => sum + entry.accounting!.reportedRequests,
+    0,
+  );
+  const cacheInput = accounted.reduce((sum, entry) => sum + entry.accounting!.cacheInputTokens, 0);
+  const cacheRead = accounted.reduce((sum, entry) => sum + entry.accounting!.cacheReadTokens, 0);
+  const cacheReported = accounted.reduce(
+    (sum, entry) => sum + entry.accounting!.cacheReportedRequests,
+    0,
+  );
   const statusCounts = {
     complete: result.entries.filter((entry) => entry.status === 'complete').length,
     failed: result.entries.filter((entry) => entry.status === 'failed').length,
@@ -80,7 +96,7 @@ export function UsageDashboard() {
     try {
       const rebuilt = await usageClient.rebuild();
       setMessage(
-        `索引已重建：扫描 ${rebuilt.projectsScanned} 个项目，写入 ${rebuilt.attemptsIndexed} 次调用${rebuilt.projectsSkipped ? `，跳过 ${rebuilt.projectsSkipped} 个项目` : ''}。`,
+        `索引已重建：扫描 ${rebuilt.projectsScanned} 个项目，写入 ${rebuilt.attemptsIndexed} 条任务尝试${rebuilt.projectsSkipped ? `，跳过 ${rebuilt.projectsSkipped} 个项目` : ''}。`,
       );
       preserveMessageOnRefresh.current = true;
       setRefreshKey((value) => value + 1);
@@ -96,7 +112,10 @@ export function UsageDashboard() {
         <div>
           <span className="eyebrow">本地派生索引</span>
           <h3>使用量与费用</h3>
-          <small>Token 来自供应商返回值；费用使用调用时的用户定价快照。</small>
+          <small>
+            Token
+            按实际模型请求累计，包含重复发送的上下文。费用按调用时定价估算，实际账单以供应商为准。
+          </small>
         </div>
         <div className="settings-header-actions">
           <button
@@ -227,12 +246,32 @@ export function UsageDashboard() {
 
       <div className="usage-summary-grid">
         <article>
-          <small>调用次数</small>
+          <small>任务尝试数</small>
           <strong>{result.entries.length}</strong>
         </article>
         <article>
           <small>供应商返回 Token</small>
-          <strong>{formatInteger(totalTokens)}</strong>
+          <strong>{hasTotalTokens ? formatInteger(totalTokens) : '未知'}</strong>
+          {!completeTotals && result.entries.length > 0 && (
+            <span>部分统计，缺失报告未按零计费</span>
+          )}
+        </article>
+        <article>
+          <small>实际模型请求数</small>
+          <strong>{accounted.length ? formatInteger(requestCount) : '未知'}</strong>
+          <span>
+            {reportedRequests} 次已报告用量
+            {accounted.length < result.entries.length ? '；部分历史记录无请求明细' : ''}
+          </span>
+        </article>
+        <article>
+          <small>输入缓存命中率</small>
+          <strong>
+            {cacheInput > 0 ? `${((100 * cacheRead) / cacheInput).toFixed(1)}%` : '未知'}
+          </strong>
+          <span>
+            缓存报告 {cacheReported} / {requestCount} 次请求，按已报告输入量加权
+          </span>
         </article>
         <article>
           <small>状态分布</small>
@@ -248,7 +287,9 @@ export function UsageDashboard() {
             <strong>
               {summary.currency} {summary.estimatedCost}
             </strong>
-            <span>{summary.attempts} 次有定价调用</span>
+            <span>
+              {summary.attempts} 条有定价尝试{summary.partial ? ' · 部分估算' : ''}
+            </span>
           </article>
         ))}
       </div>
@@ -273,9 +314,14 @@ export function UsageDashboard() {
               </span>
               <div className="usage-token-breakdown">
                 <span>输入 {formatOptionalInteger(entry.inputTokens)}</span>
-                <span>缓存 {formatOptionalInteger(entry.cachedInputTokens)}</span>
+                <span>其中缓存 {formatOptionalInteger(entry.cachedInputTokens)}</span>
                 <span>输出 {formatOptionalInteger(entry.outputTokens)}</span>
-                <span>推理 {formatOptionalInteger(entry.reasoningTokens)}</span>
+                <span>其中推理 {formatOptionalInteger(entry.reasoningTokens)}</span>
+                <span>
+                  {entry.accounting
+                    ? `${entry.accounting.requestCount} 次模型请求 · ${coverageLabel(entry.accounting.coverage)}`
+                    : '历史统计，缺少请求明细'}
+                </span>
               </div>
               <strong className="usage-entry-cost">
                 {entry.currency && entry.estimatedCost
@@ -283,12 +329,78 @@ export function UsageDashboard() {
                   : '费用未知'}
               </strong>
               <time>{new Date(entry.createdAt).toLocaleString()}</time>
+              {entry.providerReportedCost && (
+                <span>
+                  供应商报告金额：{entry.providerReportedCost.currency ?? '币种未报告'}{' '}
+                  {entry.providerReportedCost.amount}
+                </span>
+              )}
+              {entry.accounting && (
+                <details className="usage-request-details">
+                  <summary>请求明细（{entry.accounting.requests.length}）</summary>
+                  <p>
+                    输入包含缓存部分；上下文占用为本地估计，与累计 Token
+                    分开。未返回用量不能视为免费。
+                  </p>
+                  {entry.accounting.requests.map((request, index) => (
+                    <div className="usage-request" key={request.requestId}>
+                      <strong>
+                        {index + 1}. {purposeLabel(request.purpose)} · {request.stage}
+                      </strong>
+                      <span>
+                        输入 {formatOptionalInteger(request.usage?.inputTokens)} · 其中缓存{' '}
+                        {formatOptionalInteger(request.usage?.cachedInputTokens)} · 输出{' '}
+                        {formatOptionalInteger(request.usage?.outputTokens)} ·{' '}
+                        {coverageLabel(request.coverage)}
+                      </span>
+                      <span>
+                        本地估算{' '}
+                        {request.estimatedCost !== undefined
+                          ? `${request.currency ?? ''} ${request.estimatedCost}`
+                          : '未知'}
+                        {request.usage?.providerReportedCost
+                          ? ` · 供应商报告 ${request.usage.providerReportedCost.currency ?? '币种未报告'} ${request.usage.providerReportedCost.amount}`
+                          : ''}
+                      </span>
+                      {request.context && (
+                        <span>
+                          上下文约 {formatInteger(request.context.estimatedInputTokens)} /{' '}
+                          {formatInteger(request.context.contextWindowTokens)} · 输出预留{' '}
+                          {formatInteger(request.context.reservedOutputTokens)} ·{' '}
+                          {request.context.windowSource === 'contract'
+                            ? '模型合同窗口'
+                            : '保守回退窗口'}{' '}
+                          · 已整理 {request.context.compactionCount} 次
+                        </span>
+                      )}
+                      <time>
+                        {new Date(request.startedAt).toLocaleString()}
+                        {request.completedAt
+                          ? ` · ${Math.max(0, new Date(request.completedAt).getTime() - new Date(request.startedAt).getTime()) / 1000}s`
+                          : ''}
+                      </time>
+                    </div>
+                  ))}
+                </details>
+              )}
             </article>
           ))
         )}
       </div>
     </section>
   );
+}
+
+function coverageLabel(coverage: 'complete' | 'partial' | 'unknown'): string {
+  return coverage === 'complete'
+    ? '已报告输入和输出'
+    : coverage === 'partial'
+      ? '部分报告'
+      : '用量未知';
+}
+
+function purposeLabel(purpose: 'initial' | 'continuation' | 'repair'): string {
+  return purpose === 'initial' ? '首轮' : purpose === 'repair' ? '输出修正' : '续轮';
 }
 
 function usageRange(

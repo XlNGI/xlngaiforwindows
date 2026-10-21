@@ -7,6 +7,7 @@ import { createRepositories } from '@ai-video/persistence';
 import { AppSettingsService } from './app-settings-service.js';
 import { ProjectService } from './project-service.js';
 import { UsageService } from './usage-service.js';
+import type { LlmUsageAccounting } from '@ai-video/contracts';
 
 const directories: string[] = [];
 const projectsToClose: ProjectService[] = [];
@@ -93,6 +94,31 @@ describe('UsageService', () => {
 
   it('rebuilds the derived index idempotently from project schema v7 attempts', async () => {
     const { appSettings, project, projects, usage } = await setup();
+    const accounting: LlmUsageAccounting = {
+      version: 1,
+      generationId: 'generation-attempt-project',
+      conversationId: 'conversation',
+      requestCount: 1,
+      completeRequests: 1,
+      reportedRequests: 1,
+      coverage: 'complete',
+      cacheInputTokens: 100,
+      cacheReadTokens: 20,
+      cacheReportedRequests: 1,
+      estimatedCostCoverage: 'complete',
+      requests: [
+        {
+          requestId: 'request',
+          stage: 'complete',
+          purpose: 'initial',
+          dispatched: true,
+          sent: true,
+          startedAt: '2026-08-03T01:00:00.000Z',
+          coverage: 'complete',
+          usage: { inputTokens: 100, cachedInputTokens: 20, outputTokens: 50 },
+        },
+      ],
+    };
     projects.access(true, (database) => {
       const repositories = createRepositories(database);
       repositories.conversations.save({
@@ -145,6 +171,10 @@ describe('UsageService', () => {
       });
       repositories.llmGenerationAttempts.save(
         attempt('attempt-project', 'USD', '0.25', {
+          rawUsageJson: JSON.stringify({
+            accounting,
+            providerReportedCost: { amount: '0.2', currency: 'USD' },
+          }),
           conversationId: 'conversation',
           userMessageId: 'user',
           assistantMessageId: 'assistant-attempt-project',
@@ -169,6 +199,13 @@ describe('UsageService', () => {
         startAt: '2026-08-03T00:00:00.000Z',
         endAt: '2026-08-04T00:00:00.000Z',
       }).entries,
-    ).toMatchObject([{ attemptId: 'attempt-project', estimatedCost: '0.25' }]);
+    ).toMatchObject([
+      {
+        attemptId: 'attempt-project',
+        estimatedCost: '0.25',
+        accounting,
+        providerReportedCost: { amount: '0.2', currency: 'USD' },
+      },
+    ]);
   });
 });

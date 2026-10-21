@@ -113,7 +113,16 @@ function matchesFilters(entry: UsageIndexRecord, params: UsageQueryParams): bool
 }
 
 function toUsageEntry(record: UsageIndexRecord): UsageEntryInfo {
-  return { ...record };
+  const { accountingJson, providerReportedCostJson, ...entry } = record;
+  return {
+    ...entry,
+    accounting: accountingJson
+      ? (JSON.parse(accountingJson) as UsageEntryInfo['accounting'])
+      : undefined,
+    providerReportedCost: providerReportedCostJson
+      ? (JSON.parse(providerReportedCostJson) as UsageEntryInfo['providerReportedCost'])
+      : undefined,
+  };
 }
 
 function summarizeByCurrency(entries: UsageEntryInfo[]): UsageCurrencySummary[] {
@@ -135,6 +144,7 @@ function summarizeByCurrency(entries: UsageEntryInfo[]): UsageCurrencySummary[] 
       reasoningTokens: sum(group, 'reasoningTokens'),
       totalTokens: sum(group, 'totalTokens'),
       estimatedCost: addDecimalStrings(group.map((entry) => entry.estimatedCost ?? '0')),
+      partial: group.some((entry) => entry.accounting?.estimatedCostCoverage !== 'complete'),
     }));
 }
 

@@ -28,6 +28,37 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 describe('app settings database', () => {
+  it('rolls back the v9 accounting migration and preserves legacy unknown granularity', async () => {
+    const directory = await temporaryDirectory();
+    const db = openAppDatabase(join(directory, 'app-v9.sqlite'));
+    try {
+      migrateAppDatabase(db);
+      db.exec(`ALTER TABLE usage_index DROP COLUMN accounting_json;
+        ALTER TABLE usage_index DROP COLUMN provider_reported_cost_json;
+        DELETE FROM app_schema_migrations WHERE version=9;
+        INSERT INTO usage_index(attempt_id,project_id,project_name,provider_profile_id,provider_name,model_id,model_name,status,created_at)
+        VALUES('old','p','P','provider','Provider','model','Model','complete','now');
+        CREATE TRIGGER fail_v9 BEFORE INSERT ON app_schema_migrations WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'v9 failure'); END;`);
+      expect(() => migrateAppDatabase(db)).toThrow('v9 failure');
+      expect(getAppSchemaVersion(db)).toBe(8);
+      expect(
+        (db.prepare('PRAGMA table_info(usage_index)').all() as Array<{ name: string }>).some(
+          (column) => column.name === 'accounting_json',
+        ),
+      ).toBe(false);
+      db.exec('DROP TRIGGER fail_v9');
+      expect(migrateAppDatabase(db)).toBe(9);
+      expect(migrateAppDatabase(db)).toBe(9);
+      expect(createAppRepositories(db).usageIndex.get('old')).toMatchObject({
+        attemptId: 'old',
+        accountingJson: undefined,
+        totalTokens: undefined,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('migrates independently from project databases and contains no credential column', async () => {
     const directory = await temporaryDirectory();
     const appDatabase = openAppDatabase(join(directory, 'app-settings.sqlite'));

@@ -715,6 +715,8 @@ export interface ProviderDefaultRecord {
 }
 
 export interface UsageIndexRecord {
+  accountingJson?: string;
+  providerReportedCostJson?: string;
   attemptId: string;
   projectId: string;
   projectName: string;
