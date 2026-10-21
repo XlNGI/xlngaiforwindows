@@ -190,20 +190,34 @@ describe('AgentContextBudget', () => {
   );
 
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
-    'carries a new user supplement and confirmed tool history into %s replay',
+    'preserves the original %s request prefix and sends supplements separately',
     (protocol) => {
       const f = fixture(protocol);
       f.runtime.contextWindowTokens = 100000;
       const budget = new AgentContextBudget();
       budget.prepare(f.runtime, f.context);
       const next = budget.prepare(
-        { ...f.runtime, prompt: `${f.runtime.prompt}\n用户补充：保留旧版本，不重复保存` },
+        {
+          ...f.runtime,
+          continuation:
+            f.runtime.continuation?.protocol === 'openai-responses'
+              ? {
+                  ...f.runtime.continuation,
+                  userMessages: ['保留旧版本，不重复保存'],
+                }
+              : {
+                  ...f.runtime.continuation!,
+                  userMessages: ['保留旧版本，不重复保存'],
+                },
+        },
         f.context,
       );
-      expect(next.request.continuation).toBeUndefined();
-      expect(next.request.prompt).toContain('用户补充：保留旧版本，不重复保存');
-      expect(next.request.prompt).toContain('real-shot');
-      expect(next.request.prompt).toContain('手动修改必须保留');
+      expect(next.request.prompt).toBe(f.runtime.prompt);
+      expect(next.request.systemInstruction).toBe(f.runtime.systemInstruction);
+      expect(next.request.continuation?.userMessages).toEqual(['保留旧版本，不重复保存']);
+      if (protocol === 'openai-responses')
+        expect(next.request.continuation).toMatchObject({ previousResponseId: 'old-chain' });
+      else expect(next.request.continuation).toMatchObject({ providerResponseId: 'response' });
     },
   );
 
@@ -232,5 +246,28 @@ describe('AgentContextBudget', () => {
     expect(budget.lastInfo!.sections.tools!.bytes).toBeGreaterThan(0);
     expect(JSON.stringify(budget.lastInfo)).not.toContain('private-capability');
     expect(budget.lastInfo!.estimatedInputTokens).toBeLessThan(40000);
+  });
+
+  it('retains supplements exactly once through Responses compaction and the following chain', () => {
+    const f = fixture('openai-responses');
+    const content = '保留蓝色衣服，已保存的镜头不要再次写入';
+    f.context.messages.push({ role: 'user', content, timestamp: 1 });
+    f.runtime.continuation!.userMessages = [content];
+    const budget = new AgentContextBudget();
+    const prepared = budget.prepare(f.runtime, f.context);
+    expect(prepared.compacted).toBe(true);
+    expect(prepared.request.prompt.split(content)).toHaveLength(2);
+    expect(prepared.request.prompt).toContain('[USER SUPPLEMENTS — IN ORDER]');
+    expect(prepared.request.prompt).toContain('real-shot');
+    expect(prepared.request.continuation).toBeUndefined();
+    f.runtime.continuation = {
+      protocol: 'openai-responses',
+      previousResponseId: 'after-compaction',
+      outputs: [f.outputs[2]!],
+    };
+    const next = budget.prepare(f.runtime, f.context);
+    expect(next.request.prompt).toBe(f.runtime.prompt);
+    expect(next.request.continuation).toEqual(f.runtime.continuation);
+    expect(next.compacted).toBe(false);
   });
 });

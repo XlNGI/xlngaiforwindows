@@ -14,7 +14,6 @@ type HistoryEntry = { role: string; content?: unknown; callId?: string; toolName
 /** Task-local, deterministic budgeting. Never truncates user input or writes a second conversation. */
 export class AgentContextBudget {
   private readonly replacements = new Map<string, string>();
-  private lastPrompt?: string;
   private compactionCount = 0;
   lastInfo?: LlmRequestContextInfo;
 
@@ -67,11 +66,9 @@ export class AgentContextBudget {
       );
     }
     const request = structuredClone(runtime);
-    const promptChanged = this.lastPrompt !== undefined && this.lastPrompt !== runtime.prompt;
-    this.lastPrompt = runtime.prompt;
-    // Responses retains history remotely. Start a fresh chain when old results were compacted
-    // or the user supplemented the request, carrying the same evidence and confirmed saves.
-    if ((runtime.protocol === 'openai-responses' && compacted) || promptChanged) {
+    // Responses retains history remotely. Only compaction needs a new chain;
+    // user supplements travel as incremental messages on the existing chain.
+    if (runtime.protocol === 'openai-responses' && compacted) {
       request.continuation = undefined;
       request.prompt = replayPrompt(runtime.prompt, history);
     } else if (request.continuation?.protocol === 'openai-chat-completions') {
@@ -80,7 +77,7 @@ export class AgentContextBudget {
           output.output = this.replacements.get(output.callId) ?? output.output;
     }
     // Include the actual replay envelope in the final bound as it contains role/JSON overhead.
-    if (!request.continuation && (compacted || promptChanged)) {
+    if (!request.continuation && compacted) {
       const replayEstimate = this.measure(request, [], window, reserved);
       if (replayEstimate.estimatedInputTokens > inputBudget)
         throw new Error(
@@ -144,6 +141,7 @@ export class AgentContextBudget {
       context: runtime.context,
       user: runtime.prompt,
       history: JSON.stringify(history),
+      supplements: JSON.stringify(runtime.continuation?.userMessages ?? []),
       attachments: JSON.stringify(
         runtime.attachments?.map(({ name, mimeType, text }) => ({ name, mimeType, text })) ?? [],
       ),
@@ -169,7 +167,8 @@ export class AgentContextBudget {
 }
 
 function replayPrompt(prompt: string, history: HistoryEntry[]): string {
-  return `${prompt}\n\n[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]\n${JSON.stringify(history)}\n[END TASK HISTORY]\nContinue only unfinished work. Tool calls in this history already ran; do not execute them again. Reread omitted source text before relying on its details; preserve source version, draft/published status and current CAS checks.`;
+  const supplements = history.filter((entry) => entry.role === 'user').slice(1);
+  return `${prompt}${supplements.length ? `\n\n[USER SUPPLEMENTS — IN ORDER]\n${JSON.stringify(supplements)}\n[END USER SUPPLEMENTS]` : ''}\n\n[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]\n${JSON.stringify(history.filter((entry) => entry.role !== 'user'))}\n[END TASK HISTORY]\nContinue only unfinished work. Tool calls in this history already ran; do not execute them again. Reread omitted source text before relying on its details; preserve source version, draft/published status and current CAS checks.`;
 }
 
 function summarizeRead(callId: string, output: string): string | undefined {

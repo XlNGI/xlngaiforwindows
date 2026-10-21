@@ -15,6 +15,8 @@ import { PiConversationRuntime } from './pi-conversation-runtime.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js';
 
+const supplementalInputs = ['仅补充：保留蓝色衣服。', '对白保持原文。', '仅补充：保留蓝色衣服。'];
+
 describe('Pi native continuation', () => {
   it.each([
     {
@@ -22,21 +24,88 @@ describe('Pi native continuation', () => {
       responseIds: true,
       failRead: false,
       outcome: 'complete',
+      supplementMode: 'none',
     },
     {
       protocol: 'openai-chat-completions',
       responseIds: false,
       failRead: false,
       outcome: 'complete',
+      supplementMode: 'none',
     },
-    { protocol: 'openai-chat-completions', responseIds: true, failRead: true, outcome: 'complete' },
-    { protocol: 'openai-responses', responseIds: true, failRead: false, outcome: 'complete' },
-    { protocol: 'openai-chat-completions', responseIds: true, failRead: false, outcome: 'failed' },
-    { protocol: 'openai-responses', responseIds: true, failRead: false, outcome: 'cancelled' },
-    { protocol: 'openai-chat-completions', responseIds: true, failRead: false, outcome: 'missing' },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: true,
+      outcome: 'complete',
+      supplementMode: 'none',
+    },
+    {
+      protocol: 'openai-responses',
+      responseIds: true,
+      failRead: false,
+      outcome: 'complete',
+      supplementMode: 'none',
+    },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: false,
+      outcome: 'failed',
+      supplementMode: 'none',
+    },
+    {
+      protocol: 'openai-responses',
+      responseIds: true,
+      failRead: false,
+      outcome: 'cancelled',
+      supplementMode: 'none',
+    },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: false,
+      outcome: 'missing',
+      supplementMode: 'none',
+    },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: false,
+      outcome: 'complete',
+      supplementMode: 'tool',
+    },
+    {
+      protocol: 'openai-responses',
+      responseIds: true,
+      failRead: false,
+      outcome: 'complete',
+      supplementMode: 'tool',
+    },
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: false,
+      outcome: 'complete',
+      supplementMode: 'text',
+    },
+    {
+      protocol: 'openai-responses',
+      responseIds: true,
+      failRead: false,
+      outcome: 'complete',
+      supplementMode: 'text',
+    },
+    {
+      protocol: 'openai-responses',
+      responseIds: false,
+      failRead: false,
+      outcome: 'failed',
+      supplementMode: 'text',
+    },
   ] as const)(
-    'preserves context and request usage: $protocol, IDs=$responseIds, error=$failRead, $outcome',
-    async ({ protocol, responseIds, failRead, outcome }) => {
+    'preserves context and request usage: $protocol, IDs=$responseIds, error=$failRead, $outcome, supplement=$supplementMode',
+    async ({ protocol, responseIds, failRead, outcome, supplementMode }) => {
       const directory = await mkdtemp(join(tmpdir(), 'pi-native-continuation-'));
       const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
       try {
@@ -96,6 +165,14 @@ describe('Pi native continuation', () => {
             const params = envelope.params as NativeProviderStreamStartParams;
             requests.push(structuredClone(params));
             const ordinal = requests.length;
+            if (ordinal === 1 && supplementMode === 'text')
+              supplementalInputs.forEach((input, index) =>
+                generations.supplement(
+                  prepared.stream.generationId,
+                  input,
+                  `supplement-text-${index}`,
+                ),
+              );
             let sequence = 0;
             const emit = (event: NativeProviderHostEvent) => {
               bridge.handleEnvelope({
@@ -132,7 +209,7 @@ describe('Pi native continuation', () => {
               ...session,
             });
             const calls =
-              ordinal === 1
+              ordinal === 1 && supplementMode !== 'text'
                 ? [
                     {
                       id: 'search-a',
@@ -190,6 +267,14 @@ describe('Pi native continuation', () => {
           confirmTool: vi.fn(),
           selectMedia: vi.fn(),
           executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>((params) => {
+            if (supplementMode === 'tool' && params.calls[0]?.name === 'library.search')
+              supplementalInputs.forEach((input, index) =>
+                generations.supplement(
+                  prepared.stream.generationId,
+                  input,
+                  `supplement-tool-${index}`,
+                ),
+              );
             if (failRead && params.calls[0]?.name === 'library.read') {
               return Promise.reject(new Error('Library source handle is invalid or expired.'));
             }
@@ -227,6 +312,19 @@ describe('Pi native continuation', () => {
         const expectedStatus = ['complete', 'missing'].includes(outcome) ? 'complete' : outcome;
         const result = generations.get(prepared.stream.generationId);
         expect(result.status).toBe(expectedStatus);
+        if (protocol === 'openai-responses' && !responseIds) {
+          expect(requests).toHaveLength(1);
+          expect(JSON.stringify(result)).toContain('requires a Provider response ID');
+          expect(providerTools.executeTools).not.toHaveBeenCalled();
+          expect(
+            content
+              .listMessages({ conversationId: conversation.id })
+              .items.filter((message) => message.role === 'user')
+              .map((message) => message.content)
+              .sort(),
+          ).toEqual([initial.prompt, ...supplementalInputs].sort());
+          return;
+        }
         const expectedUsage = {
           inputTokens: outcome === 'cancelled' ? 601 : 600,
           cachedInputTokens: 192,
@@ -255,7 +353,7 @@ describe('Pi native continuation', () => {
           ).toMatchObject({ usage: expectedUsage, estimatedCost });
         }
         expect(requests).toHaveLength(3);
-        expect(providerTools.executeTools).toHaveBeenCalledTimes(3);
+        expect(providerTools.executeTools).toHaveBeenCalledTimes(supplementMode === 'text' ? 1 : 3);
         for (const request of requests) {
           expect(request.systemInstruction).toBe(requests[0]?.systemInstruction);
           expect(request.systemInstruction).toContain('unified project Agent');
@@ -266,30 +364,71 @@ describe('Pi native continuation', () => {
           expect(JSON.stringify(request)).not.toContain('worker-only');
         }
         expect(requests[0]?.continuation).toBeUndefined();
+        if (supplementMode !== 'none') {
+          expect(initial.prompt).not.toContain('仅补充：保留蓝色衣服。');
+          const afterSupplement = requests[1]!.continuation!;
+          if (afterSupplement.protocol === 'openai-responses') {
+            expect(afterSupplement.userMessages).toEqual(supplementalInputs);
+          } else {
+            expect(afterSupplement.userMessages).toEqual(supplementalInputs);
+            if (supplementMode === 'text') {
+              expect(afterSupplement.calls).toEqual([]);
+              expect(afterSupplement.outputs).toEqual([]);
+            }
+          }
+        }
         const continuation = requests[2]!.continuation!;
         if (continuation.protocol === 'openai-chat-completions') {
-          expect(continuation.history).toEqual([
-            {
-              content: 'Search the sources.',
-              calls: [
-                { id: 'search-a', name: 'library.search', argumentsJson: '{"query":"chapter"}' },
-                { id: 'search-b', name: 'library.search', argumentsJson: '{"query":"outline"}' },
-              ],
-              outputs: [
-                { callId: 'search-a', output: '{"status":"succeeded","result":"资料:search-a"}' },
-                { callId: 'search-b', output: '{"status":"succeeded","result":"资料:search-b"}' },
-              ],
-            },
-          ]);
+          expect(continuation.history).toEqual(
+            supplementMode === 'text'
+              ? [
+                  {
+                    content: 'Search the sources.',
+                    calls: [],
+                    outputs: [],
+                    userMessages: supplementalInputs,
+                  },
+                ]
+              : [
+                  {
+                    content: 'Search the sources.',
+                    calls: [
+                      {
+                        id: 'search-a',
+                        name: 'library.search',
+                        argumentsJson: '{"query":"chapter"}',
+                      },
+                      {
+                        id: 'search-b',
+                        name: 'library.search',
+                        argumentsJson: '{"query":"outline"}',
+                      },
+                    ],
+                    outputs: [
+                      {
+                        callId: 'search-a',
+                        output: '{"status":"succeeded","result":"资料:search-a"}',
+                      },
+                      {
+                        callId: 'search-b',
+                        output: '{"status":"succeeded","result":"资料:search-b"}',
+                      },
+                    ],
+                    ...(supplementMode === 'tool' ? { userMessages: supplementalInputs } : {}),
+                  },
+                ],
+          );
           expect(continuation.content).toBe('Read chapter one.');
           expect(continuation.calls.map((call) => call.id)).toEqual(['read-a']);
           expect(continuation.outputs[0]?.output).toContain(
             failRead ? 'Library source handle is invalid or expired.' : '资料:read-a',
           );
+          expect(continuation.userMessages).toBeUndefined();
         } else {
           expect(continuation.previousResponseId).toBe('response-2');
           expect(continuation.outputs.map((output) => output.callId)).toEqual(['read-a']);
           expect(continuation).not.toHaveProperty('history');
+          expect(continuation.userMessages).toBeUndefined();
         }
       } finally {
         projects.close();

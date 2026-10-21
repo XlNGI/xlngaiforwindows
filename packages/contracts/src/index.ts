@@ -2415,12 +2415,16 @@ export interface LlmResponsesToolContinuation {
   protocol: 'openai-responses';
   previousResponseId: string;
   outputs: LlmToolOutput[];
+  /** New user input after this response's completed tool outputs. */
+  userMessages?: string[];
 }
 
 export interface LlmChatToolTurn {
   content?: string;
   calls: Array<Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>>;
   outputs: LlmToolOutput[];
+  /** User messages following this completed assistant/tool turn, in order. */
+  userMessages?: string[];
 }
 
 export interface LlmChatCompletionsToolContinuation {
@@ -2431,6 +2435,7 @@ export interface LlmChatCompletionsToolContinuation {
   content?: string;
   calls: LlmToolCall[];
   outputs: LlmToolOutput[];
+  userMessages?: string[];
 }
 
 export type LlmToolContinuation = LlmResponsesToolContinuation | LlmChatCompletionsToolContinuation;

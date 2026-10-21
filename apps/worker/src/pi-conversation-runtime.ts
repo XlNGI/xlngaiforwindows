@@ -401,6 +401,7 @@ export class PiConversationRuntime implements ConversationRuntime {
           message,
           toolResults,
           context.messages,
+          supplements.map((supplement) => supplement.content),
         );
         this.options.generation.configureAgentTools(
           identity,
@@ -447,6 +448,9 @@ export class PiConversationRuntime implements ConversationRuntime {
         return undefined;
       },
     });
+    // Supplements belong to the same Provider turn and must be carried together
+    // in chronological order, rather than leaking one per continuation.
+    agent.steeringMode = 'all';
 
     if (providerGateway && !plannedWorkflow) {
       providerGateway.startProviderStep();
@@ -1085,9 +1089,13 @@ function buildContinuation(
   message: AgentContext['messages'][number],
   results: ToolResultMessage[],
   messages: AgentContext['messages'],
+  userMessages: string[],
 ): LlmToolContinuation | undefined {
-  if (message.role !== 'assistant' || results.length === 0) return undefined;
-  if (protocol === 'openai-responses' && !message.responseId) return undefined;
+  if (message.role !== 'assistant' || (!results.length && !userMessages.length)) return undefined;
+  if (protocol === 'openai-responses' && !message.responseId)
+    throw new Error(
+      'Responses continuation requires a Provider response ID; task inputs and saved progress are preserved.',
+    );
   const calls = message.content
     .filter(
       (item): item is Extract<AssistantMessage['content'][number], { type: 'toolCall' }> =>
@@ -1106,7 +1114,12 @@ function buildContinuation(
       .join('\n'),
   }));
   if (protocol === 'openai-responses') {
-    return { protocol, previousResponseId: message.responseId!, outputs };
+    return {
+      protocol,
+      previousResponseId: message.responseId!,
+      outputs,
+      ...(userMessages.length ? { userMessages } : {}),
+    };
   }
   // Chat Completions is stateless: a response ID cannot recover earlier tool
   // results. Rebuild completed turns from Pi, including failed tool results.
@@ -1127,6 +1140,15 @@ function buildContinuation(
         outputs: [],
       };
       history.push(turn);
+    } else if (item.role === 'user' && turn) {
+      const text =
+        typeof item.content === 'string'
+          ? item.content
+          : item.content
+              .filter((part) => part.type === 'text')
+              .map((part) => part.text)
+              .join('\n');
+      (turn.userMessages ??= []).push(text);
     } else if (item.role === 'toolResult' && turn) {
       turn.outputs.push({
         callId: item.toolCallId,
@@ -1144,5 +1166,6 @@ function buildContinuation(
     content: assistantText(message),
     calls,
     outputs,
+    ...(userMessages.length ? { userMessages } : {}),
   };
 }

@@ -225,25 +225,31 @@ describe('PiConversationRuntime', () => {
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall('task.plan.submit', {}, { id: 'plan' })], {
         stopReason: 'toolUse',
+        responseId: 'response-plan',
       }),
       fauxAssistantMessage([fauxToolCall('novel.episode.submit_draft', {}, { id: 'outline' })], {
         stopReason: 'toolUse',
+        responseId: 'response-outline',
       }),
       fauxAssistantMessage([fauxToolCall('document.create_draft', {}, { id: 'character' })], {
         stopReason: 'toolUse',
+        responseId: 'response-character',
       }),
       fauxAssistantMessage([fauxToolCall('document.create_draft', {}, { id: 'scene' })], {
         stopReason: 'toolUse',
+        responseId: 'response-scene',
       }),
       fauxAssistantMessage(
         [fauxToolCall('novel.episode.submit_structure', {}, { id: 'structure' })],
-        { stopReason: 'toolUse' },
+        { stopReason: 'toolUse', responseId: 'response-structure' },
       ),
       fauxAssistantMessage([fauxToolCall('novel.episode.submit_structure', {}, { id: 'shots' })], {
         stopReason: 'toolUse',
+        responseId: 'response-shots',
       }),
       fauxAssistantMessage([fauxToolCall('task.package.complete', {}, { id: 'complete' })], {
         stopReason: 'toolUse',
+        responseId: 'response-complete',
       }),
     ]);
     const plans = new FakePlanService();

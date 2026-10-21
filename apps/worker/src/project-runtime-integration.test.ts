@@ -666,8 +666,15 @@ it('runs two same-conversation branches concurrently while an ordered follow-up 
     ordered.prepared.stream,
     scope(f.runtimeA),
   );
-  expect(supplemented.prompt).toContain('Add a concise ending');
-  expect(supplemented.context).toContain('Ordered first response');
+  expect(supplemented.prompt).toBe(request.prompt);
+  expect(supplemented.context).toBe(request.context);
+  expect(supplemented.systemInstruction).toBe(request.systemInstruction);
+  expect(supplemented.continuation).toMatchObject({
+    protocol: 'openai-responses',
+    previousResponseId: 'ordered-complete',
+    outputs: [],
+    userMessages: ['Add a concise ending'],
+  });
   emit(streams[3]!, { type: 'text_delta', delta: 'Concise ending' });
   emit(streams[3]!, {
     type: 'complete',

@@ -51,7 +51,6 @@ import { readRequestAccounting, updateModelRequest } from './provider-request-le
 
 interface GenerationState extends LlmGenerationInfo {
   agentBaseInstruction?: string;
-  supplementContextBase?: string;
   providerUsage?: Map<string, NormalizedLlmUsage>;
   accounting?: LlmUsageAccounting;
   attemptId: string;
@@ -484,24 +483,8 @@ export class GenerationService {
         return rows;
       })(),
     );
-    if (rows.length) {
-      state.supplementContextBase ??= state.runtimeRequest.context;
-      const nextContext = `${state.supplementContextBase}\n\n[本任务此前已观察的助手输出]\n${state.assistantMessage.content}`;
-      const nextPrompt = `${state.runtimeRequest.prompt}\n\n[用户明确关联到本任务的补充输入]\n${rows.map((row) => row.content).join('\n\n')}`;
-      const budget =
-        this.projects.access(false, (database) => {
-          const snapshot = createRepositories(database).contextSnapshots.get(state.snapshotId);
-          return snapshot
-            ? (JSON.parse(snapshot.contentJson) as { budgetTokens?: number }).budgetTokens
-            : undefined;
-        }) ?? 24000;
-      if (
-        estimateTokenCount(state.runtimeRequest.systemInstruction + nextContext + nextPrompt) >
-        budget
-      )
-        throw new Error('Supplement context exceeds the task budget.');
-      state.runtimeRequest = { ...state.runtimeRequest, context: nextContext, prompt: nextPrompt };
-    }
+    // Pi appends these as user messages. Its send-time budget includes all supplements;
+    // the original prompt and frozen system context must stay unchanged.
     return rows;
   }
 
@@ -1498,8 +1481,10 @@ function cloneToolContinuation(continuation: LlmToolContinuation): LlmToolContin
       protocol: continuation.protocol,
       providerResponseId: continuation.providerResponseId,
       content: continuation.content,
+      userMessages: continuation.userMessages?.slice(),
       history: continuation.history?.map((turn) => ({
         content: turn.content,
+        userMessages: turn.userMessages?.slice(),
         calls: turn.calls.map((call) => ({ ...call })),
         outputs: turn.outputs.map((output) => ({ ...output })),
       })),
@@ -1510,6 +1495,7 @@ function cloneToolContinuation(continuation: LlmToolContinuation): LlmToolContin
   return {
     protocol: continuation.protocol,
     previousResponseId: continuation.previousResponseId,
+    userMessages: continuation.userMessages?.slice(),
     outputs: continuation.outputs.map((output) => ({ ...output })),
   };
 }

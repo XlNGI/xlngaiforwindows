@@ -1280,6 +1280,12 @@ it('freezes concurrent task inputs and excludes another active branch even after
   expect(() =>
     generations.supplement(b.stream.generationId, supplement.content, 'extra-A'),
   ).toThrow('different input');
+  const frozenA = generations.runtime(a.stream);
+  expect(generations.consumeSupplements(a.stream.generationId)).toEqual([
+    { id: 'extra-A', content: supplement.content },
+  ]);
+  expect(generations.runtime(a.stream)).toEqual(frozenA);
+  expect(generations.consumeSupplements(a.stream.generationId)).toEqual([]);
   generations.complete({ ...a.stream, content: 'A partial isolated_secret complete' });
   const library = new LibrarySearchService(projects);
   expect(

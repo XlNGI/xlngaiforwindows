@@ -5720,9 +5720,32 @@ mod tests {
                 "outputTokenParameter": parameter,
                 "reasoning": "provider_default",
             });
+            value["continuation"] = if protocol == "openai-responses" {
+                json!({"protocol": protocol, "previousResponseId": "response-1",
+                    "outputs": [{"callId": "read", "output": "source"}],
+                    "userMessages": ["Keep blue clothes", "Keep dialogue"]})
+            } else {
+                json!({"protocol": protocol, "providerResponseId": "response-1",
+                    "history": [{"content": "Earlier text", "calls": [], "outputs": [],
+                        "userMessages": ["Earlier supplement"]}],
+                    "calls": [{"id": "read", "name": "library.read", "argumentsJson": "{}"}],
+                    "outputs": [{"callId": "read", "output": "source"}],
+                    "userMessages": ["Keep blue clothes", "Keep dialogue"]})
+            };
             assert!(validate_provider_stream_params(&value).is_ok());
             let body = crate::llm_stream::request_body_for_contract_test(value).unwrap();
             assert_eq!(body[parameter], 8192);
+            let messages = if protocol == "openai-responses" {
+                body["input"].as_array().unwrap()
+            } else {
+                body["messages"].as_array().unwrap()
+            };
+            let tail = &messages[messages.len() - 2..];
+            assert_eq!(
+                tail[0],
+                json!({"role": "user", "content": "Keep blue clothes"})
+            );
+            assert_eq!(tail[1], json!({"role": "user", "content": "Keep dialogue"}));
             assert!(body.get("inferenceSettings").is_none());
         }
         let value = native_provider_stream_fixture();
@@ -5773,6 +5796,13 @@ mod tests {
                 "outputTokenParameter": if protocol == "openai-responses" { "max_output_tokens" } else { "max_completion_tokens" },
                 "reasoning": "provider_default",
             });
+            value["continuation"] = if protocol == "openai-responses" {
+                json!({"protocol": protocol, "previousResponseId": "response-1", "outputs": [],
+                    "userMessages": ["New user instruction"]})
+            } else {
+                json!({"protocol": protocol, "providerResponseId": "response-1", "calls": [], "outputs": [],
+                    "content": "Observed text", "userMessages": ["New user instruction"]})
+            };
             value
         });
         let output = Command::new("node")
@@ -5801,6 +5831,15 @@ mod tests {
                 .as_str()
                 .unwrap();
             assert_eq!(body[parameter], 8192);
+            let messages = if params["protocol"] == "openai-responses" {
+                body["input"].as_array().unwrap()
+            } else {
+                body["messages"].as_array().unwrap()
+            };
+            assert_eq!(
+                messages.last().unwrap(),
+                &json!({"role": "user", "content": "New user instruction"})
+            );
         }
     }
 

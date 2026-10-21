@@ -80,6 +80,7 @@ describe('AgentProviderToolGateway', () => {
     const load = gateway.tools().find((tool) => tool.name === 'tools.load')!;
     const first = await load.execute('first', { names: ['research.fetch'] });
     const prefix = gateway.currentDefinitions();
+    expect(JSON.stringify(prefix)).not.toBe(JSON.stringify(initial));
     await load.execute('next', { names: ['research.search'] });
     expect(gateway.currentDefinitions().slice(0, prefix.length)).toEqual(prefix);
     expect(gateway.currentDefinitions().map((tool) => tool.name)).toEqual([
@@ -92,7 +93,9 @@ describe('AgentProviderToolGateway', () => {
       initial.find((tool) => tool.name === 'tools.load'),
     );
     expect(JSON.stringify(first)).toContain('external research policy');
+    const beforeRepeat = JSON.stringify(gateway.currentDefinitions());
     const repeated = await load.execute('again', { names: ['research.fetch'] });
+    expect(JSON.stringify(gateway.currentDefinitions())).toBe(beforeRepeat);
     expect(JSON.stringify(repeated)).not.toContain('external research policy');
     await load.execute('phase', { names: ['document.create_draft'], reset: true });
     expect(gateway.currentDefinitions().map((tool) => tool.name)).toEqual([

@@ -162,6 +162,8 @@ struct LlmChatToolTurn {
     content: Option<String>,
     calls: Vec<LlmToolCall>,
     outputs: Vec<LlmToolOutput>,
+    #[serde(default)]
+    user_messages: Vec<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -172,6 +174,8 @@ enum LlmToolContinuation {
         #[serde(rename = "previousResponseId")]
         previous_response_id: String,
         outputs: Vec<LlmToolOutput>,
+        #[serde(default, rename = "userMessages")]
+        user_messages: Vec<String>,
     },
     #[serde(rename = "openai-chat-completions")]
     ChatCompletions {
@@ -183,6 +187,8 @@ enum LlmToolContinuation {
         content: Option<String>,
         calls: Vec<LlmToolCall>,
         outputs: Vec<LlmToolOutput>,
+        #[serde(default, rename = "userMessages")]
+        user_messages: Vec<String>,
     },
 }
 
@@ -1519,6 +1525,7 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
             let LlmToolContinuation::Responses {
                 previous_response_id,
                 outputs,
+                user_messages,
             } = continuation
             else {
                 return Err(StreamFailure::new(
@@ -1526,7 +1533,9 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                     false,
                 ));
             };
-            if previous_response_id.trim().is_empty() || outputs.is_empty() {
+            if previous_response_id.trim().is_empty()
+                || (outputs.is_empty() && user_messages.is_empty())
+            {
                 return Err(StreamFailure::new(
                     "LLM tool continuation is invalid.",
                     false,
@@ -1543,6 +1552,11 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                             "output": output.output,
                         })
                     })
+                    .chain(
+                        user_messages
+                            .iter()
+                            .map(|text| serde_json::json!({ "role": "user", "content": text })),
+                    )
                     .collect(),
             );
         }
@@ -1592,6 +1606,7 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                 content,
                 calls,
                 outputs,
+                user_messages,
             } = continuation
             else {
                 return Err(StreamFailure::new(
@@ -1606,6 +1621,7 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                     &turn.outputs,
                     turn.content.as_deref(),
                 )?;
+                append_user_messages(&mut messages, &turn.user_messages);
             }
             append_chat_continuation(
                 &mut messages,
@@ -1613,6 +1629,7 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                 calls,
                 outputs,
                 content.as_deref(),
+                user_messages,
             )?;
         }
         let mut value = serde_json::json!({
@@ -1674,14 +1691,27 @@ fn append_chat_continuation(
     calls: &[LlmToolCall],
     outputs: &[LlmToolOutput],
     content: Option<&str>,
+    user_messages: &[String],
 ) -> Result<(), StreamFailure> {
-    if provider_response_id.trim().is_empty() || calls.is_empty() || outputs.is_empty() {
+    if provider_response_id.trim().is_empty()
+        || (calls.is_empty() && outputs.is_empty() && user_messages.is_empty())
+    {
         return Err(StreamFailure::new(
             "LLM tool continuation is invalid.",
             false,
         ));
     }
-    append_chat_turn(messages, calls, outputs, content)
+    append_chat_turn(messages, calls, outputs, content)?;
+    append_user_messages(messages, user_messages);
+    Ok(())
+}
+
+fn append_user_messages(messages: &mut Vec<serde_json::Value>, user_messages: &[String]) {
+    messages.extend(
+        user_messages
+            .iter()
+            .map(|text| serde_json::json!({ "role": "user", "content": text })),
+    );
 }
 
 fn append_chat_turn(
@@ -3438,6 +3468,7 @@ mod tests {
             }],
             continuation: Some(super::LlmToolContinuation::Responses {
                 previous_response_id: "resp_1".to_string(),
+                user_messages: Vec::new(),
                 outputs: vec![super::LlmToolOutput {
                     call_id: "call_1".to_string(),
                     output: "{\"status\":\"draft\"}".to_string(),
@@ -3565,6 +3596,7 @@ mod tests {
             tools: Vec::new(),
             continuation: Some(super::LlmToolContinuation::ChatCompletions {
                 provider_response_id: "chatcmpl_tool".to_string(),
+                user_messages: Vec::new(),
                 history: Vec::new(),
                 content: None,
                 calls: vec![super::LlmToolCall {
@@ -3664,6 +3696,114 @@ mod tests {
     }
 
     #[test]
+    fn supplements_preserve_final_provider_message_prefixes() {
+        for protocol in ["openai-chat-completions", "openai-responses"] {
+            for text_only in [false, true] {
+                let mut runtime: LlmRuntimeRequest = serde_json::from_value(serde_json::json!({
+                    "generationId": "g", "attemptId": "a", "projectId": "p",
+                    "projectSessionId": "s", "conversationId": "c",
+                    "providerProfileId": "profile", "modelId": "model", "remoteModelId": "model",
+                    "protocol": protocol, "baseUrl": "https://example.invalid/v1",
+                    "systemInstruction": "Frozen system", "context": "Frozen catalog", "prompt": "Original user input"
+                })).unwrap();
+                let serialize = |runtime: &LlmRuntimeRequest| -> serde_json::Value {
+                    serde_json::from_slice(&super::build_request_body(runtime).unwrap()).unwrap()
+                };
+                let initial = serialize(&runtime);
+                let users = serde_json::json!([
+                    "Keep blue clothes",
+                    "Keep the dialogue",
+                    "Keep blue clothes"
+                ]);
+                let mut turn = serde_json::json!({
+                    "content": "Observed assistant output", "calls": [], "outputs": [],
+                    "userMessages": users
+                });
+                if !text_only {
+                    turn["calls"] = serde_json::json!([
+                        {"id": "saved", "name": "document.create_draft", "argumentsJson": "{}"}
+                    ]);
+                    turn["outputs"] = serde_json::json!([
+                        {"callId": "saved", "output": "{\"savedId\":\"real-draft\",\"rowVersion\":7}"}
+                    ]);
+                }
+                let mut continuation = if protocol == "openai-responses" {
+                    serde_json::json!({"protocol": protocol, "previousResponseId": "response-1",
+                        "outputs": turn["outputs"], "userMessages": users})
+                } else {
+                    let mut value = turn.clone();
+                    value["protocol"] = serde_json::json!(protocol);
+                    value["providerResponseId"] = serde_json::json!("response-1");
+                    value
+                };
+                runtime.continuation = Some(serde_json::from_value(continuation.clone()).unwrap());
+                let second = serialize(&runtime);
+                if protocol == "openai-responses" {
+                    assert_eq!(second["instructions"], initial["instructions"]);
+                    let input = second["input"].as_array().unwrap();
+                    let offset = if text_only { 0 } else { 1 };
+                    assert_eq!(input.len(), offset + 3);
+                    for index in 0..3 {
+                        assert_eq!(
+                            input[offset + index],
+                            serde_json::json!({"role": "user", "content": users[index]})
+                        );
+                    }
+                    if !text_only {
+                        assert_eq!(input[0]["call_id"], "saved");
+                    }
+                } else {
+                    let messages = second["messages"].as_array().unwrap();
+                    assert_eq!(&messages[..2], initial["messages"].as_array().unwrap());
+                    let offset = if text_only { 3 } else { 4 };
+                    assert_eq!(messages.len(), offset + 3);
+                    for index in 0..3 {
+                        assert_eq!(
+                            messages[offset + index],
+                            serde_json::json!({"role": "user", "content": users[index]})
+                        );
+                    }
+                }
+                // Two later requests must append to the exact final wire history,
+                // rather than repacking user input or replaying a successful write.
+                let mut history = vec![turn];
+                let mut previous = second;
+                for ordinal in 2..=3 {
+                    let next_turn = serde_json::json!({"content": "Read next source",
+                        "calls": [{"id": format!("read-{ordinal}"), "name": "library.read", "argumentsJson": "{}"}],
+                        "outputs": [{"callId": format!("read-{ordinal}"), "output": "source text"}]});
+                    continuation = if protocol == "openai-responses" {
+                        serde_json::json!({"protocol": protocol, "previousResponseId": format!("response-{ordinal}"), "outputs": next_turn["outputs"]})
+                    } else {
+                        let mut value = next_turn.clone();
+                        value["protocol"] = serde_json::json!(protocol);
+                        value["providerResponseId"] =
+                            serde_json::json!(format!("response-{ordinal}"));
+                        value["history"] = serde_json::json!(history);
+                        value
+                    };
+                    runtime.continuation = Some(serde_json::from_value(continuation).unwrap());
+                    let next = serialize(&runtime);
+                    if protocol == "openai-responses" {
+                        assert_eq!(next["instructions"], initial["instructions"]);
+                        assert_eq!(next["input"].as_array().unwrap().len(), 1);
+                        assert_eq!(next["previous_response_id"], format!("response-{ordinal}"));
+                        assert!(next["input"][0].get("role").is_none());
+                    } else {
+                        let prefix = previous["messages"].as_array().unwrap();
+                        assert_eq!(
+                            &next["messages"].as_array().unwrap()[..prefix.len()],
+                            prefix
+                        );
+                    }
+                    previous = next;
+                    history.push(next_turn);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rejects_chat_continuation_without_matching_output() {
         let runtime = LlmRuntimeRequest {
             inference_settings: None,
@@ -3684,6 +3824,7 @@ mod tests {
             tools: Vec::new(),
             continuation: Some(super::LlmToolContinuation::ChatCompletions {
                 provider_response_id: "chatcmpl_tool".to_string(),
+                user_messages: Vec::new(),
                 history: Vec::new(),
                 content: None,
                 calls: vec![super::LlmToolCall {
