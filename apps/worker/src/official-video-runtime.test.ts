@@ -242,30 +242,23 @@ describe('official audio reference video pipeline with actual local media', () =
       const conversation = content.createConversation({ scopeType: 'project' });
       const target = { kind: 'scene' as const, id: f.scene.id };
       const production = new ProductionService(f.ps);
-      production.execute({
-        executionKey: 'agent-role-voice',
-        operations: [
-          {
-            action: 'set_prompt',
-            target,
-            expectedRowVersion: f.scene.rowVersion,
-            instruction: {
-              version: 1,
-              summary: '主角在雨中说你好',
-              subjects: [{ documentId: f.character.id }],
-              visual: {},
-              beats: [],
-              audio: { mode: 'voice-reference' },
-              generation: {
-                duration: 5,
-                resolution: provider === 'minimax-video' ? '768P' : '720p',
-                ratio: '16:9',
-              },
-              resources: [],
-              continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
-            },
-          },
-        ],
+      content.saveScene({
+        sceneId: f.scene.id,
+        title: f.scene.title,
+        expectedRowVersion: f.scene.rowVersion,
+        authoringIR: {
+          schemaVersion: 1,
+          kind: 'scene',
+          prompt: '主角在雨中说你好',
+          references: { characterDocumentIds: [f.character.id] },
+          timing: { estimatedDurationSeconds: 5, rationale: '一句对白' },
+        },
+      });
+      production.saveDefaults({
+        expectedRowVersion: 0,
+        settings: {
+          generation: { resolution: provider === 'minimax-video' ? '768P' : '720p', ratio: '16:9' },
+        },
       });
       const identity = {
         generationId: 'agent-role-voice',

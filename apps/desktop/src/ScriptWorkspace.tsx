@@ -1,4 +1,4 @@
-import { RotateCcw } from 'lucide-react';
+import { FileText, ListChecks, RotateCcw } from 'lucide-react';
 import type { DocumentKind } from '@ai-video/contracts';
 
 const KIND_OPTIONS: Array<{ id: DocumentKind; label: string }> = [
@@ -22,6 +22,8 @@ export function ScriptWorkspace({
   onKindChange,
   onContentChange,
   onRestoreVersion,
+  onPrepareMedia,
+  preparationDisabled,
 }: {
   title: string;
   kind: DocumentKind;
@@ -37,6 +39,8 @@ export function ScriptWorkspace({
   onKindChange: (value: DocumentKind) => void;
   onContentChange: (value: string) => void;
   onRestoreVersion: (versionId: string) => void;
+  onPrepareMedia?: () => void;
+  preparationDisabled?: boolean;
 }) {
   const options = KIND_OPTIONS.some((item) => item.id === kind)
     ? KIND_OPTIONS
@@ -46,8 +50,28 @@ export function ScriptWorkspace({
     <div className="script-workspace">
       <section className="script-document-panel" aria-labelledby="script-document-heading">
         <div className="script-document-heading">
-          <h2 id="script-document-heading">{'\u9879\u76ee\u6587\u6863'}</h2>
+          <h2 id="script-document-heading">
+            <FileText size={16} aria-hidden="true" />
+            {'\u9879\u76ee\u6587\u6863'}
+          </h2>
         </div>
+        {onPrepareMedia && (
+          <div className="production-action-bar" role="group" aria-label="剧本制作">
+            <div className="production-action-copy">
+              <strong>剧本 → 媒体表单</strong>
+              <p>准备图片、视频及所需音频，调整表单后提交生成</p>
+            </div>
+            <button
+              type="button"
+              className="button primary"
+              disabled={!writable || preparationDisabled}
+              onClick={onPrepareMedia}
+            >
+              <ListChecks size={15} aria-hidden="true" />
+              一键准备媒体表单
+            </button>
+          </div>
+        )}
         {episodeChapterCount > 0 ? (
           <p className="script-episode-hint">
             {`\u5df2\u6307\u5b9a ${episodeChapterCount} \u4e2a\u7ae0\u8282\u4f5c\u4e3a\u672c\u96c6\u8303\u56f4\u3002\u8fd9\u4efd\u6587\u6863\u53ea\u5199\u672c\u96c6\u628a\u63a7\uff0c\u4e0d\u8981\u628a\u955c\u5934\u63d0\u793a\u8bcd\u5199\u8fdb\u6765\u53d1\u7ed9\u751f\u4ea7 API\u3002`}

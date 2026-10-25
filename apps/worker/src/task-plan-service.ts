@@ -29,6 +29,7 @@ import {
   validateConversationTaskPlan,
 } from './request-validation.js';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
+import { withAgentResponseLanguageInstruction } from './agent-policy-instructions.js';
 
 export class TaskPlanServiceError extends Error {
   constructor(
@@ -1386,19 +1387,21 @@ export function buildPlanOnlyInstruction(input: {
         `3. scene-shot-structure (dependsOn: [episode-outline, character-prompts])\n` +
         `4. shot-prompts (dependsOn: [scene-shot-structure])\n`
       : '';
-  return [
-    'You are in a plan-only round for a short-drama task.',
-    'Your only available tool is task.plan.submit. Call it exactly once with the complete plan.',
-    'Do not create deliverables, call business tools, or claim that the task is complete in this round.',
-    `The Worker-frozen target platform is ${input.targetPlatform}. Copy it exactly into targetPlatform.`,
-    `The Worker has frozen ${input.selectedChapterCount} selected chapter(s). Do not provide or infer chapter IDs.`,
-    'Never include authority or secret fields such as projectId, projectSessionId, sessionId, conversationId, taskId, chapterIds, selectedChapterIds, documentId, path, localPath, filePath, providerProfileId, providerCredential, credential, or secret.',
-    expectedSeedancePlan.trim(),
-    'Original user request:',
-    input.userPrompt,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  return withAgentResponseLanguageInstruction(
+    [
+      'You are in a plan-only round for a short-drama task.',
+      'Your only available tool is task.plan.submit. Call it exactly once with the complete plan.',
+      'Do not create deliverables, call business tools, or claim that the task is complete in this round.',
+      `The Worker-frozen target platform is ${input.targetPlatform}. Copy it exactly into targetPlatform.`,
+      `The Worker has frozen ${input.selectedChapterCount} selected chapter(s). Do not provide or infer chapter IDs.`,
+      'Never include authority or secret fields such as projectId, projectSessionId, sessionId, conversationId, taskId, chapterIds, selectedChapterIds, documentId, path, localPath, filePath, providerProfileId, providerCredential, credential, or secret.',
+      expectedSeedancePlan.trim(),
+      'Original user request:',
+      input.userPrompt,
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+  );
 }
 
 export function buildGenericPlanOnlyInstruction(input: {
@@ -1406,17 +1409,19 @@ export function buildGenericPlanOnlyInstruction(input: {
   authorizedOperations: string[];
   requiredOperations: string[];
 }): string {
-  return [
-    'You are in a plan-only round for a generic multi-step task.',
-    'Submit exactly one version 2 plan with task.plan.submit. You may first use authorized library.search and library.read tools to inspect project sources when helpful.',
-    'Each step needs a stable lowercase id, one exact authorized operation, required, dependsOn, and bounded constraints.',
-    'Do not call business write tools, invent authority fields, include credentials or paths, or claim completion in this round.',
-    `Worker-authorized operations: ${input.authorizedOperations.join(', ')}.`,
-    `Required operation order: ${input.requiredOperations.join(' -> ')}. Every later required operation must depend transitively on the previous one.`,
-    'Choose whether and how to retrieve project content yourself. Authorized library.search and library.read remain available throughout execution even if you omit retrieval steps from the plan.',
-    'Original user request:',
-    input.userPrompt,
-  ].join('\n\n');
+  return withAgentResponseLanguageInstruction(
+    [
+      'You are in a plan-only round for a generic multi-step task.',
+      'Submit exactly one version 2 plan with task.plan.submit. You may first use authorized library.search and library.read tools to inspect project sources when helpful.',
+      'Each step needs a stable lowercase id, one exact authorized operation, required, dependsOn, and bounded constraints.',
+      'Do not call business write tools, invent authority fields, include credentials or paths, or claim completion in this round.',
+      `Worker-authorized operations: ${input.authorizedOperations.join(', ')}.`,
+      `Required operation order: ${input.requiredOperations.join(' -> ')}. Every later required operation must depend transitively on the previous one.`,
+      'Choose whether and how to retrieve project content yourself. Authorized library.search and library.read remain available throughout execution even if you omit retrieval steps from the plan.',
+      'Original user request:',
+      input.userPrompt,
+    ].join('\n\n'),
+  );
 }
 
 export function shouldRequireStructuredPlan(

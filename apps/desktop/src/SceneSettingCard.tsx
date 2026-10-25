@@ -5,59 +5,101 @@ import { ReferenceCard, referenceAssetName } from './ReferenceCard';
 
 export function useSceneSettingImages(
   projectId: string | undefined,
-  documentId: string | undefined,
+  documentId: string | string[] | undefined,
   documents: DocumentSummary[],
   revision?: unknown,
 ) {
-  const available = documents.some(
-    (d) =>
-      d.id === documentId &&
-      d.projectId === projectId &&
-      d.kind === 'scene' &&
-      d.domainScope !== 'novel' &&
-      d.lifecycleStatus === 'active',
+  const documentIds: string[] = Array.from(
+    new Set(
+      (Array.isArray(documentId) ? documentId : documentId ? [documentId] : []).filter(
+        (id): id is string => Boolean(id),
+      ),
+    ),
   );
-  const key = `${projectId}:${documentId}:${available}`;
-  const [state, setState] = useState<{ key: string; assets: AssetInfo[]; error?: string }>();
+  const availableIds = documentIds.filter((id) =>
+    documents.some(
+      (d) =>
+        d.id === id &&
+        d.projectId === projectId &&
+        d.kind === 'scene' &&
+        d.domainScope !== 'novel' &&
+        d.lifecycleStatus === 'active',
+    ),
+  );
+  const available = availableIds.length > 0;
+  const key = `${projectId}:${documentIds.join(',')}:${availableIds.join(',')}`;
+  const [state, setState] = useState<{
+    key: string;
+    assets: AssetInfo[];
+    assetsByDocument: Record<string, AssetInfo[]>;
+    error?: string;
+  }>();
   useEffect(() => {
     let active = true;
-    if (!projectId || !documentId || !available) return;
+    if (!projectId || !availableIds.length) return;
     const callWorker = projectWorker();
-    void callWorker('asset.list', {
-      sourceDocumentId: documentId,
-      sort: 'created-desc',
-      limit: 200,
-    })
-      .then((assets) => {
+    void Promise.all(
+      availableIds.map((sourceDocumentId) =>
+        callWorker('asset.list', {
+          sourceDocumentId,
+          sort: 'created-desc',
+          limit: 200,
+        }),
+      ),
+    )
+      .then((groups) => {
+        if (active) {
+          const assetsByDocument = Object.fromEntries(
+            availableIds.map((sourceDocumentId, index) => [
+              sourceDocumentId,
+              groups[index]!.filter(
+                (asset) =>
+                  asset.projectId === projectId &&
+                  !asset.deletedAt &&
+                  !asset.kind.toLowerCase().includes('video'),
+              ),
+            ]),
+          );
+          setState({
+            key,
+            assetsByDocument,
+            assets: Array.from(
+              new Map(
+                Object.values(assetsByDocument)
+                  .flat()
+                  .map((asset) => [asset.id, asset]),
+              ).values(),
+            ),
+          });
+        }
+      })
+      .catch(() => {
         if (active)
           setState({
             key,
-            assets: assets.filter(
-              (a) =>
-                a.projectId === projectId &&
-                !a.deletedAt &&
-                !a.kind.toLowerCase().includes('video'),
-            ),
+            assets: [],
+            assetsByDocument: {},
+            error: '场景参考图读取失败，请重新打开或重试。',
           });
-      })
-      .catch(() => {
-        if (active) setState({ key, assets: [], error: '场景参考图读取失败，请重新打开或重试。' });
       });
     return () => {
       active = false;
     };
-  }, [key, revision]);
+  }, [key, revision, availableIds.join(',')]);
   return {
     assets: state?.key === key ? state.assets : [],
+    assetsByDocument: state?.key === key ? state.assetsByDocument : {},
     error: state?.key === key ? state.error : undefined,
     available,
     loading: Boolean(projectId && documentId && available && state?.key !== key),
+    documentIds,
   };
 }
 
 export function SceneSettingCard({
   projectId,
   documentId,
+  documentIds,
   documents,
   asset,
   images,
@@ -75,6 +117,7 @@ export function SceneSettingCard({
 }: {
   projectId?: string;
   documentId?: string;
+  documentIds?: string[];
   documents: DocumentSummary[];
   asset?: AssetInfo;
   images: AssetInfo[];
@@ -90,6 +133,16 @@ export function SceneSettingCard({
   imageDisabled?: boolean;
   canClear?: boolean;
 }) {
+  const boundDocumentIds: string[] = Array.from(
+    new Set(
+      (documentIds?.length ? documentIds : documentId ? [documentId] : []).filter(
+        (id): id is string => Boolean(id),
+      ),
+    ),
+  );
+  const boundDocuments = boundDocumentIds
+    .map((id) => documents.find((document) => document.id === id))
+    .filter((document): document is DocumentSummary => Boolean(document));
   const choices = [
     ...new Map(
       [...(asset ? [asset] : []), ...images, ...candidates]
@@ -131,27 +184,54 @@ export function SceneSettingCard({
         </select>
       }
     >
-      {onBind && (
-        <label>
-          绑定场景
-          <select
-            aria-label="场次绑定场景"
-            value={documentId ?? ''}
-            disabled={!writable || busy}
-            onChange={(event) => onBind(event.target.value)}
-          >
-            <option value="">未绑定场景</option>
-            {documentId && !locations.some((d) => d.id === documentId) && (
-              <option value={documentId}>已绑定的场景资料不可用</option>
+      {onBind &&
+        (boundDocumentIds.length > 1 ? (
+          <div className="reference-binding-summary" aria-label="已绑定场景资料">
+            <span>已绑定场景资料</span>
+            {boundDocuments.length ? (
+              <ul>
+                {boundDocuments.map((document) => (
+                  <li key={document.id}>
+                    {onOpen ? (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => onOpen(document.id)}
+                      >
+                        {document.title}
+                      </button>
+                    ) : (
+                      document.title
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <small>绑定的场景资料不可用</small>
             )}
-            {locations.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.title}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+          </div>
+        ) : (
+          <label>
+            绑定场景
+            <select
+              aria-label="场次绑定场景"
+              value={documentId ?? boundDocumentIds[0] ?? ''}
+              disabled={!writable || busy}
+              onChange={(event) => onBind(event.target.value)}
+            >
+              <option value="">未绑定场景</option>
+              {(documentId ?? boundDocumentIds[0]) &&
+                !locations.some((d) => d.id === (documentId ?? boundDocumentIds[0])) && (
+                  <option value={documentId ?? boundDocumentIds[0]}>已绑定的场景资料不可用</option>
+                )}
+              {locations.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
       {asset && canClear && (
         <button
           type="button"
@@ -172,7 +252,7 @@ export function SceneSettingCard({
           恢复场次场景图
         </button>
       )}
-      {documentId && onOpen && (
+      {boundDocumentIds.length <= 1 && documentId && onOpen && (
         <button type="button" className="text-button" onClick={() => onOpen(documentId)}>
           打开场景资料
         </button>

@@ -25,7 +25,7 @@ function compileRequest(
 }
 
 /** Provider selection is user-owned. This hook only compiles a local form draft. */
-export function useProductionInstructions(input: {
+export function useProductionAuthoring(input: {
   projectId?: string;
   target?: ProductionTarget;
   adapter?: AdapterDescriptor;
@@ -83,8 +83,18 @@ export function useProductionInstructions(input: {
         if (!shotIds && !overrides.current.has(contextKey) && initialOverrides.current) {
           const initial = { ...initialOverrides.current };
           if (compiled.continuity?.binding) {
-            // A saved old form cannot replace the newly confirmed prompt or image bindings.
-            for (const field of ['prompt', 'images', 'media', 'content']) delete initial[field];
+            for (const field of [
+              'prompt',
+              'content',
+              'images',
+              'image',
+              'image_url',
+              'img_url',
+              'first_frame_url',
+              'last_frame_url',
+              'media',
+            ])
+              delete initial[field];
           }
           overrides.current.set(contextKey, initial);
         }
@@ -164,10 +174,14 @@ export function useProductionInstructions(input: {
     },
     beforeSubmit: (): Promise<ProductionSource | undefined> => {
       if (!target) return Promise.resolve(undefined);
+      if (
+        !result?.source ||
+        result.source.target.kind !== target.kind ||
+        result.source.target.id !== target.id
+      )
+        return Promise.resolve(undefined);
       return Promise.resolve({
-        ...(result?.source?.target.kind === target.kind && result.source.target.id === target.id
-          ? result.source
-          : {}),
+        ...result.source,
         mode: 'form',
         target,
         ...(shotIds ? { shotIds } : {}),

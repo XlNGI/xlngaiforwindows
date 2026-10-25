@@ -1,3 +1,14 @@
+import { PromptReferenceEditor } from './PromptReferenceEditor';
+import { MediaReviewQueue } from './MediaReviewQueue';
+import { AgentQuestionForm } from './AgentQuestionForm';
+import { conversationTimeline, newerAgentTaskDetail } from './conversation-timeline';
+import {
+  canonicalPromptParameters,
+  promptReferences,
+  updatePromptParameter,
+  type PromptReference,
+} from './prompt-references';
+import { seedProductionInputs, productionImagesFromParameters } from '@ai-video/contracts';
 import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
 import {
   AlertTriangle,
@@ -19,12 +30,13 @@ import {
   Square,
   Terminal,
 } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AssistantReply } from './AssistantReply';
 import { ComposerTextarea } from './ComposerTextarea';
 import { SCENE_PROMPT_CONSTRAINT_TEMPLATE } from './conversation-prompt-template';
 import type {
   AgentResearchMode,
+  AgentInputSubmitResult,
   ChatMessageInfo,
   ConversationInfo,
   ConversationScopeType,
@@ -47,6 +59,7 @@ import type {
   MediaModelSelectionRequest,
   UnifiedAgentModelSelectionRequest,
   LibraryCatalogItem,
+  MediaReviewSummary,
 } from '@ai-video/contracts';
 
 export interface ChatAttachment {
@@ -120,6 +133,7 @@ interface ChatPanelProps {
   onOpenProtectedUi?: (handoff: AgentProtectedUiHandoff) => void;
   onOpenTaskLog?: () => void;
   onContinueAgentTask?: () => void;
+  onAnswerQuestions?: (result: AgentInputSubmitResult) => Promise<void>;
   onClose?: () => void;
   showCloseAction?: boolean;
   /**
@@ -216,6 +230,7 @@ export function ChatPanel({
   onRejectSchemaProposal,
   onOpenTaskLog,
   onContinueAgentTask,
+  onAnswerQuestions,
   onClose,
   showCloseAction = true,
   showHeading = true,
@@ -330,7 +345,8 @@ export function ChatPanel({
   const displayedConfirmation = confirmation ?? agentTask?.pendingConfirmation;
   const mergedAgentTasks = useMemo(() => {
     const byId = new Map((agentTasks ?? []).map((item) => [item.task.id, item]));
-    if (agentTask) byId.set(agentTask.task.id, agentTask);
+    if (agentTask)
+      byId.set(agentTask.task.id, newerAgentTaskDetail(byId.get(agentTask.task.id), agentTask));
     return [...byId.values()];
   }, [agentTask, agentTasks]);
   const timelineByMessageId = useMemo(() => {
@@ -385,6 +401,159 @@ export function ChatPanel({
     confirmation &&
     'confirmationToken' in confirmation &&
     onConfirmAgentAction,
+  );
+  const renderMessageItems = (
+    forms: MediaReviewSummary[] = [],
+    renderForm?: (form: MediaReviewSummary) => ReactNode,
+    queueError?: ReactNode,
+  ) => (
+    <>
+      {canLoadEarlierMessages && (
+        <div
+          className="load-earlier-container"
+          style={{ display: 'flex', justifyContent: 'center', padding: '8px' }}
+        >
+          <button
+            className="button subtle"
+            type="button"
+            disabled={loadingEarlierMessages}
+            onClick={onLoadEarlierMessages}
+          >
+            {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早历史消息'}
+          </button>
+        </div>
+      )}
+      {messages.length === 0 && forms.length === 0 ? (
+        <div className="chat-empty">
+          <Bot size={22} />
+          <strong>项目 AI 助手</strong>
+          <span>直接描述任务。需要时会检索项目里的草稿和已发布资料。</span>
+        </div>
+      ) : null}
+      {conversationTimeline(
+        messages,
+        timelineByMessageId,
+        generationLocked ? generation?.assistantMessage.id : undefined,
+        forms,
+      ).map((item) => {
+        if (item.kind === 'question')
+          return (
+            <AgentQuestionForm
+              key={`${conversation?.projectId}:${item.form.id}`}
+              form={item.form}
+              projectId={conversation!.projectId}
+              writable={writable}
+              onContinue={onAnswerQuestions}
+            />
+          );
+        if (item.kind === 'form')
+          return <Fragment key={item.id}>{renderForm?.(item.form)}</Fragment>;
+        if (item.kind === 'tools')
+          return (
+            <AgentToolTimeline
+              key={item.id}
+              detail={item.detail}
+              stage={item.staged}
+              generationStatus={
+                !item.tail
+                  ? 'complete'
+                  : generation?.assistantMessage.id === item.messageId
+                    ? generation.status
+                    : undefined
+              }
+              generationError={
+                item.tail && generation?.assistantMessage.id === item.messageId
+                  ? generation.error
+                  : undefined
+              }
+              liveActions={
+                item.live
+                  ? item.staged
+                    ? liveAgentActions?.filter((action) => action.status === 'running')
+                    : liveAgentActions
+                  : undefined
+              }
+              runningPlaceholder={item.live}
+              onOpenLibrarySource={onOpenLibrarySource}
+            />
+          );
+        const message = item.message;
+        return (
+          <article
+            key={item.id}
+            className={`message ${message.role}${item.staged ? ' assistant-phase' : ''}`}
+          >
+            <header>
+              {!item.staged && (
+                <span>
+                  {message.role === 'user'
+                    ? '你'
+                    : message.role === 'assistant'
+                      ? '助手'
+                      : message.role}
+                </span>
+              )}
+              <button
+                className="icon-button subtle"
+                type="button"
+                title="复制"
+                onClick={() => void navigator.clipboard.writeText(item.content)}
+              >
+                <Copy size={12} />
+              </button>
+            </header>
+            {message.role === 'assistant' ? (
+              <AssistantReply content={item.content} streaming={item.streaming} />
+            ) : (
+              <p>{item.content}</p>
+            )}
+            {message.role === 'assistant' &&
+              message.status === 'failed' &&
+              !timelineByMessageId.has(message.id) &&
+              (generation?.assistantMessage.id !== message.id || generation.retryable !== false) &&
+              (llmStatus?.configured || llmProfiles.length > 0) && (
+                <footer>
+                  {generation?.assistantMessage.id === message.id && statusMessage ? (
+                    <small className="chat-status">{statusMessage}</small>
+                  ) : null}
+                  <button type="button" onClick={() => onRetryGeneration(message.id)}>
+                    <RefreshCw size={11} />
+                    重试
+                  </button>
+                </footer>
+              )}
+          </article>
+        );
+      })}
+      {queueError}
+      {generationLocked &&
+        !unmatchedLiveTask &&
+        messages.some((message) => message.id === generation?.assistantMessage.id) &&
+        !timelineByMessageId.has(generation?.assistantMessage.id ?? '') && (
+          <AgentToolTimeline
+            generationStatus={generation?.status}
+            liveActions={liveAgentActions}
+            runningPlaceholder
+          />
+        )}
+      {unmatchedLiveTask ? (
+        <AgentToolTimeline
+          detail={unmatchedLiveTask}
+          generationStatus={generation?.status}
+          generationError={generation?.error}
+          liveActions={liveAgentActions}
+          runningPlaceholder={generationLocked}
+          onOpenLibrarySource={onOpenLibrarySource}
+        />
+      ) : generationLocked &&
+        !messages.some((item) => item.id === generation?.assistantMessage.id) ? (
+        <AgentToolTimeline
+          generationStatus={generation?.status}
+          liveActions={liveAgentActions}
+          runningPlaceholder
+        />
+      ) : null}
+    </>
   );
   return (
     <section ref={panelRef} className="chat-panel panel-border" aria-label="项目 AI 助手">
@@ -508,6 +677,7 @@ export function ChatPanel({
           )}
         </div>
       </div>
+
       <div className="llm-context-bar composer-inline-controls">
         {legacyLlmConfigured && (
           <div className="legacy-llm-notice">
@@ -550,127 +720,24 @@ export function ChatPanel({
             list.scrollHeight - list.clientHeight - list.scrollTop <= 32;
         }}
       >
-        {canLoadEarlierMessages && (
-          <div
-            className="load-earlier-container"
-            style={{ display: 'flex', justifyContent: 'center', padding: '8px' }}
-          >
-            <button
-              className="button subtle"
-              type="button"
-              disabled={loadingEarlierMessages}
-              onClick={onLoadEarlierMessages}
-            >
-              {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早历史消息'}
-            </button>
-          </div>
-        )}
-        {messages.length === 0 ? (
-          <div className="chat-empty">
-            <Bot size={22} />
-            <strong>项目 AI 助手</strong>
-            <span>直接描述任务。需要时会检索项目里的草稿和已发布资料。</span>
-          </div>
+        {conversation ? (
+          <MediaReviewQueue
+            projectId={conversation.projectId}
+            conversationId={conversation.id}
+            writable={writable}
+            renderTimeline={renderMessageItems}
+            renderMediaForm={(form, submit) => (
+              <MediaModelSelectionCard
+                projectId={conversation.projectId}
+                request={form.selectionRequest!}
+                referenceImageInputs={form.inputAssetIds.map((id) => `asset://${id}`)}
+                onSelect={submit}
+              />
+            )}
+          />
         ) : (
-          messages.map((message) => (
-            <Fragment key={message.id}>
-              {(() => {
-                const liveMessage =
-                  generationLocked && generation?.assistantMessage.id === message.id;
-                const timeline = timelineByMessageId.get(message.id);
-                if (!timeline || liveMessage) return null;
-                return (
-                  <AgentToolTimeline
-                    detail={timeline}
-                    generationStatus={
-                      generation?.assistantMessage.id === message.id ? generation.status : undefined
-                    }
-                    generationError={
-                      generation?.assistantMessage.id === message.id ? generation.error : undefined
-                    }
-                    onOpenLibrarySource={onOpenLibrarySource}
-                  />
-                );
-              })()}
-              <article className={`message ${message.role}`}>
-                <header>
-                  <span>
-                    {message.role === 'user'
-                      ? '你'
-                      : message.role === 'assistant'
-                        ? '助手'
-                        : message.role}
-                  </span>
-                  <button
-                    className="icon-button subtle"
-                    type="button"
-                    title="复制"
-                    onClick={() => void navigator.clipboard.writeText(message.content)}
-                  >
-                    <Copy size={12} />
-                  </button>
-                </header>
-                {message.role === 'assistant' ? (
-                  <AssistantReply
-                    content={message.content}
-                    streaming={generationLocked && generation?.assistantMessage.id === message.id}
-                  />
-                ) : (
-                  <p>{message.content}</p>
-                )}
-                {message.role === 'assistant' &&
-                  message.status === 'failed' &&
-                  !timelineByMessageId.has(message.id) &&
-                  (generation?.assistantMessage.id !== message.id ||
-                    generation.retryable !== false) &&
-                  (llmStatus?.configured || llmProfiles.length > 0) && (
-                    <footer>
-                      {generation?.assistantMessage.id === message.id && statusMessage ? (
-                        <small className="chat-status">{statusMessage}</small>
-                      ) : null}
-                      <button type="button" onClick={() => onRetryGeneration(message.id)}>
-                        <RefreshCw size={11} />
-                        重试
-                      </button>
-                    </footer>
-                  )}
-              </article>
-              {(() => {
-                const liveMessage =
-                  generationLocked && generation?.assistantMessage.id === message.id;
-                const timeline = timelineByMessageId.get(message.id);
-                if (!liveMessage) return null;
-                return (
-                  <AgentToolTimeline
-                    detail={timeline}
-                    generationStatus={generation?.status}
-                    generationError={generation?.error}
-                    liveActions={liveAgentActions}
-                    runningPlaceholder
-                    onOpenLibrarySource={onOpenLibrarySource}
-                  />
-                );
-              })()}
-            </Fragment>
-          ))
+          renderMessageItems()
         )}
-        {unmatchedLiveTask ? (
-          <AgentToolTimeline
-            detail={unmatchedLiveTask}
-            generationStatus={generation?.status}
-            generationError={generation?.error}
-            liveActions={liveAgentActions}
-            runningPlaceholder={generationLocked}
-            onOpenLibrarySource={onOpenLibrarySource}
-          />
-        ) : generationLocked &&
-          !messages.some((item) => item.id === generation?.assistantMessage.id) ? (
-          <AgentToolTimeline
-            generationStatus={generation?.status}
-            liveActions={liveAgentActions}
-            runningPlaceholder
-          />
-        ) : null}
       </div>
       {statusMessage && generation?.status !== 'failed' && (
         <small className="chat-status">{statusMessage}</small>
@@ -730,14 +797,20 @@ export function ChatPanel({
       )}
       {mediaModelSelection && (
         <MediaModelSelectionCard
+          key={mediaModelSelection.selectionToken}
           request={mediaModelSelection}
           referenceImageInputs={mediaReferenceImageInputs}
+          projectId={conversation?.projectId}
           onSelect={onSelectMediaModel}
           onCancel={onCancelMediaModelSelection}
         />
       )}
       {agentParameterRequest && (
-        <AgentParameterCard request={agentParameterRequest} onSubmit={onSubmitAgentParameters} />
+        <AgentParameterCard
+          request={agentParameterRequest}
+          projectId={conversation?.projectId}
+          onSubmit={onSubmitAgentParameters}
+        />
       )}
       {agentTask?.plan && (
         <div className="agent-progress" role="status">
@@ -1022,7 +1095,7 @@ export function ChatPanel({
             </summary>
             <div className="conversation-prompt-template-body">
               <small>
-                每次发送前自动保存并附加此处最新内容。可修改时间、风格、连续性和输出要求；清空后发送将不携带约束。
+                每次发送前自动保存并附加此处最新内容。可修改时间、风格、连续性和输出要求；清空后发送将不携带约束。已保存的约束保留你的编辑，不会随模板更新自动替换。
               </small>
               <textarea
                 aria-label="本会话要求约束"
@@ -1033,6 +1106,16 @@ export function ChatPanel({
                 maxLength={20_000}
                 disabled={!conversation || !writable || isArchived || promptTemplateBusy}
               />
+              <details>
+                <summary>查看最新版分镜制作模板（可与上方当前约束对照）</summary>
+                <textarea
+                  aria-label="最新版分镜制作模板"
+                  value={SCENE_PROMPT_CONSTRAINT_TEMPLATE}
+                  readOnly
+                  rows={8}
+                />
+                <small>点击“载入分镜制作模板”将替换上方编辑内容；保存或发送后生效。</small>
+              </details>
               <div className="conversation-prompt-template-actions">
                 <small>{promptTemplate.length}/20000</small>
                 <button
@@ -1259,6 +1342,10 @@ type AgentActionRow = {
 };
 
 const AGENT_TOOL_ACTION_LABELS: Record<string, string> = {
+  'conversation.ask': '准备问答表单',
+  'project.structure.get': '查看项目结构',
+  'tools.load': '加载工具',
+  'document.submit_draft': '保存文档草稿',
   'library.search': '检索项目资料',
   'library.read': '阅读资料正文',
   'scene.submit_structure': '保存场次与镜头',
@@ -1285,6 +1372,11 @@ const AGENT_TOOL_ACTION_LABELS: Record<string, string> = {
   'research.fetch': '抓取外部页面',
   'media.image.prepare': '准备图片生成',
   'media.video.prepare': '准备视频生成',
+  'production.skill.read': '读取制作任务声明',
+  'media.review.prepare': '保存媒体审核表单',
+  'media.review.list': '查看媒体审核队列',
+  'media.review.read': '读取媒体审核表单',
+  'media.audio.read': '查看场次配音资料',
   'media.generation.submit': '提交生成任务',
   'media.task.get': '查询生成任务',
   'media.task.cancel': '取消生成任务',
@@ -1301,6 +1393,10 @@ function agentTaskForAssistantMessage(
   generation: LlmGenerationInfo | undefined,
   liveTask: AgentTaskDetail | undefined,
 ): AgentTaskDetail | undefined {
+  const recordedTask = tasks.find((detail) =>
+    detail.events.some((event) => event.messageBoundary?.messageId === messageId),
+  );
+  if (recordedTask) return recordedTask;
   if (
     generation?.assistantMessage.id === messageId &&
     liveTask &&
@@ -1330,7 +1426,7 @@ function agentActionRows(
     while (pending.length > 0) {
       const row = pending.shift()!;
       row.status = status;
-      if (detailText) row.detail = detailText;
+      if (detailText && (status !== 'ok' || pending.length === 0)) row.detail = detailText;
       rows.push(row);
     }
   };
@@ -1372,7 +1468,7 @@ function agentActionRows(
       event.eventType === 'agent.tool.succeeded' ||
       event.eventType === 'agent.research.completed'
     ) {
-      flushPending('ok');
+      flushPending('ok', event.summary);
       continue;
     }
     if (event.eventType === 'document.draft.created') {
@@ -1511,6 +1607,7 @@ function AgentToolTimeline({
   generationError,
   liveActions,
   runningPlaceholder = false,
+  stage = false,
   onOpenLibrarySource,
 }: {
   detail?: AgentTaskDetail;
@@ -1518,6 +1615,7 @@ function AgentToolTimeline({
   generationError?: string;
   liveActions?: ConversationRuntimeLiveAction[];
   runningPlaceholder?: boolean;
+  stage?: boolean;
   onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
 }) {
   const generationFailed = generationStatus === 'failed' || generationStatus === 'cancelled';
@@ -1552,7 +1650,7 @@ function AgentToolTimeline({
       ? `资料已读取；${readableError}`
       : readableError;
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
-  const expanded = expandedOverride ?? true;
+  const expanded = expandedOverride ?? (!stage || Boolean(errorMessage));
 
   useEffect(() => {
     setExpandedOverride(null);
@@ -1568,6 +1666,7 @@ function AgentToolTimeline({
       role="status"
       aria-live="polite"
       data-state={running ? 'running' : 'settled'}
+      data-stage={stage ? 'true' : undefined}
     >
       {actions.length > 0 || (detail?.librarySources?.length ?? 0) > 0 ? (
         <>
@@ -1583,7 +1682,9 @@ function AgentToolTimeline({
                 ? actions.some((action) => action.toolName && action.status === 'running')
                   ? '正在调用工具'
                   : '等待助手回复'
-                : '调用了工具'}
+                : stage
+                  ? `已调用 ${actions.filter((action) => action.toolName).length} 个工具`
+                  : '调用了工具'}
             </span>
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
@@ -1604,7 +1705,12 @@ function AgentToolTimeline({
                         <code>{action.toolName}</code>
                       </>
                     ) : null}
-                    {action.detail ? <small>{action.detail}</small> : null}
+                    {action.detail ? (
+                      <details className="agent-tool-result">
+                        <summary>返回结果</summary>
+                        <small>{action.detail}</small>
+                      </details>
+                    ) : null}
                   </span>
                 </li>
               ))}
@@ -1637,11 +1743,13 @@ function AgentToolTimeline({
 }
 
 export function MediaModelSelectionCard({
+  projectId,
   request,
   referenceImageInputs,
   onSelect,
   onCancel,
 }: {
+  projectId?: string;
   request: MediaModelSelectionRequest;
   referenceImageInputs?: string[];
   onSelect?: (selection: MediaModelSelectionDecision) => void;
@@ -1665,7 +1773,7 @@ export function MediaModelSelectionCard({
       <div className="media-model-selection-heading">
         <div>
           <strong>选择{request.kind === 'image' ? '图片' : '视频'}生成模型</strong>
-          <small>此选择仅用于当前媒体草稿，不会更改会话 Agent 模型。</small>
+          <small>选择本次生成使用的模型，审核参数后点击“提交生成”即可开始。</small>
         </div>
         {onCancel && (
           <button className="button subtle" type="button" onClick={onCancel}>
@@ -1697,6 +1805,8 @@ export function MediaModelSelectionCard({
             已选择 {candidate.providerName} · {candidate.modelName}，重新选择
           </button>
           <AgentParameterCard
+            projectId={projectId}
+            key={`${request.selectionToken}:${candidateKey}`}
             request={{
               prompt: request.prompt,
               capability: request.kind,
@@ -1730,9 +1840,11 @@ function formatMediaProviderRegion(candidate: MediaModelCandidate): string {
 }
 
 function AgentParameterCard({
+  projectId,
   request,
   onSubmit,
 }: {
+  projectId?: string;
   request: NonNullable<ChatPanelProps['agentParameterRequest']>;
   onSubmit?: (adapterKey: string, parameters: AdapterParameters) => void;
 }) {
@@ -1751,17 +1863,28 @@ function AgentParameterCard({
         values[key] = value;
       }
     }
-    if (
-      request.referenceImageInputs &&
-      request.referenceImageInputs.length > 0 &&
-      Object.prototype.hasOwnProperty.call(adapter.parameterSchema.properties, 'images')
-    ) {
-      values.images = request.referenceImageInputs;
-    }
-    return values;
+    const existingImages = productionImagesFromParameters(adapter, values);
+    return seedProductionInputs(
+      adapter,
+      values,
+      typeof values.prompt === 'string'
+        ? values.prompt
+        : Array.isArray(values.content) &&
+            values.content.some(
+              (item) =>
+                item && typeof item === 'object' && !Array.isArray(item) && item.type === 'text',
+            )
+          ? undefined
+          : request.prompt,
+      existingImages.length
+        ? undefined
+        : request.referenceImageInputs?.map((url) => ({ url, role: 'reference' })),
+    );
   }, [adapter, request.proposedParameters, request.referenceImageInputs, request.prompt]);
   const [parameters, setParameters] = useState<AdapterParameters>(initialValues);
   const [error, setError] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const submittedRef = useRef(false);
 
   useEffect(() => {
     if (!adapter) return;
@@ -1783,14 +1906,10 @@ function AgentParameterCard({
     a.localeCompare(b),
   );
   const update = (key: string, value: AdapterParameters[string] | undefined) => {
-    setParameters((current) => {
-      const next = { ...current };
-      if (value === undefined || value === '') delete next[key];
-      else next[key] = value;
-      return next;
-    });
+    setParameters((current) => updatePromptParameter(adapter, current, key, value));
   };
   const submit = () => {
+    if (submittedRef.current || !onSubmit) return;
     const missing = adapter.parameterSchema.required.filter((key) => {
       const value = parameters[key];
       return value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
@@ -1800,15 +1919,22 @@ function AgentParameterCard({
       return;
     }
     setError('');
-    onSubmit?.(adapter.key, parameters);
+    submittedRef.current = true;
+    setSubmitted(true);
+    onSubmit(
+      adapter.key,
+      canonicalPromptParameters(parameters, promptReferences(adapter, parameters)),
+    );
   };
 
   return (
     <div className="agent-parameter-card" role="dialog" aria-label="补充生成参数">
       <strong>{request.capability === 'image' ? '图片' : '视频'}参数</strong>
-      <small>{request.modelName} · 参数会先校验，通过后才会创建草稿任务。</small>
+      <small>{request.modelName} · 参数校验通过后直接提交生成。</small>
       {request.affectsCost && (
-        <small className="agent-cost-warning">此操作可能产生费用，当前暂不计算具体金额。</small>
+        <small className="agent-cost-warning">
+          点击“提交生成”即确认使用当前模型和参数，可能产生费用，当前暂不计算具体金额。
+        </small>
       )}
       {request.adapters.length > 1 && (
         <label className="agent-parameter-adapter">
@@ -1836,25 +1962,36 @@ function AgentParameterCard({
             property={property}
             required={adapter.parameterSchema.required.includes(key)}
             value={parameters[key]}
+            references={promptReferences(adapter, parameters)}
+            projectId={projectId}
             onChange={(value) => update(key, value)}
           />
         ))}
       </div>
       {error && <small className="agent-parameter-error">{error}</small>}
-      <button className="button primary" type="button" onClick={submit}>
-        提交生成
+      <button
+        className="button primary"
+        type="button"
+        onClick={submit}
+        disabled={submitted || !onSubmit}
+      >
+        {submitted ? '正在提交…' : '提交生成'}
       </button>
     </div>
   );
 }
 
 function AgentParameterField({
+  references,
+  projectId,
   name,
   property,
   required,
   value,
   onChange,
 }: {
+  references: PromptReference[];
+  projectId?: string;
   name: string;
   property: AdapterParameterProperty;
   required: boolean;
@@ -1886,6 +2023,8 @@ function AgentParameterField({
           onChange={onChange}
           label={label}
           path={id}
+          projectId={projectId}
+          references={references}
         />
         {metadata}
       </>
@@ -1948,6 +2087,31 @@ function AgentParameterField({
       </label>
     );
   }
+  if (name === 'prompt')
+    return (
+      <div className="parameter-field prompt-field">
+        <label htmlFor={id}>{label}</label>
+        {references.length ? (
+          <PromptReferenceEditor
+            id={id}
+            label={label}
+            value={parameterScalarText(value)}
+            references={references}
+            projectId={projectId}
+            onChange={onChange}
+            maxLength={property.maxLength}
+          />
+        ) : (
+          <textarea
+            id={id}
+            value={parameterScalarText(value)}
+            maxLength={property.maxLength}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        )}
+        {metadata}
+      </div>
+    );
   const numeric = property.type === 'integer';
   return (
     <label className="parameter-field" htmlFor={id}>

@@ -174,13 +174,16 @@ describe('official HappyHorse contracts', () => {
   });
 
   it('exposes current official Qwen Image text-to-image contracts', () => {
-    expect(officialImageContracts.map((contract) => contract.officialModelName)).toEqual([
+    const legacy = officialImageContracts.filter(
+      (contract) => !contract.taskCapabilities?.includes('REFERENCE_TO_IMAGE'),
+    );
+    expect(legacy.map((contract) => contract.officialModelName)).toEqual([
       'qwen-image-3.0-pro',
       'qwen-image-3.0',
       'qwen-image-2.1-pro',
       'qwen-image-2.1-turbo',
     ]);
-    for (const contract of officialImageContracts) {
+    for (const contract of legacy) {
       const adapter = getAdapter(`TEXT_TO_IMAGE:unicompapi:${contract.contractId}:contract-1`)!;
       expect(adapter.parameterSchema.properties).toHaveProperty('size');
       expect(adapter.parameterSchema.properties).toHaveProperty('prompt_extend');
@@ -190,6 +193,80 @@ describe('official HappyHorse contracts', () => {
       expect(
         validateAdapterParameters(adapter.key, { prompt: 'a cat', generate_audio: true }).valid,
       ).toBe(false);
+    }
+  });
+
+  it('offers official Qwen image editing with model-specific image limits and frozen history', () => {
+    const current = officialImageContracts.filter((contract) =>
+      contract.taskCapabilities?.includes('REFERENCE_TO_IMAGE'),
+    );
+    expect(current.map((contract) => contract.officialModelName)).toEqual([
+      'qwen-image-3.0-pro',
+      'qwen-image-3.0',
+      'qwen-image-2.1-pro',
+      'qwen-image-2.1-turbo',
+      'qwen-image-2.0',
+      'qwen-image-2.0-pro',
+    ]);
+    for (const contract of current) {
+      const suffix = `unicompapi:${contract.contractId}:contract-${contract.contractRevision}`;
+      const edit = getAdapter(`REFERENCE_TO_IMAGE:${suffix}`)!;
+      const text = getAdapter(`TEXT_TO_IMAGE:${suffix}`)!;
+      expect(edit.uiSchema.fields.find((field) => field.key === 'images')?.control).toBe(
+        'url-list',
+      );
+      expect(text.parameterSchema.properties).not.toHaveProperty('images');
+      expect(edit.parameterSchema.required).toContain('images');
+      const max = contract.officialModelName.includes('2.1') ? 10 : 3;
+      const parameters = {
+        prompt: '保留人物，修改背景',
+        images: Array.from({ length: max }, (_, i) => `https://example.com/${i}.png`),
+      };
+      expect(validateAdapterParameters(edit.key, parameters).valid).toBe(true);
+      expect(validateAdapterParameters(edit.key, { prompt: 'background' }).valid).toBe(false);
+      expect(validateAdapterParameters(edit.key, { ...parameters, images: [] }).valid).toBe(false);
+      expect(
+        validateAdapterParameters(edit.key, {
+          ...parameters,
+          images: [...parameters.images, 'https://example.com/extra.png'],
+        }).valid,
+      ).toBe(false);
+      expect(validateAdapterParameters(text.key, parameters).valid).toBe(false);
+      expect(validateAdapterParameters(edit.key, { ...parameters, size: '100x100' }).valid).toBe(
+        false,
+      );
+      expect(validateAdapterParameters(edit.key, { ...parameters, size: '4096x4096' }).valid).toBe(
+        false,
+      );
+      if (contract.contractRevision === 2)
+        expect(validateAdapterParameters(edit.key, { ...parameters, size: '8192x64' }).valid).toBe(
+          false,
+        );
+      expect(
+        validateAdapterParameters(edit.key, { ...parameters, images: ['file:///C:/input.png'] })
+          .valid,
+      ).toBe(false);
+      expect(
+        validateAdapterParameters(edit.key, { ...parameters, prompt_extend_mode: 'agent' }).valid,
+      ).toBe(false);
+      expect(
+        validateAdapterParameters(edit.key, { ...parameters, mask: 'https://example.com/mask.png' })
+          .valid,
+      ).toBe(false);
+      expect(validateAdapterParameters(edit.key, { ...parameters, n: 7 }).valid).toBe(false);
+      if (contract.contractRevision === 2) {
+        expect(
+          validateAdapterParameters(text.key, { prompt: 'cat', prompt_extend_mode: 'agent' }).valid,
+        ).toBe(true);
+        const old = getAdapter(`TEXT_TO_IMAGE:unicompapi:${contract.contractId}:contract-1`)!;
+        expect(old.parameterSchema.properties).not.toHaveProperty('images');
+        expect(
+          adapterBindsCatalogModel(old, {
+            providerType: 'unicompapi',
+            remoteModelId: contract.officialModelName,
+          }),
+        ).toBe(false);
+      }
     }
   });
 });

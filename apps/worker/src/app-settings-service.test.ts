@@ -29,6 +29,83 @@ async function createService() {
 }
 
 describe('AppSettingsService', () => {
+  it('upgrades Qwen image contracts once and preserves model enablement and subsequent capability choices', async () => {
+    const service = await createService();
+    try {
+      const profile = service.createProfile({
+        name: 'UniComp',
+        category: 'multi',
+        providerType: 'unicompapi',
+        accessType: 'official',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://unicompapi.com/v1',
+      });
+      service.completeConnectionTest({
+        profileId: profile.id,
+        status: 'ready',
+        models: [
+          { id: 'qwen-image-3.0' },
+          { id: 'qwen-image-3.0-pro' },
+          { id: 'qwen-image-2.0' },
+          { id: 'qwen-image-2.0-pro' },
+        ],
+      });
+      const initial = service.listModels(profile.id);
+      expect(initial.every((model) => model.capabilities.imageEditing)).toBe(true);
+      expect(initial.every((model) => !model.enabled)).toBe(true);
+      const model = initial.find((model) => model.remoteModelId === 'qwen-image-3.0')!;
+      const legacy = openAppDatabase(join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'));
+      try {
+        legacy
+          .prepare('UPDATE provider_models SET contract_revision=1,capabilities_json=? WHERE id=?')
+          .run(JSON.stringify({ ...model.capabilities, imageEditing: false }), model.id);
+      } finally {
+        legacy.close();
+      }
+      const migrated = service.listModels(profile.id).find((item) => item.id === model.id)!;
+      expect(migrated).toMatchObject({
+        contractRevision: 2,
+        enabled: false,
+        capabilities: { imageEditing: true },
+      });
+      service.updateModel({
+        profileId: profile.id,
+        modelId: model.id,
+        displayName: model.displayName,
+        enabled: true,
+        capabilities: { ...migrated.capabilities, imageEditing: false },
+      });
+      expect(service.listModels(profile.id).find((item) => item.id === model.id)).toMatchObject({
+        enabled: true,
+        capabilities: { imageEditing: false },
+      });
+      const pro = initial.find((item) => item.remoteModelId === 'qwen-image-3.0-pro')!;
+      const beforeSync = openAppDatabase(join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'));
+      try {
+        beforeSync
+          .prepare('UPDATE provider_models SET contract_revision=1,capabilities_json=? WHERE id=?')
+          .run(JSON.stringify({ ...pro.capabilities, imageEditing: false }), pro.id);
+      } finally {
+        beforeSync.close();
+      }
+      service.completeConnectionTest({
+        profileId: profile.id,
+        status: 'ready',
+        models: initial.map((item) => ({ id: item.remoteModelId })),
+      });
+      expect(
+        service.listModels(profile.id).find((item) => item.id === model.id)?.capabilities
+          .imageEditing,
+      ).toBe(false);
+      expect(service.listModels(profile.id).find((item) => item.id === pro.id)).toMatchObject({
+        contractRevision: 2,
+        enabled: false,
+        capabilities: { imageEditing: true },
+      });
+    } finally {
+      service.close();
+    }
+  });
   it('uses only verified protocol-compatible output limits and preserves provider defaults otherwise', async () => {
     const service = await createService();
     try {

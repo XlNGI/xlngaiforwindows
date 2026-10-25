@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ProductionTarget } from '@ai-video/contracts';
 import { ProductionService, summarizeProductionNotices } from './production-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
@@ -36,7 +37,7 @@ export class AgentProductionQueryService {
     target: ProductionTarget,
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
-    defaultView: 'structure' | 'instruction',
+    defaultView: 'structure' | 'authoring',
   ): AgentProductionQueryResult {
     const namespace = JSON.stringify([
       identity.projectId,
@@ -49,7 +50,7 @@ export class AgentProductionQueryService {
       this.namespace = namespace;
     }
     const view = args.view ?? defaultView;
-    if (!['structure', 'instruction', 'text', 'issues'].includes(view as string))
+    if (!['structure', 'authoring', 'text', 'issues', 'media'].includes(view as string))
       throw new Error('制作读取 view 无效。');
     if (view === 'structure' && target.kind !== 'scene')
       throw new Error('structure 视图仅用于场次。');
@@ -63,12 +64,18 @@ export class AgentProductionQueryService {
       (limit as number) > MAX_PAGE_CHARACTERS
     )
       throw new Error('制作读取分页范围无效（limit 1–4096）。');
-    const version = this.production.queryVersion(target);
+    const media = view === 'media' ? this.production.readMediaForAgent(target) : undefined;
+    const baseVersion = this.production.queryVersion(target);
+    const version = media
+      ? createHash('sha256')
+          .update(JSON.stringify([baseVersion, media]))
+          .digest('hex')
+      : baseVersion;
     if (args.expectedVersion !== undefined && args.expectedVersion !== version)
       throw new Error('制作读取版本已变化，请从第一页重新读取。');
     if (offset && !args.expectedVersion)
       throw new Error('续读必须提供 expectedVersion，防止混合不同版本。');
-    const id = `${target.kind}:${target.id}`;
+    const id = `${target.kind}:${target.id}:${media ? 'media' : 'content'}`;
     let cached = this.cache.get(id);
     if (!cached || cached.version !== version) {
       const snapshot = this.production.readForAgent(target);
@@ -101,33 +108,37 @@ export class AgentProductionQueryService {
       target,
       rowVersion: snapshot.rowVersion,
       version,
-      revision: snapshot.revision,
-      stale: snapshot.issues.some((issue) => issue.code === 'STALE_INSTRUCTION'),
       readiness: snapshot.issues.length ? 'needs_attention' : 'ready',
       issueCount: snapshot.issues.length,
       issues: snapshot.issues
         .slice(0, 5)
         .map(({ code, message, target }) => ({ code, message: message.slice(0, 240), target })),
       issuesTruncated:
-        snapshot.issues.length > 5 ||
-        snapshot.issues.some(
-          (issue) => issue.message.length > 240 || issue.changedReferences?.length,
-        ),
+        snapshot.issues.length > 5 || snapshot.issues.some((issue) => issue.message.length > 240),
       issueCodes: [...new Set(snapshot.issues.map((issue) => issue.code))],
       ...summarizeProductionNotices(snapshot.notices ?? []),
       estimatedDurationSeconds: snapshot.estimatedDurationSeconds,
-      views: ['instruction', 'text', 'issues', ...(target.kind === 'scene' ? ['structure'] : [])],
+      contentFormat: snapshot.contentFormat,
+      views: [
+        'authoring',
+        'text',
+        'issues',
+        ...(['scene', 'shot'].includes(target.kind) ? ['media'] : []),
+        ...(target.kind === 'scene' ? ['structure'] : []),
+      ],
     };
     if (args.ifVersion === version && !offset && cached.completeViews.has(view as string))
       return { ...metadata, status: 'unchanged' };
     const value =
-      view === 'instruction'
-        ? (snapshot.instruction ?? null)
-        : view === 'text'
-          ? snapshot.currentText
-          : view === 'issues'
-            ? snapshot.issues
-            : { scene: snapshot.scene, shots: snapshot.shots };
+      view === 'media'
+        ? media
+        : view === 'authoring'
+          ? (snapshot.authoringIR ?? null)
+          : view === 'text'
+            ? snapshot.currentText
+            : view === 'issues'
+              ? snapshot.issues
+              : { scene: snapshot.scene, shots: snapshot.shots };
     const text = view === 'text' ? (value as string) : JSON.stringify(value);
     if (
       !offset &&

@@ -8,14 +8,10 @@ import { parseEpisodeStructureArguments, validateEpisodeReferences } from './epi
 import { resolveWriteResource } from './project-resource-map.js';
 import { ProjectService } from './project-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
-import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
-import {
-  renderProductionInstruction,
-  normalizeProductionAuthoringArguments,
-  type ProductionInstruction,
-} from '@ai-video/contracts';
+import { validateProductionAuthoringIR } from '@ai-video/contracts';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
+import { validateProductionIRReferences } from './project-ir-validation.js';
 import {
   ProductionService,
   summarizeProductionReadiness,
@@ -38,17 +34,16 @@ export class SceneStructureSubmissionService {
   }
 
   stage(args: Record<string, unknown>, identity: AgentSystemToolIdentity): Record<string, unknown> {
-    args = normalizeProductionAuthoringArguments('scene.structure.stage', args) as Record<
-      string,
-      unknown
-    >;
+    const definition = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!;
     try {
-      validateToolArguments(
-        SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!,
-        { type: 'toolCall', id: 'stage', name: 'scene.structure.stage', arguments: args },
-      );
+      validateToolArguments(definition, {
+        type: 'toolCall',
+        id: 'stage',
+        name: 'scene.structure.stage',
+        arguments: args,
+      });
     } catch (error) {
-      throw new Error(boundedValidationError(error));
+      throw new Error(boundedValidationError(error, definition, args));
     }
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -284,18 +279,28 @@ export class SceneStructureSubmissionService {
                 'STAGE_SCENE_ALREADY_SAVED: revise the returned sceneId with its current CAS; do not recreate it.',
               );
             part.scene = structuredClone(args.scene as Record<string, unknown>);
-            const instruction = part.scene.instruction as ProductionInstruction;
-            const issues = inspectProductionTargetInstruction(instruction, 'scene');
-            if (issues.length) throw new Error(issues.map((issue) => issue.message).join('\n'));
-            if (renderProductionInstruction(instruction).length > 20000)
-              throw new Error('scene.instruction renders beyond 20000 characters.');
-            requireProductionSceneDocument(
-              database,
-              project.id,
-              part.scene.sceneDocumentId as string,
-            );
-            requireProductionCharacters(database, project.id, part.scene.characterDocumentIds);
-            const ids = [part.scene.sceneDocumentId as string, ...part.scene.characterDocumentIds];
+            const ir =
+              part.scene.authoringIR === undefined
+                ? undefined
+                : validateProductionAuthoringIR(part.scene.authoringIR, 'scene');
+            if (!ir) throw new Error('Staged scene requires authoringIR.');
+            if (part.scene.sceneDocumentId)
+              requireProductionSceneDocument(
+                database,
+                project.id,
+                part.scene.sceneDocumentId as string,
+              );
+            if (part.scene.characterDocumentIds !== undefined)
+              requireProductionCharacters(database, project.id, part.scene.characterDocumentIds);
+            if (ir) validateProductionIRReferences(database, project.id, ir);
+            const references = ir?.references ?? {};
+            const ids = [
+              ...(part.scene.sceneDocumentId ? [part.scene.sceneDocumentId as string] : []),
+              ...(part.scene.characterDocumentIds ?? []),
+              ...(references.characterDocumentIds ?? []),
+              ...(references.sceneDocumentIds ?? []),
+              ...(references.propDocumentIds ?? []),
+            ];
             part.sources = [...new Set(ids)].map((documentId) => {
               const document = database
                 .prepare(
@@ -336,13 +341,20 @@ export class SceneStructureSubmissionService {
             args.shots.forEach((shot, index) => {
               part.shots[offset + index] = shot as Record<string, unknown>;
             });
-            parseEpisodeStructureArguments(
+            const staged = parseEpisodeStructureArguments(
               JSON.stringify({
                 episodeTitle: row.title,
                 scenes: [{ ...part.scene, shots: args.shots }],
               }),
-              true,
             );
+            validateEpisodeReferences(database, project.id, staged);
+            for (const stagedScene of staged.scenes) {
+              if (stagedScene.authoringIR)
+                validateProductionIRReferences(database, project.id, stagedScene.authoringIR);
+              for (const shot of stagedScene.shots)
+                if (shot.authoringIR)
+                  validateProductionIRReferences(database, project.id, shot.authoringIR);
+            }
           }
           if (before === JSON.stringify(parts)) return describe();
         } else if (!['finalize', 'checkpoint'].includes(String(args.operation)))
@@ -420,10 +432,6 @@ export class SceneStructureSubmissionService {
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
   ): Record<string, unknown> {
-    args = normalizeProductionAuthoringArguments('scene.submit_structure', args) as Record<
-      string,
-      unknown
-    >;
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         if (
@@ -486,7 +494,6 @@ export class SceneStructureSubmissionService {
           throw new Error('Provide resolution: resolved or needs_clarification.');
         const structure = parseEpisodeStructureArguments(
           JSON.stringify({ episodeTitle: args.episodeTitle, scenes: args.scenes }),
-          true,
         );
         validateEpisodeReferences(database, project.id, structure);
         const items: AgentChangeSetItemDraft[] = [];
@@ -502,7 +509,7 @@ export class SceneStructureSubmissionService {
             sceneDocumentId: scene.sceneDocumentId,
             videoPrompt: scene.videoPrompt,
             characterDocumentIds: scene.characterDocumentIds,
-            instruction: scene.instruction,
+            authoringIR: scene.authoringIR,
           });
           for (const shot of scene.shots)
             items.push({ entityType: 'shot', action: 'create', parentItemOrdinal, ...shot });

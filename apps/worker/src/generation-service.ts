@@ -1,4 +1,7 @@
-import { withAgentToolInstructions } from './agent-policy-instructions.js';
+import {
+  withAgentResponseLanguageInstruction,
+  withAgentToolInstructions,
+} from './agent-policy-instructions.js';
 import { randomUUID } from 'node:crypto';
 import { splitConversationRequest } from './conversation-request.js';
 import type {
@@ -586,6 +589,7 @@ export class GenerationService {
     if (params.content === current || !params.content.startsWith(current)) {
       return publicState(state);
     }
+    this.recordAssistantBoundary(state, current.length);
     const observedAt = nowIso();
     const attempt: LlmGenerationAttemptRecord = {
       ...state.attempt,
@@ -1212,7 +1216,7 @@ export class GenerationService {
     });
     return {
       state,
-      systemInstruction: compiled.systemInstruction,
+      systemInstruction: withAgentResponseLanguageInstruction(compiled.systemInstruction),
       context: `${compiled.rendered}${activeTaskContext}`,
     };
   }
@@ -1428,6 +1432,9 @@ export class GenerationService {
     ) {
       return undefined;
     }
+    if (content.length > state.assistantMessage.content.length) {
+      this.recordAssistantBoundary(state, state.assistantMessage.content.length);
+    }
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
       const conversation = repositories.conversations.get(state.conversationId);
@@ -1460,6 +1467,58 @@ export class GenerationService {
       state.record = nextRecord;
       project.updatedAt = updatedAt;
       return message;
+    });
+  }
+
+  /** Persist ordering metadata, without duplicating text or interpreting model intent. */
+  private recordAssistantBoundary(state: GenerationState, startOffset: number): void {
+    this.projects.access(true, (database, project) => {
+      if (
+        project.id !== state.projectId ||
+        this.projects.currentSessionId() !== state.projectSessionId
+      )
+        return;
+      database.transaction(() => {
+        const owner = database
+          .prepare(`SELECT task_id FROM agent_task_generations WHERE generation_id = ?`)
+          .get(state.generationId) as { task_id: string } | undefined;
+        if (!owner) return;
+        const lastTool = database
+          .prepare(
+            `SELECT MAX(sequence) AS sequence FROM agent_task_events
+           WHERE task_id = ? AND event_type = 'agent.tool.started'`,
+          )
+          .get(owner.task_id) as { sequence: number | null };
+        const dedupeKey = `assistant:${state.attemptId}:${lastTool.sequence ?? 'start'}`;
+        if (
+          database
+            .prepare('SELECT 1 FROM agent_task_events WHERE task_id = ? AND dedupe_key = ?')
+            .get(owner.task_id, dedupeKey)
+        )
+          return;
+        const next = database
+          .prepare(
+            'SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence FROM agent_task_events WHERE task_id = ?',
+          )
+          .get(owner.task_id) as { sequence: number };
+        database
+          .prepare(
+            `INSERT INTO agent_task_events
+           (id, task_id, project_id, sequence, event_type, level, actor_type, summary,
+            payload_json, dedupe_key, created_at)
+           VALUES (?, ?, ?, ?, 'agent.assistant.started', 'info', 'assistant', ?, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            owner.task_id,
+            project.id,
+            next.sequence,
+            '助手阶段回复',
+            JSON.stringify({ messageId: state.assistantMessage.id, startOffset }),
+            dedupeKey,
+            nowIso(),
+          );
+      })();
     });
   }
 

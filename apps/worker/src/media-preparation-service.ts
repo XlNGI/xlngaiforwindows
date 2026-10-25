@@ -29,9 +29,8 @@ import {
   isWanVideoBaseUrl,
   isWanMediaAdapter,
   seedProductionInputs,
-  productionImagesFromParameters,
   addProductionRoleVoices,
-  supportsProductionAudioUpload,
+  productionImagesFromParameters,
   productionInputSupport,
 } from '@ai-video/contracts';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -58,6 +57,7 @@ export interface MediaPrepareArguments {
   parameters: AdapterParameters;
   shotId?: string;
   sceneId?: string;
+  sourceDocumentId?: string;
   assetKind?: ImageAssetKind | VideoAssetKind;
 }
 
@@ -202,22 +202,26 @@ export class MediaPreparationService {
     kind: MediaGenerationKind,
     rawArguments: unknown,
     identity: MediaIdentity,
+    includeAttachments = true,
   ): MediaSelectionContext {
     this.assertIdentity(identity);
     const args = parseMediaPrepareArguments(kind, rawArguments);
     this.assertInputAssets(args.inputAssetIds);
-    const inputAttachments = this.resolveAttachments(identity).flatMap((attachment) => {
-      if (!attachment.mimeType.toLowerCase().startsWith('image/') || !attachment.dataUrl) return [];
-      const parsed = parseCanonicalImageDataUrl(attachment.dataUrl);
-      if (normalizeImageContentType(attachment.mimeType) !== parsed.contentType) {
-        throw new AgentToolPolicyError(
-          'AGENT_TOOL_ARGUMENTS_INVALID',
-          'An image attachment MIME type does not match its encoded content.',
-          true,
-        );
-      }
-      return [{ contentType: parsed.contentType, sha256: parsed.sha256 }];
-    });
+    const inputAttachments = (includeAttachments ? this.resolveAttachments(identity) : []).flatMap(
+      (attachment) => {
+        if (!attachment.mimeType.toLowerCase().startsWith('image/') || !attachment.dataUrl)
+          return [];
+        const parsed = parseCanonicalImageDataUrl(attachment.dataUrl);
+        if (normalizeImageContentType(attachment.mimeType) !== parsed.contentType) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_ARGUMENTS_INVALID',
+            'An image attachment MIME type does not match its encoded content.',
+            true,
+          );
+        }
+        return [{ contentType: parsed.contentType, sha256: parsed.sha256 }];
+      },
+    );
     const inputAttachmentCount = inputAttachments.length;
     return {
       kind,
@@ -300,6 +304,15 @@ export class MediaPreparationService {
       );
     }
 
+    const reviewedImages = hasReviewedImageParameters(adapter, selection.parameters)
+      ? productionImagesFromParameters(adapter, selection.parameters)
+      : undefined;
+    const inputImages = reviewedImages
+      ? reviewedImages.flatMap((image) => {
+          const match = /^(?:asset|project-asset):\/\/(.+)$/u.exec(image.url);
+          return match ? [{ assetId: match[1]!, role: image.role ?? ('reference' as const) }] : [];
+        })
+      : context.arguments.inputAssetIds.map((assetId) => ({ assetId, role: 'reference' as const }));
     const target = context.arguments.sceneId
       ? { kind: 'scene' as const, id: context.arguments.sceneId }
       : context.arguments.shotId
@@ -309,14 +322,7 @@ export class MediaPreparationService {
       ? new ProductionService(this.projects).compile({
           target,
           adapterKey: adapter.key,
-          ...(context.arguments.inputAssetIds.length
-            ? {
-                inputImages: context.arguments.inputAssetIds.map((assetId) => ({
-                  assetId,
-                  role: 'reference' as const,
-                })),
-              }
-            : {}),
+          ...(reviewedImages || inputImages.length ? { inputImages } : {}),
         })
       : undefined;
     if (production?.issues.length)
@@ -334,47 +340,53 @@ export class MediaPreparationService {
       adapter,
       selection.parameters,
     );
-    const audioMode = production?.instruction?.audio.mode;
     const sceneInputs = production?.sceneInputs;
-    const hasAudio = (value: unknown): boolean => {
-      if (Array.isArray(value)) return value.some(hasAudio);
-      if (!value || typeof value !== 'object') return false;
-      const node = value as Record<string, unknown>;
-      return (
-        (typeof node.type === 'string' &&
-          ['reference_audio', 'driving_audio', 'audio_url'].includes(node.type)) ||
-        Object.values(node).some(hasAudio)
-      );
-    };
-
-    if (
-      sceneInputs &&
-      !hasAudio(parameters) &&
-      (audioMode === 'voice-reference' || audioMode === 'dialogue-driven')
-    ) {
-      if (!supportsProductionAudioUpload(adapter))
-        throw new Error('当前渠道未接入本地音频上传，请提供公网音频地址或选择支持上传的连接。');
-      const voices =
-        audioMode === 'voice-reference'
-          ? (sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
-              if (binding.voiceDisabled) return [];
-              const voice = binding.voiceReferenceVersionId
-                ? sceneInputs.media.voices.find(
-                    (v) =>
-                      v.versionId === binding.voiceReferenceVersionId &&
-                      v.characterDocumentId === binding.characterDocumentId,
-                  )
-                : sceneInputs.media.characters.find(
-                    (c) => c.characterDocumentId === binding.characterDocumentId,
-                  )?.voice;
-              return voice ? [voice] : [];
-            })
-          : [];
+    if (sceneInputs && adapter.capability.endsWith('_VIDEO')) {
+      const voices = sceneInputs.scene.dialogueAudioId
+        ? []
+        : (sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
+            if (binding.voiceDisabled) return [];
+            const voice = binding.voiceReferenceVersionId
+              ? sceneInputs.media.voices.find(
+                  (voice) =>
+                    voice.versionId === binding.voiceReferenceVersionId &&
+                    voice.characterDocumentId === binding.characterDocumentId,
+                )
+              : sceneInputs.media.characters.find(
+                  (character) => character.characterDocumentId === binding.characterDocumentId,
+                )?.voice;
+            return voice ? [voice] : [];
+          });
       parameters = addProductionRoleVoices(
         adapter,
         parameters,
         voices,
-        audioMode === 'dialogue-driven' ? sceneInputs.scene.dialogueAudioId : undefined,
+        sceneInputs.scene.dialogueAudioId,
+        [
+          ...(sceneInputs.scene.materialBindings ?? []).filter(
+            (binding) => binding.role !== 'character',
+          ),
+          ...(sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
+            const assetId = binding.imageDisabled
+              ? undefined
+              : (binding.imageAssetId ??
+                sceneInputs.media.characters.find(
+                  (c) => c.characterDocumentId === binding.characterDocumentId,
+                )?.defaultImage?.id);
+            return assetId
+              ? [
+                  {
+                    id: 'cast-' + binding.characterDocumentId,
+                    role: 'character' as const,
+                    label: sceneInputs.characterNames[binding.characterDocumentId] ?? '角色',
+                    assetId,
+                    source: 'auto' as const,
+                    sourceDocumentId: binding.characterDocumentId,
+                  },
+                ]
+              : [];
+          }),
+        ],
       );
     }
     const validation = this.adapters.validate({ adapterKey: adapter.key, parameters });
@@ -393,6 +405,9 @@ export class MediaPreparationService {
     const common = {
       ...(production?.source ? { productionSource: production.source } : {}),
       shotId: context.arguments.shotId,
+      ...(context.arguments.sourceDocumentId
+        ? { sourceDocumentId: context.arguments.sourceDocumentId }
+        : {}),
       adapterKey: adapter.key,
       parameters,
       providerProfileId: candidate.providerProfileId,
@@ -404,7 +419,10 @@ export class MediaPreparationService {
     };
     const job =
       context.kind === 'image'
-        ? this.prepareImage(common)
+        ? this.prepareImage({
+            ...common,
+            assetKind: context.arguments.assetKind as ImageAssetKind | undefined,
+          })
         : this.prepareVideo({
             ...common,
             sceneId: context.arguments.sceneId,
@@ -420,7 +438,11 @@ export class MediaPreparationService {
       kind: context.kind,
       status: 'draft',
       prompt: context.arguments.prompt,
-      inputAssetIds: [...context.arguments.inputAssetIds],
+      // The reviewed adapter parameters may contain the saved shot/scene
+      // bindings even when the model omitted inputAssetIds. Return the actual
+      // frozen asset list so the desktop review form renders every reference
+      // image and the paid boundary receives the same list.
+      inputAssetIds: [...new Set(inputImages.map((image) => image.assetId))],
       mediaModelSelection: snapshot,
       normalizedParameters: redactInlineMedia(parameters),
       missingParameters: [],
@@ -572,7 +594,9 @@ export class MediaPreparationService {
       cloneParameters(selected),
     );
     const images = productionImagesFromParameters(adapter, parameters);
-    for (const assetId of context.arguments.inputAssetIds) {
+    for (const assetId of hasReviewedImageParameters(adapter, selected)
+      ? []
+      : context.arguments.inputAssetIds) {
       if (
         !images.some(
           (image) => image.url.replace(/^project-asset:\/\//u, 'asset://') === 'asset://' + assetId,
@@ -843,7 +867,7 @@ export function resolveMediaProviderRoute(profile: ProviderProfileInfo):
   return undefined;
 }
 
-function parseMediaPrepareArguments(
+export function parseMediaPrepareArguments(
   kind: MediaGenerationKind,
   value: unknown,
 ): MediaPrepareArguments {
@@ -862,6 +886,7 @@ function parseMediaPrepareArguments(
     'shotId',
     'sceneId',
     'assetKind',
+    'sourceDocumentId',
   ]);
   const unknown = Object.keys(record).find((key) => !allowed.has(key));
   if (unknown) {
@@ -889,7 +914,20 @@ function parseMediaPrepareArguments(
   const sceneId =
     record.sceneId === undefined ? undefined : requireText(record.sceneId, 'sceneId', 200);
   const assetKind = parseAssetKind(kind, record.assetKind);
-  return { prompt, inputAssetIds, parameters, shotId, sceneId, assetKind };
+  const sourceDocumentId =
+    record.sourceDocumentId === undefined
+      ? undefined
+      : requireText(record.sourceDocumentId, 'sourceDocumentId', 200);
+  if (sourceDocumentId && kind !== 'image') throw new Error('sourceDocumentId is an image source.');
+  return {
+    prompt,
+    inputAssetIds,
+    parameters,
+    shotId,
+    sceneId,
+    assetKind,
+    ...(sourceDocumentId ? { sourceDocumentId } : {}),
+  };
 }
 
 function parseAssetKind(
@@ -900,6 +938,7 @@ function parseAssetKind(
   const imageKinds = new Set<ImageAssetKind>([
     'character',
     'scene',
+    'prop',
     'first-frame',
     'last-frame',
     'generated-image',
@@ -1201,6 +1240,16 @@ function redactInlineMedia(parameters: AdapterParameters): AdapterParameters {
           ? 'attachment://omitted'
           : value,
     ]),
+  );
+}
+
+function hasReviewedImageParameters(
+  adapter: AdapterDescriptor,
+  parameters: AdapterParameters,
+): boolean {
+  return ['images', 'media', 'content'].some(
+    (field) =>
+      Object.hasOwn(adapter.parameterSchema.properties, field) && Object.hasOwn(parameters, field),
   );
 }
 

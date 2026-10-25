@@ -29,6 +29,111 @@ async function setup(name = 'change-set') {
 }
 
 describe('ChangeSetService', () => {
+  it('normalizes manual text proposals to the same IR and preserves open fields and whitespace', async () => {
+    const { content, changeSets } = await setup();
+    const sceneIR = {
+      schemaVersion: 1 as const,
+      kind: 'scene' as const,
+      prompt: '  场次原文\n',
+      data: { weather: '雨' },
+    };
+    const scene = content.saveScene({ title: '场次', authoringIR: sceneIR });
+    const shotIR = {
+      schemaVersion: 1 as const,
+      kind: 'shot' as const,
+      prompt: '镜头原文',
+      references: { characterDocumentIds: [] },
+      timing: { estimatedDurationSeconds: 4, rationale: '动作时长' },
+      data: { beats: ['转身'] },
+    };
+    const shot = content.saveShot({ sceneId: scene.id, title: '镜头', authoringIR: shotIR });
+    const scenePrompt = '  场次修订\n';
+    const shotPrompt = '  镜头修订\n';
+    const result = changeSets.saveDraft({
+      title: '手工正文修订',
+      items: [
+        {
+          entityType: 'scene',
+          action: 'update',
+          targetId: scene.id,
+          expectedRowVersion: scene.rowVersion,
+          title: scene.title,
+          videoPrompt: scenePrompt,
+          sceneDocumentId: null,
+          characterDocumentIds: [],
+        },
+        {
+          entityType: 'shot',
+          action: 'update',
+          targetId: shot.id,
+          expectedRowVersion: shot.rowVersion,
+          title: shot.title,
+          prompt: shotPrompt,
+        },
+      ],
+    });
+    expect(result.status).toBe('applied');
+    expect(content.listScenes()[0]).toMatchObject({
+      videoPrompt: scenePrompt,
+      authoringIR: { ...sceneIR, prompt: scenePrompt },
+    });
+    expect(content.listShots(scene.id)[0]).toMatchObject({
+      prompt: shotPrompt,
+      authoringIR: { ...shotIR, prompt: shotPrompt },
+    });
+  });
+  it('persists Agent-authored scene and shot IR through a change set without rewriting prompts', async () => {
+    const { content, changeSets } = await setup();
+    const actor = content.saveDocument({
+      kind: 'character',
+      title: '江晚',
+      contentMarkdown: '# 江晚',
+    });
+    const prop = content.saveDocument({
+      kind: 'prop',
+      title: '铁木杖',
+      contentMarkdown: '# 铁木杖',
+    });
+    const sceneIR = {
+      schemaVersion: 1 as const,
+      kind: 'scene' as const,
+      prompt: '土墙茅顶的铁匠铺，炉火正旺，门外山雾渐浓。',
+      references: { characterDocumentIds: [actor.id] },
+      data: { placement: { 江晚: '前景炉旁', 老瞎子: '东侧门口' } },
+    };
+    const shotIR = {
+      schemaVersion: 1 as const,
+      kind: 'shot' as const,
+      prompt: '老瞎子以铁木杖探地，跛行离开铁匠铺。',
+      references: { characterDocumentIds: [actor.id], propDocumentIds: [prop.id] },
+      data: { action: ['杖尖点地', '左脚探步', '右足拖行'] },
+    };
+    const proposed = changeSets.create({
+      title: '场次与镜头 IR',
+      items: [
+        { entityType: 'scene', action: 'create', title: '离去', authoringIR: sceneIR },
+        {
+          entityType: 'shot',
+          action: 'create',
+          parentItemOrdinal: 0,
+          title: '雾中离去',
+          authoringIR: shotIR,
+        },
+      ],
+    });
+    expect(proposed.items.map((item) => item.authoringIR)).toEqual([sceneIR, shotIR]);
+    const applied = changeSets.apply({
+      changeSetId: proposed.id,
+      expectedRowVersion: proposed.rowVersion,
+    });
+    expect(applied.status).toBe('applied');
+    const scene = content.listScenes()[0]!;
+    const shot = content.listShots(scene.id)[0]!;
+    expect(scene).toMatchObject({ videoPrompt: sceneIR.prompt, authoringIR: sceneIR });
+    expect(scene.characterBindings).toEqual([{ characterDocumentId: actor.id }]);
+    expect(shot).toMatchObject({ prompt: shotIR.prompt, authoringIR: shotIR });
+  });
+
   it('saves generated documents, scenes and shots as editable drafts without approval', async () => {
     const { projects, content, changeSets } = await setup();
     const saved = changeSets.saveDraft({

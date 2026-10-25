@@ -168,6 +168,39 @@ function prepareVideo(videos: VideoGenerationService) {
 }
 
 describe('MediaOrchestrationService', () => {
+  it('stores confirmed prop generation under the source document type and preserves gallery lookup', async () => {
+    const f = await setup();
+    const prop = new ContentService(f.projectsService).saveDocument({
+      kind: 'prop',
+      title: '铁木杖',
+      contentMarkdown: '铁箍杖尖',
+    });
+    const job = f.images.prepare({
+      adapterKey: imageSelection.adapterKey,
+      parameters: { prompt: '铁木杖', aspect_ratio: '16:9', resolution: '1080p' },
+      sourceDocumentId: prop.id,
+      assetKind: 'prop',
+      providerProfileId,
+      modelId: imageSelection.modelId,
+      mediaModelSelection: imageSelection,
+    });
+    f.request.mockResolvedValue({
+      status: 200,
+      body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const pending = f.service.requestSubmission({ jobId: job.id });
+    const completed = await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(completed.job).toMatchObject({ status: 'succeeded' });
+    expect(completed.job.results[0]?.asset).toMatchObject({ kind: 'prop' });
+    expect(f.images.listAssets({ sourceDocumentId: prop.id })).toMatchObject([
+      { id: completed.job.results[0]?.asset?.id, kind: 'prop' },
+    ]);
+  });
+
   it('submits the frozen final form after saved production notes change during paid confirmation', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);
@@ -175,26 +208,17 @@ describe('MediaOrchestrationService', () => {
     const shot = content.saveShot({ sceneId: scene.id, title: '拒绝' });
     const target = { kind: 'shot' as const, id: shot.id };
     const production = new ProductionService(f.projectsService);
-    production.execute({
-      executionKey: 'saved-notes',
-      operations: [
-        {
-          action: 'set_prompt',
-          target,
-          expectedRowVersion: shot.rowVersion,
-          instruction: {
-            version: 1,
-            summary: '原制作说明',
-            subjects: [],
-            visual: {},
-            beats: [],
-            audio: { mode: 'silent' },
-            generation: { duration: 20 },
-            resources: [],
-            continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
-          },
-        },
-      ],
+    content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: shot.title,
+      expectedRowVersion: shot.rowVersion,
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: '原制作说明',
+        timing: { estimatedDurationSeconds: 20, rationale: '剧情时长' },
+      },
     });
     const parameters = {
       prompt: '江晚继续打铁，老瞎子走入雾中',
@@ -206,7 +230,8 @@ describe('MediaOrchestrationService', () => {
     const job = f.videos.prepare({
       adapterKey: videoSelection.adapterKey,
       shotId: shot.id,
-      productionSource: { ...production.read(target).source!, mode: 'form' },
+      productionSource: production.compile({ target, adapterKey: videoSelection.adapterKey })
+        .source!,
       parameters,
       providerRegion: 'global',
       providerProfileId,
@@ -467,7 +492,7 @@ describe('MediaOrchestrationService', () => {
     f.scheduler.release(next);
   });
 
-  it('rechecks the structured source at paid confirmation and still permits rejecting a stale draft', async () => {
+  it('rechecks the source target at paid confirmation and still permits rejecting a stale draft', async () => {
     const { projectsService, images, service, request } = await setup();
     const content = new ContentService(projectsService);
     const actor = content.saveDocument({
@@ -477,28 +502,13 @@ describe('MediaOrchestrationService', () => {
     });
     const production = new ProductionService(projectsService);
     const target = { kind: 'character' as const, id: actor.id };
-    production.execute({
-      executionKey: 'confirmation',
-      operations: [
-        {
-          action: 'set_prompt',
-          target,
-          expectedRowVersion: actor.rowVersion,
-          instruction: {
-            version: 1,
-            summary: '蓝色外套',
-            subjects: [],
-            visual: {},
-            beats: [],
-            audio: { mode: 'silent' },
-            generation: {},
-            resources: [],
-            continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
-          },
-        },
-      ],
+    content.saveDocument({
+      documentId: actor.id,
+      kind: 'character',
+      title: actor.title,
+      contentMarkdown: '蓝色外套',
     });
-    const source = production.read(target).source!;
+    const source = production.compile({ target, adapterKey: imageSelection.adapterKey }).source!;
     const job = images.prepare({
       adapterKey: imageSelection.adapterKey,
       parameters: { prompt: '蓝色外套', aspect_ratio: '16:9', resolution: '1080p' },
@@ -515,6 +525,9 @@ describe('MediaOrchestrationService', () => {
       title: actor.title,
       contentMarkdown: '红色外套',
     });
+    projectsService.access(true, (db) =>
+      db.prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?").run(actor.id),
+    );
     await expect(
       service.confirmSubmission({
         jobId: job.id,

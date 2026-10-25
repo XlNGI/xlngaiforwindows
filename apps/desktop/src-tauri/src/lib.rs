@@ -1818,7 +1818,7 @@ fn provider_download_remote_video_blocking(
     source: &str,
 ) -> Result<ProviderBinaryDownloadResponse, String> {
     let target = parse_public_https_url(source)?;
-    provider_http::assert_public_host(&target.host)?;
+    provider_http::assert_provider_output_host(&target.host)?;
     let response = request_public_bytes(PublicHttpRequest {
         host: &target.host,
         path: &target.path,
@@ -2205,7 +2205,9 @@ fn worker_request_timeout(request: &serde_json::Value) -> Duration {
     match request.get("method").and_then(serde_json::Value::as_str) {
         Some(
             "media.generation.confirmSubmission"
+            | "media.review.submit"
             | "agent.generation.confirmMediaSubmission"
+            | "agent.generation.selectMedia"
             | "image.generate.complete"
             | "audio.import"
             | "dubbing.job.submit"
@@ -5611,6 +5613,18 @@ mod tests {
             .expect("stderr output must not block the response");
 
         assert_eq!(result["ok"], true);
+    }
+
+    #[test]
+    fn reviewed_media_form_uses_the_paid_submission_timeout() {
+        assert_eq!(
+            super::worker_request_timeout(&json!({"method": "agent.generation.selectMedia"})),
+            super::MEDIA_WORKER_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            super::worker_request_timeout(&json!({"method": "conversation.runtime.selectMedia"})),
+            super::WORKER_REQUEST_TIMEOUT
+        );
     }
 
     #[test]

@@ -67,3 +67,47 @@ export function productionReferenceImage(
     )
     .get(projectId, documentId) as { id: string } | undefined;
 }
+
+/** Validate a manually selected image without guessing imported-file provenance. */
+export function validateProductionImageBinding(
+  database: Database.Database,
+  projectId: string,
+  assetId: string,
+  sourceDocumentId: string,
+  expectedKind: 'character' | 'scene' | 'prop',
+): void {
+  const document = database
+    .prepare(
+      `SELECT id FROM documents
+       WHERE id=? AND project_id=? AND kind=? AND lifecycle_status='active'
+         AND NOT EXISTS(
+           SELECT 1 FROM document_bindings b
+           WHERE b.document_id=documents.id AND b.domain_scope='novel' AND b.status<>'archived'
+         )`,
+    )
+    .get(sourceDocumentId, projectId, expectedKind);
+  if (!document) throw new Error('参考图来源文档类型与绑定角色不一致。');
+
+  const asset = database
+    .prepare(
+      `SELECT id FROM assets
+       WHERE id=? AND project_id=? AND deleted_at IS NULL
+         AND lower(kind) NOT LIKE '%video%'`,
+    )
+    .get(assetId, projectId);
+  if (!asset) throw new Error('绑定的参考图不是当前项目中的有效图片。');
+
+  const provenance = database
+    .prepare(
+      `SELECT DISTINCT json_extract(j.task_snapshot_json,'$.sourceDocumentId') AS sourceDocumentId
+       FROM generation_results r
+       JOIN generation_jobs j ON j.id=r.job_id AND j.project_id=?
+       WHERE r.asset_id=? AND json_extract(j.task_snapshot_json,'$.sourceDocumentId') IS NOT NULL`,
+    )
+    .all(projectId, assetId) as Array<{ sourceDocumentId: string | null }>;
+  const knownSources = provenance
+    .map((row) => row.sourceDocumentId)
+    .filter((id): id is string => Boolean(id));
+  if (knownSources.length && !knownSources.includes(sourceDocumentId))
+    throw new Error('参考图不是该角色、场景或道具文档生成的素材。');
+}

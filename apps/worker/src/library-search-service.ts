@@ -7,6 +7,7 @@ import type {
   LibrarySearchMode,
   LibrarySourceStatus,
 } from '@ai-video/contracts';
+import { validateProjectContentIR } from '@ai-video/contracts';
 import {
   getProjectLibraryChunk,
   librarySnippet,
@@ -192,6 +193,7 @@ export class LibrarySearchService {
     sourceHandle: string;
     maxChars?: number;
     readMode?: 'chunk' | 'source';
+    includeContentIR?: boolean;
     offset?: number;
   }): LibraryReadResult {
     this.assertBudget(params.taskId, params.attemptId, 'read');
@@ -212,13 +214,24 @@ export class LibrarySearchService {
     if (readMode !== 'chunk' && readMode !== 'source') {
       throw new LibraryError('LIBRARY_READ_BLOCKED', 'Library read mode is invalid.', false);
     }
+    if (params.includeContentIR && readMode !== 'source')
+      throw new LibraryError(
+        'LIBRARY_READ_BLOCKED',
+        'contentIR is available only with readMode="source" for the exact retrieved document version.',
+        false,
+      );
     const offset = boundedInteger(params.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const maxChars = boundedInteger(
+    const requestedMaxChars = boundedInteger(
       params.maxChars,
       readMode === 'source' ? MAX_READ_CHARS : DEFAULT_READ_CHARS,
       1,
       MAX_READ_CHARS,
     );
+    // Keep an explicitly requested IR plus its Markdown page below the common
+    // Agent tool-result bound, even for non-ASCII text.
+    const maxChars = params.includeContentIR
+      ? Math.min(requestedMaxChars, 4_000)
+      : requestedMaxChars;
     return this.projects.access(false, (database, project) => {
       if (project.id !== handle.projectId) {
         throw new LibraryError(
@@ -280,6 +293,28 @@ export class LibrarySearchService {
               ),
             ))
           : chunk.contentText;
+      const contentIR =
+        params.includeContentIR && chunk.documentId && chunk.versionId
+          ? (() => {
+              const row = database
+                .prepare(
+                  `SELECT versions.content_ir_json, documents.kind
+                   FROM document_versions versions
+                   JOIN documents ON documents.id=versions.document_id
+                   WHERE documents.project_id=? AND documents.id=? AND versions.id=?`,
+                )
+                .get(project.id, chunk.documentId, chunk.versionId) as
+                { content_ir_json: string | null; kind: string } | undefined;
+              if (!row?.content_ir_json || !['character', 'scene', 'prop'].includes(row.kind))
+                return undefined;
+              return validateProjectContentIR(
+                JSON.parse(row.content_ir_json),
+                ['character', 'scene', 'prop'].includes(row.kind)
+                  ? (row.kind as 'character' | 'scene' | 'prop')
+                  : undefined,
+              );
+            })()
+          : undefined;
       if (offset > contentBeforeLimit.length) {
         throw new LibraryError(
           'LIBRARY_READ_BLOCKED',
@@ -316,6 +351,7 @@ export class LibrarySearchService {
         kind: chunk.kind,
         title: chunk.title,
         content,
+        ...(contentIR ? { contentIR } : {}),
         characterCount: content.length,
         startOffset: offset,
         endOffset,

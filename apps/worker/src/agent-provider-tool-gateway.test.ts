@@ -4,6 +4,7 @@ import type {
   LlmGenerationIdentity,
   LlmToolDefinition,
 } from '@ai-video/contracts';
+import { VIDEO_PROMPT_AUTHORING_REQUIREMENTS } from '@ai-video/contracts';
 import {
   AgentProviderToolGateway,
   type AgentProviderToolExecutor,
@@ -51,7 +52,9 @@ function executor(
       Promise.resolve(executeResult),
     ),
     confirmTool: vi.fn<AgentProviderToolExecutor['confirmTool']>(() => confirmResult),
-    selectMedia: vi.fn<AgentProviderToolExecutor['selectMedia']>(() => mediaResult),
+    selectMedia: vi.fn<AgentProviderToolExecutor['selectMedia']>(() =>
+      Promise.resolve(mediaResult),
+    ),
     startProviderStep: vi.fn<AgentProviderToolExecutor['startProviderStep']>(),
     completeProviderStep: vi.fn<AgentProviderToolExecutor['completeProviderStep']>(),
     terminateGeneration: vi.fn<AgentProviderToolExecutor['terminateGeneration']>(() => 1),
@@ -59,6 +62,222 @@ function executor(
 }
 
 describe('AgentProviderToolGateway', () => {
+  it('exposes prompt revisions and explicit scene scope without accepting shot scope fields', async () => {
+    const original = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.update_shot_prompts')!;
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'prompts',
+        outputs: [{ callId: 'save-prompts', output: '{"status":"shot_prompts_saved"}' }],
+      },
+    });
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [{ ...original, authorizationHandle: 'prompt-auth' }],
+      vi.fn(),
+      vi.fn(),
+    );
+    const tool = gateway.tools().find((entry) => entry.name === original.name)!;
+    const args = {
+      shots: [
+        {
+          shotId: 'shot-1',
+          expectedRowVersion: 1,
+          authoringIR: {
+            schemaVersion: 1,
+            kind: 'shot',
+            prompt: '固定机位，无配乐。',
+            data: { custom: '补充资料' },
+          },
+        },
+      ],
+    };
+    expect(tool.prepareArguments!(args)).toEqual(args);
+    expect(() =>
+      tool.prepareArguments!({
+        shots: [
+          {
+            ...args.shots[0],
+            authoringIR: { ...args.shots[0]!.authoringIR, promptScope: 'complete' },
+          },
+        ],
+      }),
+    ).toThrow();
+    gateway.captureProviderCall('save-prompts', 'prompts');
+    await tool.execute('save-prompts', args);
+    expect(worker.executeTools).toHaveBeenCalledWith(
+      expect.objectContaining({
+        calls: [
+          expect.objectContaining({
+            name: original.name,
+            authorizationHandle: 'prompt-auth',
+            argumentsJson: JSON.stringify(args),
+          }),
+        ],
+      }),
+    );
+  });
+  it('exposes the real timing patch to Pi with bounded schema and shared format guidance', async () => {
+    const args = {
+      shots: Array.from({ length: 15 }, (_, i) => ({
+        shotId: `shot-${i}`,
+        expectedRowVersion: 1,
+        estimatedDurationSeconds: 5,
+        rationale: '动作和停顿',
+      })),
+    };
+    const worker = executor({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'timing',
+        outputs: [
+          {
+            callId: 'save-times',
+            output: JSON.stringify({ status: 'shot_timings_saved', changedCount: 15 }),
+          },
+        ],
+      },
+    });
+    const schema = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.update_shot_timings')!;
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [{ ...schema, authorizationHandle: 'timing-authorization' }],
+      vi.fn(),
+      vi.fn(),
+    );
+    const tool = gateway.tools().find((item) => item.name === schema.name)!;
+    expect(schema.description).toContain('ProductionAuthoringIR=');
+    expect(schema.description).toContain('scene.submit_structure.shots creates NEW shots');
+    expect(tool.prepareArguments!(args)).toEqual(args);
+    expect(() =>
+      tool.prepareArguments!({ shots: [{ ...args.shots[0], estimatedDurationSeconds: 0 }] }),
+    ).toThrow();
+    expect(() =>
+      tool.prepareArguments!({ shots: [{ ...args.shots[0], prompt: '覆盖正文' }] }),
+    ).toThrow();
+    gateway.captureProviderCall('save-times', 'timing');
+    await tool.execute('save-times', args);
+    expect(worker.executeTools).toHaveBeenCalledWith(
+      expect.objectContaining({
+        calls: [
+          expect.objectContaining({
+            name: schema.name,
+            argumentsJson: JSON.stringify(args),
+            authorizationHandle: 'timing-authorization',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('names unsupported envelope fields without values, preserves open IR data and narrows shot batches', () => {
+    const worker = executor({});
+    const original = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!;
+    const gateway = new AgentProviderToolGateway(worker, identity, [original], vi.fn(), vi.fn());
+    const stage = () => gateway.tools().find((tool) => tool.name === original.name)!;
+    const args = {
+      resourceId: 'workspace:shots',
+      operation: 'put_shots',
+      stageId: 'stage',
+      sceneIndex: 0,
+      shotOffset: 0,
+      shots: [
+        {
+          title: '镜头',
+          camera: 'PRIVATE_BODY',
+          authoringIR: {
+            schemaVersion: 1,
+            kind: 'shot',
+            prompt: '完整提示词，含“引号”\n第二行',
+            data: { camera: { customField: 'PRIVATE_BODY' } },
+          },
+        },
+      ],
+    };
+    const snapshot = structuredClone(args);
+    let message = '';
+    try {
+      stage().prepareArguments!(args);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('shots[0].camera');
+    expect(message).toContain('at most 2 ordered shots');
+    expect(message).toContain('authoringIR.data');
+    expect(message).not.toContain('PRIVATE_BODY');
+    expect(message).not.toContain('data.camera');
+    expect(args).toEqual(snapshot);
+    expect(worker.executeTools).not.toHaveBeenCalled();
+    const properties = () =>
+      gateway.currentDefinitions()[0]!.parameters.properties as Record<
+        string,
+        { maxItems: number }
+      >;
+    expect(properties().shots!.maxItems).toBe(2);
+
+    const validShot = { title: args.shots[0]!.title, authoringIR: args.shots[0]!.authoringIR };
+    const valid = { ...args, shots: [validShot] };
+    expect(stage().prepareArguments!(valid)).toEqual(valid);
+    expect(() =>
+      stage().prepareArguments!({
+        ...valid,
+        shots: [
+          {
+            ...validShot,
+            authoringIR: {
+              ...validShot.authoringIR,
+              references: { characterIds: ['PRIVATE_ID'] },
+            },
+          },
+        ],
+      }),
+    ).toThrow('shots[0].authoringIR.references.characterIds');
+    expect(properties().shots!.maxItems).toBe(1);
+    expect(() => stage().prepareArguments!({ ...valid, shots: [validShot, validShot] })).toThrow(
+      /more than 1 items/i,
+    );
+    expect(
+      (original.parameters.properties as Record<string, { maxItems: number }>).shots!.maxItems,
+    ).toBe(4);
+  });
+
+  it('does not load an unauthorized stage or redirect existing scene validation failures', async () => {
+    const worker = executor({});
+    const submit = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.submit_structure')!;
+    const gateway = new AgentProviderToolGateway(worker, identity, [submit], vi.fn(), vi.fn());
+    expect(gateway.recoverSceneAuthoring()).toBeUndefined();
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).toEqual([submit.name]);
+    const withStage = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [submit, SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      true,
+    );
+    const load = withStage.tools().find((tool) => tool.name === 'tools.load')!;
+    await load.execute('load', { names: ['scene.submit_structure'] });
+    const update = withStage.tools().find((tool) => tool.name === submit.name)!;
+    expect(() =>
+      update.prepareArguments!({
+        resourceId: 'workspace:shots',
+        resolution: 'resolved',
+        episodeTitle: '更新',
+        scenes: [
+          { title: '原场次', sceneId: 'existing', expectedRowVersion: 0, shots: [], typo: true },
+        ],
+      }),
+    ).toThrow('scenes[0].typo');
+    expect(withStage.currentDefinitions().map((tool) => tool.name)).toContain(submit.name);
+    expect(withStage.currentDefinitions().map((tool) => tool.name)).not.toContain(
+      'scene.structure.stage',
+    );
+  });
+
   it('appends loaded schemas in first-load order, keeps the catalog stable and deduplicates workflow guidance', async () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(
@@ -103,6 +322,31 @@ describe('AgentProviderToolGateway', () => {
       'tools.load',
       'document.create_draft',
     ]);
+    expect(worker.executeTools).not.toHaveBeenCalled();
+  });
+  it('returns the full video writing guidance when the Agent loads video preparation', async () => {
+    const worker = executor({});
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      MEDIA_AGENT_TOOLS.map((tool) => ({ ...tool, authorizationHandle: 'video-capability' })),
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      true,
+    );
+    const loaded = await gateway
+      .tools()
+      .find((tool) => tool.name === 'tools.load')!
+      .execute('load-video', {
+        names: ['media.video.prepare'],
+      });
+    const output = loaded.content.find((block) => block.type === 'text');
+    if (output?.type !== 'text') throw new Error('Expected tool loading instructions.');
+    const result = JSON.parse(output.text) as { instructions: string };
+    expect(result.instructions).toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).toContain('media.video.prepare');
     expect(worker.executeTools).not.toHaveBeenCalled();
   });
 
@@ -200,7 +444,7 @@ describe('AgentProviderToolGateway', () => {
         'novel.episode.submit_structure',
         'scene.structure.stage',
         'scene.submit_structure',
-        'production.execute',
+        'scene.update_shot_prompts',
       ];
       const definitions = [...DOCUMENT_AGENT_TOOLS, ...SYSTEM_AGENT_TOOLS].map((tool) => ({
         ...tool,
@@ -350,22 +594,24 @@ describe('AgentProviderToolGateway', () => {
         continuation: {
           protocol: 'openai-responses',
           previousResponseId: 'response-media',
-          outputs: [{ callId: 'call-media', output: '{"status":"prepared"}' }],
+          outputs: [{ callId: 'call-media', output: '{"status":"polling","taskId":"media-job"}' }],
         },
         tools: [],
       },
     );
     const askMedia = vi.fn(() => Promise.resolve(selection));
+    const askSubmission = vi.fn();
     const gateway = new AgentProviderToolGateway(
       worker,
       identity,
       [definition('media.video.prepare')],
       vi.fn(),
       askMedia,
+      askSubmission,
     );
 
     gateway.captureProviderCall('call-media', 'response-media');
-    await gateway.tools()[0]!.execute('call-media', { prompt: request.prompt });
+    const result = await gateway.tools()[0]!.execute('call-media', { prompt: request.prompt });
 
     expect(askMedia).toHaveBeenCalledWith(request);
     expect(worker.selectMedia).toHaveBeenCalledWith({
@@ -373,6 +619,10 @@ describe('AgentProviderToolGateway', () => {
       selectionToken: request.selectionToken,
       selection,
     });
+    expect(askSubmission).not.toHaveBeenCalled();
+    expect(result.content).toEqual([
+      { type: 'text', text: '{"status":"polling","taskId":"media-job"}' },
+    ]);
   });
 
   it('rejects calls without Provider response context before reaching Worker', async () => {

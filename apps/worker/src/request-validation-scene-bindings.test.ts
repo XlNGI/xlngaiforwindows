@@ -2,6 +2,37 @@ import { describe, expect, it } from 'vitest';
 import { validateSessionRequestParams } from './request-validation.js';
 
 describe('scene cast RPC validation', () => {
+  it.each(['image.generate.prepare', 'video.generate.prepare'] as const)(
+    'validates the IR form source at the %s IPC boundary',
+    (method) => {
+      const params = {
+        adapterKey: 'model',
+        providerProfileId: 'profile',
+        modelId: 'model',
+        parameters: { prompt: '最终表单正文' },
+        providerRegion: 'cn',
+        productionSource: {
+          mode: 'form',
+          target: { kind: 'shot', id: 'shot' },
+          token: 'a'.repeat(64),
+        },
+      };
+      if (method === 'image.generate.prepare') Reflect.deleteProperty(params, 'providerRegion');
+      expect(() => validateSessionRequestParams(method, params)).not.toThrow();
+      for (const source of [
+        { ...params.productionSource, token: undefined },
+        { ...params.productionSource, token: 'invalid' },
+        { ...params.productionSource, mode: undefined },
+        { ...params.productionSource, instructionId: 'old' },
+      ])
+        expect(() =>
+          validateSessionRequestParams(method, { ...params, productionSource: source }),
+        ).toThrow();
+      expect(() =>
+        validateSessionRequestParams(method, { ...params, productionSource: undefined }),
+      ).not.toThrow();
+    },
+  );
   it('accepts default or disabled media and bounds batch lookups at the RPC boundary', () => {
     expect(() =>
       validateSessionRequestParams('scene.save', {

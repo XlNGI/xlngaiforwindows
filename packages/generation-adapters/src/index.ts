@@ -57,6 +57,13 @@ export function adapterDescriptorFromModelContract(
   const required = Array.isArray(schema.required)
     ? schema.required.filter((key): key is string => typeof key === 'string')
     : [];
+  // A unified image contract exposes separate production modes with explicit inputs.
+  if (params.contract.taskCapabilities?.includes('REFERENCE_TO_IMAGE')) {
+    if (params.capability === 'REFERENCE_TO_IMAGE') {
+      required.push('images');
+      if (properties.prompt_extend_mode) properties.prompt_extend_mode.enum = ['direct'];
+    } else if (params.capability === 'TEXT_TO_IMAGE') delete properties.images;
+  }
   const parameterSchema: AdapterParameterSchema = {
     ...structuredClone(schema),
     $schema: schemaUri,
@@ -1194,27 +1201,30 @@ const contractAdapters: AdapterDescriptor[] = [
     }),
   );
 });
-const officialModeAdapters = contractAdapters
-  .filter(
-    (adapter) =>
-      ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider) ||
-      (adapter.provider === 'unicompapi' && adapter.contractRevision === 3),
-  )
-  .flatMap((adapter) => {
-    const contract = officialVideoAudioContracts.find(
-      (contract) =>
-        contract.contractId === adapter.contractId &&
-        contract.contractRevision === adapter.contractRevision,
-    )!;
-    return (contract.taskCapabilities ?? [])
-      .filter((capability) => capability !== adapter.capability)
-      .map((capability) => ({
-        ...adapter,
+const officialModeAdapters = contractAdapters.flatMap((adapter) => {
+  const contract = [...officialVideoAudioContracts, ...officialImageContracts].find(
+    (contract) =>
+      contract.contractId === adapter.contractId &&
+      contract.contractRevision === adapter.contractRevision,
+  );
+  if (!contract) return [];
+  return (contract.taskCapabilities ?? [])
+    .filter((capability) => capability !== adapter.capability)
+    .map((capability) =>
+      adapterDescriptorFromModelContract({
+        contract,
         capability,
-        capabilityLabel: capabilityLabel(capability),
-        key: `${capability}:${adapter.provider}:${adapter.model}:${adapter.apiVersion}`,
-      }));
-  });
+        provider: adapter.provider,
+        providerLabel: adapter.providerLabel,
+        model: adapter.model,
+        modelLabel: adapter.modelLabel,
+        apiVersion: adapter.apiVersion,
+        endpoint: adapter.endpoint,
+        documentationUrl: adapter.documentationUrl,
+        credentialProvider: adapter.credentialProvider,
+      }),
+    );
+});
 const catalogAdapters = [
   ...adapters,
   ...unicompAdapters,
@@ -1351,12 +1361,44 @@ export function validateAdapterParameters(
           }
         : parameters;
   const valid = validator(validationParameters);
-  return { valid: Boolean(valid), errors: validationErrors(validator.errors) };
+  const errors = validationErrors(validator.errors);
+  const imageContract = officialImageContracts.find(
+    (contract) =>
+      contract.contractId === adapter.contractId &&
+      contract.contractRevision === adapter.contractRevision &&
+      contract.taskCapabilities?.includes('REFERENCE_TO_IMAGE'),
+  );
+  if (imageContract) {
+    if (typeof parameters.size === 'string' && parameters.size !== 'auto') {
+      const [width, height] = parameters.size.split('x').map(Number);
+      if (
+        !width ||
+        !height ||
+        width * height < 512 * 512 ||
+        width * height > 2048 * 2048 ||
+        (imageContract.transport.protocolFamily !== 'dashscope-image' &&
+          (width > height * 8 || height > width * 8))
+      )
+        errors.push({
+          path: '/size',
+          message: '尺寸须满足 512×512 至 2048×2048 的像素面积和 1:8 至 8:1 的宽高比。',
+        });
+    }
+    if (Array.isArray(parameters.images)) {
+      for (const [index, value] of parameters.images.entries()) {
+        if (typeof value !== 'string' || !value.startsWith('data:')) continue;
+        const encoded = value.slice(value.indexOf(',') + 1);
+        const bytes =
+          Math.floor((encoded.length * 3) / 4) -
+          (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
+        if (bytes > 10 * 1024 * 1024)
+          errors.push({ path: `/images/${index}`, message: '参考图片不能超过 10 MB。' });
+      }
+    }
+  }
+  return { valid: Boolean(valid) && errors.length === 0, errors };
 }
 export {
-  parseProductionExecution,
-  inspectProductionInstruction,
-  inspectProductionTargetInstruction,
   resolveProductionDuration,
   parseProductionDefaults,
   compileProductionParameters,

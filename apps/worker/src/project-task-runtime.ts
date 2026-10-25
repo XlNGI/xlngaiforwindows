@@ -313,6 +313,21 @@ export class ProjectTaskRuntime {
         }
         return;
       }
+      const message = error instanceof Error ? error.message : 'Native Provider polling failed.';
+      try {
+        this.recordUpdate(
+          scheduled,
+          this.videos.recordPollFailure({
+            jobId: scheduled.job.id,
+            providerTaskId: scheduled.job.providerTaskId!,
+            message,
+            projectSessionId: this.runningSessionId,
+          }),
+        );
+      } catch {
+        // The project may have been closed while persisting the diagnostic.
+      }
+
       this.schedule(
         scheduled,
         nextProjectTaskDelay(

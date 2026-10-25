@@ -28,9 +28,10 @@ export function isLocalImageDataUrl(value: unknown): value is string {
 }
 
 export function hasLocalImageParameters(parameters: AdapterParameters): boolean {
-  return Object.values(parameters).some((value) =>
-    Array.isArray(value) ? value.some(isLocalImageDataUrl) : isLocalImageDataUrl(value),
-  );
+  const containsLocalImage = (value: unknown): boolean =>
+    isLocalImageDataUrl(value) ||
+    Boolean(value && typeof value === 'object' && Object.values(value).some(containsLocalImage));
+  return containsLocalImage(parameters);
 }
 
 export function localImageDataBytes(value: string): number {

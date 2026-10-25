@@ -8,15 +8,12 @@ import type {
   AgentChangeSetItemInfo,
   AgentChangeSetListParams,
   AgentChangeSetRejectParams,
+  ProductionAuthoringIR,
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
-import {
-  renderProductionInstruction,
-  type ProductionInstruction,
-  type ProductionExecuteParams,
-} from '@ai-video/contracts';
-import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
-import { ProductionService } from './production-service.js';
+import { validateProductionAuthoringIR } from '@ai-video/contracts';
+import { validateProductionIRReferences } from './project-ir-validation.js';
+import { resolveIRSceneBindings } from './production-ir-bindings.js';
 import { rebuildLibraryChunksForChangeSet, SceneCharacterRepository } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
@@ -24,6 +21,7 @@ import {
   requireProductionCharacters,
   resolvedCast,
   productionReferenceImage,
+  validateProductionImageBinding,
 } from './scene-cast-binding.js';
 
 type ChangeSetRow = {
@@ -52,7 +50,7 @@ type ItemRow = {
   scene_document_id: string | null;
   scene_bindings_json: string | null;
   shot_prompt: string | null;
-  production_instruction_json: string | null;
+  production_authoring_ir_json: string | null;
   document_kind: AgentChangeSetItemInfo['documentKind'] | null;
   content_markdown: string | null;
   scope_type: AgentChangeSetItemInfo['scopeType'] | null;
@@ -74,7 +72,36 @@ function requiredText(value: string, label: string, maximum: number): string {
   return normalized;
 }
 
+function validateMediaBindings(
+  database: Database.Database,
+  projectId: string,
+  bindings: SceneMaterialBindingInfo[],
+): void {
+  for (const binding of bindings) {
+    if (binding.role !== 'character' && binding.role !== 'scene' && binding.role !== 'prop')
+      continue;
+    if (!binding.sourceDocumentId)
+      throw new Error('角色、场景和道具参考图必须声明来源文档。');
+    validateProductionImageBinding(
+      database,
+      projectId,
+      binding.assetId,
+      binding.sourceDocumentId,
+      binding.role,
+    );
+  }
+}
+
 function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
+  const expectedIRKind =
+    row.entity_type === 'scene' || row.entity_type === 'shot' ? row.entity_type : undefined;
+  const authoringIR = row.production_authoring_ir_json
+    ? expectedIRKind
+      ? validateProductionAuthoringIR(JSON.parse(row.production_authoring_ir_json), expectedIRKind)
+      : (() => {
+          throw new Error('Document change set items cannot contain production authoring IR.');
+        })()
+    : undefined;
   return {
     id: row.id,
     ordinal: row.ordinal,
@@ -93,9 +120,7 @@ function itemInfo(row: ItemRow): AgentChangeSetItemInfo {
       : {}),
     shotStatus: row.shot_status ?? undefined,
     prompt: row.shot_prompt ?? undefined,
-    instruction: row.production_instruction_json
-      ? (JSON.parse(row.production_instruction_json) as ProductionInstruction)
-      : undefined,
+    authoringIR,
     documentKind: row.document_kind ?? undefined,
     contentMarkdown: row.content_markdown ?? undefined,
     scopeType: row.scope_type ?? undefined,
@@ -150,61 +175,17 @@ export class ChangeSetService {
             parent_scene_id, parent_item_id, title, shot_status, document_kind,
             content_markdown, shot_prompt, scope_type, scope_id, expected_row_version,
             expected_current_version_id,
-            scene_document_id, scene_bindings_json, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+            scene_document_id, scene_bindings_json, production_authoring_ir_json, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
         );
         params.items.forEach((candidate, ordinal) => {
-          const item = this.validateDraft(candidate, ordinal, params.items);
-          if (item.instruction) {
-            requireProductionCharacters(
-              database,
-              project.id,
-              item.instruction.subjects.map((subject) => subject.documentId),
-            );
-            for (const resource of item.instruction.resources) {
-              if (
-                resource.documentId &&
-                !database
-                  .prepare(
-                    "SELECT 1 FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
-                  )
-                  .get(resource.documentId, project.id)
-              )
-                throw new Error('制作资源引用了无效的项目文档。');
-              if (
-                resource.assetId &&
-                !database
-                  .prepare(
-                    'SELECT 1 FROM assets WHERE id=? AND project_id=? AND deleted_at IS NULL',
-                  )
-                  .get(resource.assetId, project.id)
-              )
-                throw new Error('制作资源引用了无效的项目素材。');
-            }
-            const names = Object.fromEntries(
-              (
-                database
-                  .prepare('SELECT id,title FROM documents WHERE project_id=?')
-                  .all(project.id) as Array<{ id: string; title: string }>
-              ).map((doc) => [doc.id, doc.title]),
-            );
-            const prompt = requiredText(
-              renderProductionInstruction(item.instruction, names),
-              'Structured prompt',
-              20000,
-            );
-            const supplied = item.entityType === 'scene' ? item.videoPrompt : item.prompt;
-            if (
-              supplied !== undefined &&
-              !prompt.includes(supplied.trim()) &&
-              !renderProductionInstruction(item.instruction).includes(supplied.trim())
-            )
-              throw new Error(
-                'PROMPT_INSTRUCTION_CONFLICT: 正文与结构化指令不一致，请只提交结构或执行保留原文的绑定修改。',
-              );
-            if (item.entityType === 'scene') item.videoPrompt = prompt;
-            else item.prompt = prompt;
-          }
+          const item = this.validateDraft(
+            this.normalizeTextEdit(database, project.id, candidate),
+            ordinal,
+            params.items,
+          );
+          if (item.authoringIR)
+            validateProductionIRReferences(database, project.id, item.authoringIR);
           if (item.sceneDocumentId)
             requireProductionSceneDocument(database, project.id, item.sceneDocumentId);
           if (item.characterDocumentIds !== undefined) {
@@ -244,15 +225,10 @@ export class ChangeSetService {
                   videoPrompt: item.videoPrompt,
                   characterDocumentIds: item.characterDocumentIds,
                 }),
+            item.authoringIR ? JSON.stringify(item.authoringIR) : null,
             now,
             now,
           );
-          if (item.instruction)
-            database
-              .prepare(
-                'INSERT INTO production_change_set_instructions(item_id,project_id,instruction_json) VALUES(?,?,?)',
-              )
-              .run(itemIds[ordinal], project.id, JSON.stringify(item.instruction));
         });
         rebuildLibraryChunksForChangeSet(database, project.id, id, now);
         return this.getInTransaction(database, project.id, id);
@@ -292,7 +268,6 @@ export class ChangeSetService {
         const now = new Date().toISOString();
         try {
           database.transaction(() => {
-            const operations: ProductionExecuteParams['operations'] = [];
             for (const item of selected) {
               const appliedEntityId = this.applyItem(database, project.id, item, now);
               database
@@ -302,28 +277,7 @@ export class ChangeSetService {
                    WHERE id = ? AND status = 'pending'`,
                 )
                 .run(appliedEntityId, now, item.id);
-              if (item.production_instruction_json) {
-                const kind = item.entity_type === 'scene' ? 'scene' : 'shot';
-                const row = database
-                  .prepare(
-                    `SELECT row_version FROM ${kind === 'scene' ? 'scenes' : 'shots'} WHERE id=?`,
-                  )
-                  .get(appliedEntityId) as { row_version: number };
-                operations.push({
-                  action: 'set_prompt',
-                  target: { kind, id: appliedEntityId },
-                  expectedRowVersion: row.row_version,
-                  instruction: JSON.parse(
-                    item.production_instruction_json,
-                  ) as ProductionInstruction,
-                });
-              }
             }
-            for (let index = 0; index < operations.length; index += 30)
-              new ProductionService(this.projects).execute({
-                executionKey: `change-set:${set.id}:${set.row_version}:${index}`,
-                operations: operations.slice(index, index + 30),
-              });
           })();
         } catch (error) {
           if (!(error instanceof ChangeSetConflict)) throw error;
@@ -402,19 +356,55 @@ export class ChangeSetService {
     );
   }
 
+  /** Manual text edits enter the same IR path before being proposed or applied. */
+  private normalizeTextEdit(
+    database: Database.Database,
+    projectId: string,
+    item: AgentChangeSetItemDraft,
+  ): AgentChangeSetItemDraft {
+    if (item.authoringIR || !['scene', 'shot'].includes(item.entityType)) return item;
+    const kind = item.entityType === 'scene' ? 'scene' : 'shot';
+    const prompt = kind === 'scene' ? item.videoPrompt : item.prompt;
+    if (prompt === undefined) return item;
+    const existing = !item.targetId
+      ? undefined
+      : kind === 'scene'
+        ? database
+            .prepare('SELECT authoring_ir_json FROM scenes WHERE id=? AND project_id=?')
+            .get(item.targetId, projectId)
+        : database
+            .prepare(
+              'SELECT shots.authoring_ir_json FROM shots JOIN scenes ON scenes.id=shots.scene_id WHERE shots.id=? AND scenes.project_id=?',
+            )
+            .get(item.targetId, projectId);
+    const saved = existing as { authoring_ir_json: string | null } | undefined;
+    const ir = saved?.authoring_ir_json
+      ? validateProductionAuthoringIR(JSON.parse(saved.authoring_ir_json), kind)
+      : { schemaVersion: 1 as const, kind };
+    return { ...item, authoringIR: validateProductionAuthoringIR({ ...ir, prompt }, kind) };
+  }
+
   private validateDraft(
     candidate: AgentChangeSetItemDraft,
     ordinal: number,
     all: AgentChangeSetItemDraft[],
   ): AgentChangeSetItemDraft {
     const item = { ...candidate, title: requiredText(candidate.title, 'Item title', 200) };
-    if (item.instruction) {
+    if (item.authoringIR) {
       if (!['scene', 'shot'].includes(item.entityType))
-        throw new Error('Only scenes and shots accept production instructions.');
-      const issues = inspectProductionTargetInstruction(item.instruction, item.entityType);
-      if (issues.length) throw new Error(issues.map((issue) => issue.message).join('\n'));
-      if (Buffer.byteLength(JSON.stringify(item.instruction)) > 512 * 1024)
-        throw new Error('制作指令超过512 KiB。');
+        throw new Error('Authoring IR is only valid for scene/shot items.');
+      const expectedKind =
+        item.entityType === 'scene' || item.entityType === 'shot' ? item.entityType : undefined;
+      if (!expectedKind) throw new Error('Authoring IR is only valid for scene/shot items.');
+      item.authoringIR = validateProductionAuthoringIR(item.authoringIR, expectedKind);
+      const prompt = item.authoringIR.prompt;
+      const supplied = item.entityType === 'scene' ? item.videoPrompt : item.prompt;
+      if (supplied !== undefined && supplied !== prompt)
+        throw new Error(
+          'PROMPT_AUTHORING_IR_CONFLICT: stored prompt must match authoringIR.prompt.',
+        );
+      if (item.entityType === 'scene') item.videoPrompt = prompt;
+      else item.prompt = prompt;
     }
     if (item.sceneDocumentId !== undefined) {
       if (item.entityType !== 'scene')
@@ -422,7 +412,10 @@ export class ChangeSetService {
       if (item.sceneDocumentId !== null)
         item.sceneDocumentId = requiredText(item.sceneDocumentId, 'Scene document ID', 200);
     }
-    if (item.videoPrompt !== undefined || item.characterDocumentIds !== undefined) {
+    if (
+      (item.videoPrompt !== undefined && !item.authoringIR) ||
+      item.characterDocumentIds !== undefined
+    ) {
       if (
         item.entityType !== 'scene' ||
         item.sceneDocumentId === undefined ||
@@ -432,7 +425,7 @@ export class ChangeSetService {
         throw new Error(
           'Scene bindings require videoPrompt, sceneDocumentId and characterDocumentIds together.',
         );
-      item.videoPrompt = requiredText(item.videoPrompt, 'Scene video prompt', 20000);
+      requiredText(item.videoPrompt, 'Scene video prompt', 20000);
     }
     if (item.action === 'create') {
       if (item.targetId || item.expectedRowVersion !== undefined) {
@@ -499,7 +492,7 @@ export class ChangeSetService {
     }
     if (item.shotStatus !== undefined)
       item.shotStatus = requiredText(item.shotStatus, 'Shot status', 80);
-    if (item.prompt !== undefined) item.prompt = requiredText(item.prompt, 'Shot prompt', 20000);
+    if (item.prompt !== undefined) requiredText(item.prompt, 'Shot prompt', 20000);
     return item;
   }
 
@@ -509,6 +502,24 @@ export class ChangeSetService {
     item: ItemRow,
     now: string,
   ): string {
+    if (
+      !item.production_authoring_ir_json &&
+      (item.shot_prompt !== null || item.scene_bindings_json)
+    )
+      throw new ChangeSetConflict('AUTHORING_IR_REQUIRED');
+    if (item.production_authoring_ir_json) {
+      try {
+        validateProductionIRReferences(
+          database,
+          projectId,
+          validateProductionAuthoringIR(JSON.parse(item.production_authoring_ir_json)),
+        );
+      } catch (error) {
+        throw new ChangeSetConflict(
+          error instanceof Error ? error.message : 'IR_REFERENCE_CONFLICT',
+        );
+      }
+    }
     const bindings = item.scene_bindings_json
       ? (JSON.parse(item.scene_bindings_json) as {
           sceneDocumentId: string | null;
@@ -549,6 +560,18 @@ export class ChangeSetService {
         )
         .run(id, projectId, item.title, position, now, now, item.scene_document_id);
       if (bindings) this.applySceneBindings(database, projectId, id, bindings);
+      if (item.production_authoring_ir_json) {
+        const ir = validateProductionAuthoringIR(
+          JSON.parse(item.production_authoring_ir_json),
+          'scene',
+        );
+        this.applyIRSceneBindings(database, projectId, id, ir);
+        database
+          .prepare(
+            'UPDATE scenes SET video_prompt=?,authoring_ir_json=? WHERE id=? AND project_id=?',
+          )
+          .run(ir.prompt, item.production_authoring_ir_json, id, projectId);
+      }
       return id;
     }
     if (item.entity_type === 'scene') {
@@ -568,6 +591,18 @@ export class ChangeSetService {
         );
       if (result.changes !== 1) throw new ChangeSetConflict('SCENE_ROW_VERSION_CONFLICT');
       if (bindings) this.applySceneBindings(database, projectId, item.target_id!, bindings);
+      if (item.production_authoring_ir_json) {
+        const ir = validateProductionAuthoringIR(
+          JSON.parse(item.production_authoring_ir_json),
+          'scene',
+        );
+        this.applyIRSceneBindings(database, projectId, item.target_id!, ir);
+        database
+          .prepare(
+            'UPDATE scenes SET video_prompt=?,authoring_ir_json=? WHERE id=? AND project_id=?',
+          )
+          .run(ir.prompt, item.production_authoring_ir_json, item.target_id, projectId);
+      }
       return item.target_id!;
     }
     if (item.action === 'create') {
@@ -585,8 +620,8 @@ export class ChangeSetService {
       database
         .prepare(
           `INSERT INTO shots
-           (id, scene_id, title, position, status, prompt, created_at, updated_at, row_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+           (id, scene_id, title, position, status, prompt, created_at, updated_at, row_version, authoring_ir_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
         )
         .run(
           id,
@@ -597,13 +632,16 @@ export class ChangeSetService {
           item.shot_prompt ?? null,
           now,
           now,
+          item.production_authoring_ir_json,
         );
       return id;
     }
     const result = database
       .prepare(
         `UPDATE shots SET title = ?, status = COALESCE(?, status),
-           prompt = COALESCE(?, prompt), updated_at = ?,
+           prompt = COALESCE(?, prompt),
+           authoring_ir_json = COALESCE(?, authoring_ir_json),
+           updated_at = ?,
            row_version = row_version + 1
          WHERE id = ? AND row_version = ? AND scene_id IN (
            SELECT id FROM scenes WHERE project_id = ?
@@ -613,6 +651,7 @@ export class ChangeSetService {
         item.title,
         item.shot_status,
         item.shot_prompt,
+        item.production_authoring_ir_json,
         now,
         item.target_id,
         item.expected_row_version,
@@ -638,39 +677,123 @@ export class ChangeSetService {
         .prepare('SELECT material_bindings_json FROM scenes WHERE id=? AND project_id=?')
         .get(sceneId, projectId) as { material_bindings_json: string };
       const previous = JSON.parse(scene.material_bindings_json) as SceneMaterialBindingInfo[];
+      const sceneRow = database
+        .prepare('SELECT scene_document_id,authoring_ir_json FROM scenes WHERE id=? AND project_id=?')
+        .get(sceneId, projectId) as {
+          scene_document_id: string | null;
+          authoring_ir_json: string | null;
+        };
+      let authoringIR: ProductionAuthoringIR | undefined;
+      try {
+        if (sceneRow.authoring_ir_json)
+          authoringIR = validateProductionAuthoringIR(
+            JSON.parse(sceneRow.authoring_ir_json),
+            'scene',
+          ) as ProductionAuthoringIR;
+      } catch {
+        authoringIR = undefined;
+      }
+      const existingSceneIds = authoringIR?.references?.sceneDocumentIds ?? [];
+      const preserveExistingSceneIds = existingSceneIds.length > 1;
+      const sceneDocumentIds = preserveExistingSceneIds
+        ? existingSceneIds
+        : bindings.sceneDocumentId
+          ? [bindings.sceneDocumentId]
+          : [];
+      const sceneDocumentSet = new Set(sceneDocumentIds);
       const materials = previous.filter(
         (item) =>
           item.role !== 'scene' ||
           item.source !== 'auto' ||
-          item.sourceDocumentId === bindings.sceneDocumentId,
+          Boolean(item.sourceDocumentId && sceneDocumentSet.has(item.sourceDocumentId)),
       );
-      if (bindings.sceneDocumentId && !materials.some((item) => item.role === 'scene')) {
-        const image = productionReferenceImage(database, projectId, bindings.sceneDocumentId);
+      for (const sceneDocumentId of sceneDocumentIds) {
+        if (materials.some((item) => item.role === 'scene' && item.sourceDocumentId === sceneDocumentId))
+          continue;
+        const image = productionReferenceImage(database, projectId, sceneDocumentId);
         const doc = database
           .prepare('SELECT title FROM documents WHERE id=?')
-          .get(bindings.sceneDocumentId) as { title: string };
-        if (image)
+          .get(sceneDocumentId) as { title: string } | undefined;
+        if (image && doc)
           materials.push({
-            id: `scene:${bindings.sceneDocumentId}`,
+            id: `scene:${sceneDocumentId}`,
             role: 'scene',
             label: doc.title,
             assetId: image.id,
-            sourceDocumentId: bindings.sceneDocumentId,
+            sourceDocumentId: sceneDocumentId,
             source: 'auto',
           });
       }
+      if (authoringIR && !preserveExistingSceneIds) {
+        authoringIR = {
+          ...authoringIR,
+          references: { ...authoringIR.references, sceneDocumentIds },
+        };
+      }
+      validateMediaBindings(database, projectId, materials);
       database
         .prepare(
-          'UPDATE scenes SET video_prompt=?,scene_document_id=?,material_bindings_json=? WHERE id=? AND project_id=?',
+          'UPDATE scenes SET scene_document_id=?,material_bindings_json=?,authoring_ir_json=COALESCE(?,authoring_ir_json),authoring_bindings_applied=1 WHERE id=? AND project_id=?',
         )
         .run(
-          bindings.videoPrompt,
-          bindings.sceneDocumentId,
+          preserveExistingSceneIds
+            ? (bindings.sceneDocumentId ?? sceneRow.scene_document_id)
+            : bindings.sceneDocumentId,
           JSON.stringify(materials),
+          authoringIR && !existingSceneIds.length ? JSON.stringify(authoringIR) : null,
           sceneId,
           projectId,
         );
       new SceneCharacterRepository(database).replace(sceneId, cast);
+    } catch (error) {
+      throw new ChangeSetConflict(
+        error instanceof Error ? error.message : 'SCENE_BINDING_CONFLICT',
+      );
+    }
+  }
+
+  private applyIRSceneBindings(
+    database: Database.Database,
+    projectId: string,
+    sceneId: string,
+    ir: ProductionAuthoringIR,
+  ): void {
+    try {
+      const row = database
+        .prepare(
+          'SELECT scene_document_id,material_bindings_json FROM scenes WHERE id=? AND project_id=?',
+        )
+        .get(sceneId, projectId) as {
+        scene_document_id: string | null;
+        material_bindings_json: string;
+      };
+      const cast = new SceneCharacterRepository(database);
+      const bindings = resolveIRSceneBindings(database, projectId, sceneId, ir, {
+        sceneDocumentId: row.scene_document_id ?? undefined,
+        materialBindings: JSON.parse(row.material_bindings_json) as SceneMaterialBindingInfo[],
+        characterBindings: cast.list(sceneId),
+      });
+      for (const binding of bindings.characterBindings)
+        if (binding.imageAssetId)
+          validateProductionImageBinding(
+            database,
+            projectId,
+            binding.imageAssetId,
+            binding.characterDocumentId,
+            'character',
+          );
+      validateMediaBindings(database, projectId, bindings.materialBindings);
+      database
+        .prepare(
+          'UPDATE scenes SET scene_document_id=?,material_bindings_json=?,authoring_bindings_applied=1 WHERE id=? AND project_id=?',
+        )
+        .run(
+          bindings.sceneDocumentId ?? null,
+          JSON.stringify(bindings.materialBindings),
+          sceneId,
+          projectId,
+        );
+      cast.replace(sceneId, bindings.characterBindings);
     } catch (error) {
       throw new ChangeSetConflict(
         error instanceof Error ? error.message : 'SCENE_BINDING_CONFLICT',
@@ -893,10 +1016,9 @@ export class ChangeSetService {
   private itemRows(database: Database.Database, changeSetId: string): ItemRow[] {
     return database
       .prepare(
-        `SELECT items.*, parent.ordinal AS parent_item_ordinal, instruction.instruction_json AS production_instruction_json
+        `SELECT items.*, parent.ordinal AS parent_item_ordinal
          FROM agent_change_set_items items
          LEFT JOIN agent_change_set_items parent ON parent.id = items.parent_item_id
-         LEFT JOIN production_change_set_instructions instruction ON instruction.item_id = items.id AND instruction.project_id = items.project_id
          WHERE items.change_set_id = ? ORDER BY items.ordinal`,
       )
       .all(changeSetId) as ItemRow[];

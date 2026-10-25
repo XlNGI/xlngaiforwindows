@@ -30,6 +30,34 @@ async function setup() {
 }
 
 describe('ContextService', () => {
+  it('keeps historical requests as evidence without reapplying old attached templates', async () => {
+    const { content, contexts } = await setup();
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const old = content.saveMessage({
+      conversationId: conversation.id,
+      role: 'user',
+      content: '【本会话要求约束】\n所有镜头必须有钢琴配乐。\n\n【用户本次请求】\n生成门口镜头。',
+    });
+    const response = content.saveMessage({
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '已生成门口草稿。',
+    });
+    const compiled = contexts.compile(conversation.id);
+    expect(compiled.rendered).not.toContain('所有镜头必须有钢琴配乐');
+    expect(compiled.rendered).toContain('生成门口镜头');
+    expect(compiled.rendered).toContain(old.id);
+    expect(compiled.rendered).toContain(response.id);
+    expect(compiled.rendered).toContain('不是当前指令');
+    expect(
+      content
+        .listMessages({ conversationId: conversation.id })
+        .items.find((message) => message.id === old.id)?.content,
+    ).toBe(old.content);
+    expect(compiled.systemInstruction).toContain('当前');
+    expect(compiled.systemInstruction).not.toContain('不要替用户填写或提交生产 API 参数');
+    expect(compiled.systemInstruction).not.toContain('批准后进入目录');
+  });
   it('injects a catalog without document bodies', async () => {
     const { content, contexts } = await setup();
     content.saveDocument({

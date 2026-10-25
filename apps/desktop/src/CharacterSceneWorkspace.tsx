@@ -47,7 +47,9 @@ export function CharacterSceneWorkspace({
   onOpenScene?: (sceneId: string) => void;
 }) {
   const generateLabel =
-    kind === 'scene' ? '\u751f\u6210\u573a\u666f\u56fe' : '\u751f\u6210\u89d2\u8272\u56fe';
+    kind === 'scene' ? '生成场景图' : kind === 'prop' ? '生成道具图' : '生成角色图';
+  const heading =
+    kind === 'scene' ? '场景生图提示词' : kind === 'prop' ? '道具资料' : '角色生图提示词';
 
   return (
     <div
@@ -55,9 +57,7 @@ export function CharacterSceneWorkspace({
     >
       <section className="character-scene-prompt" aria-labelledby="character-scene-prompt-heading">
         <div className="character-scene-prompt-heading">
-          <h2 id="character-scene-prompt-heading">
-            {kind === 'scene' ? '场景生图提示词' : '角色生图提示词'}
-          </h2>
+          <h2 id="character-scene-prompt-heading">{heading}</h2>
         </div>
         <div className="character-scene-identity">
           <label className="title-field">
@@ -65,20 +65,23 @@ export function CharacterSceneWorkspace({
             <input
               value={title}
               onChange={(event) => onTitleChange(event.target.value)}
-              placeholder={'\u8f93\u5165\u89d2\u8272\u6216\u573a\u666f\u540d\u79f0'}
+              placeholder={
+                '\u8f93\u5165\u89d2\u8272\u3001\u573a\u666f\u6216\u9053\u5177\u540d\u79f0'
+              }
               readOnly={!writable}
             />
           </label>
           <label className="kind-field">
             {'\u7c7b\u578b'}
             <select
-              value={kind === 'scene' ? 'scene' : 'character'}
+              value={kind}
               onChange={(event) => onKindChange(event.target.value as DocumentKind)}
               disabled={!writable}
               aria-label={'\u6587\u6863\u7c7b\u578b'}
             >
               <option value="character">{'\u89d2\u8272'}</option>
               <option value="scene">{'\u573a\u666f'}</option>
+              <option value="prop">道具</option>
             </select>
           </label>
           <span className={`document-state document-state-${stateKey}`}>{stateLabel}</span>
@@ -93,39 +96,43 @@ export function CharacterSceneWorkspace({
         </div>
         <textarea
           className="markdown-editor character-scene-prompt-editor"
-          aria-label={'\u63d0\u793a\u8bcd'}
+          aria-label={kind === 'prop' ? '道具资料' : '\u63d0\u793a\u8bcd'}
           value={content}
           onChange={(event) => onContentChange(event.target.value)}
           placeholder={
-            '\u8f93\u5165\u89d2\u8272\u6216\u573a\u666f\u7684\u751f\u56fe\u63d0\u793a\u8bcd\u2026'
+            kind === 'prop'
+              ? '输入道具外观、材质、用途与来历…'
+              : '\u8f93\u5165\u89d2\u8272\u6216\u573a\u666f\u7684\u751f\u56fe\u63d0\u793a\u8bcd\u2026'
           }
           readOnly={!writable}
         />
         {message ? <div className="inline-status">{message}</div> : null}
       </section>
-      <section className="character-scene-bindings" aria-label="场次绑定">
-        <div className="workspace-section-heading">
-          <h2>场次绑定</h2>
-          <span className="workspace-count">{boundScenes.length} 场</span>
-        </div>
-        {boundScenes.length ? (
-          <div className="bound-scene-links">
-            {boundScenes.map((scene) => (
-              <button
-                key={scene.id}
-                type="button"
-                className="button secondary"
-                disabled={!onOpenScene}
-                onClick={() => onOpenScene?.(scene.id)}
-              >
-                {scene.title}
-              </button>
-            ))}
+      {kind !== 'prop' ? (
+        <section className="character-scene-bindings" aria-label="场次绑定">
+          <div className="workspace-section-heading">
+            <h2>场次绑定</h2>
+            <span className="workspace-count">{boundScenes.length} 场</span>
           </div>
-        ) : (
-          <p className="workspace-hint">尚未绑定场次，可在“场次与镜头”中关联。</p>
-        )}
-      </section>
+          {boundScenes.length ? (
+            <div className="bound-scene-links">
+              {boundScenes.map((scene) => (
+                <button
+                  key={scene.id}
+                  type="button"
+                  className="button secondary"
+                  disabled={!onOpenScene}
+                  onClick={() => onOpenScene?.(scene.id)}
+                >
+                  {scene.title}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="workspace-hint">尚未绑定场次，可在“场次与镜头”中关联。</p>
+          )}
+        </section>
+      ) : null}
       <section
         className={`character-scene-gallery${assets.length === 0 ? ' is-empty' : ''}`}
         aria-labelledby="character-scene-gallery-heading"

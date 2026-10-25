@@ -4,18 +4,21 @@ import type {
   AdapterDescriptor,
   SceneInfo,
   VideoGenerationPrepareParams,
+  AdapterParameters,
   ProductionCompileResult,
 } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
 import { callWorker } from './worker-client';
 import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
 import { officialVideoAudioContracts } from '@ai-video/contracts';
+import { replacePromptText } from './prompt-editor.test-utils';
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  window.localStorage.clear();
 });
 const mediaSchema = (contractId: string, revision: number) =>
   (
@@ -225,8 +228,6 @@ describe('scene production bindings', () => {
             rowVersion: 1,
             source: {
               target: { kind: 'shot', id: 'shot' },
-              instructionId: 'instruction',
-              revision: 1,
               token: 'a'.repeat(64),
             },
             parameters: { prompt: '人物转身离去' },
@@ -277,9 +278,8 @@ describe('scene production bindings', () => {
       { assetId: 'scene-image', role: 'scene' as const },
     ];
     const source = {
+      mode: 'form' as const,
       target: { kind: 'shot' as const, id: 'shot' },
-      instructionId: 'instruction',
-      revision: 1,
       token: 'b'.repeat(64),
       inputImages,
     };
@@ -313,7 +313,7 @@ describe('scene production bindings', () => {
         writable
       />,
     );
-    await screen.findByText('已填入制作内容 · 版本 1');
+    await screen.findByText('已填入制作内容');
     expect(await screen.findAllByRole('img')).toHaveLength(2);
     expect(screen.queryByDisplayValue(/project-asset:\/\//)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
@@ -336,7 +336,79 @@ describe('scene production bindings', () => {
     );
     expect(screen.queryByText('制作来源已变化，请重新适配。')).not.toBeInTheDocument();
   });
-  it('shows nonblocking schema notices and does not force stored voice or dialogue inputs into native audio production', async () => {
+
+  it('fills every saved scene binding into the form when only binding metadata is provided', async () => {
+    mock({ ...scene, characterBindings: [] });
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    const bindings = [
+      {
+        id: 'character-binding',
+        role: 'character' as const,
+        label: '顾清影',
+        assetId: 'character-image',
+        source: 'auto' as const,
+      },
+      {
+        id: 'scene-binding',
+        role: 'scene' as const,
+        label: '听雨楼',
+        assetId: 'scene-image',
+        source: 'manual' as const,
+      },
+    ];
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+      if (method === 'production.compile') {
+        expect(params.inputImages).toEqual([
+          { assetId: 'character-image', role: 'character', label: '顾清影' },
+          { assetId: 'scene-image', role: 'scene', label: '听雨楼' },
+        ]);
+        return Promise.resolve({
+          target: { kind: 'shot', id: 'shot' },
+          rowVersion: 1,
+          source: {
+            mode: 'form',
+            target: { kind: 'shot', id: 'shot' },
+            token: 'a'.repeat(64),
+            inputImages: params.inputImages,
+          },
+          parameters: {
+            prompt: '顾清影在听雨楼外回身',
+            duration: 5,
+            media: [
+              { type: 'reference_image', url: 'project-asset://character-image' },
+              { type: 'reference_image', url: 'project-asset://scene-image' },
+            ],
+          },
+          issues: [],
+        });
+      }
+      return fallback(method as never, params);
+    }) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        shotId="shot"
+        seedReferenceBindings={bindings}
+        writable
+      />,
+    );
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'production.compile',
+        expect.objectContaining({
+          inputImages: [
+            { assetId: 'character-image', role: 'character', label: '顾清影' },
+            { assetId: 'scene-image', role: 'scene', label: '听雨楼' },
+          ],
+        }),
+      ),
+    );
+    expect(await screen.findAllByRole('img')).toHaveLength(2);
+  });
+
+  it('shows schema notices and rejects incompatible bound dialogue before submission', async () => {
     const sceneValue = { ...scene, dialogueAudioId: dialogue.id };
     mock(sceneValue);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
@@ -344,9 +416,8 @@ describe('scene production bindings', () => {
       target: { kind: 'scene', id: scene.id },
       rowVersion: 1,
       source: {
+        mode: 'form',
         target: { kind: 'scene', id: scene.id },
-        instructionId: 'native',
-        revision: 1,
         token: 'a'.repeat(64),
       },
       parameters: { prompt: '模型生成雨声及对白', duration: 8 },
@@ -357,17 +428,6 @@ describe('scene production bindings', () => {
           message: '当前模型没有扩写参数，本次不传入该设置。',
         },
       ],
-      instruction: {
-        version: 1,
-        summary: '雨夜对白',
-        subjects: [],
-        visual: {},
-        beats: [],
-        audio: { mode: 'native' },
-        generation: {},
-        resources: [],
-        continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
-      },
       sceneInputs: {
         scene: sceneValue,
         media: {
@@ -392,21 +452,12 @@ describe('scene production bindings', () => {
       />,
     );
     expect(await screen.findByLabelText('模型适配说明')).toHaveTextContent('当前模型没有扩写参数');
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).not.toBeChecked());
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).toBeChecked());
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
-    await waitFor(() =>
-      expect(
-        vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
-      ).toBe(true),
-    );
-    const prepared = vi
-      .mocked(callWorker)
-      .mock.calls.find(
-        ([method]) => method === 'video.generate.prepare',
-      )![1] as VideoGenerationPrepareParams;
-    expect(JSON.stringify(prepared.parameters)).not.toContain('character-voice://');
-    expect(JSON.stringify(prepared.parameters)).not.toContain('project-audio://');
-    expect(prepared.productionSource).toEqual({ ...result.source, mode: 'form' });
+    expect(
+      await screen.findByText(/本场绑定了完整对白，请选择支持完整对白驱动的模型/),
+    ).toBeVisible();
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
   });
   it('lets a UniComp Wan user enter a public audio reference separately from the audio switch', async () => {
     const contract = officialVideoAudioContracts.find(
@@ -450,7 +501,6 @@ describe('scene production bindings', () => {
   it('keeps stale and unrelated character facts advisory and submits the final prompt unchanged', async () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
-    const update = vi.fn();
     vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
       method === 'production.compile' || method === 'production.read'
         ? Promise.resolve({
@@ -458,8 +508,6 @@ describe('scene production bindings', () => {
             rowVersion: 1,
             source: {
               target: { kind: 'shot', id: 'shot' },
-              instructionId: 'old',
-              revision: 1,
               token: 'a'.repeat(64),
             },
             parameters: {
@@ -468,18 +516,17 @@ describe('scene production bindings', () => {
             },
             issues: [
               {
-                code: 'STALE_INSTRUCTION',
+                code: 'INVALID_IR_REFERENCE',
                 message: '「入场」引用的角色林澈已有新版本，请在会话中更新制作指令。',
                 target: { kind: 'shot', id: 'shot' },
                 targetTitle: '入场',
-                changedReferences: [{ target: { kind: 'character', id: 'actor' }, title: '林澈' }],
               },
               {
-                code: 'CONTINUITY_UNVERIFIED',
+                code: 'INVALID_IR_REFERENCE',
                 message: '开始状态「沈孤鸿状态」缺少可比较的前置证据。',
               },
               {
-                code: 'LOCKED_FACT_CHANGED',
+                code: 'PARAMETER_CONFLICT',
                 message: '前置对象对状态「江晚外观」的锁定值发生变化。',
               },
             ],
@@ -501,18 +548,17 @@ describe('scene production bindings', () => {
           },
         ]}
         writable
-        onUpdateProductionInstructions={update}
       />,
     );
-    const button = await screen.findByRole('button', { name: '到会话更新制作指令' });
-    expect(screen.queryByRole('button', { name: '重新填入制作内容' })).not.toBeInTheDocument();
-    fireEvent.click(button);
-    expect(update).toHaveBeenCalledOnce();
-    expect(update.mock.calls[0]![0]).toContain('入场（shot:shot）');
-    expect(update.mock.calls[0]![0]).toContain('林澈');
-    expect(update.mock.calls[0]![0]).toContain('手工修改');
+    await screen.findByRole('textbox', { name: '提示词' });
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: '提示词' })).toHaveAttribute(
+        'data-lexical-editor',
+        'true',
+      ),
+    );
     const prompt = screen.getByRole('textbox', { name: '提示词' });
-    fireEvent.change(prompt, { target: { value: '江晚继续打铁，老瞎子走入门外雾中' } });
+    await replacePromptText(prompt, '江晚继续打铁，老瞎子走入门外雾中');
     expect(screen.getByText(/制作说明仅供参考/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
     await waitFor(() =>
@@ -542,15 +588,14 @@ describe('scene production bindings', () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
     const source = {
+      mode: 'form' as const,
       target: { kind: 'scene' as const, id: 'scene' },
-      instructionId: 'instruction',
-      revision: 1,
       token: 'a'.repeat(64),
     };
     const result = (image: string, revision: number): ProductionCompileResult => ({
       target: source.target,
       rowVersion: revision,
-      source: { ...source, revision, token: String(revision).repeat(64) },
+      source: { ...source, token: String(revision).repeat(64) },
       parameters: {
         prompt: `制作版本${revision}`,
         media: [{ type: 'reference_image', url: `project-asset://${image}` }],
@@ -582,12 +627,12 @@ describe('scene production bindings', () => {
         writable
       />,
     );
-    await screen.findByText(/已填入制作内容 · 版本 1/);
+    await screen.findByText('已填入制作内容');
     latest = result('new-image', 2);
     window.dispatchEvent(new Event('production-source-updated'));
     expect(await screen.findByText(/制作说明或参考资料已更新/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '重新填入制作内容' }));
-    await screen.findByText(/已填入制作内容 · 版本 2/);
+    await screen.findByText(/已填入制作内容/);
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
     await waitFor(() =>
       expect(
@@ -599,7 +644,7 @@ describe('scene production bindings', () => {
       .mock.calls.find(
         ([method]) => method === 'video.generate.prepare',
       )![1] as VideoGenerationPrepareParams;
-    expect(prepared.productionSource?.revision).toBe(2);
+    expect(prepared.productionSource?.token).toBe('2'.repeat(64));
     expect(prepared.parameters.media).toEqual([
       { type: 'reference_image', url: 'project-asset://new-image' },
     ]);
@@ -794,6 +839,7 @@ describe('scene production bindings', () => {
       />,
     );
     expect(await screen.findByRole('checkbox', { name: /林澈/ })).toBeChecked();
+    await waitFor(() => expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
     await waitFor(() =>
       expect(
@@ -837,5 +883,110 @@ describe('scene production bindings', () => {
     expect(
       vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
     ).toBe(false);
+  });
+
+  it.each([true, false])(
+    'saves the exact voice snapshot and restores its selected state (enabled=%s)',
+    async (enabled) => {
+      mock(scene);
+      let saved: AdapterParameters | undefined;
+      const fallback = vi.mocked(callWorker).getMockImplementation()!;
+      vi.mocked(callWorker).mockImplementation(((
+        method: string,
+        params: Record<string, unknown>,
+      ) => {
+        if (method === 'generation.draft.get')
+          return Promise.resolve(saved ? { parameters: saved } : null);
+        if (method === 'generation.draft.save') {
+          saved = params.parameters as AdapterParameters;
+          return Promise.resolve({ updatedAt: '2026-10-23T00:00:00Z' });
+        }
+        return fallback(method as never, params);
+      }) as typeof callWorker);
+      const view = render(
+        <ProductionPanel
+          expanded
+          capability="REFERENCE_TO_VIDEO"
+          projectId="project"
+          sceneId="scene"
+          shotId="shot"
+          seedPrompt="图片 1中的林澈回身"
+          seedImages={['https://example.com/actor.png']}
+          writable
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled(),
+      );
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).toBeChecked());
+      if (!enabled) fireEvent.click(screen.getByRole('checkbox', { name: /林澈/ }));
+      fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+      await screen.findByText(/草稿已保存/);
+      expect(saved?.prompt).toContain('图 1中的林澈回身');
+      expect(saved?.media).toEqual([
+        { type: 'reference_image', url: 'https://example.com/actor.png' },
+        ...(enabled ? [{ type: 'reference_audio', url: 'character-voice://actor/voice-v1' }] : []),
+      ]);
+      view.unmount();
+      render(
+        <ProductionPanel
+          expanded
+          capability="REFERENCE_TO_VIDEO"
+          projectId="project"
+          sceneId="scene"
+          shotId="shot"
+          writable
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled(),
+      );
+      expect(await screen.findByRole('checkbox', { name: /林澈/ })).toHaveProperty(
+        'checked',
+        enabled,
+      );
+      fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith(
+          'video.generate.prepare',
+          expect.objectContaining({ parameters: saved }),
+        ),
+      );
+    },
+  );
+  it('restores structured input references from parameter memory when there is no project draft', async () => {
+    mock({ ...scene, characterBindings: [] });
+    const parameters = {
+      prompt: '图 1中的女子回身',
+      duration: 5,
+      media: [{ type: 'reference_image', url: 'https://example.com/actor.png' }],
+    };
+    window.localStorage.setItem(
+      'ai-video.production-adapter-parameters',
+      JSON.stringify({ [adapter.key]: parameters }),
+    );
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        shotId="shot"
+        sceneId="scene"
+        writable
+      />,
+    );
+    await waitFor(() => expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled());
+    await waitFor(() =>
+      expect(
+        screen.getByRole('textbox', { name: '提示词' }).querySelector('.prompt-reference-chip'),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'video.generate.prepare',
+        expect.objectContaining({ parameters }),
+      ),
+    );
   });
 });

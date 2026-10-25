@@ -13,9 +13,47 @@ import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-reg
 import { ContentService } from './content-service.js';
 import { NovelService } from './novel-service.js';
 import { ProjectService } from './project-service.js';
+import { DocumentWorkflowService } from './document-workflow-service.js';
 
 const directories: string[] = [];
 const projects: ProjectService[] = [];
+
+it('declares questions as a core system tool and returns a persisted form receipt', async () => {
+  const { service, content, project, current, identity } = await setup();
+  const user = content.saveMessage({
+    conversationId: current.id,
+    role: 'user',
+    content: '设计短剧',
+  });
+  const assistant = content.saveMessage({
+    conversationId: current.id,
+    replyToMessageId: user.id,
+    role: 'assistant',
+    content: '请确认方向',
+  });
+  const workflow = new DocumentWorkflowService(project);
+  const { task } = workflow.createDocumentDraftFromMessage({ messageId: assistant.id });
+  expect(service.availableOperations()).toContain('conversation.ask');
+  const receipt = service.execute(
+    'conversation.ask',
+    {
+      key: 'direction',
+      title: '确认方向',
+      questions: [{ id: 'notes', prompt: '你的想法', type: 'text' }],
+    },
+    { ...identity, taskId: task.id },
+  );
+  expect(receipt).toMatchObject({
+    status: 'pending',
+    questionCount: 1,
+    presentation: 'conversation-form',
+    awaitingUserAnswer: true,
+  });
+  expect(receipt).not.toHaveProperty('answers');
+  expect(
+    workflow.getTask({ taskId: task.id }).events.find((event) => event.userInput)?.userInput?.id,
+  ).toBe(receipt.formId);
+});
 
 afterEach(async () => {
   for (const project of projects.splice(0)) project.close();
@@ -310,6 +348,11 @@ describe('AgentSystemToolService', () => {
     expect(
       service.execute('scene.read', { sceneId: scene.id, view: 'text' }, identity),
     ).toMatchObject({ text: scene.videoPrompt });
+    const mediaRead = service.execute('scene.read', { sceneId: scene.id, view: 'media' }, identity);
+    expect(mediaRead.status).toBe('read');
+    expect(JSON.stringify(mediaRead)).toContain('saved-production-bindings');
+    expect(JSON.stringify(mediaRead)).toContain(actor.id);
+    expect(JSON.stringify(mediaRead)).toContain('"selectionSource":"none"');
     expect(JSON.stringify(result)).not.toContain('"token"');
     expect(() => service.execute('scene.read', { sceneId: 'missing' }, identity)).toThrow(
       'current project',
@@ -368,6 +411,59 @@ describe('AgentSystemToolService', () => {
     expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('active');
   });
 
+  it('exposes chapter metadata editing without body submission and rejects unsupported mutations', async () => {
+    const { service, identity, novels } = await setup();
+    const chapter = novels.saveChapter({
+      title: '第二章 深夜剑冢',
+      displayLabel: '第二章 深夜剑冢',
+    });
+    const params = {
+      chapterId: chapter.id,
+      expectedChapterRowVersion: chapter.rowVersion,
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+      displayLabel: '第 2 章',
+    };
+    expect(service.availableOperations()).toContain('novel.chapter.update_metadata');
+    expect(
+      unifiedAgentToolRegistry.require('novel.chapter.update_metadata').confirmationPolicy,
+    ).toBe('explicit-user-intent');
+    for (const unsupported of [
+      { contentMarkdown: '覆盖正文' },
+      { position: 8 },
+      { volumeId: 'other-volume' },
+    ]) {
+      expect(() =>
+        service.execute('novel.chapter.update_metadata', { ...params, ...unsupported }, identity),
+      ).toThrow('unsupported field');
+    }
+    expect(() =>
+      service.execute(
+        'novel.chapter.update_metadata',
+        { ...params, displayLabel: undefined },
+        identity,
+      ),
+    ).toThrow('Provide title or displayLabel');
+    expect(() =>
+      service.execute('novel.chapter.update_metadata', { ...params, displayLabel: ' ' }, identity),
+    ).toThrow();
+    expect(() =>
+      service.execute(
+        'novel.chapter.update_metadata',
+        { ...params, expectedDocumentRowVersion: undefined },
+        identity,
+      ),
+    ).toThrow();
+    expect(service.execute('novel.chapter.update_metadata', params, identity)).toMatchObject({
+      status: 'chapter_metadata_saved',
+      chapterId: chapter.id,
+      chapter: { title: chapter.title, displayLabel: '第 2 章' },
+      locator: { workspace: 'novel', chapterId: chapter.id, documentId: chapter.documentId },
+    });
+    expect(() => service.execute('novel.chapter.update_metadata', params, identity)).toThrow(
+      'updated elsewhere',
+    );
+  });
+
   it('rejects stale or foreign novel chapter lifecycle requests', async () => {
     const first = await setup();
     first.novels.getProfile({ createIfMissing: true });
@@ -414,6 +510,7 @@ describe('AgentSystemToolService', () => {
 
   it('returns only the normalized media task summary', async () => {
     const { service, identity } = await setup();
+    expect(service.availableOperations()).toContain('media.task.get');
     const result = service.execute('media.task.get', { taskId: 'media-task' }, identity);
 
     expect(result).toMatchObject({
@@ -422,6 +519,16 @@ describe('AgentSystemToolService', () => {
     });
     expect(JSON.stringify(result)).not.toMatch(
       /rootPath|relativePath|providerBody|providerResponse/iu,
+    );
+  });
+
+  it('omits media task inspection when its service is not configured', async () => {
+    const { project, content, assets, settings, identity } = await setup();
+    const service = new AgentSystemToolService(project, content, assets, settings);
+
+    expect(service.availableOperations()).not.toContain('media.task.get');
+    expect(() => service.execute('media.task.get', { taskId: 'media-task' }, identity)).toThrow(
+      'Media task inspection is not configured for this runtime.',
     );
   });
 

@@ -33,6 +33,54 @@ async function setup() {
 }
 
 describe('LibrarySearchService', () => {
+  it('returns open IR only on an explicit source read and pins it to the found document version', async () => {
+    const { content, library } = await setup();
+    const contentIR = {
+      schemaVersion: 1 as const,
+      kind: 'prop' as const,
+      data: { material: '寒铁', mark: '逆鳞', dimensions: { length: 80, unit: 'cm' } },
+    };
+    const document = content.saveDocument({
+      kind: 'prop',
+      title: '逆鳞剑匣',
+      contentMarkdown: '# 逆鳞剑匣\n寒铁打造，表面有旧刻痕。',
+      contentIR,
+    });
+    const found = library.search({ taskId: 'ir-task', attemptId: 'ir-attempt', query: '逆鳞' });
+    const source = found.sources.find((item) => item.sourceId === document.id)!;
+    expect(source.versionId).toBe(document.currentVersion?.id);
+
+    const proseOnly = library.read({
+      taskId: 'ir-task',
+      attemptId: 'ir-attempt',
+      sourceHandle: source.sourceHandle,
+      readMode: 'source',
+    });
+    expect(proseOnly.content).toContain('寒铁打造');
+    expect(proseOnly.contentIR).toBeUndefined();
+
+    const withIR = library.read({
+      taskId: 'ir-task',
+      attemptId: 'ir-attempt',
+      sourceHandle: source.sourceHandle,
+      readMode: 'source',
+      includeContentIR: true,
+    });
+    expect(withIR).toMatchObject({
+      sourceId: document.id,
+      versionId: document.currentVersion?.id,
+      contentIR,
+    });
+    expect(() =>
+      library.read({
+        taskId: 'ir-task',
+        attemptId: 'ir-attempt',
+        sourceHandle: source.sourceHandle,
+        includeContentIR: true,
+      }),
+    ).toThrow(/readMode="source"/);
+  });
+
   it('finds unpublished markdown drafts and labels them as draft', async () => {
     const { content, library } = await setup();
     content.saveDocument({

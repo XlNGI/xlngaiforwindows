@@ -9,7 +9,7 @@ import type {
   ProductionTarget,
   ProductionCompileParams,
 } from '@ai-video/contracts';
-import { useProductionInstructions } from './use-production-instructions';
+import { useProductionAuthoring } from './use-production-authoring';
 import { callWorker } from './worker-client';
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 afterEach(() => {
@@ -30,8 +30,7 @@ const adapter = {
 const target: ProductionTarget = { kind: 'scene', id: 'scene-a' };
 const source: ProductionSource = {
   target,
-  instructionId: 'instruction',
-  revision: 1,
+  mode: 'form',
   token: 'a'.repeat(64),
 };
 const compiled = (patch: Partial<ProductionCompileResult> = {}): ProductionCompileResult => ({
@@ -46,7 +45,7 @@ function useForm(
   props: { target?: ProductionTarget; adapter?: AdapterDescriptor; ready?: boolean } = {},
 ) {
   const [parameters, setParameters] = useState<AdapterParameters>({ resolution: '720P' });
-  const state = useProductionInstructions({
+  const state = useProductionAuthoring({
     projectId: 'project',
     target: props.target ?? target,
     adapter: props.adapter ?? adapter,
@@ -102,7 +101,7 @@ describe('production form local compilation', () => {
     );
     const { result } = renderHook(() => {
       const [parameters, setParameters] = useState<AdapterParameters>({});
-      const state = useProductionInstructions({
+      const state = useProductionAuthoring({
         projectId: 'project',
         target: { kind: 'shot', id: 'shot' },
         adapter: selectedAdapter,
@@ -141,7 +140,7 @@ describe('production form local compilation', () => {
       const { result } = renderHook(() => {
         const [parameters, setParameters] = useState<AdapterParameters>({});
         return {
-          ...useProductionInstructions({
+          ...useProductionAuthoring({
             projectId: 'project',
             target,
             adapter,
@@ -368,7 +367,7 @@ describe('production form local compilation', () => {
     await waitFor(() => expect(result.current.result?.source).toEqual(source));
     act(() => result.current.edit('prompt', '保留我的表单修改'));
     const issue = {
-      code: 'STALE_INSTRUCTION',
+      code: 'INVALID_IR_REFERENCE',
       message: '「入场」引用的资料林澈已有新版本',
       target: { kind: 'shot' as const, id: 'shot' },
       targetTitle: '入场',
@@ -387,19 +386,19 @@ describe('production form local compilation', () => {
     expect(result.current.parameters.prompt).toBe('保留我的表单修改');
     await expect(result.current.beforeSubmit()).resolves.toMatchObject({ mode: 'form' });
     vi.mocked(callWorker).mockResolvedValue(
-      compiled({ source: { ...source, revision: 2, token: 'c'.repeat(64) } }),
+      compiled({ source: { ...source, token: 'c'.repeat(64) } }),
     );
     act(() => result.current.refreshKeepingEdits());
-    await waitFor(() => expect(result.current.result?.source?.revision).toBe(2));
+    await waitFor(() => expect(result.current.result?.source?.token).toBe('c'.repeat(64)));
     expect(result.current.parameters.prompt).toBe('保留我的表单修改');
-    await expect(result.current.beforeSubmit()).resolves.toMatchObject({ revision: 2 });
+    await expect(result.current.beforeSubmit()).resolves.toMatchObject({ token: 'c'.repeat(64) });
   });
   it('keeps continuity warnings advisory and supports targets without structured instructions', async () => {
     vi.mocked(callWorker).mockResolvedValue(
       compiled({
         issues: [
-          { code: 'CONTINUITY_UNVERIFIED', message: '沈孤鸿状态缺少前置证据' },
-          { code: 'LOCKED_FACT_CHANGED', message: '江晚外观锁定值发生变化' },
+          { code: 'INVALID_IR_REFERENCE', message: '沈孤鸿状态缺少前置证据' },
+          { code: 'PARAMETER_CONFLICT', message: '江晚外观锁定值发生变化' },
         ],
       }),
     );
@@ -415,7 +414,7 @@ describe('production form local compilation', () => {
     act(() => result.current.refill());
     await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.result?.source).toBeUndefined());
-    await expect(result.current.beforeSubmit()).resolves.toEqual({ target, mode: 'form' });
+    await expect(result.current.beforeSubmit()).resolves.toBeUndefined();
   });
   it('allows a completed manual form when instruction compilation is unavailable', async () => {
     vi.mocked(callWorker).mockRejectedValue(new Error('制作说明暂时不可用'));
@@ -423,7 +422,7 @@ describe('production form local compilation', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.error).toContain('制作说明暂时不可用');
     act(() => result.current.edit('prompt', '手工填写的镜头'));
-    await expect(result.current.beforeSubmit()).resolves.toEqual({ target, mode: 'form' });
+    await expect(result.current.beforeSubmit()).resolves.toBeUndefined();
     expect(result.current.parameters.prompt).toBe('手工填写的镜头');
   });
 });

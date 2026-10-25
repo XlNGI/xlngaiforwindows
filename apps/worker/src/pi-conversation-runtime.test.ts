@@ -343,6 +343,8 @@ describe('PiConversationRuntime', () => {
       expect.objectContaining({ content: 'The project currently has one active draft.' }),
     );
     expect(systemPrompt).toContain('unified project Agent');
+    expect(systemPrompt).toContain('用户使用中文时使用简体中文');
+    expect(systemPrompt).toContain('除非用户明确要求翻译或输出英文');
   });
 
   it('lets the model pick image and video tools in document mode without a forced plan', async () => {
@@ -841,11 +843,11 @@ describe('PiConversationRuntime', () => {
       parameters: { prompt: mediaSelection.prompt },
     };
     vi.mocked(providerTools.executeTools).mockResolvedValue({ mediaSelection });
-    vi.mocked(providerTools.selectMedia).mockReturnValue({
+    vi.mocked(providerTools.selectMedia).mockResolvedValue({
       continuation: {
         protocol: 'openai-responses',
         previousResponseId: 'response-video',
-        outputs: [{ callId: 'video-call', output: '{"status":"prepared"}' }],
+        outputs: [{ callId: 'video-call', output: '{"status":"polling","taskId":"media-job"}' }],
       },
       tools: [],
     });

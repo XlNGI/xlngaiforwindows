@@ -125,6 +125,7 @@ export interface DocumentVersionRecord {
   documentId: string;
   version: number;
   contentMarkdown: string;
+  contentIRJson?: string;
   state?:
     | 'draft'
     | 'in_review'
@@ -480,6 +481,7 @@ export interface SceneRecord {
   title: string;
   sceneDocumentId?: string;
   videoPrompt?: string;
+  authoringIRJson?: string;
   materialBindingsJson?: string;
   dialogueAudioId?: string;
   position: number;
@@ -497,6 +499,7 @@ export interface ShotRecord {
   documentId?: string;
   /** Short-drama episode shot prompt (image/video generation text). */
   prompt?: string;
+  authoringIRJson?: string;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;

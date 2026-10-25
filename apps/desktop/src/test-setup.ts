@@ -1,5 +1,19 @@
 import '@testing-library/jest-dom/vitest';
 
+if (typeof window.ClipboardEvent === 'undefined') {
+  class TestClipboardEvent extends Event {
+    readonly clipboardData: DataTransfer | null;
+    constructor(type: string, init: ClipboardEventInit = {}) {
+      super(type, init);
+      this.clipboardData = init.clipboardData ?? null;
+    }
+  }
+  Object.defineProperty(window, 'ClipboardEvent', {
+    configurable: true,
+    value: TestClipboardEvent,
+  });
+}
+
 class TestResizeObserver implements ResizeObserver {
   disconnect() {}
 

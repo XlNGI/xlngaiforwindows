@@ -277,6 +277,8 @@ export function streamPreparedLlmGeneration(
           await fail('Provider tool calls did not include a continuation identity.', false);
           return 'terminal';
         }
+        clearFlushTimer();
+        await enqueueObserve();
         const execution = await callWorker('agent.generation.executeTools', {
           ...identity,
           providerResponseId: event.providerResponseId,

@@ -7,6 +7,9 @@ import type {
   NativeDubbingCancelParams,
 } from './dubbing.js';
 export * from './dubbing.js';
+export * from './production-skills.js';
+export * from './media-review.js';
+import type { MediaReviewWorkerMethodMap } from './media-review.js';
 export * from './voice-reference.js';
 export * from './official-video-endpoint.js';
 import type { VoiceReferenceWorkerMethodMap } from './voice-reference.js';
@@ -19,8 +22,9 @@ import type { FileTaskWorkerMethodMap } from './file-tasks.js';
 export * from './file-tasks.js';
 export * from './task-schedule.js';
 export * from './production.js';
-export * from './production-authoring.js';
-export * from './production-continuity.js';
+export * from './project-ir.js';
+export * from './character-sheet.js';
+export * from './video-prompt-guidance.js';
 export * from './production-schema.js';
 export * from './production-inputs.js';
 export * from './shot-continuity.js';
@@ -31,7 +35,6 @@ import type {
   ProductionCompileResult,
   ProductionTarget,
   ProductionSource,
-  ProductionInstruction,
   ProductionDefaultsInfo,
   ProductionDefaults,
 } from './production.js';
@@ -932,7 +935,8 @@ export interface DiagnosticRevealParams {
   path: string;
 }
 
-export type DocumentKind = 'outline' | 'plan' | 'character' | 'scene' | 'storyboard' | 'note';
+export type DocumentKind =
+  'outline' | 'plan' | 'character' | 'scene' | 'prop' | 'storyboard' | 'note';
 export type DocumentLifecycleStatus = 'active' | 'archived';
 export type DocumentVersionState =
   | 'draft'
@@ -967,6 +971,7 @@ export interface DocumentVersionInfo {
   documentId: string;
   version: number;
   contentMarkdown: string;
+  contentIR?: import('./project-ir.js').ProjectContentIR;
   state: DocumentVersionState;
   baseVersionId?: string;
   titleSnapshot?: string;
@@ -1097,6 +1102,14 @@ export interface NovelChapterArchiveParams {
   reason?: NovelChapterArchiveReason;
 }
 
+export interface NovelChapterMetadataUpdateParams {
+  chapterId: string;
+  expectedChapterRowVersion: number;
+  expectedDocumentRowVersion: number;
+  title?: string;
+  displayLabel?: string;
+}
+
 export interface NovelChapterRestoreParams {
   chapterId: string;
   expectedRowVersion: number;
@@ -1185,6 +1198,7 @@ export interface DocumentSaveParams {
   kind?: DocumentKind;
   title: string;
   contentMarkdown: string;
+  contentIR?: import('./project-ir.js').ProjectContentIR;
   scopeType?: ConversationScopeType;
   scopeId?: string;
   expectedDocumentRowVersion?: number;
@@ -1537,6 +1551,13 @@ export interface AgentTaskInfo {
   estimatedCost?: string;
 }
 
+export * from './agent-user-input.js';
+import type {
+  AgentInputForm,
+  AgentInputSubmitParams,
+  AgentInputSubmitResult,
+} from './agent-user-input.js';
+
 export interface AgentTaskEventInfo {
   id: string;
   taskId: string;
@@ -1545,6 +1566,9 @@ export interface AgentTaskEventInfo {
   level: 'info' | 'warning' | 'error';
   summary: string;
   createdAt: string;
+  /** Position in the saved assistant message, captured before this stage's first text. */
+  messageBoundary?: { messageId: string; startOffset: number };
+  userInput?: AgentInputForm;
 }
 
 export interface AgentTaskDocumentArtifact {
@@ -1607,6 +1631,7 @@ export interface AgentTaskDetail {
   chapterBatch?: { batchId: string; role: 'parent' | 'child' };
   task: AgentTaskInfo;
   productionUpdated?: boolean;
+  novelMetadataUpdated?: boolean;
   target?: AgentTaskTargetInfo;
   pendingConfirmation?: AgentTaskPendingConfirmationInfo;
   pendingSchemaConfirmation?: AgentTaskPendingSchemaConfirmationInfo;
@@ -1762,7 +1787,10 @@ export interface SceneInfo {
   title: string;
   /** Reusable production scene document (kind=scene). */
   sceneDocumentId?: string;
+  /** All reusable production scene documents referenced by the scene IR. */
+  sceneDocumentIds?: string[];
   videoPrompt?: string;
+  authoringIR?: import('./project-ir.js').ProductionSceneAuthoringIR;
   materialBindings?: SceneMaterialBindingInfo[];
   /** Explicit cast, independent of whether reference images exist. */
   characterBindings?: SceneCharacterBindingInfo[];
@@ -1818,7 +1846,10 @@ export interface SceneSaveParams {
   title: string;
   /** Omitted preserves the binding; null clears it. */
   sceneDocumentId?: string | null;
+  /** Complete reusable location list. This is the authoritative write field. */
+  sceneDocumentIds?: string[] | null;
   videoPrompt?: string;
+  authoringIR?: import('./project-ir.js').ProductionSceneAuthoringIR | null;
   materialBindings?: SceneMaterialBindingInfo[];
   characterBindings?: SceneCharacterBindingInfo[];
   /** Omitted preserves the recording; null clears it. */
@@ -1835,9 +1866,35 @@ export interface ShotInfo {
   documentId?: string;
   /** Short-drama episode shot prompt (image/video generation text). */
   prompt?: string;
+  authoringIR?: import('./project-ir.js').ProductionShotAuthoringIR;
+  /** Durable manual image selections used by direct generation and review forms. */
+  referenceBindings?: ShotReferenceBindingInfo;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ShotReferenceBindingInfo {
+  /** Durable document-to-asset selections. These are authoritative when present. */
+  characterBindings?: Array<{
+    characterDocumentId: string;
+    assetId: string;
+  }>;
+  sceneBindings?: Array<{
+    sourceDocumentId: string;
+    assetId: string;
+  }>;
+  characterAssetId?: string;
+  characterAssetIds?: string[];
+  sceneAssetId?: string;
+  sceneAssetIds?: string[];
+  firstFrameAssetId?: string;
+  ignoreSceneBinding?: boolean;
+}
+
+export interface ShotReferenceBindingResult {
+  shotId: string;
+  referenceBindings?: ShotReferenceBindingInfo;
 }
 
 export interface ShotListParams {
@@ -1851,7 +1908,14 @@ export interface ShotSaveParams {
   status?: string;
   documentId?: string;
   prompt?: string;
+  authoringIR?: import('./project-ir.js').ProductionShotAuthoringIR | null;
+  referenceBindings?: ShotReferenceBindingInfo | null;
   expectedRowVersion?: number;
+}
+
+export interface ShotReferenceBindingSaveParams {
+  shotId: string;
+  referenceBindings?: ShotReferenceBindingInfo | null;
 }
 
 export interface ShotStoryboardSaveParams {
@@ -1886,7 +1950,7 @@ export interface AgentChangeSetItemDraft {
   /** LLM-resolved scene prompt and complete cast, applied together after review. */
   videoPrompt?: string;
   characterDocumentIds?: string[];
-  instruction?: ProductionInstruction;
+  authoringIR?: import('./project-ir.js').ProductionAuthoringIR;
   title: string;
   shotStatus?: string;
   /** Shot prompt for `shot` items; applied to `shots.prompt` when approved. */
@@ -2168,6 +2232,8 @@ export interface LibraryReadResult {
   kind?: string;
   title: string;
   content: string;
+  /** Returned only when requested by the Agent for a full source-version read. */
+  contentIR?: import('./project-ir.js').ProjectContentIR;
   characterCount: number;
   truncated: boolean;
   citationLabel: string;
@@ -2253,6 +2319,8 @@ export interface ProjectStructureResource {
   sourceType?: LibrarySourceType;
   lifecycleStatus?: DocumentLifecycleStatus | 'active' | 'archived' | 'trash';
   rowVersion?: number;
+  /** Complete reusable location list for scene/shot resources. */
+  sceneDocumentIds?: string[];
   revision?: string;
   /** Metadata describing how an empty workspace accepts content. */
   writeTool?: string;
@@ -2266,6 +2334,7 @@ export interface ProjectStructureResource {
     structurePath?: string[];
     sceneId?: string;
     sceneDocumentId?: string;
+    sceneDocumentIds?: string[];
     shotId?: string;
     changeSetId?: string;
   };
@@ -3084,6 +3153,8 @@ export interface AgentGenerationExecuteToolsResult {
   confirmation?: AgentToolConfirmationRequest;
   mediaSelection?: MediaModelSelectionRequest;
   mediaSubmission?: MediaSubmissionConfirmationRequest;
+  /** The current Agent turn must end while a durable user form is pending. */
+  terminate?: boolean;
   /** Tools authorized for the next Provider step, including read-only research. */
   tools?: LlmToolDefinition[];
 }
@@ -3143,6 +3214,7 @@ export interface MediaModelSelectionRequest {
 }
 
 export interface MediaModelSelectionDecision {
+  /** Sent by the reviewed generation form: authorizes submission of these exact parameters. */
   providerProfileId: string;
   modelId: string;
   adapterKey: string;
@@ -3574,7 +3646,7 @@ export interface GenerationDraftSaveParams extends GenerationDraftGetParams {
 
 export type ImageGenerationJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type ImageAssetKind =
-  'character' | 'scene' | 'first-frame' | 'last-frame' | 'generated-image';
+  'character' | 'scene' | 'prop' | 'first-frame' | 'last-frame' | 'generated-image';
 
 export interface AssetInfo {
   id: string;
@@ -3626,6 +3698,7 @@ export interface ImageGenerationPrepareParams {
   productionSource?: ProductionSource;
   shotId?: string;
   sourceDocumentId?: string;
+  assetKind?: ImageAssetKind;
   adapterKey: string;
   parameters: AdapterParameters;
   providerProfileId?: string;
@@ -3702,6 +3775,9 @@ export interface VideoGenerationMetadataInfo {
   providerState?: string;
   pollAttempts: number;
   lastPolledAt?: string;
+  lastPollError?: string;
+  lastPollErrorAt?: string;
+  pollFailureCount?: number;
   pollDeadlineAt?: string;
   failureKind?: VideoGenerationFailureKind;
   cost?: VideoGenerationCostInfo;
@@ -3934,6 +4010,7 @@ export interface AssetSourceInfo {
 export interface WorkerMethodMap
   extends
     DubbingWorkerMethodMap,
+    MediaReviewWorkerMethodMap,
     VoiceReferenceWorkerMethodMap,
     TaskScheduleWorkerMethodMap,
     ProjectRuntimeWorkerMethodMap,
@@ -4135,6 +4212,8 @@ export interface WorkerMethodMap
   };
   'agent.task.list': { params: AgentTaskListParams; result: AgentTaskInfo[] };
   'agent.task.get': { params: AgentTaskGetParams; result: AgentTaskDetail };
+  'agent.input.get': { params: { taskId: string; formId: string }; result: AgentInputForm };
+  'agent.input.submit': { params: AgentInputSubmitParams; result: AgentInputSubmitResult };
   'agent.task.events': { params: AgentTaskEventsParams; result: AgentTaskEventsResult };
   'agent.generation.prepare': {
     params: AgentGenerationPrepareParams;
@@ -4246,6 +4325,14 @@ export interface WorkerMethodMap
   'scene.save': { params: SceneSaveParams; result: SceneInfo };
   'shot.list': { params: ShotListParams; result: ShotInfo[] };
   'shot.save': { params: ShotSaveParams; result: ShotInfo };
+  'shot.references.get': {
+    params: { shotId: string };
+    result: ShotReferenceBindingResult;
+  };
+  'shot.references.save': {
+    params: ShotReferenceBindingSaveParams;
+    result: ShotReferenceBindingResult;
+  };
   'shot.storyboard.save': { params: ShotStoryboardSaveParams; result: DocumentDetail };
   'constraint.list': { params: Record<string, never>; result: ConstraintInfo[] };
   'agent.changeSet.create': {

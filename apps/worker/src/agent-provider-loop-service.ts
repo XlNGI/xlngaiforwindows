@@ -12,17 +12,21 @@ import type {
   AgentGenerationSelectMediaParams,
   AgentDocumentIntent,
   AgentDocumentOperation,
+  AgentTaskPhase,
+  AgentTaskStatus,
   AgentResearchMode,
   ConversationTargetPlatform,
   DocumentDetail,
   DocumentBindingRole,
   DocumentKind,
+  ProjectContentIR,
   AgentProviderStepCompleteParams,
   LlmGenerationIdentity,
   LlmToolCall,
   LlmToolContinuation,
   LlmToolDefinition,
   LlmToolOutput,
+  NormalizedLlmUsage,
   AdapterDescriptor,
   UnifiedAgentAdapterSchemaProposeResult,
   UnifiedAgentAdapterSchemaAuditInfo,
@@ -67,12 +71,14 @@ import {
   hashAgentToolArguments,
   unifiedAgentToolRegistry,
 } from './agent-tool-registry.js';
+import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import type {
   MediaPrepareToolOperation,
   MediaSubmissionToolOperation,
   SystemAgentToolOperation,
 } from './agent-tool-definitions.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
+import { addDecimalStrings } from './usage-cost.js';
 import {
   documentWorkspace,
   RESOURCE_ARGUMENT_KEYS,
@@ -96,6 +102,7 @@ const POLICY_VERSION = 'agent-policy.v2';
 const AUTHORIZATION_TTL_MS = 30 * 60_000;
 const AGENT_TASK_TOOL_CALL_DEFAULT = 16;
 const AGENT_TASK_TOOL_CALL_HARD_LIMIT = 32;
+const AGENT_TASK_TURN_DEFAULT = 24;
 const DOCUMENT_TOOL_CALL_RESERVE = 1;
 const RESEARCH_SEARCH_CALL_LIMIT = 3;
 const RESEARCH_FETCH_CALL_LIMIT = 8;
@@ -201,6 +208,17 @@ interface AgentTaskRow {
   request_snapshot_json: string;
   tool_call_limit: number;
   tool_call_count: number;
+  quota_state:
+    | 'active'
+    | 'paused_budget'
+    | 'provider_rate_limited'
+    | 'provider_quota_exhausted'
+    | 'context_exhausted';
+  quota_error_code: string | null;
+  turn_limit: number;
+  turn_count: number;
+  status: AgentTaskStatus;
+  phase: AgentTaskPhase;
 }
 
 interface MediaSelectionRow {
@@ -539,9 +557,9 @@ export class AgentProviderLoopService {
             `INSERT INTO agent_tasks
              (id, project_id, project_session_id, conversation_id, user_message_id, task_type,
               scope_type, scope_id, title, request_snapshot_json, request_hash, context_snapshot_id,
-              status, created_at, started_at, updated_at, phase, row_version, tool_call_limit)
+              status, created_at, started_at, updated_at, phase, row_version, tool_call_limit, turn_limit)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     'running', ?, ?, ?, 'model_running', 0, ?)`,
+                     'running', ?, ?, ?, 'model_running', 0, ?, ?)`,
           )
           .run(
             taskId,
@@ -588,6 +606,7 @@ export class AgentProviderLoopService {
             now,
             now,
             AGENT_TASK_TOOL_CALL_DEFAULT,
+            AGENT_TASK_TURN_DEFAULT,
           );
         database
           .prepare(
@@ -713,9 +732,11 @@ export class AgentProviderLoopService {
     );
   }
 
-  selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult {
+  async selectMedia(
+    params: AgentGenerationSelectMediaParams,
+  ): Promise<AgentGenerationExecuteToolsResult> {
     try {
-      return this.resolveMediaSelection(params);
+      return await this.resolveMediaSelection(params);
     } catch (error) {
       if (error instanceof AgentToolPolicyError) this.auditPolicyRejection(params, error);
       throw error;
@@ -1301,9 +1322,9 @@ export class AgentProviderLoopService {
     );
   }
 
-  private resolveMediaSelection(
+  private async resolveMediaSelection(
     params: AgentGenerationSelectMediaParams,
-  ): AgentGenerationExecuteToolsResult {
+  ): Promise<AgentGenerationExecuteToolsResult> {
     const media = this.media;
     if (!media) {
       throw new AgentToolPolicyError(
@@ -1391,50 +1412,126 @@ export class AgentProviderLoopService {
     }
 
     const context = JSON.parse(pending.contextJson) as MediaSelectionContext;
-    let outputValue: Record<string, unknown>;
-    let selectionStatus: 'consumed' | 'rejected';
-    let toolStatus: 'succeeded' | 'failed';
-    if (!params.selection) {
-      outputValue = {
-        version: 1,
-        status: 'cancelled',
-        kind: pending.kind,
-        summary: 'The user cancelled media model selection. No Provider request was submitted.',
-      };
-      selectionStatus = 'rejected';
-      toolStatus = 'succeeded';
-    } else {
+    // Claim the UI decision and freeze its job in one transaction before yielding.
+    // The one-use selection token cannot create a second job during paid submission.
+    const staged = this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        this.requireActiveGeneration(database, project.id, params);
+        const now = new Date().toISOString();
+        const claimed = database
+          .prepare(
+            `UPDATE agent_media_selections SET resolved_at = ?
+             WHERE id = ? AND status = 'pending' AND token_hash = ?`,
+          )
+          .run(now, pending.id, hash(params.selectionToken));
+        if (claimed.changes !== 1) {
+          throw new AgentToolPolicyError(
+            'AGENT_TOOL_AUTHORIZATION_REPLAYED',
+            'The media selection was already resolved.',
+          );
+        }
+        let output: string;
+        let selectionStatus: 'consumed' | 'rejected' = 'rejected';
+        let toolStatus: 'succeeded' | 'failed' = 'succeeded';
+        let submission: MediaSubmissionResult | undefined;
+        if (!params.selection) {
+          output = unifiedAgentToolRegistry.serializeResult({
+            version: 1,
+            status: 'cancelled',
+            kind: pending.kind,
+            summary: 'The user cancelled media model selection. No Provider request was submitted.',
+          });
+        } else {
+          const selection = params.selection;
+          try {
+            const executor = this.mediaSubmission;
+            if (!executor) throw new Error('Media submission is not configured for this runtime.');
+            submission = database.transaction(() => {
+              const draft = media.prepareSelected(context, selection, params);
+              return executor.requestSubmission({ jobId: draft.draftId });
+            })();
+            output = mediaSubmissionOutput(submission);
+            selectionStatus = 'consumed';
+          } catch (error) {
+            const policyError =
+              error instanceof AgentToolPolicyError
+                ? error
+                : new AgentToolPolicyError(
+                    'AGENT_TOOL_ARGUMENTS_INVALID',
+                    error instanceof Error ? error.message : 'Media submission preparation failed.',
+                    true,
+                  );
+            output = unifiedAgentToolRegistry.serializeResult(policyError.result());
+            toolStatus = 'failed';
+          }
+        }
+        database
+          .prepare(
+            'UPDATE agent_media_selections SET status = ?, selection_summary_json = ? WHERE id = ?',
+          )
+          .run(selectionStatus, output, pending.id);
+        database
+          .prepare(
+            `UPDATE agent_tasks SET phase = 'tool_validating', updated_at = ?, row_version = row_version + 1
+             WHERE id = ? AND status = 'running'`,
+          )
+          .run(now, pending.taskId);
+        return { output, selectionStatus, toolStatus, submission };
+      })(),
+    );
+    let { output, toolStatus } = staged;
+    const { selectionStatus, submission } = staged;
+    if (submission?.confirmation) {
       try {
-        const draft = media.prepareSelected(context, params.selection, params);
-        outputValue = { version: 1, status: 'prepared', draft };
-        selectionStatus = 'consumed';
-        toolStatus = 'succeeded';
+        // The UI has already reviewed and approved these exact frozen parameters.
+        // Reuse the sole paid boundary and its token, source checks and idempotency.
+        const submitted = await this.mediaSubmission!.confirmSubmission({
+          jobId: submission.job.id,
+          confirmationToken: submission.confirmation.confirmationToken,
+          approved: true,
+        });
+        output = mediaSubmissionOutput(submitted);
       } catch (error) {
-        const policyError =
-          error instanceof AgentToolPolicyError
-            ? error
-            : new AgentToolPolicyError(
-                'AGENT_TOOL_ARGUMENTS_INVALID',
-                error instanceof Error ? error.message : 'Media draft preparation failed.',
-                true,
-              );
-        outputValue = { ...policyError.result() };
-        selectionStatus = 'rejected';
+        if (this.projects.currentSessionId() !== params.projectSessionId) throw error;
+        const current = media.getTask(submission.job.id);
         toolStatus = 'failed';
+        output = unifiedAgentToolRegistry.serializeResult({
+          version: 1,
+          status: current.state,
+          taskId: current.taskId,
+          resultAssetIds: current.resultAssetIds,
+          error: {
+            code: 'MEDIA_SUBMISSION_FAILED',
+            message: error instanceof Error ? error.message : 'Media submission failed.',
+          },
+        });
       }
     }
-    const output = unifiedAgentToolRegistry.serializeResult(outputValue);
 
+    if (this.projects.currentSessionId() !== params.projectSessionId) {
+      throw new AgentToolPolicyError(
+        'AGENT_TOOL_PROJECT_SCOPE',
+        'Project session changed during media submission.',
+      );
+    }
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
+        this.requireActiveGeneration(database, project.id, params);
         const task = this.requireTask(database, project.id, params.generationId);
         const now = new Date().toISOString();
         const updated = database
           .prepare(
             `UPDATE agent_media_selections SET status = ?, selection_summary_json = ?, resolved_at = ?
-             WHERE id = ? AND status = 'pending' AND token_hash = ?`,
+             WHERE id = ? AND status = ? AND token_hash = ?`,
           )
-          .run(selectionStatus, output, now, pending.id, hash(params.selectionToken));
+          .run(
+            selectionStatus,
+            output,
+            now,
+            pending.id,
+            selectionStatus,
+            hash(params.selectionToken),
+          );
         if (updated.changes !== 1) {
           throw new AgentToolPolicyError(
             'AGENT_TOOL_AUTHORIZATION_REPLAYED',
@@ -1451,8 +1548,10 @@ export class AgentProviderLoopService {
             toolStatus,
             output,
             now,
-            toolStatus === 'failed' ? 'MEDIA_SELECTION_INVALID' : null,
-            toolStatus === 'failed' ? 'The selected media draft could not be prepared.' : null,
+            toolStatus === 'failed' ? 'MEDIA_SUBMISSION_FAILED' : null,
+            toolStatus === 'failed'
+              ? 'The reviewed media generation could not be submitted.'
+              : null,
             pending.toolCallId,
           );
         database
@@ -1469,7 +1568,7 @@ export class AgentProviderLoopService {
             ? 'agent.media.selection.resolved'
             : 'agent.media.selection.rejected',
           selectionStatus === 'consumed'
-            ? 'Media Provider and model selection was validated and frozen to a local draft.'
+            ? 'The reviewed generation form was processed; the tool result records its actual media task state.'
             : 'Media Provider and model selection was cancelled or rejected.',
           now,
         );
@@ -1544,6 +1643,7 @@ export class AgentProviderLoopService {
         const now = new Date().toISOString();
         const outputs: LlmToolOutput[] = [];
         const seenIds = new Set<string>();
+        let pauseForUserInput = false;
         for (const [ordinal, call] of params.calls.entries()) {
           if (!isSystemOperation(call.name)) {
             throw new AgentToolPolicyError(
@@ -1590,7 +1690,7 @@ export class AgentProviderLoopService {
             continue;
           }
           if (
-            ['scene.read', 'production.read', 'production.execute'].includes(call.name) &&
+            ['scene.read', 'production.read'].includes(call.name) &&
             task.tool_call_limit === AGENT_TASK_TOOL_CALL_DEFAULT
           ) {
             database
@@ -1805,6 +1905,7 @@ export class AgentProviderLoopService {
             stageOperation?: string;
             sceneIds?: string[];
             savedSceneThisCall?: boolean;
+            awaitingUserAnswer?: boolean;
           };
           database
             .prepare(
@@ -1822,6 +1923,8 @@ export class AgentProviderLoopService {
               toolCallId,
             );
           outputs.push({ callId: call.id, output });
+          if (operation === 'conversation.ask' && artifact.awaitingUserAnswer === true)
+            pauseForUserInput = true;
           if (
             artifact.status === 'scene_structure_saved' &&
             (operation === 'scene.submit_structure' ||
@@ -1835,6 +1938,19 @@ export class AgentProviderLoopService {
               artifact.readiness === 'needs_attention'
                 ? '已保存场次与镜头草稿，存在待处理的制作问题。'
                 : '已保存场次与镜头草稿。',
+              now,
+            );
+          } else if (
+            (operation === 'scene.update_shot_timings' &&
+              artifact.status === 'shot_timings_saved') ||
+            (operation === 'scene.update_shot_prompts' && artifact.status === 'shot_prompts_saved')
+          ) {
+            this.appendEvent(
+              database,
+              project.id,
+              task.id,
+              'scene.structure.saved',
+              operation === 'scene.update_shot_prompts' ? '已保存镜头提示词。' : '已保存镜头时长。',
               now,
             );
           } else if (
@@ -1865,6 +1981,48 @@ export class AgentProviderLoopService {
         const readonlySystemStep = params.calls.every(
           (call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel',
         );
+        if (pauseForUserInput) {
+          // A pending durable form is a user-review boundary. End the current
+          // Agent turn after recording the tool result; the normal completion
+          // path is guarded by the waiting_review status and cannot overwrite
+          // it with completed/read-only.
+          this.completeStep(
+            database,
+            step,
+            params.providerResponseId,
+            params.calls.length,
+            params.usage,
+            now,
+            'waiting_review',
+            JSON.stringify({
+              version: 1,
+              callIds: params.calls.map((call) => call.id),
+              userInputPending: true,
+            }),
+          );
+          database
+            .prepare(
+              "UPDATE agent_tasks SET status='waiting_review', phase='waiting_review', updated_at=?, row_version=row_version+1 WHERE id=? AND status='running'",
+            )
+            .run(now, task.id);
+          this.appendEvent(
+            database,
+            project.id,
+            task.id,
+            'agent.task.waiting_review',
+            '已生成问答表单，等待用户填写后继续。',
+            now,
+          );
+          return {
+            continuation: createToolContinuation(
+              activeGeneration.protocol,
+              params.providerResponseId,
+              params.calls,
+              outputs,
+            ),
+            terminate: true,
+          };
+        }
         if (!readonlySystemStep) {
           this.completeStep(
             database,
@@ -2289,6 +2447,7 @@ export class AgentProviderLoopService {
                 String(args.title ?? ''),
                 String(args.contentMarkdown ?? ''),
               ),
+            contentIR: args.contentIR as ProjectContentIR | undefined,
             scopeType: task.scope_type,
             scopeId: task.scope_id ?? undefined,
             sourceMessageId: task.user_message_id ?? undefined,
@@ -2359,7 +2518,7 @@ export class AgentProviderLoopService {
         } else if (call.name === 'novel.episode.submit_structure') {
           let structure: EpisodeStructure;
           try {
-            structure = parseEpisodeStructureArguments(call.argumentsJson, true);
+            structure = parseEpisodeStructureArguments(call.argumentsJson);
             validateEpisodeReferences(database, project.id, structure);
           } catch (error) {
             database
@@ -2396,7 +2555,7 @@ export class AgentProviderLoopService {
               sceneDocumentId: scene.sceneDocumentId,
               videoPrompt: scene.videoPrompt,
               characterDocumentIds: scene.characterDocumentIds,
-              instruction: scene.instruction,
+              authoringIR: scene.authoringIR,
             });
             for (const shot of scene.shots) {
               items.push({
@@ -2405,7 +2564,7 @@ export class AgentProviderLoopService {
                 parentItemOrdinal: sceneOrdinal,
                 title: shot.title,
                 prompt: shot.prompt,
-                instruction: shot.instruction,
+                authoringIR: shot.authoringIR,
               });
             }
           }
@@ -2477,6 +2636,7 @@ export class AgentProviderLoopService {
             baseVersionId: authorization.baseVersionId ?? null,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
+            contentIR: args.contentIR as ProjectContentIR | undefined,
             scopeType: task.scope_type,
             scopeId: task.scope_id ?? undefined,
             sourceMessageId: task.user_message_id ?? undefined,
@@ -2844,6 +3004,7 @@ export class AgentProviderLoopService {
                       sourceHandle: toolArguments.sourceHandle,
                       maxChars: toolArguments.maxChars,
                       readMode: toolArguments.readMode,
+                      includeContentIR: toolArguments.includeContentIR,
                       offset: toolArguments.offset,
                     });
               resultSummary = summarizeLibraryResult(result);
@@ -3521,7 +3682,9 @@ export class AgentProviderLoopService {
         const now = new Date().toISOString();
         database
           .prepare(
-            `UPDATE agent_tasks SET tool_call_count=tool_call_count+1, updated_at=?, row_version=row_version+1 WHERE id=? AND tool_call_count<tool_call_limit`,
+            `UPDATE agent_tasks SET tool_call_count=tool_call_count+1,
+             quota_state=CASE WHEN tool_call_count+1 >= tool_call_limit THEN 'paused_budget' ELSE quota_state END,
+             updated_at=?, row_version=row_version+1 WHERE id=? AND tool_call_count<tool_call_limit`,
           )
           .run(now, task.id);
         this.appendEvent(
@@ -3532,6 +3695,111 @@ export class AgentProviderLoopService {
           JSON.stringify({ operation, argumentBytes, reason: reason.slice(0, 1600) }),
           now,
         );
+      })(),
+    );
+  }
+
+  reserveTurn(identity: LlmGenerationIdentity): void {
+    this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const task = this.requireTask(database, project.id, identity.generationId);
+        const now = new Date().toISOString();
+        const reserved = database
+          .prepare(
+            `UPDATE agent_tasks SET turn_count=turn_count+1, updated_at=?, row_version=row_version+1
+             WHERE id=? AND status IN ('running', 'waiting_review')
+               AND quota_state='active' AND turn_count<turn_limit`,
+          )
+          .run(now, task.id);
+        if (reserved.changes !== 1)
+          throw new Error(
+            'AGENT_TURN_QUOTA_EXHAUSTED: Agent task Provider-turn quota is exhausted; unfinished work must not be reported as complete.',
+          );
+      })(),
+    );
+  }
+
+  recordProviderUsage(
+    identity: LlmGenerationIdentity,
+    requestId: string,
+    usage: NormalizedLlmUsage,
+  ): void {
+    if (!requestId.trim()) return;
+    this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const task = this.requireTask(database, project.id, identity.generationId);
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            `INSERT INTO agent_task_usage
+              (task_id,request_id,input_tokens,output_tokens,reasoning_tokens,total_tokens,
+               provider_reported_cost,currency,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(task_id,request_id) DO UPDATE SET
+               input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
+               reasoning_tokens=excluded.reasoning_tokens, total_tokens=excluded.total_tokens,
+               provider_reported_cost=excluded.provider_reported_cost, currency=excluded.currency,
+               updated_at=excluded.updated_at`,
+          )
+          .run(
+            task.id,
+            requestId,
+            usage.inputTokens ?? null,
+            usage.outputTokens ?? null,
+            usage.reasoningTokens ?? null,
+            usage.totalTokens ?? null,
+            usage.providerReportedCost?.amount ?? null,
+            usage.providerReportedCost?.currency ?? null,
+            now,
+          );
+        const rows = database
+          .prepare(
+            `SELECT input_tokens,output_tokens,reasoning_tokens,total_tokens,
+                    provider_reported_cost,currency
+             FROM agent_task_usage WHERE task_id=?`,
+          )
+          .all(task.id) as Array<{
+          input_tokens: number | null;
+          output_tokens: number | null;
+          reasoning_tokens: number | null;
+          total_tokens: number | null;
+          provider_reported_cost: string | null;
+          currency: string | null;
+        }>;
+        const currencies = [
+          ...new Set(rows.map((row) => row.currency).filter(Boolean)),
+        ] as string[];
+        let cost: string | null = null;
+        if (currencies.length === 1) {
+          const values = rows
+            .map((row) => row.provider_reported_cost)
+            .filter((value): value is string => Boolean(value));
+          if (values.length) {
+            try {
+              cost = addDecimalStrings(values);
+            } catch {
+              cost = null;
+            }
+          }
+        }
+        const sum = (key: 'input_tokens' | 'output_tokens' | 'reasoning_tokens' | 'total_tokens') =>
+          rows.reduce((total, row) => total + (row[key] ?? 0), 0);
+        database
+          .prepare(
+            `UPDATE agent_tasks SET input_tokens=?, output_tokens=?, reasoning_tokens=?, total_tokens=?,
+             provider_reported_cost=?, provider_cost_currency=?, updated_at=?, row_version=row_version+1
+             WHERE id=?`,
+          )
+          .run(
+            sum('input_tokens'),
+            sum('output_tokens'),
+            sum('reasoning_tokens'),
+            sum('total_tokens'),
+            cost,
+            currencies.length === 1 ? currencies[0] : null,
+            now,
+            task.id,
+          );
       })(),
     );
   }
@@ -3645,6 +3913,31 @@ export class AgentProviderLoopService {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const task = this.requireTask(database, project.id, params.generationId);
+        if (task.status === 'waiting_review' || task.phase === 'waiting_review') {
+          // A question form closes the tool-calling step itself. A provider may
+          // still emit its final callback, and in some older flows a follow-up
+          // model step is left open. Complete that open step for accounting,
+          // while never reopening or mutating the already closed review step.
+          const openStep = database
+            .prepare(
+              `SELECT id, ordinal, status FROM llm_provider_steps
+               WHERE attempt_id = ? AND status IN ('prepared', 'in_flight')
+               ORDER BY ordinal DESC LIMIT 1`,
+            )
+            .get(params.attemptId) as StepRow | undefined;
+          if (openStep) {
+            this.completeStep(
+              database,
+              openStep,
+              params.providerResponseId,
+              0,
+              params.usage,
+              new Date().toISOString(),
+              'completed',
+            );
+          }
+          return;
+        }
         const step = this.requireOpenStep(database, params.attemptId);
         const conflict = database
           .prepare(
@@ -3711,7 +4004,7 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN ? = 'partial' THEN NULL WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'production.execute')
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.chapter.update_metadata', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'scene.update_shot_timings', 'scene.update_shot_prompts')
                  AND (tool_name NOT IN ('scene.submit_structure', 'scene.structure.stage') OR json_extract(result_summary_json,'$.status')='scene_structure_saved')
              ) THEN NULL ELSE 'read-only' END, completion_state = ?,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
@@ -3765,17 +4058,27 @@ export class AgentProviderLoopService {
           .run(reason === 'cancelled' ? 'cancelled' : 'failed', now, now, generationId, project.id);
         for (const task of tasks) {
           const taskStatus = reason === 'cancelled' ? 'cancelled' : 'failed';
+          const quota = classifyQuotaFailure(detail);
           database
             .prepare(
               `UPDATE agent_tasks SET status = ?, phase = 'recovering', error_code = ?,
-              error_message = ?, retryable = COALESCE(?, retryable), completed_at = ?, updated_at = ?, row_version = row_version + 1
+              error_message = ?, retryable = COALESCE(?, retryable),
+              completion_state = CASE WHEN ? IS NULL THEN completion_state ELSE 'partial' END,
+              quota_state = COALESCE(?, quota_state), quota_error_code = COALESCE(?, quota_error_code),
+              quota_checkpoint_at = CASE WHEN ? IS NULL THEN quota_checkpoint_at ELSE ? END,
+              completed_at = ?, updated_at = ?, row_version = row_version + 1
                WHERE id = ? AND status = 'running'`,
             )
             .run(
               taskStatus,
-              reason,
+              quota?.code ?? reason,
               detail.slice(0, 1000),
-              reason === 'interrupted' ? 1 : null,
+              quota?.retryable ?? (reason === 'interrupted' ? 1 : null),
+              quota ? 'partial' : null,
+              quota?.state ?? null,
+              quota?.code ?? null,
+              quota ? now : null,
+              quota ? now : null,
               now,
               now,
               task.id,
@@ -4139,7 +4442,8 @@ export class AgentProviderLoopService {
       .prepare(
         `UPDATE agent_tasks SET tool_call_count = tool_call_count + 1, phase = ?,
          updated_at = ?, row_version = row_version + 1
-         WHERE id = ? AND status = 'running' AND tool_call_count < tool_call_limit`,
+         WHERE id = ? AND status = 'running' AND quota_state = 'active'
+         AND tool_call_count < tool_call_limit`,
       )
       .run(phase, now, taskId);
     if (taskReserved.changes !== 1)
@@ -4407,7 +4711,7 @@ function assertSceneAuthoringCompleted(
   const calls = database
     .prepare(
       `SELECT tool_name,status,error_message,result_summary_json,created_at FROM agent_tool_calls
-       WHERE task_id=? AND tool_name IN ('scene.submit_structure','scene.structure.stage','novel.episode.submit_structure','production.execute')
+       WHERE task_id=? AND tool_name IN ('scene.submit_structure','scene.structure.stage','novel.episode.submit_structure','scene.update_shot_timings','scene.update_shot_prompts')
        ORDER BY created_at,rowid`,
     )
     .all(taskId) as Array<{
@@ -4421,7 +4725,12 @@ function assertSceneAuthoringCompleted(
   const resolvedAt = new Map<string, string>();
   const checkpointedStages = new Set<string>();
   for (const call of calls) {
-    const group = call.tool_name === 'production.execute' ? 'production' : 'scene';
+    const group =
+      call.tool_name === 'scene.update_shot_prompts'
+        ? 'shot-prompts'
+        : call.tool_name === 'scene.update_shot_timings'
+          ? 'shot-timings'
+          : 'scene';
     const result = JSON.parse(call.result_summary_json ?? '{}') as {
       status?: string;
       stageOperation?: string;
@@ -4435,6 +4744,8 @@ function assertSceneAuthoringCompleted(
         'episode_structure_saved',
         'scene_bindings_need_clarification',
         'applied',
+        'shot_timings_saved',
+        'shot_prompts_saved',
       ].includes(result.status ?? '')
     ) {
       unresolved.delete(group);
@@ -4471,17 +4782,23 @@ function assertSceneAuthoringCompleted(
         'scene.submit_structure',
         'scene.structure.stage',
         'novel.episode.submit_structure',
-        'production.execute',
+        'scene.update_shot_timings',
+        'scene.update_shot_prompts',
       ].includes(failure.operation ?? '')
     )
       continue;
-    const group = failure.operation === 'production.execute' ? 'production' : 'scene';
+    const group =
+      failure.operation === 'scene.update_shot_prompts'
+        ? 'shot-prompts'
+        : failure.operation === 'scene.update_shot_timings'
+          ? 'shot-timings'
+          : 'scene';
     if (!resolvedAt.has(group) || resolvedAt.get(group)! < event.created_at)
       unresolved.set(group, failure.reason?.slice(0, 500) ?? '提交参数校验未通过。');
   }
   for (const [group, reason] of unresolved)
     throw new Error(
-      `${group === 'production' ? 'AGENT_PRODUCTION_NOT_SAVED' : 'AGENT_SCENE_NOT_SAVED'}: 任务未完成：${reason}`,
+      `${group === 'shot-prompts' || group === 'shot-timings' ? 'AGENT_SCENE_NOT_SAVED' : 'AGENT_SCENE_NOT_SAVED'}: 任务未完成：${reason}`,
     );
   return checkpointedStages.size ? 'partial' : undefined;
 }
@@ -4613,8 +4930,9 @@ function parseToolArguments(
   const allowedKeys = !needsContent
     ? []
     : operation === 'document.create_draft'
-      ? ['title', 'contentMarkdown', 'documentKind']
+      ? ['title', 'contentMarkdown', 'documentKind', 'contentIR']
       : ['title', 'contentMarkdown'];
+  if (operation === 'document.update_draft') allowedKeys.push('contentIR');
   if (needsContent || operation === 'document.archive' || operation === 'document.restore')
     allowedKeys.push('documentId', ...RESOURCE_ARGUMENT_KEYS);
   if (needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
@@ -5252,61 +5570,9 @@ function isSystemOperation(value: string): value is SystemAgentToolOperation {
   return SYSTEM_AGENT_OPERATIONS.has(value as SystemAgentToolOperation);
 }
 
-const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>([
-  'scene.structure.stage',
-  'conversation.task.route',
-  'production.defaults.get',
-  'novel.chapter.batch.submit',
-  'novel.chapter.batch.source.read',
-  'novel.chapter.batch.get',
-  'production.read',
-  'production.execute',
-  'scene.submit_structure',
-  'scene.read',
-  'document.submit_draft',
-  'novel.chapter.write_draft',
-  'project.get_context',
-  'project.structure.get',
-  'novel.structure.get',
-  'novel.chapter.list',
-  'novel.chapter.archive',
-  'novel.chapter.restore',
-  'project.integrity.check',
-  'project.backup.prepare',
-  'project.export.prepare',
-  'project.restore.prepare',
-  'conversation.search',
-  'conversation.create',
-  'conversation.rename',
-  'conversation.archive',
-  'conversation.restore',
-  'document.publish',
-  'asset.search',
-  'asset.get',
-  'asset.update_alias',
-  'asset.update_tags',
-  'asset.move_to_trash',
-  'asset.restore',
-  'asset.purge',
-  'tag.list',
-  'tag.create',
-  'tag.update',
-  'tag.delete',
-  'assetGroup.list',
-  'assetGroup.create',
-  'assetGroup.update',
-  'assetGroup.delete',
-  'assetGroup.resolve',
-  'settings.get',
-  'settings.propose_update',
-  'settings.apply_update',
-  'maintenance.status',
-  'maintenance.clear_cache',
-  'maintenance.cleanup_research_cache',
-  'maintenance.cleanup_context_snapshots',
-  'maintenance.diagnostics.prepare',
-  'media.task.get',
-]);
+const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>(
+  SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation),
+);
 
 function parseConfirmationContinuationDescriptor(
   value: string,
@@ -5508,7 +5774,15 @@ function taskTypeFor(operation: AgentToolOperation): string {
   throw new Error('Unsupported Agent tool operation.');
 }
 
-const DOCUMENT_KIND_SET = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
+const DOCUMENT_KIND_SET = new Set([
+  'outline',
+  'plan',
+  'character',
+  'scene',
+  'prop',
+  'storyboard',
+  'note',
+]);
 
 function normalizeTitle(value: string): string {
   const title = value.normalize('NFC').trim();
@@ -5540,6 +5814,7 @@ type LibraryToolArguments =
       sourceHandle: string;
       maxChars?: number;
       readMode?: 'chunk' | 'source';
+      includeContentIR?: boolean;
       offset?: number;
     };
 
@@ -5606,7 +5881,8 @@ function parseLibraryToolArguments(
   }
   if (
     Object.keys(record).some(
-      (key) => !['sourceHandle', 'maxChars', 'readMode', 'offset'].includes(key),
+      (key) =>
+        !['sourceHandle', 'maxChars', 'readMode', 'includeContentIR', 'offset'].includes(key),
     )
   ) {
     throw new Error('Library read arguments contain unsupported fields.');
@@ -5616,12 +5892,16 @@ function parseLibraryToolArguments(
   }
   const sourceHandle = record.sourceHandle.trim();
   if (sourceHandle.length > 128) throw new Error('Library sourceHandle is invalid.');
+  if (record.includeContentIR !== undefined && typeof record.includeContentIR !== 'boolean')
+    throw new Error('Library includeContentIR must be a boolean.');
   return {
     operation,
     sourceHandle,
     maxChars: optionalBoundedInteger(record.maxChars, 1, 20_000),
     readMode:
       record.readMode === 'chunk' || record.readMode === 'source' ? record.readMode : undefined,
+    includeContentIR:
+      typeof record.includeContentIR === 'boolean' ? record.includeContentIR : undefined,
     offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
   };
 }
@@ -5642,6 +5922,8 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
     operation: argumentsValue.operation,
     sourceHandleHash: hash(argumentsValue.sourceHandle),
     maxChars: argumentsValue.maxChars,
+    readMode: argumentsValue.readMode,
+    includeContentIR: argumentsValue.includeContentIR,
   };
 }
 
@@ -5731,6 +6013,29 @@ function libraryBudget(
     searchRemaining: Math.max(0, LIBRARY_SEARCH_CALL_LIMIT - (used.get('library.search') ?? 0)),
     readRemaining: Math.max(0, LIBRARY_READ_CALL_LIMIT - (used.get('library.read') ?? 0)),
   };
+}
+
+type QuotaFailure = {
+  state:
+    'paused_budget' | 'provider_rate_limited' | 'provider_quota_exhausted' | 'context_exhausted';
+  code: string;
+  retryable: 0 | 1;
+};
+
+function classifyQuotaFailure(message: string): QuotaFailure | undefined {
+  if (/AGENT_TOOL_QUOTA_EXHAUSTED/.test(message))
+    return { state: 'paused_budget', code: 'AGENT_TOOL_QUOTA_EXHAUSTED', retryable: 1 };
+  if (/AGENT_TURN_QUOTA_EXHAUSTED|Pi runtime exceeded the \d+-turn limit/i.test(message))
+    return { state: 'paused_budget', code: 'AGENT_TURN_QUOTA_EXHAUSTED', retryable: 1 };
+  if (/CONTEXT_BUDGET_EXCEEDED/.test(message))
+    return { state: 'context_exhausted', code: 'CONTEXT_BUDGET_EXCEEDED', retryable: 1 };
+  if (/\b429\b|rate limit|too many requests/i.test(message))
+    return { state: 'provider_rate_limited', code: 'PROVIDER_RATE_LIMITED', retryable: 1 };
+  if (
+    /insufficient[_ ]quota|quota[_ ]exhaust|billing|credit balance|payment required/i.test(message)
+  )
+    return { state: 'provider_quota_exhausted', code: 'PROVIDER_QUOTA_EXHAUSTED', retryable: 0 };
+  return undefined;
 }
 
 function libraryBudgetFailure(

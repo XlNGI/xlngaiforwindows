@@ -8,16 +8,16 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-describe('project visual defaults', () => {
-  it('loads on demand and saves shared style with optimistic versioning', async () => {
+describe('project provider defaults', () => {
+  it('loads on demand and saves output parameters with optimistic versioning', async () => {
     vi.mocked(callWorker)
       .mockResolvedValueOnce({
         rowVersion: 2,
-        settings: { style: { medium: '二维动画' }, generation: { ratio: '9:16' } },
+        settings: { generation: { ratio: '9:16' } },
       })
       .mockResolvedValueOnce({
         rowVersion: 3,
-        settings: { style: { medium: '水彩动画' }, generation: { ratio: '9:16' } },
+        settings: { generation: { ratio: '9:16', resolution: '1080p' } },
       });
     const saved = vi.fn();
     const { container } = render(<ProjectProductionDefaults writable onSaved={saved} />);
@@ -25,13 +25,13 @@ describe('project visual defaults', () => {
     const details = container.querySelector('details')!;
     details.open = true;
     fireEvent(details, new Event('toggle'));
-    const input = await screen.findByLabelText('画面类型');
-    fireEvent.change(input, { target: { value: '水彩动画' } });
+    const input = await screen.findByLabelText('视频默认分辨率');
+    fireEvent.change(input, { target: { value: '1080p' } });
     fireEvent.click(screen.getByRole('button', { name: '保存默认设置' }));
     await waitFor(() => expect(saved).toHaveBeenCalledOnce());
     expect(callWorker).toHaveBeenCalledWith('production.defaults.save', {
       expectedRowVersion: 2,
-      settings: { style: { medium: '水彩动画' }, generation: { ratio: '9:16' } },
+      settings: { generation: { ratio: '9:16', resolution: '1080p' } },
     });
   });
 });

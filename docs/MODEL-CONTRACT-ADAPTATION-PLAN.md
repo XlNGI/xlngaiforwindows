@@ -165,6 +165,8 @@ JSON Schema 是参数校验和前端动态表单的唯一来源。传输映射�
 
 ## 7. 清单状态
 
+- [x] Qwen Image 图生图切片（2026-10-22）：按官方文档补齐 3.0／Pro、2.1 Pro／Turbo 新修订与 2.0／Pro 合同、UniComp Binding、参考生图模式和原生字段投影；保留历史修订。最终验证以 [Qwen Image 图生图适配](./QWEN-IMAGE-EDITING-IMPLEMENTATION.md) 的 Q3 记录为准，不将其余模型迁移阶段标记完成。
+
 - [x] 现有模型和适配器初步盘点
 - [x] 主流模型候选清单
 - [x] 合同、Binding、Adapter 三层设计

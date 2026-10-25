@@ -3,6 +3,7 @@ import { BarChart3, Database, Moon, Server, Settings2, Sun, X } from 'lucide-rea
 import { ProviderConnectionsView } from './settings/ProviderConnectionsView';
 import { UsageDashboard } from './settings/UsageDashboard';
 import { THEME_OPTIONS, useTheme, type ThemeId } from './theme';
+import { FONT_SCALE_MAX, FONT_SCALE_MIN, FONT_SCALE_STEP, useFontScale } from './font-scale';
 
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
 
@@ -27,6 +28,7 @@ export function SettingsCenter({
 }: SettingsCenterProps) {
   const [page, setPage] = useState<SettingsPage>(initialPage);
   const { theme, setTheme } = useTheme();
+  const { global, workspace, setGlobal, setWorkspace } = useFontScale();
   const dialogLabel = initialPage === 'maintenance' ? '项目维护' : undefined;
   const themeIcons: Record<ThemeId, typeof Moon> = {
     dark: Moon,
@@ -101,6 +103,38 @@ export function SettingsCenter({
         </aside>
 
         <div className="settings-content">
+          <section className="font-scale-panel" aria-label="字体大小">
+            <div className="font-scale-panel-heading">
+              <strong>字体大小</strong>
+              <span>分别调整全局界面与会话、内容生产页面的字体。</span>
+            </div>
+            <label className="font-scale-row">
+              <span>全局界面字体</span>
+              <input
+                aria-label="全局界面字体"
+                type="range"
+                min={FONT_SCALE_MIN}
+                max={FONT_SCALE_MAX}
+                step={FONT_SCALE_STEP}
+                value={global}
+                onChange={(event) => setGlobal(Number(event.target.value))}
+              />
+              <output>{Math.round(global * 100)}%</output>
+            </label>
+            <label className="font-scale-row">
+              <span>会话 / 内容生产字体</span>
+              <input
+                aria-label="会话 / 内容生产字体"
+                type="range"
+                min={FONT_SCALE_MIN}
+                max={FONT_SCALE_MAX}
+                step={FONT_SCALE_STEP}
+                value={workspace}
+                onChange={(event) => setWorkspace(Number(event.target.value))}
+              />
+              <output>{Math.round(workspace * 100)}%</output>
+            </label>
+          </section>
           {page === 'providers' && (
             <ProviderConnectionsView initialSelectedProfileId={providerFocusId} />
           )}

@@ -441,5 +441,181 @@
     "inputTransport": {
       "audio": "url-only"
     }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-3.0-pro-image-v2",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-3.0-pro",
+    "contractId": "cn.qwen.qwen-image-3-0-pro",
+    "contractRevision": 2,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-3.0-image-v2",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-3.0",
+    "contractId": "cn.qwen.qwen-image-3-0",
+    "contractRevision": 2,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-2.1-pro-image-v2",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-2.1-pro",
+    "contractId": "cn.qwen.qwen-image-2-1-pro",
+    "contractRevision": 2,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-2.1-turbo-image-v2",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-2.1-turbo",
+    "contractId": "cn.qwen.qwen-image-2-1-turbo",
+    "contractRevision": 2,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled",
+    "inputTransport": {
+      "audio": "url-only"
+    }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-2.0-image-v1",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-2.0",
+    "contractId": "cn.qwen.qwen-image-2-0",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled",
+    "transportOverride": {
+      "protocolFamily": "openai-compatible-image",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "images",
+          "to": "image"
+        },
+        {
+          "operation": "copy",
+          "from": "n",
+          "to": "n"
+        },
+        {
+          "operation": "copy",
+          "from": "size",
+          "to": "size"
+        },
+        {
+          "operation": "copy",
+          "from": "negative_prompt",
+          "to": "negative_prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "data[0].url",
+          "to": "outputUrl"
+        }
+      ]
+    }
+  },
+  {
+    "bindingId": "unicomp-qwen-image-2.0-pro-image-v1",
+    "providerType": "unicompapi",
+    "remoteModelId": "qwen-image-2.0-pro",
+    "contractId": "cn.qwen.qwen-image-2-0-pro",
+    "contractRevision": 1,
+    "protocol": "openai-compatible-image",
+    "compatibility": "partial",
+    "status": "enabled",
+    "transportOverride": {
+      "protocolFamily": "openai-compatible-image",
+      "request": [
+        {
+          "operation": "copy",
+          "from": "prompt",
+          "to": "prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "images",
+          "to": "image"
+        },
+        {
+          "operation": "copy",
+          "from": "n",
+          "to": "n"
+        },
+        {
+          "operation": "copy",
+          "from": "size",
+          "to": "size"
+        },
+        {
+          "operation": "copy",
+          "from": "negative_prompt",
+          "to": "negative_prompt"
+        },
+        {
+          "operation": "copy",
+          "from": "prompt_extend",
+          "to": "prompt_extend"
+        },
+        {
+          "operation": "copy",
+          "from": "watermark",
+          "to": "watermark"
+        },
+        {
+          "operation": "copy",
+          "from": "seed",
+          "to": "seed"
+        }
+      ],
+      "response": [
+        {
+          "operation": "extract",
+          "from": "data[0].url",
+          "to": "outputUrl"
+        }
+      ]
+    }
   }
 ]

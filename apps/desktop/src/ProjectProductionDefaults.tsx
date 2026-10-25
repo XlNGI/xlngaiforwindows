@@ -2,19 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { ProductionDefaults, ProductionDefaultsInfo } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
 
-const styleFields = [
-  ['medium', '画面类型'],
-  ['technique', '表现方式'],
-  ['realism', '写实程度'],
-  ['proportions', '人物比例'],
-  ['linework', '线条'],
-  ['materials', '材质'],
-  ['palette', '色彩'],
-  ['contrast', '明暗对比'],
-  ['texture', '画面质感'],
-  ['referenceDescription', '参考风格说明'],
-] as const;
-
 export function ProjectProductionDefaults({
   writable,
   onSaved,
@@ -76,8 +63,7 @@ export function ProjectProductionDefaults({
       className="project-production-defaults"
       onToggle={(event) => setOpened(event.currentTarget.open)}
     >
-      <summary>项目统一风格与输出默认值</summary>
-      <p>角色、场景、场次和分镜默认沿用；单次制作可以覆盖。时长按剧情自动计算。</p>
+      <summary>项目输出默认值</summary>
       <button
         type="button"
         className="button secondary"
@@ -92,20 +78,6 @@ export function ProjectProductionDefaults({
       </button>
       {value && (
         <fieldset disabled={!writable || busy}>
-          {styleFields.map(([key, label]) => (
-            <label className="parameter-field" key={key}>
-              {label}
-              <input
-                value={value.settings.style?.[key] ?? ''}
-                onChange={(event) => {
-                  const style = { ...value.settings.style };
-                  if (event.target.value.trim()) style[key] = event.target.value;
-                  else delete style[key];
-                  update({ ...value.settings, style });
-                }}
-              />
-            </label>
-          ))}
           <label className="parameter-field">
             视频默认画幅
             <select

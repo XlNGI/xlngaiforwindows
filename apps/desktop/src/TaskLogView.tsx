@@ -747,6 +747,12 @@ function MediaTaskDetailPanel({
                   : '无'}
               </dd>
             </div>
+            {(detail as VideoGenerationJobInfo).metadata.lastPollError && (
+              <div>
+                <dt>最近轮询异常</dt>
+                <dd>{(detail as VideoGenerationJobInfo).metadata.lastPollError}</dd>
+              </div>
+            )}
           </>
         )}
       </dl>

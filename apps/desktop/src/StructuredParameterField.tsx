@@ -1,3 +1,5 @@
+import { PromptReferenceEditor } from './PromptReferenceEditor';
+import type { PromptReference } from './prompt-references';
 import type { AdapterParameterValue } from '@ai-video/contracts';
 import { useState, type ReactNode } from 'react';
 import { Check, ChevronDown, ChevronUp, ImagePlus, Plus, Trash2 } from 'lucide-react';
@@ -79,6 +81,7 @@ function StructuredImageObject({
   label,
   path,
   projectId,
+  references,
   selector,
   actions,
   onChange,
@@ -89,6 +92,7 @@ function StructuredImageObject({
   label: string;
   path: string;
   projectId?: string;
+  references?: PromptReference[];
   selector: ReactNode;
   actions?: ReactNode;
   onChange: (value: AdapterParameterValue) => void;
@@ -134,6 +138,7 @@ function StructuredImageObject({
             path={`${path}.${name}`}
             depth={depth + 1}
             projectId={projectId}
+            references={references}
             onChange={(next) => {
               const output = { ...value } as Record<string, AdapterParameterValue>;
               if (next === undefined) delete output[name];
@@ -176,6 +181,7 @@ export function StructuredParameterField({
   path = 'structured',
   depth = 0,
   projectId,
+  references,
   actions,
   multiline = false,
 }: {
@@ -185,6 +191,7 @@ export function StructuredParameterField({
   path?: string;
   depth?: number;
   projectId?: string;
+  references?: PromptReference[];
   actions?: ReactNode;
   multiline?: boolean;
   onChange: (value: AdapterParameterValue | undefined) => void;
@@ -224,6 +231,7 @@ export function StructuredParameterField({
         label={label}
         path={path}
         projectId={projectId}
+        references={references}
         selector={selector}
         actions={actions}
         onChange={onChange}
@@ -246,6 +254,7 @@ export function StructuredParameterField({
               path={`${path}.${key}`}
               depth={depth + 1}
               projectId={projectId}
+              references={references}
               multiline={['text', 'prompt'].includes(key)}
               onChange={(next) => {
                 const output = { ...current } as Record<string, AdapterParameterValue>;
@@ -292,6 +301,7 @@ export function StructuredParameterField({
                 path={`${path}.${index}`}
                 depth={depth + 1}
                 projectId={projectId}
+                references={references}
                 actions={
                   <>
                     {[-1, 1].map((offset) => (
@@ -379,13 +389,25 @@ export function StructuredParameterField({
     return (
       <div className="parameter-field prompt-field">
         <label htmlFor={path}>{label}</label>
-        <textarea
-          id={path}
-          aria-label={label}
-          value={parameterScalarText(value)}
-          maxLength={typeof active.maxLength === 'number' ? active.maxLength : undefined}
-          onChange={(event) => onChange(event.target.value || undefined)}
-        />
+        {references?.length ? (
+          <PromptReferenceEditor
+            id={path}
+            label={label}
+            value={parameterScalarText(value)}
+            references={references}
+            projectId={projectId}
+            maxLength={typeof active.maxLength === 'number' ? active.maxLength : undefined}
+            onChange={(text) => onChange(text || undefined)}
+          />
+        ) : (
+          <textarea
+            id={path}
+            aria-label={label}
+            value={parameterScalarText(value)}
+            maxLength={typeof active.maxLength === 'number' ? active.maxLength : undefined}
+            onChange={(event) => onChange(event.target.value || undefined)}
+          />
+        )}
         <ParameterHelp
           description={typeof active.description === 'string' ? active.description : undefined}
           label={label}

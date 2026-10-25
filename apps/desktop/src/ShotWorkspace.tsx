@@ -6,8 +6,8 @@ import type {
   DocumentSummary,
   SceneInfo,
   SceneCharacterBindingInfo,
+  ShotReferenceBindingInfo,
 } from '@ai-video/contracts';
-import { productionCharacterIds } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
 import { AssetImagePreview } from './AssetImagePreview';
 import { ReferenceCard, referenceAssetName } from './ReferenceCard';
@@ -22,9 +22,12 @@ const STORAGE_PREFIX = 'ai-video.shot-reference-assets:';
 export type ShotReferenceSlot = 'character' | 'scene' | 'firstFrame';
 
 export interface ShotReferenceAssets {
+  characterBindings?: NonNullable<ShotReferenceBindingInfo['characterBindings']>;
+  sceneBindings?: NonNullable<ShotReferenceBindingInfo['sceneBindings']>;
   characterAssetId?: string;
   characterAssetIds?: string[];
   sceneAssetId?: string;
+  sceneAssetIds?: string[];
   firstFrameAssetId?: string;
   continuityReferenceAssetIds?: string[];
   continuityRowVersion?: number;
@@ -94,6 +97,8 @@ function ShotWorkspaceContent({
   onOpenDocument,
   sceneBindingBusy,
   sceneBindingMessage,
+  referenceBindings,
+  onSaveReferenceBindings,
   continuitySourceDirty = false,
   llm,
 }: {
@@ -128,13 +133,23 @@ function ShotWorkspaceContent({
   onOpenDocument?: (id: string) => void;
   sceneBindingBusy?: boolean;
   sceneBindingMessage?: string;
+  referenceBindings?: ShotReferenceBindingInfo;
+  onSaveReferenceBindings?: (bindings: ShotReferenceBindingInfo | null) => Promise<unknown>;
   continuitySourceDirty?: boolean;
   llm?: { providerProfileId: string; modelId: string; name: string; vision: boolean };
 }) {
   const callWorker = projectWorker();
-  const [refs, setRefs] = useState<ShotReferenceAssets>(() =>
-    projectId ? loadShotReferences(projectId, shotId) : {},
-  );
+  const [refs, setRefs] = useState<ShotReferenceAssets>(() => {
+    const local = projectId ? loadShotReferences(projectId, shotId) : {};
+    return referenceBindings
+      ? {
+          continuityReferenceAssetIds: local.continuityReferenceAssetIds,
+          continuityRowVersion: local.continuityRowVersion,
+          continuityPrompt: local.continuityPrompt,
+          ...referenceBindings,
+        }
+      : local;
+  });
   const [characters, setCharacters] = useState(scene?.characterBindings ?? []);
   const [dialogueAudioId, setDialogueAudioId] = useState(scene?.dialogueAudioId);
   const [audios, setAudios] = useState<AudioFileInfo[]>([]);
@@ -146,8 +161,26 @@ function ShotWorkspaceContent({
     [mediaRevision, continuityRevision],
   );
   const revision = useMemo(() => ({ assets, mediaRevision }), [assets, mediaRevision]);
+  const sceneDocumentIds = Array.from(
+    new Set(
+      scene?.sceneDocumentIds?.length
+        ? scene.sceneDocumentIds
+        : sceneDocumentId
+          ? [sceneDocumentId]
+          : [],
+    ),
+  );
+  const primarySceneDocumentId = sceneDocumentId ?? sceneDocumentIds[0];
+  const sceneMaterials =
+    scene?.materialBindings?.filter(
+      (binding) =>
+        binding.role === 'scene' &&
+        (binding.source === 'manual' || sceneDocumentIds.includes(binding.sourceDocumentId ?? '')),
+    ) ?? [];
   const sceneMaterial = scene?.materialBindings?.find(
-    (b) => b.role === 'scene' && (b.source === 'manual' || b.sourceDocumentId === sceneDocumentId),
+    (b) =>
+      b.role === 'scene' &&
+      (b.source === 'manual' || sceneDocumentIds.includes(b.sourceDocumentId ?? '')),
   );
   const castMedia = useSceneMedia(
     projectId,
@@ -157,6 +190,7 @@ function ShotWorkspaceContent({
         sceneMaterial?.assetId,
         refs.characterAssetId,
         refs.sceneAssetId,
+        ...(refs.sceneAssetIds ?? []),
         refs.firstFrameAssetId,
       ].filter((id): id is string => Boolean(id)),
     ),
@@ -182,6 +216,7 @@ function ShotWorkspaceContent({
     };
   }, [projectId]);
   const [referenceMessage, setReferenceMessage] = useState('');
+  const referenceSave = useRef<Promise<unknown>>(Promise.resolve());
   const [shotImageResults, setShotImageResults] = useState<{
     shotId: string;
     projectId?: string;
@@ -210,11 +245,11 @@ function ShotWorkspaceContent({
       active = false;
     };
   }, [projectId, shotId, assets]);
-  const setting = useSceneSettingImages(projectId, sceneDocumentId, documents, revision);
+  const setting = useSceneSettingImages(projectId, sceneDocumentIds, documents, revision);
   const inheritedSceneAsset = setting.assets[0];
   const boundSceneAvailable = setting.available;
   const currentScope = useRef('');
-  currentScope.current = `${projectId}:${shotId}:${sceneDocumentId}:${boundSceneAvailable}:${JSON.stringify(characters)}:${dialogueAudioId}`;
+  currentScope.current = `${projectId}:${shotId}:${sceneDocumentIds.join('|')}:${boundSceneAvailable}:${JSON.stringify(characters)}:${dialogueAudioId}`;
   useEffect(
     () => () => {
       currentScope.current = '';
@@ -229,28 +264,69 @@ function ShotWorkspaceContent({
           ...assets,
           ...(continuity?.images ?? []),
           ...(castMedia.value?.assets ?? []),
-          ...(inheritedSceneAsset ? [inheritedSceneAsset] : []),
+          ...setting.assets,
         ]
           .filter((a) => a.projectId === projectId && !a.deletedAt && !isVideoKind(a.kind))
           .map((a) => [a.id, a]),
       ).values(),
     ],
-    [assets, inheritedSceneAsset, castMedia.value, projectId, continuity],
+    [assets, setting.assets, castMedia.value, projectId, continuity],
   );
   const effectiveRefs = {
     ...refs,
     sceneAssetId:
       refs.sceneAssetId ??
       (refs.ignoreSceneBinding ? undefined : (sceneMaterial?.assetId ?? inheritedSceneAsset?.id)),
+    sceneAssetIds:
+      refs.sceneAssetIds ??
+      (refs.ignoreSceneBinding
+        ? undefined
+        : sceneMaterials.length > 1
+          ? sceneMaterials.map((binding) => binding.assetId)
+          : undefined),
   };
 
   useEffect(() => {
-    setRefs(projectId ? loadShotReferences(projectId, shotId) : {});
-  }, [projectId, shotId]);
+    const local = projectId ? loadShotReferences(projectId, shotId) : {};
+    setRefs(
+      referenceBindings
+        ? {
+            continuityReferenceAssetIds: local.continuityReferenceAssetIds,
+            continuityRowVersion: local.continuityRowVersion,
+            continuityPrompt: local.continuityPrompt,
+            ...referenceBindings,
+          }
+        : local,
+    );
+  }, [projectId, shotId, referenceBindings]);
 
-  const persist = (next: ShotReferenceAssets) => {
+  const durableReferences = (next: ShotReferenceAssets): ShotReferenceBindingInfo => ({
+    ...(next.characterBindings?.length ? { characterBindings: next.characterBindings } : {}),
+    ...(next.sceneBindings?.length ? { sceneBindings: next.sceneBindings } : {}),
+    ...(next.characterAssetId ? { characterAssetId: next.characterAssetId } : {}),
+    ...(next.characterAssetIds?.length ? { characterAssetIds: next.characterAssetIds } : {}),
+    ...(next.sceneAssetId ? { sceneAssetId: next.sceneAssetId } : {}),
+    ...(next.sceneAssetIds?.length ? { sceneAssetIds: next.sceneAssetIds } : {}),
+    ...(next.firstFrameAssetId ? { firstFrameAssetId: next.firstFrameAssetId } : {}),
+    ...(next.ignoreSceneBinding ? { ignoreSceneBinding: true } : {}),
+  });
+
+  const persist = (next: ShotReferenceAssets, saveLocal = true) => {
     setRefs(next);
-    if (projectId) saveShotReferences(projectId, shotId, next);
+    if (saveLocal && projectId) saveShotReferences(projectId, shotId, next);
+    if (onSaveReferenceBindings) {
+      const durable = durableReferences(next);
+      referenceSave.current = referenceSave.current
+        .catch(() => undefined)
+        .then(() => onSaveReferenceBindings(durable));
+    }
+    return referenceSave.current;
+  };
+
+  const persistFromControl = (next: ShotReferenceAssets) => {
+    void persist(next).catch((error: unknown) => {
+      setReferenceMessage(error instanceof Error ? error.message : '镜头参考图保存失败。');
+    });
   };
 
   const assign = (slot: ShotReferenceSlot, assetId?: string) => {
@@ -276,15 +352,27 @@ function ShotWorkspaceContent({
     }
     const next = {
       ...refs,
+      characterBindings:
+        slot === 'character'
+          ? undefined
+          : refs.characterBindings,
+      sceneBindings:
+        slot === 'scene'
+          ? assetId && primarySceneDocumentId
+            ? [{ sourceDocumentId: primarySceneDocumentId, assetId }]
+            : undefined
+          : refs.sceneBindings,
       characterAssetId: slot === 'character' ? assetId : refs.characterAssetId,
+      characterAssetIds: slot === 'character' ? undefined : refs.characterAssetIds,
       sceneAssetId: slot === 'scene' ? assetId : refs.sceneAssetId,
+      sceneAssetIds: slot === 'scene' ? (assetId ? [assetId] : undefined) : refs.sceneAssetIds,
       firstFrameAssetId: slot === 'firstFrame' ? assetId : refs.firstFrameAssetId,
     };
-    if (slot === 'scene' && sceneDocumentId) {
+    if (slot === 'scene' && sceneDocumentIds.length) {
       if (!assetId) next.ignoreSceneBinding = true;
       else delete next.ignoreSceneBinding;
     }
-    persist(next);
+    persistFromControl(next);
   };
 
   const saveReferences = async () => {
@@ -314,28 +402,61 @@ function ShotWorkspaceContent({
     let next = { ...refs };
     if (!next.sceneAssetId && !refs.ignoreSceneBinding && sceneMaterial)
       next.sceneAssetId = sceneMaterial.assetId;
-    if (sceneDocumentId && !next.sceneAssetId && !refs.ignoreSceneBinding) {
-      if (!boundSceneAvailable) throw new Error('绑定场景资料不可用，请重新选择场次的场景。');
-      const items = await callWorker('asset.list', {
-        sourceDocumentId: sceneDocumentId,
-        sort: 'created-desc',
-        limit: 200,
-      });
-      const asset = items.find(
-        (item) => item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
+    if (!next.sceneAssetIds?.length && !refs.ignoreSceneBinding && sceneMaterials.length > 1)
+      next.sceneAssetIds = sceneMaterials.map((binding) => binding.assetId);
+    if (onSaveReferenceBindings && !next.sceneBindings?.length && !refs.ignoreSceneBinding && sceneMaterials.length) {
+      const mapped = sceneMaterials.flatMap((binding) =>
+        binding.sourceDocumentId
+          ? [{ sourceDocumentId: binding.sourceDocumentId, assetId: binding.assetId }]
+          : [],
       );
-      if (asset) {
-        next = { ...next, sceneAssetId: asset.id };
-      }
+      if (mapped.length) next.sceneBindings = mapped;
+    }
+    if (sceneDocumentIds.length && !next.sceneAssetIds?.length && !refs.ignoreSceneBinding) {
+      if (!boundSceneAvailable) throw new Error('绑定场景资料不可用，请重新选择场次的场景。');
+      const groups = await Promise.all(
+        sceneDocumentIds.map((sourceDocumentId) =>
+          callWorker('asset.list', {
+            sourceDocumentId,
+            sort: 'created-desc',
+            limit: 200,
+          }),
+        ),
+      );
+      const sceneAssetEntries = groups
+        .map((items, index) => {
+          const asset = items.find(
+            (item) => item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
+          );
+          return asset ? { sourceDocumentId: sceneDocumentIds[index]!, asset } : undefined;
+        })
+        .filter(
+          (entry): entry is { sourceDocumentId: string; asset: AssetInfo } => Boolean(entry),
+        );
+      const sceneAssets = sceneAssetEntries.map((entry) => entry.asset);
+      if (sceneAssets.length)
+        next = {
+          ...next,
+          sceneAssetId: next.sceneAssetId ?? sceneAssets[0]?.id,
+          ...(onSaveReferenceBindings
+            ? {
+                sceneBindings: sceneAssetEntries.map(({ sourceDocumentId, asset }) => ({
+                  sourceDocumentId,
+                  assetId: asset.id,
+                })),
+              }
+            : {}),
+          ...(sceneAssets.length > 1
+            ? { sceneAssetIds: sceneAssets.map((asset) => asset.id) }
+            : {}),
+        };
     }
     if (characters.length && projectId) {
       const production = await callWorker('production.read', {
         target: { kind: 'shot', id: shotId },
       }).catch(() => undefined);
       if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
-      const characterIds = production?.issues?.some((issue) => issue.code === 'STALE_INSTRUCTION')
-        ? undefined
-        : productionCharacterIds(production?.instruction);
+      const characterIds = production?.authoringIR?.references?.characterDocumentIds;
       const shotCharacters = characters.filter(
         (character) =>
           characterIds === undefined || characterIds.includes(character.characterDocumentId),
@@ -345,13 +466,17 @@ function ShotWorkspaceContent({
         c.imageAssetId ? [c.imageAssetId] : [],
       );
       next.characterAssetIds = [...new Set(ids)];
+      if (onSaveReferenceBindings)
+        next.characterBindings = effectiveSceneCast(shotCharacters, media).flatMap((character) =>
+          character.imageAssetId
+            ? [{ characterDocumentId: character.characterDocumentId, assetId: character.imageAssetId }]
+            : [],
+        );
     }
     if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
-    if (sceneDocumentId && !refs.sceneAssetId) {
-      const explicitRefs = { ...refs };
-      delete explicitRefs.sceneAssetId;
-      persist(explicitRefs);
-    } else persist(refs);
+    // Automatic scene/cast defaults are saved to the durable binding record,
+    // but must not become a local override that blocks future scene changes.
+    await persist(next, false);
     return next;
   };
 
@@ -367,6 +492,7 @@ function ShotWorkspaceContent({
         ![
           ...(resolved.characterAssetIds ?? []),
           resolved.characterAssetId,
+          ...(resolved.sceneAssetIds ?? []),
           resolved.sceneAssetId,
           resolved.firstFrameAssetId,
         ].some(Boolean)
@@ -401,6 +527,7 @@ function ShotWorkspaceContent({
     characters.some((c) => !c.imageDisabled) ||
     refs.characterAssetId ||
     effectiveRefs.sceneAssetId ||
+    effectiveRefs.sceneAssetIds?.length ||
     refs.firstFrameAssetId,
   );
 
@@ -449,7 +576,7 @@ function ShotWorkspaceContent({
           <button
             className="button secondary"
             type="button"
-            disabled={!writable || (!hasSelectedRefs && !sceneDocumentId)}
+            disabled={!writable || (!hasSelectedRefs && !sceneDocumentIds.length)}
             onClick={() => {
               void generate('video');
             }}
@@ -477,8 +604,10 @@ function ShotWorkspaceContent({
           defaults={castMedia.value?.characters ?? []}
           mediaLoading={castMedia.loading}
           sceneLabel={
-            sceneDocumentId
-              ? (documents.find((item) => item.id === sceneDocumentId)?.title ?? '资料不可用')
+            sceneDocumentIds.length
+              ? sceneDocumentIds
+                  .map((id) => documents.find((item) => item.id === id)?.title ?? '资料不可用')
+                  .join('、')
               : undefined
           }
           scopeNote={
@@ -517,7 +646,8 @@ function ShotWorkspaceContent({
           ) : null}
           <SceneSettingCard
             projectId={projectId}
-            documentId={sceneDocumentId}
+            documentId={primarySceneDocumentId}
+            documentIds={sceneDocumentIds}
             documents={documents}
             asset={availableAssets.find((a) => a.id === effectiveRefs.sceneAssetId)}
             images={setting.assets}
@@ -531,12 +661,14 @@ function ShotWorkspaceContent({
             onDropAsset={(asset) => assign('scene', asset.id)}
             imageDisabled={refs.ignoreSceneBinding}
             onRestore={
-              sceneDocumentId && (refs.sceneAssetId || refs.ignoreSceneBinding)
+              sceneDocumentIds.length &&
+              (refs.sceneAssetId || refs.sceneAssetIds?.length || refs.ignoreSceneBinding)
                 ? () => {
                     const next = { ...refs };
                     delete next.sceneAssetId;
+                    delete next.sceneAssetIds;
                     delete next.ignoreSceneBinding;
-                    persist(next);
+                    persistFromControl(next);
                   }
                 : undefined
             }

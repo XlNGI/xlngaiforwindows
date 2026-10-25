@@ -405,6 +405,8 @@ describe('streamPreparedLlmGeneration', () => {
       });
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'agent.generation.executeTools') return Promise.resolve({ mediaSelection });
+      if (method === 'llm.generation.observe')
+        return Promise.resolve(state('streaming', (params as { content: string }).content));
       if (method === 'agent.generation.selectMedia') {
         return Promise.resolve({
           continuation: {

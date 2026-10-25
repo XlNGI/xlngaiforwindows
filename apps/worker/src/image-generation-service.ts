@@ -90,9 +90,27 @@ export class ImageGenerationService {
     if (!validation.valid) throw new Error('Image generation parameters are invalid.');
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
-      if (params.sourceDocumentId || params.shotId) {
+      const sourceDocument = params.sourceDocumentId
+        ? repositories.documents.get(params.sourceDocumentId)
+        : undefined;
+      if (params.sourceDocumentId && (!sourceDocument || sourceDocument.projectId !== project.id))
+        throw new Error('Document was not found.');
+      if (sourceDocument?.kind === 'prop') {
+        // Prop documents supply a prompt, not a legacy character/setting production target.
+        if (
+          sourceDocument.lifecycleStatus !== 'active' ||
+          database
+            .prepare(
+              "SELECT 1 FROM document_bindings WHERE document_id=? AND domain_scope='novel' AND status<>'archived'",
+            )
+            .get(sourceDocument.id)
+        )
+          throw new Error('目标不是有效的制作道具。');
+        if (params.productionSource || params.shotId)
+          throw new Error('道具生图不能使用角色、场景或镜头制作来源。');
+      } else if (params.sourceDocumentId || params.shotId) {
         const kind = params.sourceDocumentId
-          ? repositories.documents.get(params.sourceDocumentId)?.kind === 'character'
+          ? sourceDocument?.kind === 'character'
             ? 'character'
             : 'setting'
           : 'shot';
@@ -111,11 +129,6 @@ export class ImageGenerationService {
         if (!shot || !scene || scene.projectId !== project.id)
           throw new Error('Shot was not found.');
       }
-      if (params.sourceDocumentId) {
-        const document = repositories.documents.get(params.sourceDocumentId);
-        if (!document || document.projectId !== project.id)
-          throw new Error('Document was not found.');
-      }
       const now = new Date().toISOString();
       const record: JobRecord = {
         id: randomUUID(),
@@ -130,6 +143,7 @@ export class ImageGenerationService {
           productionSource: params.productionSource,
           capability: 'image',
           adapterKey: params.adapterKey,
+          assetKind: params.assetKind,
           schemaVersion: adapter.schemaVersion,
           schemaSource: 'official-adapter',
           providerProfileId: params.providerProfileId,

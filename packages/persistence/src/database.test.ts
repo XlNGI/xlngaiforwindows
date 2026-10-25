@@ -49,12 +49,168 @@ function removeSceneBindingMigration(database: Awaited<ReturnType<typeof tempora
 }
 
 describe('project database', () => {
+  it('retries the v64 Agent quota ledger when the physical schema is ahead of the ledger', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database.exec(`
+        ALTER TABLE agent_tasks DROP COLUMN provider_cost_currency;
+        DELETE FROM schema_migrations WHERE version>=64;
+      `);
+      expect(getSchemaVersion(database)).toBe(63);
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      const columns = database.prepare('PRAGMA table_info(agent_tasks)').all() as Array<{
+        name: string;
+      }>;
+      expect(columns.map((column) => column.name)).toContain('provider_cost_currency');
+      expect(
+        database
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_task_usage'")
+          .get(),
+      ).toEqual({ name: 'agent_task_usage' });
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='agent_task_usage_task'",
+          )
+          .get(),
+      ).toEqual({ name: 'agent_task_usage_task' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rolls back review-form migration atomically and preserves saved forms on repeated migration', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database.exec(`DROP TABLE production_review_forms;
+        DELETE FROM schema_migrations WHERE version>=63;
+        CREATE TRIGGER fail_review_v63 BEFORE INSERT ON schema_migrations WHEN NEW.version=63 BEGIN SELECT RAISE(ABORT,'review failure'); END;`);
+      expect(() => migrateDatabase(database)).toThrow('review failure');
+      expect(getSchemaVersion(database)).toBe(62);
+      expect(
+        database
+          .prepare("SELECT name FROM sqlite_master WHERE name='production_review_forms'")
+          .get(),
+      ).toBeUndefined();
+      database.exec('DROP TRIGGER fail_review_v63');
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      database.exec(`INSERT INTO projects(id,name,created_at,updated_at) VALUES('review-project','Project','now','now');
+        INSERT INTO conversations(id,project_id,scope_type,title,created_at,updated_at) VALUES('review-chat','review-project','project','Chat','now','now');
+        INSERT INTO production_review_forms(id,project_id,conversation_id,form_key,draft_json,source_rows_json,draft_hash,created_at,updated_at)
+          VALUES('review-form','review-project','review-chat','shot-video','{}','[]','hash','now','now');`);
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(
+        database.prepare('SELECT id,status,row_version FROM production_review_forms').all(),
+      ).toEqual([{ id: 'review-form', status: 'pending', row_version: 0 }]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('adds the IR binding repair marker atomically from v60 and preserves explicit repair state', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database.exec(`INSERT INTO projects(id,name,created_at,updated_at) VALUES('ir-v60','IR Legacy','now','now');
+        INSERT INTO scenes(id,project_id,title,position,created_at,updated_at,row_version) VALUES('scene','ir-v60','旧场次',0,'now','now',3);
+        ALTER TABLE scenes DROP COLUMN authoring_bindings_applied;
+        DELETE FROM schema_migrations WHERE version>=61;
+        CREATE TRIGGER fail_ir_binding_v61 BEFORE INSERT ON schema_migrations WHEN NEW.version=61 BEGIN SELECT RAISE(ABORT,'v61 failure'); END;`);
+      expect(() => migrateDatabase(database)).toThrow('v61 failure');
+      expect(getSchemaVersion(database)).toBe(60);
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM pragma_table_info('scenes') WHERE name='authoring_bindings_applied'",
+          )
+          .get(),
+      ).toBeUndefined();
+      database.exec('DROP TRIGGER fail_ir_binding_v61');
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(
+        database
+          .prepare('SELECT authoring_bindings_applied,row_version FROM scenes WHERE id=?')
+          .get('scene'),
+      ).toEqual({ authoring_bindings_applied: 0, row_version: 3 });
+      database.exec(
+        "UPDATE scenes SET authoring_bindings_applied=1 WHERE id='scene'; DELETE FROM schema_migrations WHERE version>=61",
+      );
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(
+        database.prepare('SELECT authoring_bindings_applied FROM scenes WHERE id=?').get('scene'),
+      ).toEqual({ authoring_bindings_applied: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('adds nullable IR columns atomically from v59 and preserves legacy production text', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database.exec(`
+        INSERT INTO projects(id,name,created_at,updated_at) VALUES('ir-v59','IR Legacy','now','now');
+        INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at,row_version)
+          VALUES('ir-scene','ir-v59','旧场次',0,'旧场次提示词','now','now',3);
+        INSERT INTO shots(id,scene_id,title,position,prompt,created_at,updated_at,row_version)
+          VALUES('ir-shot','ir-scene','旧镜头',0,'旧镜头提示词','now','now',4);
+        ALTER TABLE document_versions DROP COLUMN content_ir_json;
+        ALTER TABLE scenes DROP COLUMN authoring_ir_json;
+        ALTER TABLE shots DROP COLUMN authoring_ir_json;
+        ALTER TABLE agent_change_set_items DROP COLUMN production_authoring_ir_json;
+        DELETE FROM schema_migrations WHERE version>=60;
+      `);
+      expect(getSchemaVersion(database)).toBe(59);
+      database.exec(
+        "CREATE TRIGGER fail_ir_v60 BEFORE INSERT ON schema_migrations WHEN NEW.version=60 BEGIN SELECT RAISE(ABORT,'v60 failure'); END;",
+      );
+
+      expect(() => migrateDatabase(database)).toThrow('v60 failure');
+      expect(getSchemaVersion(database)).toBe(59);
+      expect(
+        database
+          .prepare("SELECT name FROM pragma_table_info('scenes') WHERE name='authoring_ir_json'")
+          .get(),
+      ).toBeUndefined();
+
+      database.exec('DROP TRIGGER fail_ir_v60');
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(
+        database
+          .prepare('SELECT title,video_prompt,row_version FROM scenes WHERE id=?')
+          .get('ir-scene'),
+      ).toEqual({ title: '旧场次', video_prompt: '旧场次提示词', row_version: 3 });
+      expect(
+        database.prepare('SELECT title,prompt,row_version FROM shots WHERE id=?').get('ir-shot'),
+      ).toEqual({ title: '旧镜头', prompt: '旧镜头提示词', row_version: 4 });
+      expect(
+        database.prepare('SELECT authoring_ir_json FROM scenes WHERE id=?').get('ir-scene'),
+      ).toEqual({
+        authoring_ir_json: JSON.stringify({
+          schemaVersion: 1,
+          kind: 'scene',
+          prompt: '旧场次提示词',
+        }),
+      });
+      expect(() =>
+        database
+          .prepare('UPDATE scenes SET authoring_ir_json=? WHERE id=?')
+          .run('{invalid', 'ir-scene'),
+      ).toThrow();
+      expect(checkIntegrity(database).ok).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
   it('upgrades populated v48 shot prompts atomically and keeps the shot-only proposal guard', async () => {
     const database = await temporaryDatabase();
     try {
       migrateDatabase(database);
-      database.exec(`DROP TABLE production_instruction_versions;
-        DROP TABLE production_execution_lists;
+      database.exec(`DROP TABLE production_instruction_versions_archive;
+        DROP TABLE production_execution_lists_archive;
         ALTER TABLE shots RENAME COLUMN prompt TO old_prompt;
         ALTER TABLE shots ADD COLUMN prompt TEXT CHECK(prompt IS NULL OR length(trim(prompt))<=2000);
         UPDATE shots SET prompt=old_prompt;

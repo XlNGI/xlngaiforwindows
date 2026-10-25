@@ -37,13 +37,13 @@
 .dubbing-heading h2,
 .dubbing-heading h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: calc(16px * var(--ui-font-scale));
 }
 .dubbing-heading p,
 .dubbing-note {
   margin: 8px 0;
   color: var(--text-muted, #637080);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
   line-height: 1.7;
 }
 .dubbing-fields {
@@ -60,7 +60,7 @@
   display: grid;
   gap: 6px;
   min-width: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
 }
 .dubbing-panel input:not([type='checkbox']),
 .dubbing-panel select,
@@ -84,7 +84,7 @@
   align-items: flex-start;
   gap: 7px;
   margin: 10px 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
   line-height: 1.6;
 }
 .dubbing-check input {
@@ -95,7 +95,7 @@
   padding: 4px 7px;
   border-radius: 5px;
   background: var(--input-bg, #eef2f6);
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-font-scale));
 }
 .dubbing-cue-list,
 .dubbing-job-list {
@@ -116,7 +116,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   margin: 10px 0;
-  font-size: 13px;
+  font-size: calc(13px * var(--ui-font-scale));
 }
 .dubbing-takes {
   display: grid;
@@ -128,7 +128,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
 }
 .dubbing-take audio {
   width: min(290px, 100%);
@@ -150,7 +150,7 @@
 }
 .dubbing-error {
   color: var(--danger, #a72b37);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
   overflow-wrap: anywhere;
 }
 .dubbing-job-steps {
@@ -158,7 +158,7 @@
   flex-wrap: wrap;
   gap: 8px;
   margin: 8px 0;
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-font-scale));
   color: var(--text-muted, #637080);
 }
 .dubbing-panel button:focus-visible,

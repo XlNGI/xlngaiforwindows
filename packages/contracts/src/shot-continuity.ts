@@ -17,6 +17,7 @@ export interface ShotContinuityBinding {
   anchorAssetId: string;
   firstFrameAssetId?: string;
   imagePrompt?: string;
+  /** Read projection of the current shot authoring IR, never a second stored video prompt. */
   videoPrompt?: string;
 }
 export interface ShotContinuityState {

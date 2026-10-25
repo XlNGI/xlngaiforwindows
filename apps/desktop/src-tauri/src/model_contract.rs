@@ -182,20 +182,64 @@ pub(crate) fn image_payload(
         .as_object()
         .cloned()
         .ok_or("Invalid contract parameters")?;
-    // Qwen Image's official OpenAI-compatible contract uses `1024x1024`.
-    // UniComp's image transport accepts the equivalent DashScope spelling
-    // `1024*1024`; `auto` is represented by omitting the optional field.
-    if let Some(size) = object.remove("size") {
-        if let Some(value) = size.as_str() {
-            if !value.eq_ignore_ascii_case("auto") {
-                let mapped = value
-                    .split_once('x')
-                    .map(|(width, height)| format!("{width}*{height}"))
-                    .unwrap_or_else(|| value.to_string());
-                object.insert("size".into(), Value::String(mapped));
+    if contract["taskCapabilities"]
+        .as_array()
+        .is_some_and(|modes| modes.iter().any(|mode| mode == "REFERENCE_TO_IMAGE"))
+    {
+        let references = adapter_key.starts_with("REFERENCE_TO_IMAGE:");
+        if references != object.contains_key("images") {
+            return Err("Image inputs must match the selected production mode".into());
+        }
+        if let Some(images) = object.get("images").and_then(Value::as_array) {
+            for image in images {
+                validate_image_source(image.as_str().ok_or("Invalid image source")?)?;
             }
-        } else {
-            object.insert("size".into(), size);
+        }
+        if let Some(size) = object.get("size").and_then(Value::as_str) {
+            if size != "auto" {
+                let (width, height) = size.split_once('x').ok_or("Invalid image size")?;
+                let width = width.parse::<u64>().map_err(|_| "Invalid image width")?;
+                let height = height.parse::<u64>().map_err(|_| "Invalid image height")?;
+                if !(512 * 512..=2048 * 2048).contains(&(width * height))
+                    || (contract["transport"]["protocolFamily"] != "dashscope-image"
+                        && (width > height * 8 || height > width * 8))
+                {
+                    return Err(
+                        "Image size exceeds the official pixel or aspect ratio limits".into(),
+                    );
+                }
+            }
+        }
+        // Domain image arrays become the official image field only at transport time.
+        if let Some(images) = object.remove("images") {
+            let images = images.as_array().ok_or("Invalid image array")?;
+            object.insert(
+                "image".into(),
+                if images.len() == 1 {
+                    images[0].clone()
+                } else {
+                    Value::Array(images.clone())
+                },
+            );
+        }
+    }
+    // Current OpenAI image contracts preserve `x` and `auto`; old snapshots
+    // and the DashScope 2.0 channel retain the existing `*` size projection.
+    let dashscope_size = contract["taskCapabilities"].as_array().is_none()
+        || contract["transport"]["protocolFamily"] == "dashscope-image";
+    if dashscope_size {
+        if let Some(size) = object.remove("size") {
+            if let Some(value) = size.as_str() {
+                if !value.eq_ignore_ascii_case("auto") {
+                    let mapped = value
+                        .split_once('x')
+                        .map(|(width, height)| format!("{width}*{height}"))
+                        .unwrap_or_else(|| value.to_string());
+                    object.insert("size".into(), Value::String(mapped));
+                }
+            } else {
+                object.insert("size".into(), size);
+            }
         }
     }
     object.insert("model".into(), Value::String(remote_model_id.into()));
@@ -203,10 +247,152 @@ pub(crate) fn image_payload(
         .map_err(|error| format!("Unable to encode official image contract parameters: {error}"))
 }
 
+fn validate_image_source(value: &str) -> Result<(), String> {
+    use base64::Engine;
+    if value.starts_with("http://") || value.starts_with("https://") {
+        let url = tauri::Url::parse(value).map_err(|_| "Invalid reference image URL")?;
+        if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+            return Err("Invalid reference image URL".into());
+        }
+        return Ok(());
+    }
+    let (header, encoded) = value
+        .split_once(',')
+        .ok_or("Invalid reference image Data URL")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "Invalid reference image Base64")?;
+    if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
+        return Err("Reference image exceeds the official 10 MB limit".into());
+    }
+    let valid = match header {
+        "data:image/png;base64" => bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]),
+        "data:image/jpeg;base64" | "data:image/jpg;base64" => {
+            bytes.starts_with(&[0xff, 0xd8, 0xff])
+        }
+        "data:image/webp;base64" => {
+            bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
+        }
+        "data:image/bmp;base64" => bytes.starts_with(b"BM"),
+        "data:image/tiff;base64" => {
+            bytes.starts_with(b"II\x2a\x00") || bytes.starts_with(b"MM\x00\x2a")
+        }
+        "data:image/gif;base64" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        _ => false,
+    };
+    if !valid {
+        return Err("Reference image content does not match its format".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn qwen_image_modes_project_ordered_references_and_enforce_official_limits() {
+        for (id, model, revision, max) in [
+            ("cn.qwen.qwen-image-3-0", "qwen-image-3.0", 2, 3),
+            ("cn.qwen.qwen-image-3-0-pro", "qwen-image-3.0-pro", 2, 3),
+            ("cn.qwen.qwen-image-2-1-pro", "qwen-image-2.1-pro", 2, 10),
+            (
+                "cn.qwen.qwen-image-2-1-turbo",
+                "qwen-image-2.1-turbo",
+                2,
+                10,
+            ),
+            ("cn.qwen.qwen-image-2-0", "qwen-image-2.0", 1, 3),
+            ("cn.qwen.qwen-image-2-0-pro", "qwen-image-2.0-pro", 1, 3),
+        ] {
+            let key = format!("REFERENCE_TO_IMAGE:unicompapi:{id}:contract-{revision}");
+            let images: Vec<_> = (0..max)
+                .map(|i| format!("https://example.com/{i}.png"))
+                .collect();
+            let payload: Value = serde_json::from_slice(
+                &image_payload(
+                    &key,
+                    json!({"prompt":"融合人物与场景","images":images,"size":"1024x1024","n":2}),
+                    model,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(payload["model"], model);
+            assert_eq!(payload["image"], json!(images));
+            assert_eq!(
+                payload["size"],
+                if revision == 2 {
+                    "1024x1024"
+                } else {
+                    "1024*1024"
+                }
+            );
+            assert!(payload.get("images").is_none());
+            assert!(payload.get("response_format").is_none());
+            let single: Value = serde_json::from_slice(
+                &image_payload(&key, json!({"prompt":"换背景","images":[images[0]]}), model)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(single["image"], images[0]);
+            for parameters in [
+                json!({"prompt":"test"}),
+                json!({"prompt":"test","images":[]}),
+                json!({"prompt":"test","images":vec!["https://example.com/x.png"; max+1]}),
+                json!({"prompt":"test","images":images,"prompt_extend_mode":"agent"}),
+                json!({"prompt":"test","images":images,"mask":"https://example.com/mask.png"}),
+                json!({"prompt":"test","images":images,"model":"forged"}),
+                json!({"prompt":"test","images":images,"size":"4096x4096"}),
+                json!({"prompt":"test","images":["file:///C:/secret.png"]}),
+                json!({"prompt":"test","images":["data:image/png;base64,YWJj"]}),
+            ] {
+                assert!(image_payload(&key, parameters, model).is_err());
+            }
+            if revision == 2 {
+                assert!(image_payload(
+                    &key,
+                    json!({"prompt":"test","images":images,"size":"8192x64"}),
+                    model
+                )
+                .is_err());
+                let auto: Value = serde_json::from_slice(
+                    &image_payload(
+                        &key,
+                        json!({"prompt":"test","images":images,"size":"auto"}),
+                        model,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(auto["size"], "auto");
+            }
+            assert!(image_payload(
+                &key,
+                json!({"prompt":"test","images":images}),
+                "other-model"
+            )
+            .is_err());
+            let text = format!("TEXT_TO_IMAGE:unicompapi:{id}:contract-{revision}");
+            assert!(image_payload(&text, json!({"prompt":"test","images":images}), model).is_err());
+            assert!(image_payload(&text, json!({"prompt":"test"}), model).is_ok());
+        }
+    }
+
+    #[test]
+    fn qwen_image_accepts_real_inline_images_and_rejects_oversized_inputs() {
+        use base64::Engine;
+        let key = "REFERENCE_TO_IMAGE:unicompapi:cn.qwen.qwen-image-3-0:contract-2";
+        let model = "qwen-image-3.0";
+        let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Xn6pAAAAAElFTkSuQmCC";
+        assert!(image_payload(key, json!({"prompt":"test","images":[image]}), model).is_ok());
+        let image = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(vec![0; 10 * 1024 * 1024 + 1])
+        );
+        assert!(image_payload(key, json!({"prompt":"test","images":[image]}), model).is_err());
+    }
 
     #[test]
     fn wan_channel_preserves_audio_semantics_in_metadata_and_keeps_legacy_tasks_readable() {

@@ -1,5 +1,7 @@
 # UniCompAPI 集成与验收
 
+2026-10-22 补充：Qwen Image 3.0／Pro、2.1 Pro／Turbo 的新版合同同时开放文生图与参考生图；2.0／Pro 新增官方图片编辑合同及独立渠道字段映射。3.0／2.0 最多 3 张参考图，2.1 最多 10 张。新任务使用当前修订，旧任务保留历史合同。实现及验证见 [Qwen Image 图生图适配](./QWEN-IMAGE-EDITING-IMPLEMENTATION.md)。
+
 2026-10-16 补充：Wan 3.0／Prime 新请求使用官方 revision 3，并由独立 Binding 将素材与生成参数映射到 UniComp `metadata.input` / `metadata.parameters`。参考音频入口为公网 URL，`audio` 仅控制有声输出；未接入本地音频上传。旧修订保留用于历史任务查询。具体参数、兼容边界与验证见 [UniComp 媒体兼容层](./UNICOMP-MEDIA-COMPATIBILITY-IMPLEMENTATION.md)。
 
 日期：2026-09-18  

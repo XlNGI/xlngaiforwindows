@@ -17,4 +17,7 @@ export * from './repositories.js';
 export * from './schema.js';
 export * from './task-history.js';
 export * from './migration-v55.js';
+export * from './migration-v60.js';
+export * from './migration-v64.js';
+export * from './migration-v65.js';
 export * from './shot-continuity.js';

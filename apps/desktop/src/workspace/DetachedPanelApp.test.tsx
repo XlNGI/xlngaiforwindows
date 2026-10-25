@@ -2,6 +2,10 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest';
 import type { DetachedPanelEnvelope, DetachedPanelSnapshot } from './detached-window';
 import { DetachedPanelApp } from './DetachedPanelApp';
+import { callWorker } from '../worker-client';
+import type { AgentInputForm, AgentTaskDetail } from '@ai-video/contracts';
+
+vi.mock('../worker-client', () => ({ callWorker: vi.fn() }));
 
 const eventApi = vi.hoisted(() => ({
   emitTo: vi.fn().mockResolvedValue(undefined),
@@ -24,6 +28,164 @@ vi.mock('@tauri-apps/api/window', () => ({
 }));
 
 describe('DetachedPanelApp', () => {
+  it.each([false, true])(
+    'waits for the main window to accept question continuation and surfaces failure (failed=%s)',
+    async (failed) => {
+      const form: AgentInputForm = {
+        id: 'form',
+        taskId: 'task',
+        conversationId: 'conversation',
+        key: 'style',
+        title: '确认方向',
+        createdAt: 'now',
+        status: 'pending',
+        questions: [{ id: 'style', type: 'text', prompt: '画面风格' }],
+      };
+      let saved = form;
+      vi.mocked(callWorker).mockImplementation(((
+        method: string,
+        params: { answers?: AgentInputForm['answers'] },
+      ) => {
+        if (method === 'media.review.list') return Promise.resolve([]);
+        if (method === 'agent.input.get') return Promise.resolve(saved);
+        saved = { ...form, status: 'answered', answers: params.answers };
+        return Promise.resolve({
+          form: saved,
+          prompt: '已回答',
+          idempotencyKey: 'question-answer:form',
+        });
+      }) as typeof callWorker);
+      const config = {
+        panelId: 'conversation' as const,
+        projectId: 'project',
+        entityId: 'conversation',
+        label: 'workspace-conversation-project-conversation',
+        sessionId: 'detached',
+      };
+      const conversation = {
+        id: 'conversation',
+        projectId: 'project',
+        scopeType: 'project' as const,
+        title: '短剧设计',
+        createdAt: 'now',
+        updatedAt: 'now',
+      };
+      const user = {
+        id: 'user',
+        conversationId: 'conversation',
+        role: 'user' as const,
+        content: '设计短剧',
+        status: 'complete' as const,
+        createdAt: 'now',
+      };
+      const assistant = {
+        ...user,
+        id: 'assistant',
+        replyToMessageId: user.id,
+        role: 'assistant' as const,
+        content: '确认方向',
+      };
+      const task: AgentTaskDetail = {
+        task: {
+          id: 'task',
+          projectId: 'project',
+          conversationId: 'conversation',
+          userMessageId: user.id,
+          title: '短剧设计',
+          taskType: 'document-query',
+          scopeType: 'project',
+          status: 'completed',
+          phase: 'model_running',
+          rowVersion: 1,
+          createdAt: 'now',
+          updatedAt: 'now',
+        },
+        events: [
+          {
+            id: 'event',
+            taskId: 'task',
+            sequence: 0,
+            eventType: 'agent.user_input.requested',
+            summary: form.title,
+            createdAt: 'now',
+            level: 'info',
+            userInput: form,
+          },
+        ],
+        documents: [],
+        providerSteps: [],
+        researchSources: [],
+      };
+      const snapshot: DetachedPanelSnapshot = {
+        panelId: 'conversation',
+        projectId: 'project',
+        projectName: 'Project',
+        scopeType: 'project',
+        scopeAvailable: true,
+        writable: true,
+        conversations: [conversation],
+        conversation,
+        messages: [user, assistant],
+        agentTasks: [task],
+        composer: '未发送草稿',
+        statusMessage: '',
+        legacyLlmConfigured: false,
+        llmProfiles: [],
+        llmModels: [],
+        selectedLlmProfileId: '',
+        selectedLlmModelId: '',
+      };
+      const mounted = render(<DetachedPanelApp config={config} />);
+      act(() => {
+        eventApi.listeners.get('workspace-panel-snapshot')?.({
+          payload: {
+            label: config.label,
+            projectId: 'project',
+            entityId: 'conversation',
+            sequence: 1,
+            payload: snapshot,
+          },
+        });
+      });
+      fireEvent.change(await screen.findByLabelText('画面风格：补充回答'), {
+        target: { value: '二维动画' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '提交回答并继续' }));
+      await waitFor(() =>
+        expect(
+          eventApi.emitTo.mock.calls.some(
+            (call) =>
+              call[1] === 'workspace-panel-action' &&
+              (call[2] as { payload: { type: string } }).payload.type ===
+                'conversation-answer-questions',
+          ),
+        ).toBe(true),
+      );
+      const envelope = eventApi.emitTo.mock.calls
+        .filter((call) => call[1] === 'workspace-panel-action')
+        .at(-1)![2] as { payload: { requestId: string } };
+      expect(screen.getByRole('button', { name: '正在提交…' })).toBeDisabled();
+      act(() => {
+        if (!failed) saved = { ...saved, continuationGenerationId: 'generation' };
+        eventApi.listeners.get('workspace-question-result')?.({
+          payload: {
+            requestId: envelope.payload.requestId,
+            ...(failed ? { error: '原会话已切换' } : {}),
+          },
+        });
+      });
+      if (failed) {
+        expect(await screen.findByRole('alert')).toHaveTextContent('原会话已切换');
+        expect(screen.getByRole('button', { name: '继续处理' })).toBeEnabled();
+      } else
+        await waitFor(() =>
+          expect(screen.queryByRole('button', { name: '正在提交…' })).not.toBeInTheDocument(),
+        );
+      expect(screen.getByRole('textbox', { name: '会话消息' })).toHaveValue('未发送草稿');
+      mounted.unmount();
+    },
+  );
+
   it('renders a document snapshot and forwards edits and reattach actions to main', async () => {
     render(
       <DetachedPanelApp

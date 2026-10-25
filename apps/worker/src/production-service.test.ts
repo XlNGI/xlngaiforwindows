@@ -1,83 +1,30 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import type {
-  ProductionInstruction,
-  ProductionTarget,
-  ProductionSource,
-} from '@ai-video/contracts';
+import { afterEach, expect, it } from 'vitest';
 import { getAdapterCatalog } from '@ai-video/generation-adapters';
 import { ProjectService } from './project-service.js';
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
-import {
-  AgentSystemToolService,
-  type AgentAssetToolService,
-  type AgentSettingsToolService,
-} from './agent-system-tool-service.js';
-import { validateSessionRequestParams } from './request-validation.js';
-import { VideoGenerationService } from './video-generation-service.js';
-import { DocumentWorkflowService } from './document-workflow-service.js';
-import { ChangeSetService } from './change-set-service.js';
-import { parseEpisodeStructureArguments } from './episode-structure.js';
 
 const fixtures: Array<{ projects: ProjectService; directory: string }> = [];
 afterEach(async () => {
-  for (const fixture of fixtures.splice(0)) {
-    fixture.projects.close();
-    await rm(fixture.directory, { recursive: true, force: true });
+  for (const f of fixtures.splice(0)) {
+    f.projects.close();
+    await rm(f.directory, { recursive: true, force: true });
   }
 });
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'production-execution-'));
+  const directory = await mkdtemp(join(tmpdir(), 'production-ir-'));
   const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
   fixtures.push({ projects, directory });
-  const project = projects.create(join(directory, 'project'), '制作清单');
+  projects.create(join(directory, 'project'), '制作 IR');
   const content = new ContentService(projects);
-  const actor = content.saveDocument({
-    kind: 'character',
-    title: '林澈',
-    contentMarkdown: '角色设定',
-  });
-  const setting = content.saveDocument({
-    kind: 'scene',
-    title: '车站',
-    contentMarkdown: '场景设定',
-  });
   const scene = content.saveScene({
     title: '雨夜',
-    sceneDocumentId: setting.id,
-    characterBindings: [{ characterDocumentId: actor.id }],
+    authoringIR: { schemaVersion: 1, kind: 'scene', prompt: '古道雨夜。' },
   });
-  const shot = content.saveShot({ sceneId: scene.id, title: '入场' });
-  return {
-    projects,
-    project,
-    content,
-    actor,
-    setting,
-    scene,
-    shot,
-    service: new ProductionService(projects),
-  };
-}
-function instruction(patch: Partial<ProductionInstruction> = {}): ProductionInstruction {
-  return {
-    version: 1,
-    summary: '雨中的车站',
-    subjects: [],
-    visual: {},
-    beats: [],
-    audio: { mode: 'silent' },
-    generation: {},
-    resources: [],
-    continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
-    ...patch,
-  };
-}
-function operation(target: ProductionTarget, expectedRowVersion: number, spec = instruction()) {
-  return { action: 'set_prompt', target, expectedRowVersion, instruction: spec };
+  return { projects, content, scene, service: new ProductionService(projects) };
 }
 const wan = () =>
   getAdapterCatalog().adapters.find(
@@ -87,1486 +34,217 @@ const wan = () =>
       a.provider === 'wan-video',
   )!;
 
-describe('production execution in the project store', () => {
-  it('uses only the declared shot cast for automatic images, keeps warnings advisory and preserves manual inputs', async () => {
-    const f = await setup();
-    const blind = f.content.saveDocument({
-      kind: 'character',
-      title: '老瞎子',
-      contentMarkdown: '左臂自肘部断缺，双目失明',
-    });
-    const absent = f.content.saveDocument({
-      kind: 'character',
-      title: '烛阴',
-      contentMarkdown: '本场后镜才出现',
-    });
-    const actors = [f.actor, blind, absent];
-    for (const actor of actors) {
-      await writeFile(join(f.project.rootPath, `assets/${actor.id}.png`), 'fixture');
-      f.projects.access(true, (db, p) =>
-        db
-          .prepare(
-            "INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,'generated-image',?,'original',7,'now')",
-          )
-          .run(actor.id, p.id, `assets/${actor.id}.png`),
-      );
-    }
-    const scene = f.content.saveScene({
+it('compiles the verbatim IR prompt and explicit timing without interpreting open data', async () => {
+  const f = await setup();
+  const ir = {
+    schemaVersion: 1 as const,
+    kind: 'shot' as const,
+    prompt: '  她在发丝缝隙间看向镜头。\n保留雨声，无配乐。  ',
+    timing: { estimatedDurationSeconds: 5, rationale: '反手制敌和转身' },
+    data: { timing: { estimatedDurationSeconds: 999 }, audio: '这是开放描述，不是执行字段' },
+  };
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回身', authoringIR: ir });
+  const target = { kind: 'shot' as const, id: shot.id };
+  expect(f.service.read(target)).toMatchObject({
+    authoringIR: ir,
+    compiledPrompt: ir.prompt,
+    estimatedDurationSeconds: 5,
+  });
+  const compiled = f.service.compile({ target, adapterKey: wan().key });
+  expect(compiled.parameters.prompt).toBe(ir.prompt);
+  expect(Number(compiled.parameters.duration)).toBe(5);
+  expect(JSON.stringify(compiled.parameters)).not.toContain('开放描述');
+  expect(f.service.read({ kind: 'scene', id: f.scene.id })).toMatchObject({
+    compiledPrompt: '古道雨夜。',
+    timeline: [{ shotId: shot.id, startSeconds: 0, endSeconds: 5 }],
+  });
+});
+
+it('rejects conflicting prompt projections and stale CAS without changing the saved IR', async () => {
+  const f = await setup();
+  const ir = { schemaVersion: 1 as const, kind: 'shot' as const, prompt: '原始提示词' };
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回身', authoringIR: ir });
+  const update = {
+    shotId: shot.id,
+    sceneId: shot.sceneId,
+    title: shot.title,
+    expectedRowVersion: shot.rowVersion,
+    authoringIR: ir,
+  };
+  expect(() => f.content.saveShot({ ...update, prompt: '不同正文' })).toThrow('must match');
+  expect(() =>
+    f.content.saveShot({ ...update, authoringIR: null, prompt: '不能同时清除和写入正文' }),
+  ).toThrow('must be empty');
+  expect(() =>
+    f.content.saveScene({
       sceneId: f.scene.id,
       title: f.scene.title,
       expectedRowVersion: f.scene.rowVersion,
-      characterBindings: actors.map((actor) => ({
-        characterDocumentId: actor.id,
-        imageAssetId: actor.id,
-      })),
-    });
-    const second = f.content.saveShot({ sceneId: scene.id, title: '烛阴现身' });
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    const shotSpec = (ids: string[]): ProductionInstruction =>
-      instruction({
-        version: 2,
-        narrative: { purpose: '收束开场' },
-        camera: { framing: '中远景' },
-        stillFrame: '门外雾气渐浓',
-        timing: { estimatedDurationSeconds: 8, rationale: '转身、探路、落锤' },
-        subjects: ids.map((id) => ({ documentId: id })),
-        beats: [
-          {
-            id: 'leave',
-            startSeconds: 0,
-            endSeconds: 8,
-            action: '人物离去，江晚停锤片刻',
-            characterDocumentIds: ids,
-            dialogue: [],
-          },
-        ],
-        generation: { duration: 8 },
-      });
-    const first = shotSpec([f.actor.id, blind.id]);
-    first.reviewNotes = ['老资料的断臂侧别有差异，保留待核实。'];
-    first.subjects[1]!.appearance = '右肩空荡';
-    first.continuity.locked = [
-      {
-        key: '断臂',
-        value: '左臂自肘部断缺',
-        comparison: {
-          entity: { kind: 'character', id: blind.id },
-          attribute: 'arm',
-          state: 'left-elbow',
-        },
-      },
-    ];
-    f.service.execute({
-      executionKey: 'scoped-cast',
-      operations: [
-        operation(
-          { kind: 'scene', id: scene.id },
-          scene.rowVersion,
-          instruction({
-            subjects: actors.map((actor) => ({ documentId: actor.id })),
-            resources: [
-              {
-                kind: 'character-image',
-                documentId: absent.id,
-                required: true,
-                purpose: '后镜烛阴',
-              },
-            ],
-          }),
-        ),
-        operation(target, f.shot.rowVersion, first),
-        operation({ kind: 'shot', id: second.id }, second.rowVersion, shotSpec([absent.id])),
-      ],
-    });
-    const model = getAdapterCatalog().adapters.find(
-      (a) => a.contractId === 'cn.happyhorse.1.1.r2v' && a.provider === 'unicompapi',
-    )!;
-    const compiled = f.service.compile({ target, adapterKey: model.key });
-    expect(compiled.issues).toEqual([]);
-    expect(compiled.notices?.map((notice) => notice.code)).toEqual(
-      expect.arrayContaining(['AUTHORING_REVIEW_NOTE', 'CHARACTER_DETAIL_REVIEW']),
-    );
-    expect(compiled.parameters.images).toEqual([
-      `project-asset://${f.actor.id}`,
-      `project-asset://${blind.id}`,
-    ]);
-    expect(compiled.parameters.prompt).not.toContain('烛阴');
-    expect(compiled.parameters.prompt).not.toContain('老资料的断臂侧别');
-    expect(
-      compiled.sceneInputs?.scene.characterBindings?.map((c) => c.characterDocumentId),
-    ).toEqual([f.actor.id, blind.id]);
-    expect(f.content.listScenes()[0]!.characterBindings).toHaveLength(3);
-    expect(() =>
-      f.service.assertSource(compiled.source, target, model.key, {
-        parameters: compiled.parameters,
-      }),
-    ).not.toThrow();
-    const segment = f.service.compile({
-      target: { kind: 'scene', id: scene.id },
-      adapterKey: model.key,
-      shotIds: [f.shot.id],
-    });
-    expect(segment.parameters.images).toEqual(compiled.parameters.images);
-    const manual = f.service.compile({
-      target,
-      adapterKey: model.key,
-      inputImages: [{ assetId: absent.id, role: 'reference' }],
-    });
-    expect(manual.parameters.images).toEqual([`project-asset://${absent.id}`]);
-    const full = f.service.compile({
-      target: { kind: 'scene', id: scene.id },
-      adapterKey: model.key,
-    });
-    expect(full.parameters.images).toHaveLength(3);
-    expect(
-      f.projects.access(false, (db) =>
-        db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
-      ),
-    ).toEqual({ count: 0 });
-  });
-
-  it('prepares the final form without imposing saved story facts, duration or required references', async () => {
-    const f = await setup();
-    const scene = { kind: 'scene' as const, id: f.scene.id };
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    f.service.execute({
-      executionKey: 'form-authoring',
-      operations: [
-        operation(
-          scene,
-          f.scene.rowVersion,
-          instruction({
-            continuity: {
-              predecessors: [],
-              before: [],
-              after: [],
-              constraints: [],
-              locked: [{ key: '沈孤鸿外观', value: '暗青长袍、束发' }],
-            },
-          }),
-        ),
-        operation(
-          target,
-          f.shot.rowVersion,
-          instruction({
-            summary: '原制作说明',
-            timing: { estimatedDurationSeconds: 20, rationale: '原剧情时长' },
-            resources: [
-              {
-                kind: 'character-image',
-                documentId: f.actor.id,
-                required: true,
-                purpose: '原角色参考图',
-              },
-            ],
-            continuity: {
-              predecessors: [],
-              after: [],
-              constraints: [],
-              before: [{ key: '沈孤鸿状态', value: '长剑出鞘' }],
-              locked: [{ key: '沈孤鸿外观', value: '暗青长袍、披发' }],
-            },
-          }),
-        ),
-      ],
-    });
-    const read = f.service.read(target);
-    expect(read.issues.map((issue) => issue.code)).toContain('LOCKED_FACT_CHANGED');
-    const form: ProductionSource = { ...read.source!, mode: 'form' };
-    f.content.saveShot({
-      shotId: f.shot.id,
-      sceneId: f.scene.id,
-      title: f.shot.title,
-      prompt: '修改过的镜头正文',
-      expectedRowVersion: read.rowVersion,
-    });
-    const parameters = {
-      prompt: '江晚继续打铁，老瞎子离去',
-      duration: 5,
-      resolution: '720P',
-      ratio: '9:16',
-      audio: false,
-    };
-    const videos = new VideoGenerationService(f.projects);
-    const prepare = (patch = {}) =>
-      videos.prepare({
-        adapterKey: wan().key,
-        shotId: f.shot.id,
-        parameters,
-        providerRegion: 'cn',
-        productionSource: form,
-        ...patch,
-      });
-    const job = prepare();
-    expect(job.request).toEqual(parameters);
-    expect(job.request.prompt).not.toContain('沈孤鸿');
-    const snapshot = f.projects.access(false, (db) =>
-      db.prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?').get(job.id),
-    ) as { task_snapshot_json: string };
-    expect(
-      (JSON.parse(snapshot.task_snapshot_json) as { productionSource: ProductionSource })
-        .productionSource,
-    ).toEqual(form);
-    expect(() => prepare({ parameters: { ...parameters, duration: 999 } })).toThrow(
-      'parameters are invalid',
-    );
-    expect(() => prepare({ productionSource: { mode: 'form', target: scene } })).toThrow(
-      '目标对象不匹配',
-    );
-    expect(() =>
-      f.service.assertSource(
-        { mode: 'form', target: { kind: 'shot', id: 'missing' } },
-        { kind: 'shot', id: 'missing' },
-      ),
-    ).toThrow('镜头不存在');
-  });
-
-  it('validates explicit form provenance while retaining strict instruction-source validation', async () => {
-    const f = await setup();
-    const params = {
-      adapterKey: wan().key,
-      shotId: f.shot.id,
-      parameters: {},
-      providerRegion: 'cn',
-      providerProfileId: 'profile',
-      modelId: 'model',
-      productionSource: { mode: 'form', target: { kind: 'shot', id: f.shot.id } },
-    };
-    expect(() => validateSessionRequestParams('video.generate.prepare', params)).not.toThrow();
-    expect(() =>
-      validateSessionRequestParams('image.generate.prepare', {
-        adapterKey: 'image',
-        shotId: f.shot.id,
-        parameters: {},
-        productionSource: params.productionSource,
-        providerProfileId: 'profile',
-        modelId: 'model',
-      }),
-    ).not.toThrow();
-    expect(() =>
-      validateSessionRequestParams('video.generate.prepare', {
-        ...params,
-        productionSource: { target: params.productionSource.target },
-      }),
-    ).toThrow();
-    for (const invalid of [{ mode: 'unchecked' }, { token: 'invalid' }, { revision: 0 }])
-      expect(() =>
-        validateSessionRequestParams('video.generate.prepare', {
-          ...params,
-          productionSource: { ...params.productionSource, ...invalid },
-        }),
-      ).toThrow();
-  });
-
-  it('includes resource documents outside the scene cast in provenance and no-op checks', async () => {
-    const f = await setup();
-    const resource = f.content.saveDocument({
-      kind: 'scene',
-      title: '道具资料',
-      contentMarkdown: '旧道具设定',
-    });
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    const spec = instruction({
-      resources: [
-        { kind: 'prop-image', documentId: resource.id, required: false, purpose: '道具参考' },
-      ],
-    });
-    f.service.execute({
-      executionKey: 'resource-before',
-      operations: [operation(target, f.shot.rowVersion, spec)],
-    });
-    const before = f.service.read(target);
-    f.content.saveDocument({
-      documentId: resource.id,
-      kind: 'scene',
-      title: resource.title,
-      contentMarkdown: '新道具设定',
-    });
-    const stale = f.service.read(target);
-    expect(stale.issues.map((issue) => issue.code)).toContain('STALE_INSTRUCTION');
-    expect(stale.source?.token).not.toBe(before.source?.token);
-    expect(
-      f.service.execute({
-        executionKey: 'resource-after',
-        operations: [operation(target, before.rowVersion, spec)],
-      }),
-    ).toMatchObject({ changedCount: 1 });
-    expect(f.service.read(target)).toMatchObject({ source: { revision: 2 }, issues: [] });
-  });
-
-  it('compares real entity states, inherits shared initial facts and retains unresolved prose as unverified', async () => {
-    const f = await setup();
-    const scene = { kind: 'scene' as const, id: f.scene.id };
-    const first = { kind: 'shot' as const, id: f.shot.id };
-    const second = f.content.saveShot({ sceneId: f.scene.id, title: '后镜' });
-    const target = { kind: 'shot' as const, id: second.id };
-    const fact = (value: string, state = 'held') => ({
-      key: '物品位置',
-      value,
-      comparison: { entity: scene, attribute: 'prop.letter.location', state },
-    });
-    const spec = (patch: Partial<ProductionInstruction['continuity']>) =>
-      instruction({
-        continuity: {
-          predecessors: [],
-          before: [],
-          after: [],
-          locked: [],
-          constraints: [],
-          ...patch,
-        },
-      });
-    f.service.execute({
-      executionKey: 'comparable',
-      operations: [
-        operation(scene, f.scene.rowVersion, spec({ before: [fact('在手中')] })),
-        operation(
-          first,
-          f.shot.rowVersion,
-          spec({ before: [fact('拿在手中观察')], after: [fact('依然拿着信封')] }),
-        ),
-        operation(target, second.rowVersion, spec({ before: [fact('在手中，正在展开')] })),
-      ],
-    });
-    expect(f.service.read(scene).issues).toEqual([]);
-    expect(f.service.read(target).issues).toEqual([]);
-    const result = f.service.execute({
-      executionKey: 'conflict',
-      operations: [
-        operation(
-          target,
-          f.service.read(target).rowVersion,
-          spec({ before: [fact('桌上', 'table')] }),
-        ),
-      ],
-    });
-    expect(result).toMatchObject({
-      status: 'applied',
-    });
-    expect(result.issues).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: 'CONTINUITY_CONFLICT', target })]),
-    );
-    expect(f.service.read(scene).issues.map((issue) => issue.code)).toContain(
-      'CONTINUITY_CONFLICT',
-    );
-    expect(() => f.service.assertSource(f.service.read(target).source, target)).toThrow();
-    f.service.execute({
-      executionKey: 'unknown',
-      operations: [
-        operation(
-          target,
-          f.service.read(target).rowVersion,
-          spec({ before: [{ key: '炭灰盆', value: '墙角' }] }),
-        ),
-      ],
-    });
-    expect(f.service.read(target).issues.map((issue) => issue.code)).toContain(
-      'CONTINUITY_UNVERIFIED',
-    );
-    expect(f.service.read(target).issues.map((issue) => issue.code)).not.toContain(
-      'CONTINUITY_CONFLICT',
-    );
-    expect(() =>
-      f.service.execute({
-        executionKey: 'fake-entity',
-        operations: [
-          operation(
-            target,
-            f.service.read(target).rowVersion,
-            spec({
-              after: [
-                {
-                  ...fact('手中'),
-                  comparison: {
-                    entity: { kind: 'scene', id: 'invented' },
-                    attribute: 'location',
-                    state: 'held',
-                  },
-                },
-              ],
-            }),
-          ),
-        ],
-      }),
-    ).toThrow();
-  });
-
-  it('saves references first even when listed last and snapshots every consumer against the final batch', async () => {
-    const f = await setup();
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    f.service.execute({
-      executionKey: 'mixed-order',
-      operations: [
-        operation(target, f.shot.rowVersion),
-        operation({ kind: 'scene', id: f.scene.id }, f.scene.rowVersion),
-        operation(
-          { kind: 'character', id: f.actor.id },
-          f.actor.rowVersion,
-          instruction({ summary: '更新角色' }),
-        ),
-      ],
-    });
-    expect(f.service.read(target).issues).toEqual([]);
-    expect(f.service.read({ kind: 'scene', id: f.scene.id }).issues).toEqual([]);
-  });
-
-  it('keeps business versions on no-op, survives reopen, validates CAS, and refreshes changed sources', async () => {
-    const f = await setup();
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    const first = f.service.execute({
-      executionKey: 'first',
-      operations: [operation(target, f.shot.rowVersion)],
-    });
-    const saved = f.service.read(target);
-    f.projects.close();
-    f.projects.open(join(fixtures.at(-1)!.directory, 'project'));
-    const repeated = f.service.execute({
-      executionKey: 'second',
-      operations: [operation(target, saved.rowVersion)],
-    });
-    expect(repeated).toMatchObject({
-      status: 'applied',
-      changedCount: 0,
-      unchangedCount: 1,
-      operations: [
-        expect.objectContaining({ changed: false, revision: 1, rowVersion: saved.rowVersion }),
-      ],
-    });
-    expect(f.service.read(target).source).toEqual(saved.source);
-    expect(() =>
-      f.service.execute({
-        executionKey: 'old-cas',
-        operations: [operation(target, f.shot.rowVersion)],
-      }),
-    ).toThrow('已被修改');
-    expect(
-      f.service.execute({
-        executionKey: 'first',
-        operations: [operation(target, f.shot.rowVersion)],
-      }),
-    ).toEqual(first);
-    expect(() =>
-      f.service.execute({
-        executionKey: 'first',
-        operations: [operation(target, saved.rowVersion)],
-      }),
-    ).toThrow('执行键');
-    f.content.saveDocument({
-      documentId: f.actor.id,
-      kind: 'character',
-      title: f.actor.title,
-      contentMarkdown: '新资料',
-    });
-    expect(
-      f.service.execute({
-        executionKey: 'source-change',
-        operations: [operation(target, saved.rowVersion)],
-      }),
-    ).toMatchObject({ changedCount: 1 });
-    expect(f.service.read(target).source?.revision).toBe(2);
-  });
-
-  it('derives replay keys from task payload and rolls back a mixed batch on persistence failure', async () => {
-    const f = await setup();
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    const identity = {
-      projectId: f.project.id,
-      projectSessionId: 'test',
-      conversationId: 'test',
-      taskId: 'test',
-    };
-    const input = { operations: [operation(target, f.shot.rowVersion)] };
-    const first = f.service.execute(input, identity);
-    expect(f.service.execute(input, identity)).toEqual(first);
-    const before = f.service.read(target);
-    const other = f.content.saveShot({ sceneId: f.scene.id, title: '第二镜' });
-    f.projects.access(true, (db) =>
-      db.exec(
-        "CREATE TEMP TRIGGER fail_instruction BEFORE INSERT ON production_instruction_versions BEGIN SELECT RAISE(ABORT,'injected persistence failure'); END",
-      ),
-    );
-    expect(() =>
-      f.service.execute({
-        executionKey: 'rollback',
-        operations: [
-          operation(target, before.rowVersion),
-          operation({ kind: 'shot', id: other.id }, other.rowVersion),
-        ],
-      }),
-    ).toThrow('injected persistence failure');
-    expect(f.service.read(target).source).toEqual(before.source);
-    expect(f.content.listShots(f.scene.id).find((s) => s.id === other.id)?.rowVersion).toBe(
-      other.rowVersion,
-    );
-    f.projects.access(false, (db) =>
-      expect(
-        db.prepare("SELECT 1 FROM production_execution_lists WHERE execution_key='rollback'").get(),
-      ).toBeUndefined(),
-    );
-  });
-
-  it('identifies changed references and repairs parent and shot instructions without losing manual edits', async () => {
-    const f = await setup();
-    const sceneTarget = { kind: 'scene' as const, id: f.scene.id };
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    f.service.execute({
-      executionKey: 'before-reference-edit',
-      operations: [
-        operation(sceneTarget, f.scene.rowVersion),
-        operation(target, f.shot.rowVersion),
-      ],
-    });
-    const old = f.service.read(target);
-    const updated = f.content.saveShot({
-      shotId: f.shot.id,
-      sceneId: f.scene.id,
-      title: f.shot.title,
-      prompt: '手工保留的对白和动作',
-      expectedRowVersion: old.rowVersion,
-    });
-    f.content.saveDocument({
-      documentId: f.actor.id,
-      kind: 'character',
-      title: f.actor.title,
-      contentMarkdown: '更新后的角色设定，仍保留原人物身份',
-    });
-    // Keep the reference update ordering deterministic on fast clocks.
-    f.projects.access(true, (db) =>
-      db
-        .prepare(
-          "UPDATE document_versions SET created_at='2099-01-01T00:00:00.000Z' WHERE id=(SELECT current_version_id FROM documents WHERE id=?)",
-        )
-        .run(f.actor.id),
-    );
-    const before = f.service.read(target);
-    const stale = before.issues.filter((issue) => issue.code === 'STALE_INSTRUCTION');
-    expect(stale.map((issue) => issue.target)).toEqual([target, sceneTarget]);
-    expect(stale[0]).toMatchObject({
-      targetTitle: '入场',
-      changedReferences: [{ target: { kind: 'character', id: f.actor.id }, title: '林澈' }],
-    });
-    expect(stale[0]!.message).toContain('林澈');
-    expect(stale[0]!.message).not.toContain(f.shot.id);
-    expect(() => f.service.assertSource(before.source, target)).toThrow('更新制作指令');
-    expect(f.service.compile({ target, adapterKey: wan().key }).issues).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: 'STALE_INSTRUCTION' })]),
-    );
-    expect(f.service.read(target).source).toEqual(before.source);
-    expect(f.content.listShots(f.scene.id)[0]!.prompt).toBe('手工保留的对白和动作');
-    // The author reads the current text and explicitly incorporates it in the new revision.
-    const result = f.service.execute({
-      executionKey: 'after-reference-edit',
-      operations: [
-        operation(
-          sceneTarget,
-          f.service.read(sceneTarget).rowVersion,
-          instruction({ summary: '保留原场次，只同步角色新设定' }),
-        ),
-        operation(target, updated.rowVersion, instruction({ summary: '手工保留的对白和动作' })),
-      ],
-    });
-    expect(result).toMatchObject({ status: 'applied', readiness: 'ready' });
-    const current = f.service.read(target);
-    expect(current.issues).toEqual([]);
-    expect(current.source?.revision).toBe(2);
-    expect(f.content.listShots(f.scene.id)[0]!.prompt).toContain('手工保留的对白和动作');
-    expect(() => f.service.assertSource(old.source, target)).toThrow('制作来源已变化');
-    f.projects.access(false, (db) =>
-      expect(db.prepare('SELECT COUNT(*) AS n FROM generation_jobs').get()).toEqual({ n: 0 }),
-    );
-  });
-
-  it('preserves drafts with an unprepared real predecessor but rejects nonexistent IDs atomically', async () => {
-    const f = await setup();
-    const next = f.content.saveShot({ sceneId: f.scene.id, title: '后镜' });
-    const target = { kind: 'shot' as const, id: next.id };
-    const spec = instruction({
-      continuity: {
-        predecessors: [{ kind: 'shot', id: f.shot.id }],
-        before: [],
-        after: [],
-        locked: [],
-        constraints: [],
-      },
-    });
-    const result = f.service.execute({
-      executionKey: 'unprepared',
-      operations: [operation(target, next.rowVersion, spec)],
-    });
-    expect(result).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
-    expect(f.service.read(target).issues.map((i) => i.code)).toContain(
-      'DEPENDENCY_INSTRUCTION_MISSING',
-    );
-    expect(() => f.service.assertSource(f.service.read(target).source, target)).toThrow(
-      '尚无结构化',
-    );
-    const version = f.service.read(target).rowVersion;
-    spec.continuity.predecessors[0]!.id = 'missing';
-    expect(() =>
-      f.service.execute({
-        executionKey: 'invalid-reference',
-        operations: [operation(target, version, spec)],
-      }),
-    ).toThrow('不存在');
-    expect(f.service.read(target).rowVersion).toBe(version);
-    expect(f.service.read(target).instruction?.continuity.predecessors[0]?.id).toBe(f.shot.id);
-  });
-  it('adapts an unselected recording preference without rewriting the creative instruction', async () => {
-    const f = await setup();
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    f.service.execute({
-      executionKey: 'unselected-recording',
-      operations: [
-        operation(
-          target,
-          f.shot.rowVersion,
-          instruction({
-            audio: { mode: 'dialogue-driven', ambience: '雨声' },
-            generation: { duration: 8 },
-          }),
-        ),
-      ],
-    });
-    const before = f.service.read(target);
-    const adapter = getAdapterCatalog().adapters.find(
-      (a) => a.contractId === 'cn.happyhorse.1.1.r2v',
-    )!;
-    const compiled = f.service.compile({ target, adapterKey: adapter.key });
-    expect(compiled.issues).toEqual([]);
-    expect(compiled.instruction?.audio.mode).toBe('auto');
-    expect(compiled.notices?.map((n) => n.code)).toContain('AUDIO_METHOD_ADAPTED');
-    expect(compiled.parameters.prompt).toContain('雨声');
-    expect(f.service.read(target)).toEqual(before);
-    expect(before.instruction?.audio.mode).toBe('dialogue-driven');
-    expect(() =>
-      f.service.assertSource(compiled.source, target, adapter.key, {
-        parameters: compiled.parameters,
-      }),
-    ).not.toThrow();
-    expect(() =>
-      f.service.assertSource(compiled.source, target, adapter.key, {
-        parameters: { ...compiled.parameters, duration: 5 },
-      }),
-    ).toThrow('实际提交时长');
-  });
-  it('preserves selected image roles in the source and rejects changed selections or asset versions', async () => {
-    const f = await setup();
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    for (const id of ['board', 'frame']) {
-      await writeFile(join(f.project.rootPath, `assets/${id}.png`), 'fixture');
-      f.projects.access(true, (db, p) =>
-        db
-          .prepare(
-            "INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,'generated-image',?,'original',7,'now')",
-          )
-          .run(id, p.id, `assets/${id}.png`),
-      );
-    }
-    f.service.execute({
-      executionKey: 'roles',
-      operations: [
-        operation(target, f.shot.rowVersion, instruction({ generation: { duration: 8 } })),
-      ],
-    });
-    const adapter = getAdapterCatalog().adapters.find(
-      (a) => a.contractId === 'cn.happyhorse.1.1.i2v',
-    )!;
-    const inputImages = [
-      { assetId: 'board', role: 'character' as const },
-      { assetId: 'frame', role: 'first-frame' as const },
-    ];
-    const prepared = f.service.compile({ target, adapterKey: adapter.key, inputImages });
-    expect(prepared.issues).toEqual([]);
-    expect(prepared.parameters.images).toEqual(['project-asset://frame']);
-    expect(prepared.source?.inputImages).toEqual(inputImages);
-    expect(() =>
-      f.service.assertSource(prepared.source, target, adapter.key, {
-        parameters: { ...prepared.parameters, images: ['https://example.com/another-frame.png'] },
-      }),
-    ).toThrow('本镜首帧');
-    expect(() =>
-      f.service.assertSource(prepared.source, target, adapter.key, {
-        parameters: prepared.parameters,
-      }),
-    ).not.toThrow();
-    const withoutFrame = f.service.compile({
-      target,
-      adapterKey: adapter.key,
-      inputImages: inputImages.slice(0, 1),
-    });
-    expect(withoutFrame.issues.map((i) => i.code)).toContain('INPUT_SELECTION_CONFLICT');
-    expect(() =>
-      f.service.compile({
-        target,
-        adapterKey: adapter.key,
-        inputImages: inputImages.slice(0, 1),
-        expectedToken: prepared.source!.token,
-      }),
-    ).toThrow('制作来源已变化');
-    f.projects.access(true, (db) =>
-      db.prepare("UPDATE assets SET content_hash='changed' WHERE id='frame'").run(),
-    );
-    expect(() => f.service.assertSource(prepared.source, target, adapter.key)).toThrow('制作来源');
-  });
-  it('keeps video editing independent of generation-duration segment planning', async () => {
-    const f = await setup();
-    const second = f.content.saveShot({ sceneId: f.scene.id, title: '第二镜' });
-    const target = { kind: 'scene' as const, id: f.scene.id };
-    f.service.execute({
-      executionKey: 'editing',
-      operations: [
-        operation(target, f.scene.rowVersion),
-        operation(
-          { kind: 'shot', id: f.shot.id },
-          f.shot.rowVersion,
-          instruction({ generation: { duration: 8 } }),
-        ),
-        operation(
-          { kind: 'shot', id: second.id },
-          second.rowVersion,
-          instruction({ generation: { duration: 15 } }),
-        ),
-      ],
-    });
-    const adapter = getAdapterCatalog().adapters.find(
-      (a) => a.contractId === 'cn.happyhorse.1.0.video-edit',
-    )!;
-    const compiled = f.service.compile({ target, adapterKey: adapter.key });
-    expect(compiled.timeline).toHaveLength(2);
-    expect(compiled.estimatedDurationSeconds).toBe(23);
-    expect(compiled.segments).toEqual([]);
-    expect(compiled.issues.some((i) => i.code === 'SCENE_REQUIRES_SEGMENTS')).toBe(false);
-  });
-  it('keeps unspecified legacy audio on the selected model defaults instead of forcing silent output', async () => {
-    const f = await setup();
-    f.service.saveDefaults({
-      expectedRowVersion: 0,
-      settings: { generation: { resolution: '720p' } },
-    });
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    const result = f.service.compile({ target, adapterKey: wan().key });
-    expect(result.instruction?.audio.mode).toBe('auto');
-    expect(result.parameters).not.toHaveProperty('audio');
-    expect(JSON.stringify(result.parameters)).not.toContain('无声音');
-    expect(result.issues).toEqual([]);
-  });
-  it('adapts shared output preferences to the selected schema while guarding actual required audio inputs', async () => {
-    const f = await setup();
-    f.service.saveDefaults({
-      expectedRowVersion: 0,
-      settings: {
-        generation: { ratio: '9:16', resolution: '1080p', promptExtend: true, watermark: false },
-      },
-    });
-    const target = { kind: 'shot' as const, id: f.shot.id };
-    const spec = instruction({
-      audio: { mode: 'native', ambience: '雨声' },
-      generation: { duration: 8, seed: -1 },
-    });
-    f.service.execute({
-      executionKey: 'schema-native',
-      operations: [operation(target, f.shot.rowVersion, spec)],
-    });
-    const original = f.service.read(target);
-    const model = getAdapterCatalog().adapters.find(
-      (a) => a.contractId === 'cn.happyhorse.1.1.i2v',
-    )!;
-    const result = f.service.compile({ target, adapterKey: model.key });
-    expect(result.issues).toEqual([]);
-    expect(result.notices?.length).toBeGreaterThan(0);
-    expect(result.parameters).toMatchObject({ duration: 8, resolution: '1080P', watermark: false });
-    expect(result.parameters).not.toHaveProperty('ratio');
-    expect(result.parameters).not.toHaveProperty('seed');
-    expect(result.parameters).not.toHaveProperty('prompt_extend');
-    expect(result.parameters.prompt).toContain('雨声');
-    expect(() =>
-      f.service.assertSource(result.source, target, model.key, {
-        parameters: { ...result.parameters, images: ['https://example.com/frame.png'] },
-      }),
-    ).not.toThrow();
-    expect(f.service.read(target)).toEqual(original);
-    f.service.execute({
-      executionKey: 'schema-driving',
-      operations: [
-        operation(target, original.rowVersion, {
-          ...spec,
-          audio: { mode: 'dialogue-driven' },
-          resources: [
-            { kind: 'dialogue-audio', required: true, purpose: '用户指定的完整对白录音' },
-          ],
-        }),
-      ],
-    });
-    const required = f.service.compile({ target, adapterKey: model.key });
-    expect(required.issues.map((i) => i.code)).toEqual(
-      expect.arrayContaining(['UNSUPPORTED_DIALOGUE_AUDIO', 'MISSING_DIALOGUE']),
-    );
-    expect(() => f.service.assertSource(required.source, target, model.key)).toThrow('完整对白');
-  });
-  it.each([true, false])(
-    'adapts a saved prompt expansion default when switching models without rewriting the shot (enabled=%s)',
-    async (enabled) => {
-      const f = await setup();
-      f.service.saveDefaults({
-        expectedRowVersion: 0,
-        settings: { generation: { promptExtend: enabled } },
-      });
-      const target = { kind: 'shot' as const, id: f.shot.id };
-      f.service.execute({
-        executionKey: 'prompt-expansion',
-        operations: [
-          operation(
-            target,
-            f.shot.rowVersion,
-            instruction({ generation: { duration: 8, ratio: '16:9' } }),
-          ),
-        ],
-      });
-      const before = f.service.read(target);
-      const happyhorse = getAdapterCatalog().adapters.find(
-        (model) => model.contractId === 'cn.happyhorse.1.1.r2v' && model.provider === 'unicompapi',
-      )!;
-      const compiled = f.service.compile({ target, adapterKey: happyhorse.key });
-      expect(compiled.issues).toEqual([]);
-      expect(compiled.parameters).toMatchObject({ duration: 8, ratio: '16:9' });
-      expect(compiled.parameters).not.toHaveProperty('prompt_extend');
-      expect(compiled.parameters).not.toHaveProperty('promptExtend');
-      const supported = f.service.compile({ target, adapterKey: wan().key });
-      expect(supported.issues).toEqual([]);
-      expect(supported.parameters.prompt_extend).toBe(enabled);
-      expect(f.service.read(target)).toEqual(before);
-      expect(f.service.getDefaults().settings.generation?.promptExtend).toBe(enabled);
-    },
+      authoringIR: null,
+      videoPrompt: '冲突正文',
+    }),
+  ).toThrow('must be empty');
+  expect(() => f.content.saveShot({ ...update, expectedRowVersion: shot.rowVersion - 1 })).toThrow(
+    'SHOT_ROW_VERSION_CONFLICT',
   );
-  it('reviews complete scene/shot instructions atomically, derives 23 story seconds and fills every shot for two providers', async () => {
-    const f = await setup();
-    const shared = instruction({
-      version: 2,
-      narrative: { purpose: '等待、发现线索并决定离开' },
-      storyTime: { era: '现代', season: '深秋', timeOfDay: '傍晚' },
-      location: { description: '车站候车厅' },
-      style: { medium: '二维动画', technique: '赛璐璐' },
-      subjects: [{ documentId: f.actor.id, wardrobe: '蓝色外套' }],
-      generation: { ratio: '16:9', resolution: '720p' },
-    });
-    const detail = (title: string, seconds: number): ProductionInstruction =>
-      instruction({
-        version: 2,
-        summary: title,
-        narrative: { purpose: title },
-        timing: {
-          estimatedDurationSeconds: seconds,
-          rationale: '依据动作完成、观察反应和自然停顿',
-        },
-        camera: { framing: '中景', angle: '平视', movement: '缓慢前推' },
-        subjects: [{ documentId: f.actor.id }],
-        beats: [{ id: 'action', action: title, characterDocumentIds: [f.actor.id], dialogue: [] }],
-        stillFrame: `${title}开始前的画面`,
-      });
-    const structure = parseEpisodeStructureArguments(
-      JSON.stringify({
-        episodeTitle: '按剧情编排',
-        scenes: [
-          {
-            title: '线索',
-            sceneDocumentId: f.setting.id,
-            characterDocumentIds: [f.actor.id],
-            instruction: shared,
-            shots: [
-              { title: '观察线索', instruction: detail('观察线索', 8) },
-              { title: '确认后离开', instruction: detail('确认后离开', 15) },
-            ],
-          },
-        ],
-      }),
-    );
-    const spec = structure.scenes[0]!;
-    const changes = new ChangeSetService(f.projects);
-    const proposal = changes.create({
-      title: '剧情方案',
-      items: [
-        {
-          entityType: 'scene',
-          action: 'create',
-          title: spec.title,
-          sceneDocumentId: spec.sceneDocumentId,
-          characterDocumentIds: spec.characterDocumentIds,
-          videoPrompt: spec.videoPrompt,
-          instruction: spec.instruction,
-        },
-        ...spec.shots.map((shot) => ({
-          entityType: 'shot' as const,
-          action: 'create' as const,
-          parentItemOrdinal: 0,
-          ...shot,
-        })),
-      ],
-    });
-    expect(f.content.listScenes()).toHaveLength(1);
-    expect(proposal.items[1]?.instruction?.timing?.estimatedDurationSeconds).toBe(8);
-    const applied = changes.apply({
-      changeSetId: proposal.id,
-      expectedRowVersion: proposal.rowVersion,
-    });
-    expect(applied.status).toBe('applied');
-    const sceneId = applied.items[0]!.appliedEntityId!;
-    const compiled = f.service.compile({
-      target: { kind: 'scene', id: sceneId },
-      adapterKey: wan().key,
-    });
-    expect(compiled.issues).toEqual([]);
-    expect(compiled.estimatedDurationSeconds).toBe(23);
-    expect(compiled.requestedDurationSeconds).toBe(23);
-    expect(compiled.parameters).toMatchObject({
-      duration: 23,
-      ratio: '16:9',
-      resolution: '720P',
-      audio: false,
-    });
-    expect(compiled.parameters.prompt).toContain('0—8秒');
-    expect(compiled.parameters.prompt).toContain('8—23秒');
-    expect(compiled.parameters.prompt).toContain('确认后离开');
-    expect(compiled.parameters.prompt).toContain('深秋');
-    expect(compiled.parameters.prompt).toContain('蓝色外套');
-    const seedance = getAdapterCatalog().adapters.find(
-      (a) =>
-        a.contractId === 'cn.bytedance.seedance2-0.video' &&
-        a.provider === 'seedance-video' &&
-        a.capability === 'REFERENCE_TO_VIDEO',
-    )!;
-    const limited = f.service.compile({
-      target: { kind: 'scene', id: sceneId },
-      adapterKey: seedance.key,
-    });
-    expect(limited.issues.map((issue) => issue.code)).toContain('SCENE_REQUIRES_SEGMENTS');
-    expect(limited.parameters.content).toEqual([{ type: 'text', text: compiled.compiledPrompt }]);
-    expect(limited.segments?.map((segment) => segment.estimatedDurationSeconds)).toEqual([8, 15]);
-    expect(limited.parameters.duration).toBeUndefined();
-    const segment = f.service.compile({
-      target: { kind: 'scene', id: sceneId },
-      adapterKey: seedance.key,
-      shotIds: limited.segments![0]!.shotIds,
-    });
-    expect(segment.issues).toEqual([]);
-    expect(segment.parameters.duration).toBe(8);
-    expect(segment.source?.shotIds).toEqual(limited.segments![0]!.shotIds);
-    expect(() =>
-      f.service.assertSource(segment.source, { kind: 'scene', id: sceneId }, seedance.key),
-    ).not.toThrow();
-    expect(() =>
-      f.service.compile({
-        target: { kind: 'scene', id: sceneId },
-        adapterKey: seedance.key,
-        shotIds: [limited.segments![1]!.shotIds[0]!, limited.segments![0]!.shotIds[0]!],
-      }),
-    ).toThrow('按顺序连续');
-    f.projects.close();
-    f.projects.open(f.project.rootPath);
-    expect(
-      f.service.compile({ target: { kind: 'scene', id: sceneId }, adapterKey: wan().key }).source,
-    ).toEqual(compiled.source);
-    expect(
-      f.projects.access(false, (db) =>
-        db.prepare('SELECT COUNT(*) AS n FROM generation_jobs').get(),
-      ),
-    ).toEqual({ n: 0 });
-    const changed = f.content.listShots(sceneId)[0]!;
+  expect(f.service.read({ kind: 'shot', id: shot.id }).authoringIR).toEqual(ir);
+});
+
+it('does not revive prompt-column or archive rendering when the authoritative IR is absent', async () => {
+  const f = await setup();
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '空镜头' });
+  f.projects.access(true, (db) =>
+    db.prepare('UPDATE shots SET prompt=? WHERE id=?').run('仅存于投影列', shot.id),
+  );
+  const compiled = f.service.compile({
+    target: { kind: 'shot', id: shot.id },
+    adapterKey: wan().key,
+  });
+  expect(compiled.compiledPrompt).toBeUndefined();
+  expect(compiled.parameters).toEqual({});
+});
+
+it('keeps provider defaults independent, enforces CAS and invalidates compiled form tokens', async () => {
+  const f = await setup();
+  const target = { kind: 'scene' as const, id: f.scene.id };
+  const before = f.service.compile({ target, adapterKey: wan().key });
+  f.service.saveDefaults({ expectedRowVersion: 0, settings: { generation: { watermark: false } } });
+  expect(() => f.service.saveDefaults({ expectedRowVersion: 0, settings: {} })).toThrow('已变化');
+  expect(() =>
+    f.service.saveDefaults({ expectedRowVersion: 1, settings: { style: '写实' } as never }),
+  ).toThrow('无效');
+  expect(() =>
+    f.service.compile({ target, adapterKey: wan().key, expectedToken: before.source!.token }),
+  ).toThrow('已变化');
+  expect(f.service.compile({ target, adapterKey: wan().key }).parameters).toMatchObject({
+    prompt: '古道雨夜。',
+    watermark: false,
+  });
+});
+
+it('uses the complete scene prompt once and keeps ranges within selected shot prompts and timing', async () => {
+  const f = await setup();
+  f.content.saveScene({
+    sceneId: f.scene.id,
+    title: f.scene.title,
+    expectedRowVersion: f.scene.rowVersion,
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'scene',
+      prompt: '整场最终正文，包括结尾。',
+      timing: { estimatedDurationSeconds: 20, rationale: '完整剧情' },
+      data: { sharedPrompt: '不得从开放数据渲染' },
+    },
+  });
+  const shots = [1, 2].map((i) =>
     f.content.saveShot({
-      shotId: changed.id,
-      sceneId,
-      title: changed.title,
-      prompt: '手工修改后的当前剧情',
-      expectedRowVersion: changed.rowVersion,
-    });
-    const current = f.service.read({ kind: 'scene', id: sceneId });
-    expect(current.compiledPrompt).toContain('手工修改后的当前剧情');
-    expect(current.issues.map((issue) => issue.code)).toContain('STALE_INSTRUCTION');
-    expect(current.estimatedDurationSeconds).toBe(23);
-    expect(current.issues.map((issue) => issue.code)).not.toContain('MISSING_SHOT_TIMING');
-  });
-  it('tracks edits, added/reordered/deleted shots and project style in the whole-scene source without rewriting story timing', async () => {
-    const f = await setup();
-    f.service.saveDefaults({
-      expectedRowVersion: 0,
-      settings: {
-        style: { medium: '二维动画', linework: '清晰细线' },
-        generation: { ratio: '9:16' },
+      sceneId: f.scene.id,
+      title: `镜${i}`,
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: `第${i}镜完整正文`,
+        timing: { estimatedDurationSeconds: 4, rationale: '本镜动作' },
       },
-    });
-    const shot = f.content.saveShot({
-      sceneId: f.scene.id,
-      title: '第二镜',
-      prompt: '保留全部镜头文本',
-    });
-    const target = { kind: 'scene' as const, id: f.scene.id };
-    const first = f.service.read(target);
-    expect(first.compiledPrompt).toContain('保留全部镜头文本');
-    expect(first.compiledPrompt).toContain('清晰细线');
-    expect(first.estimatedDurationSeconds).toBeUndefined();
-    expect(
-      f.service.compile({ target, adapterKey: wan().key }).parameters.duration,
-    ).toBeUndefined();
-    f.content.saveShot({
-      shotId: shot.id,
-      sceneId: f.scene.id,
-      title: shot.title,
-      prompt: '修改后的镜头',
-      expectedRowVersion: shot.rowVersion,
-    });
-    const edited = f.service.read(target);
-    expect(edited.source?.token).not.toBe(first.source?.token);
-    expect(edited.compiledPrompt).toContain('修改后的镜头');
-    f.projects.access(true, (db) => {
-      db.prepare('UPDATE shots SET position=2 WHERE id=?').run(f.shot.id);
-      db.prepare('UPDATE shots SET position=0 WHERE id=?').run(shot.id);
-    });
-    const reordered = f.service.read(target);
-    expect(reordered.timeline?.[0]?.shotId).toBe(shot.id);
-    expect(reordered.source?.token).not.toBe(edited.source?.token);
-    f.projects.access(true, (db) => db.prepare('DELETE FROM shots WHERE id=?').run(shot.id));
-    expect(f.service.read(target).source?.token).not.toBe(reordered.source?.token);
-    const previous = f.service.read(target).source;
-    f.service.saveDefaults({
-      expectedRowVersion: 1,
-      settings: { style: { medium: '二维动画', linework: '粗线' } },
-    });
-    expect(f.service.read(target).source?.token).not.toBe(previous?.token);
-    expect(() => f.service.assertSource(previous, target, wan().key)).toThrow('制作来源');
-    expect(() => f.service.saveDefaults({ expectedRowVersion: 1, settings: {} })).toThrow('已变化');
+    }),
+  );
+  const target = { kind: 'scene' as const, id: f.scene.id };
+  expect(f.service.compile({ target, adapterKey: wan().key }).parameters.prompt).toBe(
+    '整场最终正文，包括结尾。',
+  );
+  const range = f.service.compile({ target, adapterKey: wan().key, shotIds: [shots[0]!.id] });
+  expect(range.parameters.prompt).toBe('第1镜完整正文');
+  expect(range.estimatedDurationSeconds).toBe(4);
+  expect(range.timeline).toMatchObject([{ shotId: shots[0]!.id, startSeconds: 0, endSeconds: 4 }]);
+});
+
+it('invalidates scene structure reads on child edits and shot forms on parent binding edits', async () => {
+  const f = await setup();
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '镜头', prompt: '镜头正文' });
+  const target = { kind: 'scene' as const, id: f.scene.id };
+  const version = f.service.queryVersion(target);
+  f.content.saveShot({
+    shotId: shot.id,
+    sceneId: shot.sceneId,
+    title: '新标题',
+    expectedRowVersion: shot.rowVersion,
   });
-  it('rejects a missing shot duration and rolls back reviewed instructions when a late database write fails', async () => {
-    const f = await setup();
-    const detail = instruction({
-      version: 2,
-      narrative: { purpose: '自然完成动作' },
-      camera: { framing: '中景' },
-      beats: [{ id: 'b', action: '回头', characterDocumentIds: [], dialogue: [] }],
-    });
-    expect(() =>
-      parseEpisodeStructureArguments(
-        JSON.stringify({
-          episodeTitle: '测试',
-          scenes: [{ title: '场次', shots: [{ title: '分镜', instruction: detail }] }],
-        }),
-      ),
-    ).toThrow('timing');
-    const changes = new ChangeSetService(f.projects);
-    const proposal = changes.create({
-      title: '审核原子性',
-      items: [
-        {
-          entityType: 'shot',
-          action: 'create',
-          parentSceneId: f.scene.id,
-          title: '回头',
-          instruction: {
-            ...detail,
-            timing: { estimatedDurationSeconds: 3, rationale: '回头观察' },
-            stillFrame: '回头之前的画面',
-          },
-          prompt: '回头',
-        },
-      ],
-    });
-    f.projects.access(true, (db) =>
-      db.exec(
-        "CREATE TRIGGER fail_scene_instruction BEFORE INSERT ON production_instruction_versions BEGIN SELECT RAISE(ABORT,'instruction failure'); END",
-      ),
-    );
-    expect(() => changes.apply({ changeSetId: proposal.id, expectedRowVersion: 0 })).toThrow(
-      'instruction failure',
-    );
-    expect(f.content.listShots(f.scene.id)).toHaveLength(1);
-    expect(changes.list()[0]?.items[0]?.status).toBe('pending');
+  expect(f.service.queryVersion(target)).not.toBe(version);
+  const shotTarget = { kind: 'shot' as const, id: shot.id };
+  const token = f.service.compile({ target: shotTarget, adapterKey: wan().key }).source!.token;
+  f.content.saveScene({
+    sceneId: f.scene.id,
+    title: '新的场次名称',
+    expectedRowVersion: f.scene.rowVersion,
   });
-  it('atomically projects both pages, persists history across reopen, and replays only identical keys', async () => {
-    const f = await setup();
-    const list = {
-      executionKey: 'all-pages',
-      operations: [
-        operation({ kind: 'scene', id: f.scene.id }, f.scene.rowVersion),
-        operation({ kind: 'character', id: f.actor.id }, f.actor.rowVersion),
-        operation({ kind: 'setting', id: f.setting.id }, f.setting.rowVersion),
-        operation(
-          { kind: 'shot', id: f.shot.id },
-          f.shot.rowVersion,
-          instruction({ visual: { environment: '雨'.repeat(3000) } }),
-        ),
-      ],
-    };
-    const result = f.service.execute(list);
-    expect(result).toMatchObject({ status: 'applied', paidRequests: 0 });
-    expect(f.service.execute(list)).toEqual(result);
-    expect(() => f.service.execute({ ...list, operations: list.operations.slice(1) })).toThrow(
-      '执行键',
-    );
-    expect(f.content.getDocument(f.actor.id).currentVersion?.state).toBe('draft');
-    expect(f.content.getDocument(f.actor.id).currentVersion?.contentMarkdown).toContain(
-      '雨中的车站',
-    );
-    expect(f.content.listScenes()[0]?.videoPrompt).toContain('雨中的车站');
-    expect(f.service.read({ kind: 'scene', id: f.scene.id }).issues).toEqual([]);
-    expect(f.content.listShots(f.scene.id)[0]?.prompt?.length).toBeGreaterThan(3000);
-    const source = f.service.read({ kind: 'shot', id: f.shot.id }).source;
-    expect(
-      f.projects.access(false, (db) =>
-        db.prepare('SELECT count(*) AS count FROM generation_jobs').get(),
-      ),
-    ).toEqual({ count: 0 });
-    f.projects.close();
-    f.projects.open(f.project.rootPath);
-    expect(f.service.read({ kind: 'shot', id: f.shot.id }).source).toEqual(source);
-    expect(f.service.execute(list)).toEqual(result);
-    f.content.saveDocument({
-      documentId: f.actor.id,
-      kind: 'character',
-      title: f.actor.title,
-      contentMarkdown: '角色造型已修改',
-    });
-    expect(
-      f.service.read({ kind: 'scene', id: f.scene.id }).issues.map((issue) => issue.code),
-    ).toContain('STALE_INSTRUCTION');
+  expect(() =>
+    f.service.compile({ target: shotTarget, adapterKey: wan().key, expectedToken: token }),
+  ).toThrow('已变化');
+});
+
+it('revalidates child IR references and does not report out-of-range references', async () => {
+  const f = await setup();
+  const actor = f.content.saveDocument({
+    kind: 'character',
+    title: '角色',
+    contentMarkdown: '角色资料',
   });
-  it('rolls back all operations on stale versions, duplicate targets, invalid references and late write failure', async () => {
-    const f = await setup();
-    const target = { kind: 'scene' as const, id: f.scene.id };
-    const op = operation(target, f.scene.rowVersion);
-    expect(() =>
-      f.service.execute({
-        executionKey: 'cas',
-        operations: [op, operation({ kind: 'shot', id: f.shot.id }, 99)],
-      }),
-    ).toThrow('已被修改');
-    expect(() => f.service.execute({ executionKey: 'duplicate', operations: [op, op] })).toThrow(
-      '重复',
-    );
-    expect(() =>
-      f.service.execute({
-        executionKey: 'references',
-        operations: [
-          { ...op, instruction: instruction({ subjects: [{ documentId: 'other-project' }] }) },
-        ],
-      }),
-    ).toThrow();
-    expect(() =>
-      f.service.execute({
-        executionKey: 'late',
-        operations: [
-          op,
-          operation(
-            { kind: 'shot', id: f.shot.id },
-            f.shot.rowVersion,
-            instruction({
-              visual: Object.fromEntries(
-                ['environment', 'composition', 'lighting', 'style', 'palette', 'lens'].map((k) => [
-                  k,
-                  k + '雨'.repeat(4000 - k.length),
-                ]),
-              ),
-            }),
-          ),
-        ],
-      }),
-    ).toThrow('20000');
-    expect(f.content.listScenes()[0]?.rowVersion).toBe(f.scene.rowVersion);
-    expect(
-      f.projects.access(false, (db) =>
-        db.prepare('SELECT count(*) AS count FROM production_execution_lists').get(),
-      ),
-    ).toEqual({ count: 0 });
-    expect(() =>
-      f.service.execute({
-        executionKey: 'missing',
-        operations: [operation({ kind: 'scene', id: 'foreign' }, 0)],
-      }),
-    ).toThrow();
+  const first = f.content.saveShot({ sceneId: f.scene.id, title: '第一镜', prompt: '空镜' });
+  const second = f.content.saveShot({
+    sceneId: f.scene.id,
+    title: '第二镜',
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: '角色回头',
+      references: { characterDocumentIds: [actor.id] },
+    },
   });
-  it('saves continuity issues with drafts, inherits locks and still rejects dependency cycles', async () => {
-    const f = await setup();
-    const a = { kind: 'scene' as const, id: f.scene.id };
-    const b = { kind: 'shot' as const, id: f.shot.id };
-    const third = f.content.saveShot({ sceneId: f.scene.id, title: '后续' });
-    const c = { kind: 'shot' as const, id: third.id };
-    const continuity = (patch: Partial<ProductionInstruction['continuity']>) => ({
-      predecessors: [],
-      before: [],
-      after: [],
-      locked: [],
-      constraints: [],
-      ...patch,
-    });
-    f.service.execute({
-      executionKey: 'graph',
-      operations: [
-        operation(
-          a,
-          f.scene.rowVersion,
-          instruction({
-            continuity: continuity({
-              after: [{ key: 'door', value: 'open' }],
-              locked: [{ key: 'coat', value: 'blue' }],
-            }),
-          }),
-        ),
-        operation(
-          b,
-          f.shot.rowVersion,
-          instruction({ continuity: continuity({ after: [{ key: 'weather', value: 'rain' }] }) }),
-        ),
-        operation(
-          c,
-          third.rowVersion,
-          instruction({
-            continuity: continuity({
-              predecessors: [a, b],
-              before: [
-                { key: 'door', value: 'open' },
-                { key: 'weather', value: 'rain' },
-              ],
-            }),
-          }),
-        ),
-      ],
-    });
-    expect(f.service.read(c).issues).toEqual([]);
-    const updated = f.service.execute({
-      executionKey: 'changed-canonical-dependency',
-      operations: [
-        operation(
-          { kind: 'character', id: f.actor.id },
-          f.actor.rowVersion,
-          instruction({ summary: '角色的新设定' }),
-        ),
-        operation(c, f.service.read(c).rowVersion, f.service.read(c).instruction),
-      ],
-    });
-    expect(updated).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
-    expect(f.content.getDocument(f.actor.id).currentVersion?.contentMarkdown).toContain(
-      '角色的新设定',
-    );
-    const fourth = f.content.saveShot({ sceneId: f.scene.id, title: '破坏锁定' });
-    const locked = f.service.execute({
-      executionKey: 'lock',
-      operations: [
-        operation(
-          { kind: 'shot', id: fourth.id },
-          fourth.rowVersion,
-          instruction({
-            continuity: continuity({ predecessors: [c], after: [{ key: 'coat', value: 'red' }] }),
-          }),
-        ),
-      ],
-    });
-    expect(locked).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
-    expect(f.service.read({ kind: 'shot', id: fourth.id }).issues.map((i) => i.code)).toContain(
-      'LOCKED_FACT_CHANGED',
-    );
-    expect(() =>
-      f.service.execute({
-        executionKey: 'cycle',
-        operations: [
-          operation(
-            a,
-            f.service.read(a).rowVersion,
-            instruction({ continuity: continuity({ predecessors: [c] }) }),
-          ),
-        ],
-      }),
-    ).toThrow('循环');
-    const branch = f.service.execute({
-      executionKey: 'branch',
-      operations: [
-        operation(
-          b,
-          f.service.read(b).rowVersion,
-          instruction({ continuity: continuity({ after: [{ key: 'door', value: 'closed' }] }) }),
-        ),
-        operation(c, f.service.read(c).rowVersion, f.service.read(c).instruction),
-      ],
-    });
-    expect(branch).toMatchObject({ status: 'applied', readiness: 'needs_attention' });
-    expect(f.service.read(c).issues.map((i) => i.code)).toContain('CONTINUITY_UNVERIFIED');
-    expect(() => f.service.assertSource(f.service.read(c).source, c)).toThrow();
-    f.content.saveScene({
-      sceneId: f.scene.id,
-      title: f.scene.title,
-      videoPrompt: '人工改写',
-      expectedRowVersion: f.service.read(a).rowVersion,
-    });
-    expect(f.service.read(c).issues.map((i) => i.code)).toContain('STALE_INSTRUCTION');
+  f.projects.access(true, (db) =>
+    db.prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?").run(actor.id),
+  );
+  const target = { kind: 'scene' as const, id: f.scene.id };
+  expect(f.service.read(target).issues).toMatchObject([
+    { code: 'INVALID_IR_REFERENCE', target: { kind: 'shot', id: second.id } },
+  ]);
+  expect(f.service.read(target, [first.id]).issues).toEqual([]);
+});
+
+it('inherits scene cast for unscoped shots without inventing segments across unknown timing', async () => {
+  const f = await setup();
+  const actor = f.content.saveDocument({
+    kind: 'character',
+    title: '角色',
+    contentMarkdown: '资料',
   });
-  it('invalidates effective input changes, ignores unused images, and guards prepare without any paid request', async () => {
-    const f = await setup();
-    const target = { kind: 'scene' as const, id: f.scene.id };
-    f.service.execute({
-      executionKey: 'first',
-      operations: [operation(target, f.scene.rowVersion)],
-    });
-    const original = f.service.read(target).source!;
-    const addImage = async (id: string) => {
-      await writeFile(join(f.project.rootPath, `assets/images/${id}.png`), 'fixture');
-      f.projects.access(true, (db, p) => {
-        db.prepare(
-          "INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,'character',?,?,7,?)",
-        ).run(id, p.id, `assets/images/${id}.png`, 'a'.repeat(64), id);
-        db.prepare(
-          "INSERT INTO generation_jobs(id,project_id,adapter_key,status,request_json,task_snapshot_json,created_at,updated_at) VALUES(?,?,'fixture','succeeded','{}',?,'now','now')",
-        ).run(`job-${id}`, p.id, JSON.stringify({ sourceDocumentId: f.actor.id }));
-        db.prepare(
-          "INSERT INTO generation_results(id,job_id,asset_id,created_at) VALUES(?,?,?,'now')",
-        ).run(`result-${id}`, `job-${id}`, id);
-      });
-    };
-    await addImage('first');
-    expect(f.service.read(target).source?.token).not.toBe(original.token);
-    const selected = f.service.read(target).source!;
-    await addImage('second');
-    expect(f.service.read(target).source?.token).toBe(selected.token);
-    f.service.execute({
-      executionKey: 'required-input',
-      operations: [
-        operation(
-          target,
-          f.service.read(target).rowVersion,
-          instruction({
-            resources: [
-              {
-                kind: 'character-image',
-                documentId: f.actor.id,
-                required: true,
-                purpose: '保持角色外观',
-              },
-            ],
-          }),
-        ),
-      ],
-    });
-    const requiredSource = f.service.read(target).source!;
-    expect(() =>
-      f.service.assertSource(requiredSource, target, wan().key, {
-        parameters: { prompt: 'project-asset://first' },
-      }),
-    ).toThrow('提交参数缺少');
-    expect(() =>
-      f.service.assertSource(requiredSource, target, wan().key, {
-        parameters: { media: [{ type: 'reference_image', url: 'project-asset://first' }] },
-      }),
-    ).not.toThrow();
-    f.service.execute({
-      executionKey: 'optional-again',
-      operations: [operation(target, f.service.read(target).rowVersion)],
-    });
-    const currentSource = f.service.read(target).source!;
-    const videos = new VideoGenerationService(f.projects);
-    const params = {
-      adapterKey: wan().key,
-      sceneId: f.scene.id,
-      parameters: {
-        prompt: '用户确认的文字',
-        duration: 5,
-        resolution: '720P',
-        ratio: '16:9',
-        audio: false,
-      },
-      providerRegion: 'cn' as const,
-    };
-    expect(() => videos.prepare(params)).toThrow('制作来源');
-    expect(() => videos.prepare({ ...params, productionSource: original })).toThrow('制作来源');
-    const prepared = videos.prepare({ ...params, productionSource: currentSource });
-    const snapshot = f.projects.access(false, (db) =>
-      db.prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?').get(prepared.id),
-    ) as { task_snapshot_json: string };
-    expect(
-      (JSON.parse(snapshot.task_snapshot_json) as { productionSource: ProductionSource })
-        .productionSource,
-    ).toEqual(currentSource);
-    f.content.saveScene({
-      sceneId: f.scene.id,
-      title: f.scene.title,
-      characterBindings: [{ characterDocumentId: f.actor.id, imageDisabled: true }],
-      expectedRowVersion: f.service.read(target).rowVersion,
-    });
-    expect(() => f.service.assertSource(currentSource, target, wan().key)).toThrow('制作来源');
-    expect(
-      (JSON.parse(snapshot.task_snapshot_json) as { productionSource: ProductionSource })
-        .productionSource,
-    ).toEqual(currentSource);
+  f.content.saveScene({
+    sceneId: f.scene.id,
+    title: f.scene.title,
+    expectedRowVersion: f.scene.rowVersion,
+    characterBindings: [
+      { characterDocumentId: actor.id, imageDisabled: true, voiceDisabled: true },
+    ],
   });
-  it('validates RPC source shape and refuses execution without a current Agent call', async () => {
-    const f = await setup();
-    const target = { kind: 'scene' as const, id: f.scene.id };
-    expect(() => validateSessionRequestParams('production.read', { target })).not.toThrow();
-    expect(() =>
-      validateSessionRequestParams('production.compile', {
-        target,
-        adapterKey: wan().key,
-        paid: true,
-      }),
-    ).toThrow();
-    const params = {
-      adapterKey: wan().key,
-      parameters: {},
-      providerProfileId: 'p',
-      modelId: 'm',
-      providerRegion: 'cn',
-      productionSource: { target, instructionId: 'i', revision: 1, token: 'pretend' },
-    };
-    expect(() => validateSessionRequestParams('video.generate.prepare', params)).toThrow();
-    const conversation = f.content.createConversation({ scopeType: 'project', title: '制作' });
-    const tools = new AgentSystemToolService(
-      f.projects,
-      f.content,
-      {} as AgentAssetToolService,
-      {} as AgentSettingsToolService,
-    );
-    const identity = {
-      projectId: f.project.id,
-      projectSessionId: f.projects.currentSessionId()!,
-      conversationId: conversation.id,
-    };
-    expect(tools.execute('production.read', { target }, identity)).toMatchObject({
-      target,
-      rowVersion: f.scene.rowVersion,
-    });
-    expect(() =>
-      tools.execute(
-        'production.execute',
-        { executionKey: 'not-running', operations: [operation(target, f.scene.rowVersion)] },
-        identity,
-      ),
-    ).toThrow('正在执行');
-    f.projects.access(true, (db, p) => {
-      db.prepare(
-        `INSERT INTO agent_tasks(id,project_id,project_session_id,conversation_id,task_type,scope_type,title,request_snapshot_json,request_hash,status,created_at,started_at,updated_at,phase,row_version,tool_call_limit) VALUES('task',?,?,?,'document-create','project','制作清单','{}','hash','running','now','now','now','model_running',0,16)`,
-      ).run(p.id, identity.projectSessionId, conversation.id);
-      db.prepare(
-        `INSERT INTO agent_tool_calls(id,project_id,task_id,tool_name,arguments_summary_json,normalized_arguments_hash,status,created_at,idempotency_key,redaction_state) VALUES('call',?,'task','production.execute','{}','hash','executing','now','call-key','native')`,
-      ).run(p.id);
-    });
-    expect(
-      tools.execute(
-        'production.execute',
-        {
-          executionKey: 'gateway',
-          operations: [
-            operation(target, f.scene.rowVersion),
-            operation({ kind: 'character', id: f.actor.id }, f.actor.rowVersion),
-            operation({ kind: 'setting', id: f.setting.id }, f.setting.rowVersion),
-          ],
-        },
-        { ...identity, taskId: 'task', toolCallId: 'call' },
-      ),
-    ).toMatchObject({ status: 'applied' });
-    const workflow = new DocumentWorkflowService(f.projects);
-    const parent = workflow.getTask({ taskId: 'task' });
-    expect(parent.documents).toHaveLength(2);
-    const sourceTaskId = f.content.getDocument(f.actor.id).currentVersion?.sourceTaskId;
-    expect(sourceTaskId).not.toBe('task');
-    expect(workflow.getTask({ taskId: sourceTaskId! }).task.status).toBe('waiting_review');
-    expect(workflow.getTask({ taskId: 'task' }).productionUpdated).toBeUndefined();
-    f.projects.access(true, (db) =>
-      db.prepare("UPDATE agent_tool_calls SET status='succeeded' WHERE id='call'").run(),
-    );
-    expect(workflow.getTask({ taskId: 'task' }).productionUpdated).toBe(true);
+  const first = f.content.saveShot({
+    sceneId: f.scene.id,
+    title: '空镜',
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: '空镜正文',
+      references: { characterDocumentIds: [] },
+      timing: { estimatedDurationSeconds: 4, rationale: '空镜时长' },
+    },
   });
+  const second = f.content.saveShot({ sceneId: f.scene.id, title: '继承角色', prompt: '人物出现' });
+  const target = { kind: 'scene' as const, id: f.scene.id };
+  const range = f.service.compile({
+    target,
+    adapterKey: wan().key,
+    shotIds: [first.id, second.id],
+  });
+  expect(range.sceneInputs?.scene.characterBindings).toHaveLength(1);
+  expect(range.segments).toEqual([]);
+  const empty = f.service.compile({ target, adapterKey: wan().key, shotIds: [first.id] });
+  expect(empty.sceneInputs?.scene.characterBindings).toEqual([]);
 });

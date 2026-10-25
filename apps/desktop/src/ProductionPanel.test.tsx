@@ -11,6 +11,7 @@ import type {
 } from '@ai-video/contracts';
 import { officialVideoContracts } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
+import { composeCharacterImagePrompt } from './character-image-prompt';
 import { callWorker } from './worker-client';
 
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
@@ -707,7 +708,9 @@ describe('ProductionPanel', () => {
         preferredAssetKind="first-frame"
       />,
     );
-    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('雨夜里林澈回头');
+    await waitFor(() =>
+      expect(screen.getByLabelText(/画面提示词/)).toHaveTextContent('雨夜里林澈回头'),
+    );
     expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
   });
 
@@ -744,6 +747,117 @@ describe('ProductionPanel', () => {
     );
     expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('林澈，灯塔守望员');
     expect(screen.getByLabelText('保存为')).toHaveValue('character');
+  });
+
+  it('keeps the complete character sheet through compilation and prepares the edited form verbatim', async () => {
+    const previous = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+      if (method === 'production.compile')
+        return Promise.resolve({
+          target: params.target,
+          rowVersion: 1,
+          parameters: { prompt: '旧说明：仅正面立绘' },
+          issues: [],
+        });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      return previous(method as never, params);
+    }) as typeof callWorker);
+    const seedPrompt = composeCharacterImagePrompt('林澈，灯塔守望员，青色雨衣。');
+    render(
+      <ProductionPanel
+        projectId="project"
+        writable
+        capability="TEXT_TO_IMAGE"
+        sourceDocumentId="character-doc"
+        seedPrompt={seedPrompt}
+        preferredAssetKind="character"
+      />,
+    );
+    const prompt = await screen.findByLabelText(/画面提示词/);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('production.compile', expect.anything()),
+    );
+    expect(prompt).toHaveValue(seedPrompt);
+    const edited = `${seedPrompt}\n补充：衣领有已确认的灯塔徽记。`;
+    fireEvent.change(prompt, { target: { value: edited } });
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await screen.findByRole('button', { name: '批准' });
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(([method]) => method === 'image.generate.prepare')?.[1];
+    expect(prepared).toMatchObject({
+      sourceDocumentId: 'character-doc',
+      assetKind: 'character',
+      parameters: { prompt: edited },
+    });
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.confirmSubmission',
+      expect.anything(),
+    );
+  });
+
+  it('prepares prop images with their source document and refreshes the owning gallery', async () => {
+    const asset = { ...savedAsset, kind: 'prop' };
+    const onAssetsChanged = vi.fn();
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(catalog);
+      if (method === 'adapter.resolve') return Promise.resolve(descriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({
+          kind: 'image',
+          job: {
+            ...imageJob('succeeded'),
+            results: [{ id: 'prop-result', jobId: 'job', asset, createdAt: 'now' }],
+          },
+        });
+      if (method === 'asset.list') return Promise.resolve([asset]);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(
+      <ProductionPanel
+        projectId="project"
+        writable
+        capability="TEXT_TO_IMAGE"
+        sourceDocumentId="prop-doc"
+        seedPrompt="铁木杖，杖尖包有铁箍"
+        preferredAssetKind="prop"
+        onAssetsChanged={onAssetsChanged}
+      />,
+    );
+    const prompt = await screen.findByLabelText(/画面提示词/);
+    expect(prompt).toHaveValue('铁木杖，杖尖包有铁箍');
+    expect(screen.getByLabelText('保存为')).toHaveValue('prop');
+    fireEvent.change(prompt, { target: { value: '铁木杖，白底完整展示，保留铁箍' } });
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    const approval = await screen.findByRole('button', { name: '批准' });
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(([method]) => method === 'image.generate.prepare')?.[1] as unknown;
+    expect(prepared).toMatchObject({
+      sourceDocumentId: 'prop-doc',
+      assetKind: 'prop',
+      shotId: undefined,
+      parameters: { prompt: '铁木杖，白底完整展示，保留铁箍' },
+    });
+    expect(callWorker).toHaveBeenCalledWith('media.generation.requestSubmission', {
+      jobId: 'job',
+    });
+    expect(callWorker).not.toHaveBeenCalledWith('production.compile', expect.anything());
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.confirmSubmission',
+      expect.anything(),
+    );
+    fireEvent.click(approval);
+    expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
+    expect(onAssetsChanged).toHaveBeenCalledWith([asset], asset.id);
   });
 
   it('renders schema fields and saves a validated per-shot draft', async () => {

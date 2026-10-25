@@ -35,6 +35,7 @@ import type {
   TaskLogPage,
   TaskLogListParams,
 } from '@ai-video/contracts';
+import { validateProjectContentIR, type ProjectContentIR } from '@ai-video/contracts';
 import type {
   DocumentWorkflowAuditAction,
   DocumentWorkflowAuditActorType,
@@ -47,6 +48,7 @@ import {
   rebuildNovelRagChunks,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
+import { AgentInputService } from './agent-input-service.js';
 
 const LOCAL_USER = 'local-user';
 const MAX_DOCUMENT_LENGTH = 1_000_000;
@@ -119,6 +121,7 @@ interface DocumentVersionRow {
   document_id: string;
   version: number;
   content_markdown: string;
+  content_ir_json?: string | null;
   state: string;
   base_version_id: string | null;
   title_snapshot: string | null;
@@ -169,6 +172,7 @@ interface AgentTaskEventRow {
   level: string;
   summary: string;
   created_at: string;
+  payload_json?: string | null;
 }
 
 interface ReviewRow {
@@ -243,6 +247,7 @@ export interface TrustedAgentDraftParams {
   taskId: string;
   title: string;
   contentMarkdown: string;
+  contentIR?: ProjectContentIR;
   kind?: DocumentKind;
   scopeType: DocumentSummary['scopeType'];
   scopeId?: string;
@@ -275,7 +280,7 @@ function required(value: string, name: string, maxLength: number): string {
 }
 
 function documentKind(value: string): DocumentSummary['kind'] {
-  return ['outline', 'plan', 'character', 'scene', 'storyboard', 'note'].includes(value)
+  return ['outline', 'plan', 'character', 'scene', 'prop', 'storyboard', 'note'].includes(value)
     ? (value as DocumentSummary['kind'])
     : 'note';
 }
@@ -324,6 +329,9 @@ function toDocumentVersion(row: DocumentVersionRow): DocumentVersionInfo {
     documentId: row.document_id,
     version: row.version,
     contentMarkdown: row.content_markdown,
+    ...(row.content_ir_json
+      ? { contentIR: validateProjectContentIR(JSON.parse(row.content_ir_json)) }
+      : {}),
     state: documentState(row.state),
     baseVersionId: row.base_version_id ?? undefined,
     titleSnapshot: row.title_snapshot ?? undefined,
@@ -398,6 +406,17 @@ function toTask(row: AgentTaskRow): AgentTaskInfo {
 }
 
 function toEvent(row: AgentTaskEventRow): AgentTaskEventInfo {
+  let messageBoundary: AgentTaskEventInfo['messageBoundary'];
+  if (row.event_type === 'agent.assistant.started' && row.payload_json) {
+    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    if (
+      typeof payload.messageId === 'string' &&
+      Number.isSafeInteger(payload.startOffset) &&
+      Number(payload.startOffset) >= 0
+    ) {
+      messageBoundary = { messageId: payload.messageId, startOffset: Number(payload.startOffset) };
+    }
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -406,6 +425,7 @@ function toEvent(row: AgentTaskEventRow): AgentTaskEventInfo {
     level: row.level === 'warning' || row.level === 'error' ? row.level : 'info',
     summary: row.summary,
     createdAt: row.created_at,
+    ...(messageBoundary ? { messageBoundary } : {}),
   };
 }
 
@@ -518,6 +538,16 @@ export class DocumentWorkflowService {
           kind: documentKind(document.kind),
           title: document.title,
           contentMarkdown: sourceVersion.content_markdown,
+          contentIR: sourceVersion.content_ir_json
+            ? validateProjectContentIR(
+                JSON.parse(sourceVersion.content_ir_json),
+                document.kind === 'character' ||
+                  document.kind === 'scene' ||
+                  document.kind === 'prop'
+                  ? document.kind
+                  : undefined,
+              )
+            : undefined,
           scopeType: scopeType(document.scope_type),
           scopeId: document.scope_id ?? undefined,
           expectedDocumentRowVersion: document.row_version,
@@ -1040,6 +1070,7 @@ export class DocumentWorkflowService {
       kind: params.kind ?? 'note',
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
       contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      contentIR: params.contentIR,
       scopeType: params.scopeType,
       scopeId: params.scopeId,
       sourceTaskId: params.taskId,
@@ -1110,6 +1141,7 @@ export class DocumentWorkflowService {
       kind: params.kind ?? 'note',
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
       contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      contentIR: params.contentIR,
       scopeType: params.scopeType,
       scopeId: params.scopeId,
       sourceTaskId: params.taskId,
@@ -1164,6 +1196,7 @@ export class DocumentWorkflowService {
       kind: documentKind(existing.kind),
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
       contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      contentIR: params.contentIR,
       scopeType: scopeType(existing.scope_type),
       scopeId: existing.scope_id ?? undefined,
       expectedDocumentRowVersion: params.expectedDocumentRowVersion,
@@ -1440,7 +1473,12 @@ export class DocumentWorkflowService {
         database
           .prepare('SELECT * FROM agent_task_events WHERE task_id = ? ORDER BY sequence, id')
           .all(task.id) as AgentTaskEventRow[]
-      ).map(toEvent);
+      ).map((row) => {
+        const event = toEvent(row);
+        if (row.event_type === 'agent.user_input.requested')
+          event.userInput = new AgentInputService(this.projects).get(task.id, row.id);
+        return event;
+      });
       const documents = (
         database
           .prepare(
@@ -1618,10 +1656,20 @@ export class DocumentWorkflowService {
         task: toTask(task),
         ...(database
           .prepare(
-            "SELECT 1 FROM agent_tool_calls WHERE task_id=? AND project_id=? AND tool_name='production.execute' AND status='succeeded' LIMIT 1",
+            `SELECT 1 FROM agent_tool_calls WHERE task_id=? AND project_id=?
+             AND tool_name IN ('novel.episode.submit_structure','scene.submit_structure','scene.structure.stage','scene.update_shot_prompts','scene.update_shot_timings')
+             AND status='succeeded' LIMIT 1`,
           )
           .get(task.id, project.id)
           ? { productionUpdated: true }
+          : {}),
+        ...(database
+          .prepare(
+            `SELECT 1 FROM agent_tool_calls WHERE task_id=? AND project_id=?
+           AND tool_name='novel.chapter.update_metadata' AND status='succeeded' LIMIT 1`,
+          )
+          .get(task.id, project.id)
+          ? { novelMetadataUpdated: true }
           : {}),
         ...(target ? { target } : {}),
         ...(pendingConfirmation ? { pendingConfirmation } : {}),
@@ -1656,7 +1704,12 @@ export class DocumentWorkflowService {
         )
         .all(task.id, afterSequence, limit + 1) as AgentTaskEventRow[];
       const hasMore = rows.length > limit;
-      const events = rows.slice(0, limit).map(toEvent);
+      const events = rows.slice(0, limit).map((row) => {
+        const event = toEvent(row);
+        if (row.event_type === 'agent.user_input.requested')
+          event.userInput = new AgentInputService(this.projects).get(task.id, row.id);
+        return event;
+      });
       return {
         task: toTask(task),
         events,
@@ -2123,6 +2176,15 @@ export class DocumentWorkflowService {
       nextScopeType === 'project' ? undefined : (params.scopeId ?? existing?.scope_id ?? undefined);
     this.assertScope(database, project, nextScopeType, nextScopeId);
     const documentId = existing?.id ?? randomUUID();
+    const expectedContentIRKind = params.kind ?? existing?.kind;
+    if (params.contentIR !== undefined) {
+      if (!['character', 'scene', 'prop'].includes(expectedContentIRKind ?? ''))
+        throw new Error('contentIR is only valid for character, scene or prop documents.');
+      params.contentIR = validateProjectContentIR(
+        params.contentIR,
+        expectedContentIRKind as 'character' | 'scene' | 'prop',
+      );
+    }
     const current = existing?.current_version_id
       ? this.requireVersion(database, documentId, existing.current_version_id)
       : undefined;
@@ -2186,16 +2248,17 @@ export class DocumentWorkflowService {
     database
       .prepare(
         `INSERT INTO document_versions
-         (id, document_id, version, content_markdown, created_at, state, base_version_id,
+         (id, document_id, version, content_markdown, content_ir_json, created_at, state, base_version_id,
           title_snapshot, scope_type_snapshot, scope_id_snapshot, author_type, author_id,
           source_task_id, source_message_id, context_snapshot_id, content_hash, state_updated_at)
-         VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         versionId,
         documentId,
         versionNumber,
         params.contentMarkdown,
+        params.contentIR ? JSON.stringify(params.contentIR) : null,
         now,
         baseVersionId ?? null,
         params.title,

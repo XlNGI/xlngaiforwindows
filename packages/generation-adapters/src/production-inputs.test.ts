@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { seedProductionInputs, supportsProductionAudioUpload } from '@ai-video/contracts';
+import {
+  addProductionRoleVoices,
+  productionImageSelectionsFromBindings,
+  seedProductionInputs,
+  supportsProductionAudioUpload,
+  type CharacterVoiceReferenceInfo,
+} from '@ai-video/contracts';
 import { getAdapterCatalog, validateAdapterParameters } from './index.js';
 const model = (contractId: string, capability = 'REFERENCE_TO_VIDEO') =>
   getAdapterCatalog().adapters.find(
@@ -7,6 +13,78 @@ const model = (contractId: string, capability = 'REFERENCE_TO_VIDEO') =>
       a.contractId === contractId && a.capability === capability && a.provider !== 'unicompapi',
   )!;
 describe('canonical production input projection', () => {
+  it('converts saved scene bindings into ordered form image selections', () => {
+    expect(
+      productionImageSelectionsFromBindings([
+        {
+          id: 'character-binding',
+          role: 'character',
+          label: '顾清影',
+          assetId: 'character-image',
+          source: 'auto',
+        },
+        {
+          id: 'scene-binding',
+          role: 'scene',
+          label: '听雨楼',
+          assetId: 'scene-image',
+          source: 'manual',
+        },
+        {
+          id: 'prop-binding',
+          role: 'prop',
+          label: '断刀',
+          assetId: 'prop-image',
+          source: 'manual',
+        },
+      ]),
+    ).toEqual([
+      { assetId: 'character-image', role: 'character', label: '顾清影' },
+      { assetId: 'scene-image', role: 'scene', label: '听雨楼' },
+      { assetId: 'prop-image', role: 'reference', label: '断刀' },
+    ]);
+    expect(productionImageSelectionsFromBindings(undefined)).toBeUndefined();
+  });
+
+  it('reuses an exact pinned voice snapshot without duplicating media and still rejects mixed or changed audio', () => {
+    const adapter = model('cn.qwen.wan3-0-video');
+    const voice = {
+      characterDocumentId: 'actor',
+      characterName: '顾清影',
+      versionId: 'v1',
+    } as CharacterVoiceReferenceInfo;
+    const parameters = addProductionRoleVoices(adapter, { prompt: '音频1为女子声音' }, [voice]);
+    expect(addProductionRoleVoices(adapter, parameters, [voice])).toEqual(parameters);
+    expect(() =>
+      addProductionRoleVoices(adapter, parameters, [{ ...voice, versionId: 'v2' }]),
+    ).toThrow('其中一种');
+    expect(() =>
+      addProductionRoleVoices(
+        adapter,
+        { media: [{ type: 'reference_audio', url: 'https://example.com/a.wav' }] },
+        [voice],
+      ),
+    ).toThrow('其中一种');
+  });
+  it('preserves ordered Qwen image references through the shared production projector', () => {
+    const adapter = getAdapterCatalog().adapters.find(
+      (a) =>
+        a.contractId === 'cn.qwen.qwen-image-3-0' &&
+        a.contractRevision === 2 &&
+        a.capability === 'REFERENCE_TO_IMAGE',
+    )!;
+    const parameters = seedProductionInputs(adapter, {}, '融合人物和场景', [
+      { url: 'asset://actor', role: 'character' },
+      { url: 'https://example.com/scene.png', role: 'scene' },
+      { url: 'asset://prop', role: 'reference' },
+    ]);
+    expect(parameters.images).toEqual([
+      'project-asset://actor',
+      'https://example.com/scene.png',
+      'project-asset://prop',
+    ]);
+    expect(validateAdapterParameters(adapter.key, parameters).valid).toBe(true);
+  });
   it.each(['cn.qwen.wan3-0-video', 'cn.bytedance.seedance2-0.video', 'cn.minimax.h3.video'])(
     'projects references and preserves manual audio for %s',
     (id) => {

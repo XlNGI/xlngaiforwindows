@@ -520,17 +520,18 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
       this.database
         .prepare(
           `INSERT INTO document_versions
-           (id, document_id, version, content_markdown, state, base_version_id,
+           (id, document_id, version, content_markdown, content_ir_json, state, base_version_id,
             title_snapshot, scope_type_snapshot, scope_id_snapshot,
             author_type, author_id, source_task_id, source_message_id,
             context_snapshot_id, content_hash, state_updated_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           version.id,
           version.documentId,
           version.version,
           version.contentMarkdown,
+          version.contentIRJson ?? null,
           version.state ?? 'published',
           version.baseVersionId ?? null,
           version.titleSnapshot ?? record.title,
@@ -1063,13 +1064,14 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
   save(record: SceneRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json, dialogue_audio_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json, dialogue_audio_id, authoring_ir_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
            scene_document_id = excluded.scene_document_id,
            video_prompt = excluded.video_prompt,
            material_bindings_json = excluded.material_bindings_json,
            dialogue_audio_id = excluded.dialogue_audio_id,
+           authoring_ir_json = excluded.authoring_ir_json,
            row_version = scenes.row_version + 1
          WHERE scenes.row_version = excluded.row_version`,
       )
@@ -1085,6 +1087,7 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.videoPrompt ?? null,
         record.materialBindingsJson ?? '[]',
         record.dialogueAudioId ?? null,
+        record.authoringIRJson ?? null,
       );
     if (result.changes !== 1) throw new Error('SCENE_ROW_VERSION_CONFLICT');
     rebuildLibraryChunksForRecord(
@@ -1152,6 +1155,7 @@ interface SceneRow {
   video_prompt: string | null;
   material_bindings_json: string;
   dialogue_audio_id: string | null;
+  authoring_ir_json: string | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -1165,6 +1169,7 @@ function mapScene(row: SceneRow): SceneRecord {
     title: row.title,
     sceneDocumentId: row.scene_document_id ?? undefined,
     videoPrompt: row.video_prompt ?? undefined,
+    authoringIRJson: row.authoring_ir_json ?? undefined,
     materialBindingsJson: row.material_bindings_json || '[]',
     dialogueAudioId: row.dialogue_audio_id ?? undefined,
     position: row.position,
@@ -1178,11 +1183,12 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
   save(record: ShotRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO shots (id, scene_id, title, position, status, document_id, prompt, created_at, updated_at, row_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO shots (id, scene_id, title, position, status, document_id, prompt, created_at, updated_at, row_version, authoring_ir_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title, status = excluded.status, document_id = excluded.document_id,
            prompt = excluded.prompt, updated_at = excluded.updated_at,
+           authoring_ir_json = excluded.authoring_ir_json,
            row_version = shots.row_version + 1
          WHERE shots.row_version = excluded.row_version`,
       )
@@ -1197,6 +1203,7 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
         record.createdAt,
         record.updatedAt,
         record.rowVersion,
+        record.authoringIRJson ?? null,
       );
     if (result.changes !== 1) throw new Error('SHOT_ROW_VERSION_CONFLICT');
     const scene = this.database
@@ -1251,6 +1258,7 @@ interface ShotRow {
   status: string;
   document_id: string | null;
   prompt: string | null;
+  authoring_ir_json: string | null;
   created_at: string;
   updated_at: string;
   row_version: number;
@@ -1265,6 +1273,7 @@ function mapShot(row: ShotRow): ShotRecord {
     status: row.status,
     documentId: row.document_id ?? undefined,
     prompt: row.prompt ?? undefined,
+    authoringIRJson: row.authoring_ir_json ?? undefined,
     rowVersion: row.row_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

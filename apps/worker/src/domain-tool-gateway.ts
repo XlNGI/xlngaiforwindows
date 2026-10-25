@@ -370,7 +370,7 @@ function documentKindFor(
   requested: unknown,
   title: string,
   contentMarkdown: string,
-): 'outline' | 'plan' | 'character' | 'scene' | 'storyboard' | 'note' {
+): 'outline' | 'plan' | 'character' | 'scene' | 'prop' | 'storyboard' | 'note' {
   if (kind === 'episode-outline') return 'plan';
   if (kind === 'character-prompts') return 'character';
   if (kind === 'scene-prompts') return 'scene';
@@ -380,6 +380,7 @@ function documentKindFor(
     requested === 'plan' ||
     requested === 'character' ||
     requested === 'scene' ||
+    requested === 'prop' ||
     requested === 'storyboard' ||
     requested === 'note'
   )

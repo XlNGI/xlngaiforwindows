@@ -620,6 +620,8 @@ describe('TaskPlanService P4 plan-only round', () => {
       expect(round.systemInstruction).toContain(kind);
     }
     expect(round.systemInstruction).toContain('Do not provide or infer chapter IDs');
+    expect(round.systemInstruction).toContain('用户使用中文时使用简体中文');
+    expect(round.systemInstruction).toContain('除非用户明确要求翻译或输出英文');
   });
 
   it('validates, freezes and activates a plan while retaining Worker-owned chapter scope', async () => {

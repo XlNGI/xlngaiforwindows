@@ -342,7 +342,14 @@ export class MediaOrchestrationService {
         projectSessionId: prepared.projectSessionId,
         providerStatus: status,
         providerBody: body.body,
-        assetKind: 'generated-image',
+        assetKind:
+          snapshot.assetKind === 'character' ||
+          snapshot.assetKind === 'scene' ||
+          snapshot.assetKind === 'prop' ||
+          snapshot.assetKind === 'first-frame' ||
+          snapshot.assetKind === 'last-frame'
+            ? snapshot.assetKind
+            : 'generated-image',
       });
       return { kind, job: completed };
     }

@@ -110,6 +110,118 @@ async function setup(attachments: LlmInputAttachment[] = []) {
 }
 
 describe('MediaPreparationService', () => {
+  it('keeps reference descriptions and timed video prose intact when preparing a local video draft', async () => {
+    const f = await setup([{ name: 'reference.png', mimeType: 'image/png', dataUrl: tinyPng }]);
+    const prompt = `输入图片说明：本次输入一张图，图1为本段首帧及人物外观参考。
+视频目标：林澈离开雨夜车站，动作连贯。
+【基础设定】林澈穿青色雨衣；保留同期雨声与脚步声，无对白，无配乐。
+【氛围与画质】近景向后拉远，冷灰灯光照亮湿地。
+动态流程：0.0至3.0秒，林澈转身；3.0至6.0秒，沿站台走远；6.0至8.0秒，前景站柱遮住身影。
+负面约束：不改人物容貌与衣服固有色，不出现字幕或水印。`;
+    const context = f.service.selectionContext('video', { prompt }, f.identity);
+    const candidate = context.candidates[0]!;
+    const adapter = candidate.adapters.find((item) => item.parameterSchema.properties.images)!;
+    const draft = f.service.prepareSelected(
+      context,
+      {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: adapter.key,
+        parameters: { images: [tinyPng], duration: 8 },
+      },
+      f.identity,
+    );
+    expect(draft.normalizedParameters.prompt).toBe(prompt);
+    expect(draft.normalizedParameters.images).toEqual(['attachment://omitted']);
+    const job = f.projectsService.access(false, (db) =>
+      createRepositories(db).jobs.get(draft.draftId)!,
+    );
+    const snapshot = JSON.parse(job.taskSnapshotJson!) as { parameters: { prompt: string } };
+    expect(snapshot.parameters.prompt).toBe(prompt);
+    expect(job.providerTaskId).toBeUndefined();
+  });
+  it('prepares current Qwen image editing with local references and freezes only controlled handles', async () => {
+    const f = await setup([{ name: 'reference.png', mimeType: 'image/png', dataUrl: tinyPng }]);
+    const model = f.settings.createManualModel({
+      profileId: f.profile.id,
+      remoteModelId: 'qwen-image-3.0',
+      capabilities: {
+        ...f.settings.listModels(f.profile.id)[0]!.capabilities,
+        imageGeneration: true,
+        imageEditing: true,
+      },
+      enabled: true,
+    });
+    const context = f.service.selectionContext(
+      'image',
+      {
+        prompt: '保留人物，将背景改为海边',
+        parameters: { images: ['https://example.com/background.png'] },
+      },
+      f.identity,
+    );
+    const candidate = context.candidates.find((item) => item.modelId === model.id)!;
+    expect(candidate.adapters.map((a) => a.capability)).toEqual(['REFERENCE_TO_IMAGE']);
+    const adapter = candidate.adapters[0]!;
+    expect(adapter.key).toBe('REFERENCE_TO_IMAGE:unicompapi:cn.qwen.qwen-image-3-0:contract-2');
+    const draft = f.service.prepareSelected(
+      context,
+      {
+        providerProfileId: f.profile.id,
+        modelId: model.id,
+        adapterKey: adapter.key,
+        parameters: { images: [tinyPng, 'https://example.com/background.png'] },
+      },
+      f.identity,
+    );
+    const row = f.projectsService.access(false, (db) =>
+      createRepositories(db).jobs.get(draft.draftId)!,
+    );
+    const snapshot = JSON.parse(row.taskSnapshotJson!) as {
+      parameters: { images: string[] };
+      inputs: unknown[];
+    };
+    expect(snapshot.parameters.images).toEqual([
+      expect.stringMatching(/^controlled-file:\/\//u),
+      'https://example.com/background.png',
+    ]);
+    expect(row.requestJson).not.toContain('base64');
+    expect(row.taskSnapshotJson).not.toContain('base64');
+    expect(snapshot.inputs).toHaveLength(1);
+  });
+  it('retains the prop image kind when preparing an Agent-selected image model', async () => {
+    const f = await setup();
+    const document = new ContentService(f.projectsService).saveDocument({
+      kind: 'prop',
+      title: '铁木杖',
+      contentMarkdown: '铁木杖，白底展示',
+      scopeType: 'project',
+    });
+    const context = f.service.selectionContext(
+      'image',
+      { prompt: '铁木杖，白底展示', assetKind: 'prop', sourceDocumentId: document.id },
+      f.identity,
+    );
+    const candidate = context.candidates.find((item) => item.remoteModelId === 'qwen-image')!;
+    const draft = f.service.prepareSelected(
+      context,
+      {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: candidate.adapters[0]!.key,
+        parameters: {},
+      },
+      f.identity,
+    );
+    const job = f.projectsService.access(false, (db) =>
+      createRepositories(db).jobs.get(draft.draftId)!,
+    );
+    expect(JSON.parse(job.taskSnapshotJson!)).toMatchObject({
+      assetKind: 'prop',
+      sourceDocumentId: document.id,
+    });
+  });
+
   it('still rejects an unavailable image in the final form before creating a generation job', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);
@@ -119,7 +231,7 @@ describe('MediaPreparationService', () => {
       f.service.prepareImage({
         adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
         shotId: shot.id,
-        productionSource: { mode: 'form', target: { kind: 'shot', id: shot.id } },
+        productionSource: { mode: 'form', token: 'forged', target: { kind: 'shot', id: shot.id } },
         parameters: {
           prompt: '用户填写的镜头',
           images: ['project-asset://missing'],
@@ -140,26 +252,17 @@ describe('MediaPreparationService', () => {
     const scene = content.saveScene({ title: '雨夜' });
     const shot = content.saveShot({ sceneId: scene.id, title: '观察' });
     const production = new ProductionService(f.projectsService);
-    production.execute({
-      executionKey: 'agent-existing',
-      operations: [
-        {
-          action: 'set_prompt',
-          target: { kind: 'shot', id: shot.id },
-          expectedRowVersion: shot.rowVersion,
-          instruction: {
-            version: 1,
-            summary: '观察雨中的车站',
-            subjects: [],
-            visual: {},
-            beats: [],
-            audio: { mode: 'auto' },
-            generation: { duration: 8 },
-            resources: [],
-            continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
-          },
-        },
-      ],
+    content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: shot.title,
+      expectedRowVersion: shot.rowVersion,
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: '观察雨中的车站',
+        timing: { estimatedDurationSeconds: 8, rationale: '观察和停顿' },
+      },
     });
     const context = f.service.selectionContext(
       'video',
@@ -189,7 +292,7 @@ describe('MediaPreparationService', () => {
     };
     expect(request.duration).toBe(8);
     expect(snapshot.productionSource).toEqual(
-      production.read({ kind: 'shot', id: shot.id }).source,
+      production.compile({ target: { kind: 'shot', id: shot.id }, adapterKey: adapter.key }).source,
     );
     expect(snapshot.productionSource.target.id).toBe(shot.id);
   });
@@ -660,6 +763,31 @@ describe('MediaPreparationService', () => {
       (item) => item.type === 'controlled_temporary_file',
     )?.handle;
     expect(existsSync(join(nativeRoot, handle!))).toBe(true);
+    const edited = service.prepareSelected(
+      context,
+      {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: adapter.key,
+        parameters: {
+          prompt: '用户修改后的图序说明',
+          images: ['https://example.com/reviewed.png'],
+        },
+      },
+      identity,
+    );
+    const editedSnapshot = projectsService.access(false, (db) => {
+      const row = createRepositories(db).jobs.get(edited.draftId)!;
+      return JSON.parse(row.taskSnapshotJson!) as {
+        parameters: { prompt: string; images: string[] };
+        inputs?: unknown[];
+      };
+    });
+    expect(editedSnapshot.parameters).toMatchObject({
+      prompt: '用户修改后的图序说明',
+      images: ['https://example.com/reviewed.png'],
+    });
+    expect(editedSnapshot.inputs ?? []).not.toContainEqual({ type: 'asset', assetId });
   });
 
   it('rejects malformed inline images, raw Base64, and absolute paths before draft creation', async () => {

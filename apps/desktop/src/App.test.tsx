@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AdapterDescriptor,
   AgentTaskDetail,
+  AgentInputForm,
   ConversationInfo,
   LlmGenerationInfo,
 } from '@ai-video/contracts';
@@ -400,6 +401,212 @@ describe('App', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
   });
+
+  it('continues question forms through ordinary agent.run with a stable key and preserves the composer and attachments', async () => {
+    const accepted = mockComposerSend('agent.run', Promise.resolve(null));
+    const baseline = vi.mocked(callWorker).getMockImplementation()!;
+    let form: AgentInputForm = {
+      id: 'question-form',
+      taskId: 'question-task',
+      conversationId: 'composer-conversation',
+      createdAt: '2026-10-24T00:00:02Z',
+      key: 'style',
+      title: '确认风格',
+      status: 'pending',
+      questions: [{ id: 'style', prompt: '希望的风格', type: 'text' }],
+    };
+    const user = {
+      id: 'question-user',
+      conversationId: form.conversationId,
+      role: 'user' as const,
+      content: '设计短剧',
+      status: 'complete' as const,
+      createdAt: '2026-10-24T00:00:00Z',
+    };
+    const assistant = {
+      ...user,
+      id: 'question-assistant',
+      replyToMessageId: user.id,
+      role: 'assistant' as const,
+      content: '请确认创作方向。',
+      createdAt: '2026-10-24T00:00:01Z',
+    };
+    const detail: AgentTaskDetail = {
+      task: {
+        id: form.taskId,
+        projectId: 'project',
+        conversationId: form.conversationId,
+        userMessageId: user.id,
+        title: '设计短剧',
+        taskType: 'document-query',
+        scopeType: 'project',
+        status: 'completed',
+        phase: 'model_running',
+        rowVersion: 1,
+        createdAt: user.createdAt,
+        updatedAt: form.createdAt,
+      },
+      events: [
+        {
+          id: form.id,
+          taskId: form.taskId,
+          sequence: 0,
+          eventType: 'agent.user_input.requested',
+          summary: form.title,
+          level: 'info',
+          createdAt: form.createdAt,
+          userInput: form,
+        },
+      ],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+    };
+    vi.mocked(callWorker).mockImplementation(((
+      method: string,
+      params: { answers?: AgentInputForm['answers'] },
+    ) => {
+      if (method === 'agent.run') {
+        form = { ...form, continuationGenerationId: 'composer-generation' };
+        return Promise.resolve(accepted);
+      }
+      if (method === 'agent.task.list') return Promise.resolve([detail.task]);
+      if (method === 'agent.task.get') return Promise.resolve(detail);
+      if (method === 'chat.message.list') return Promise.resolve({ items: [user, assistant] });
+      if (method === 'agent.input.get') return Promise.resolve(form);
+      if (method === 'agent.input.submit') {
+        form = { ...form, status: 'answered', answers: params.answers };
+        return Promise.resolve({
+          form,
+          prompt: '我已回答：二维动画',
+          idempotencyKey: 'question-answer:question-form',
+        });
+      }
+      return baseline(method as never, params as never);
+    }) as typeof callWorker);
+    const mounted = render(<App />);
+    await screen.findByDisplayValue('输入草稿');
+    selectLlm('composer-profile', 'composer-model');
+    const composer = screen.getByRole('textbox', { name: '会话消息' });
+    fireEvent.change(composer, { target: { value: '暂不发送的想法' } });
+    fireEvent.change(mounted.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(['笔记'], '笔记.txt', { type: 'text/plain' })] },
+    });
+    await screen.findByText('笔记.txt');
+    fireEvent.change(await screen.findByLabelText('希望的风格：补充回答'), {
+      target: { value: '二维动画' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '提交回答并继续' }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'agent.run'),
+      ).toHaveLength(1),
+    );
+    const params = vi.mocked(callWorker).mock.calls.find(([method]) => method === 'agent.run')![1];
+    expect(params).toMatchObject({
+      conversationId: 'composer-conversation',
+      capability: 'text',
+      idempotencyKey: 'question-answer:question-form',
+      prompt: '我已回答：二维动画',
+    });
+    expect(params).not.toHaveProperty('attachments');
+    expect(composer).toHaveValue('暂不发送的想法');
+    expect(screen.getByText('笔记.txt')).toBeInTheDocument();
+  });
+
+  it.each(['chapters-to-script', 'script-to-media'] as const)(
+    'launches %s through the same Agent with saved source metadata and preserves the composer',
+    async (skillId) => {
+      const accepted = mockComposerSend('agent.run', Promise.resolve(null));
+      const baseline = vi.mocked(callWorker).getMockImplementation()!;
+      const source = {
+        id: 'production-source',
+        projectId: 'project',
+        kind: skillId === 'chapters-to-script' ? 'note' : 'outline',
+        title: '制作源资料',
+        scopeType: 'project',
+        lifecycleStatus: 'active',
+        rowVersion: 1,
+        currentVersionId: 'source-version',
+        createdAt: 'now',
+        updatedAt: 'now',
+        currentVersion: {
+          id: 'source-version',
+          documentId: 'production-source',
+          version: 1,
+          contentMarkdown: '正文必须通过 Agent 按需读取',
+          state: 'draft',
+          authorType: 'user',
+          createdAt: 'now',
+        },
+      };
+      vi.mocked(callWorker).mockImplementation(((method: string, params: unknown) => {
+        if (method === 'agent.run') return Promise.resolve(accepted);
+        if (method === 'document.list')
+          return Promise.resolve(skillId === 'script-to-media' ? [source] : []);
+        if (method === 'document.get') return Promise.resolve(source);
+        if (method === 'document.versions') return Promise.resolve([]);
+        if (method === 'novel.volume.list') return Promise.resolve([]);
+        if (method === 'novel.chapter.list')
+          return Promise.resolve(
+            skillId === 'chapters-to-script'
+              ? [
+                  {
+                    id: 'selected-chapter',
+                    projectId: 'project',
+                    documentId: source.id,
+                    title: source.title,
+                    position: 0,
+                    displayLabel: '第1章',
+                    lifecycleStatus: 'active',
+                    documentRowVersion: 1,
+                    ragChunkCount: 1,
+                    rowVersion: 1,
+                    createdAt: 'now',
+                    updatedAt: 'now',
+                  },
+                ]
+              : [],
+          );
+        return baseline(method as never, params as never);
+      }) as typeof callWorker);
+      render(<App />);
+      await screen.findByDisplayValue('输入草稿');
+      selectLlm('composer-profile', 'composer-model');
+      const composer = screen.getByRole('textbox', { name: '会话消息' });
+      fireEvent.change(composer, { target: { value: '另外一条未发送的想法' } });
+      const nav = screen.getByRole('navigation', { name: '项目导航' });
+      fireEvent.click(
+        within(nav).getByRole('button', {
+          name: skillId === 'chapters-to-script' ? /^小说/ : /^剧本/,
+        }),
+      );
+      if (skillId === 'script-to-media')
+        fireEvent.click(await screen.findByRole('button', { name: /制作源资料/ }));
+      const button = await screen.findByRole('button', {
+        name: skillId === 'chapters-to-script' ? /一键生成短剧资料/ : '一键准备媒体表单',
+      });
+      await waitFor(() => expect(button).toBeEnabled());
+      fireEvent.click(button);
+      await waitFor(() =>
+        expect(
+          vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'agent.run'),
+        ).toHaveLength(1),
+      );
+      const params = vi
+        .mocked(callWorker)
+        .mock.calls.find(([method]) => method === 'agent.run')![1] as {
+        prompt: string;
+        capability: string;
+      };
+      expect(params.capability).toBe('text');
+      expect(params.prompt).toContain(skillId);
+      expect(params.prompt).toContain('source-version');
+      expect(params.prompt).toContain(source.id);
+      expect(params.prompt).not.toContain(source.currentVersion.contentMarkdown);
+      await waitFor(() => expect(composer).toHaveValue('另外一条未发送的想法'));
+    },
+  );
 
   it.each([
     ['agent.run', false],
@@ -2876,333 +3083,373 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeInTheDocument();
   });
 
-  it('keeps an opened document listed when it does not match the active kind filter', async () => {
-    vi.mocked(callWorker).mockImplementation((method: string) => {
-      if (method === 'conversation.promptTemplate.get')
-        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
-      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
-        return Promise.resolve([]);
-      if (method === 'health')
-        return Promise.resolve({
-          protocolVersion: 1,
-          workerVersion: '0.1.0',
-          nodeVersion: 'v22.0.0',
-          platform: 'win32',
-          arch: 'x64',
-          pid: 123,
-        });
-      if (method === 'sqlite.probe')
-        return Promise.resolve({
-          databasePath: 'probe.sqlite',
-          sqliteVersion: '3.50.0',
-          journalMode: 'wal',
-          writeVerified: true,
-        });
-      if (method === 'project.current')
-        return Promise.resolve({
-          id: 'project',
-          name: 'Filter Project',
-          rootPath: 'D:\\Filter',
-          createdAt: 'now',
-          updatedAt: 'now',
-          mode: 'read-write',
-          schemaVersion: 4,
-        });
-      if (method === 'project.recent') return Promise.resolve([]);
-      if (method === 'document.list')
-        return Promise.resolve([
-          {
-            id: 'd-outline',
-            projectId: 'project',
-            kind: 'outline',
-            title: '项目大纲',
-            scopeType: 'project',
-            lifecycleStatus: 'active',
-            rowVersion: 0,
+  it.each(['character', 'scene'] as const)(
+    'strictly filters the directory while preserving the opened %s editor',
+    async (kind) => {
+      const title = kind === 'scene' ? '场景板·屋外雨坪' : '角色设定';
+      vi.mocked(callWorker).mockImplementation((method: string) => {
+        if (method === 'conversation.promptTemplate.get')
+          return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+        if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+          return Promise.resolve([]);
+        if (method === 'health')
+          return Promise.resolve({
+            protocolVersion: 1,
+            workerVersion: '0.1.0',
+            nodeVersion: 'v22.0.0',
+            platform: 'win32',
+            arch: 'x64',
+            pid: 123,
+          });
+        if (method === 'sqlite.probe')
+          return Promise.resolve({
+            databasePath: 'probe.sqlite',
+            sqliteVersion: '3.50.0',
+            journalMode: 'wal',
+            writeVerified: true,
+          });
+        if (method === 'project.current')
+          return Promise.resolve({
+            id: 'project',
+            name: 'Filter Project',
+            rootPath: 'D:\\Filter',
             createdAt: 'now',
             updatedAt: 'now',
-          },
-          {
+            mode: 'read-write',
+            schemaVersion: 4,
+          });
+        if (method === 'project.recent') return Promise.resolve([]);
+        if (method === 'document.list')
+          return Promise.resolve([
+            {
+              id: 'd-outline',
+              projectId: 'project',
+              kind: 'outline',
+              title: '项目大纲',
+              scopeType: 'project',
+              lifecycleStatus: 'active',
+              rowVersion: 0,
+              createdAt: 'now',
+              updatedAt: 'now',
+            },
+            {
+              id: 'd-character',
+              projectId: 'project',
+              kind,
+              title,
+              scopeType: 'project',
+              lifecycleStatus: 'active',
+              rowVersion: 0,
+              createdAt: 'now',
+              updatedAt: 'now',
+            },
+          ]);
+        if (method === 'document.get')
+          return Promise.resolve({
             id: 'd-character',
             projectId: 'project',
-            kind: 'character',
-            title: '角色设定',
+            kind,
+            title,
             scopeType: 'project',
             lifecycleStatus: 'active',
             rowVersion: 0,
             createdAt: 'now',
             updatedAt: 'now',
-          },
-        ]);
-      if (method === 'document.get')
-        return Promise.resolve({
-          id: 'd-character',
-          projectId: 'project',
-          kind: 'character',
-          title: '角色设定',
-          scopeType: 'project',
-          lifecycleStatus: 'active',
-          rowVersion: 0,
-          createdAt: 'now',
-          updatedAt: 'now',
-          currentVersion: {
-            id: 'v-1',
-            version: 1,
-            state: 'draft',
-            contentMarkdown: '# 角色设定',
-            createdAt: 'now',
-          },
-          currentVersionId: 'v-1',
-        });
-      if (method === 'document.versions') return Promise.resolve([]);
-      if (method === 'scene.list') return Promise.resolve([]);
-      if (method === 'asset.list') return Promise.resolve([]);
-      if (method === 'constraint.list') return Promise.resolve([]);
-      if (method === 'llm.status')
-        return Promise.resolve({
-          provider: 'OpenAI',
-          model: 'test',
-          configured: false,
-          configurationSource: 'none',
-        });
-      if (method === 'adapter.catalog')
-        return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
-      if (method === 'characterVoice.list') return Promise.resolve([]);
-      if (method === 'provider.profile.list') return Promise.resolve([]);
-      if (method === 'video.generate.list') return Promise.resolve([]);
-      if (method === 'agent.changeSet.list') return Promise.resolve([]);
-      if (method === 'novel.chapter.list') return Promise.resolve([]);
-      if (method === 'production.compile' || method === 'production.read')
-        return Promise.resolve({
-          target: { kind: 'scene' as const, id: 'legacy' },
-          rowVersion: 1,
-          parameters: {},
-          issues: [],
-        });
-      if (method === 'characterVoiceReference.list' || method === 'audio.list')
-        return Promise.resolve([]);
-      throw new Error('Unexpected method ' + method);
-    });
-    render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
-    fireEvent.click(await screen.findByText('角色设定'));
-    await waitFor(() => expect(screen.getByDisplayValue('角色设定')).toBeInTheDocument());
+            currentVersion: {
+              id: 'v-1',
+              version: 1,
+              state: 'draft',
+              contentMarkdown: `# ${title}`,
+              createdAt: 'now',
+            },
+            currentVersionId: 'v-1',
+          });
+        if (method === 'document.versions') return Promise.resolve([]);
+        if (method === 'scene.list') return Promise.resolve([]);
+        if (method === 'asset.list') return Promise.resolve([]);
+        if (method === 'constraint.list') return Promise.resolve([]);
+        if (method === 'llm.status')
+          return Promise.resolve({
+            provider: 'OpenAI',
+            model: 'test',
+            configured: false,
+            configurationSource: 'none',
+          });
+        if (method === 'adapter.catalog')
+          return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
+        if (method === 'characterVoice.list') return Promise.resolve([]);
+        if (method === 'provider.profile.list') return Promise.resolve([]);
+        if (method === 'video.generate.list') return Promise.resolve([]);
+        if (method === 'agent.changeSet.list') return Promise.resolve([]);
+        if (method === 'novel.chapter.list') return Promise.resolve([]);
+        if (method === 'production.compile' || method === 'production.read')
+          return Promise.resolve({
+            target: { kind: 'scene' as const, id: 'legacy' },
+            rowVersion: 1,
+            parameters: {},
+            issues: [],
+          });
+        if (method === 'characterVoiceReference.list' || method === 'audio.list')
+          return Promise.resolve([]);
+        throw new Error('Unexpected method ' + method);
+      });
+      render(<App />);
+      fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
+      fireEvent.click(await screen.findByText(title));
+      await waitFor(() => expect(screen.getByDisplayValue(title)).toBeInTheDocument());
+      fireEvent.change(screen.getByDisplayValue(`# ${title}`), {
+        target: { value: '尚未保存的编辑内容' },
+      });
 
-    const filters = screen.getByRole('group', { name: '文档类型筛选' });
-    fireEvent.click(within(filters).getByRole('button', { name: '场景' }));
+      const filters = screen.getByRole('group', { name: '文档类型筛选' });
+      const directory = screen.getByRole('complementary', { name: '项目文档目录' });
+      for (const label of ['道具', kind === 'scene' ? '角色' : '场景']) {
+        fireEvent.click(within(filters).getByRole('button', { name: label }));
+        expect(within(directory).queryByText('项目大纲')).not.toBeInTheDocument();
+        expect(within(directory).queryByText(title)).not.toBeInTheDocument();
+        expect(within(directory).getByText(`暂无${label}类型文档`)).toBeInTheDocument();
+        expect(screen.getByDisplayValue('尚未保存的编辑内容')).toBeInTheDocument();
+      }
+      fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
+      expect(within(directory).getByText(title)).toBeInTheDocument();
+      expect(screen.getByDisplayValue('尚未保存的编辑内容')).toBeInTheDocument();
+    },
+  );
 
-    const directory = screen.getByRole('complementary', { name: '项目文档目录' });
-    expect(within(directory).queryByText('项目大纲')).not.toBeInTheDocument();
-    expect(within(directory).getByText('角色设定')).toBeInTheDocument();
-  });
-
-  it('opens character prompts in a prompt-and-gallery workspace and seeds image production', async () => {
-    const project = {
-      id: 'project',
-      name: 'Filter Project',
-      rootPath: 'D:\\Filter',
-      createdAt: 'now',
-      updatedAt: 'now',
-      mode: 'read-write' as const,
-      schemaVersion: 4,
-    };
-    const character = {
-      id: 'd-character',
-      projectId: 'project',
-      kind: 'character' as const,
-      title: '角色设定',
-      scopeType: 'project' as const,
-      lifecycleStatus: 'active' as const,
-      rowVersion: 0,
-      createdAt: 'now',
-      updatedAt: 'now',
-      currentVersion: {
-        id: 'v-1',
-        version: 1,
-        state: 'draft' as const,
-        contentMarkdown: '林澈，灯塔守望员',
+  it.each(['character', 'scene', 'prop'] as const)(
+    'opens %s prompts in a prompt-and-gallery workspace and seeds image production',
+    async (kind) => {
+      const project = {
+        id: 'project',
+        name: 'Filter Project',
+        rootPath: 'D:\\Filter',
         createdAt: 'now',
-      },
-      currentVersionId: 'v-1',
-    };
-    const imageAdapter: AdapterDescriptor = {
-      key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
-      capability: 'TEXT_TO_IMAGE' as const,
-      capabilityLabel: '文生图',
-      provider: 'vidu',
-      providerLabel: 'Vidu',
-      model: 'viduq2',
-      modelLabel: 'Vidu Q2',
-      apiVersion: 'v2',
-      schemaVersion: 1,
-      endpoint: 'https://api.vidu.com/ent/v2/text2image',
-      documentationUrl: 'https://platform.vidu.com/docs',
-      credentialProvider: 'vidu',
-      parameterSchema: {
-        $schema: 'https://json-schema.org/draft/2020-12/schema' as const,
-        type: 'object' as const,
-        additionalProperties: false,
-        required: ['prompt'],
-        properties: {
-          prompt: { type: 'string', title: '画面提示词', minLength: 1 },
+        updatedAt: 'now',
+        mode: 'read-write' as const,
+        schemaVersion: 4,
+      };
+      const character = {
+        id: `d-${kind}`,
+        projectId: 'project',
+        kind,
+        title: '角色设定',
+        scopeType: 'project' as const,
+        lifecycleStatus: 'active' as const,
+        rowVersion: 0,
+        createdAt: 'now',
+        updatedAt: 'now',
+        currentVersion: {
+          id: 'v-1',
+          version: 1,
+          state: 'draft' as const,
+          contentMarkdown: '林澈，灯塔守望员',
+          createdAt: 'now',
         },
-      },
-      uiSchema: {
-        fields: [
-          { key: 'prompt', control: 'textarea' as const, group: 'basic' as const, order: 10 },
-        ],
-      },
-    };
-    const profile = {
-      id: '11111111-1111-4111-8111-111111111111',
-      name: 'Vidu',
-      category: 'image' as const,
-      providerType: 'vidu' as const,
-      accessType: 'official' as const,
-      protocol: 'vidu-v2',
-      baseUrl: 'https://api.vidu.cn',
-      enabled: true,
-      connectionStatus: 'ready' as const,
-      createdAt: 'now',
-      updatedAt: 'now',
-    };
-    const model = {
-      id: '21111111-1111-4111-8111-111111111111',
-      providerProfileId: profile.id,
-      remoteModelId: 'viduq2',
-      displayName: 'Vidu Q2',
-      capabilities: {
-        text: false,
-        vision: false,
-        streaming: false,
-        reasoning: false,
-        tools: false,
-        structuredOutput: false,
-        embeddings: false,
-        imageGeneration: true,
-        videoGeneration: false,
-      },
-      source: 'built-in' as const,
-      enabled: true,
-      createdAt: 'now',
-      updatedAt: 'now',
-    };
-    vi.mocked(callWorker).mockImplementation((method: string) => {
-      if (method === 'conversation.promptTemplate.get')
-        return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
-      if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
-        return Promise.resolve([]);
-      if (method === 'health')
-        return Promise.resolve({
-          protocolVersion: 1,
-          workerVersion: '0.1.0',
-          nodeVersion: 'v22.0.0',
-          platform: 'win32',
-          arch: 'x64',
-          pid: 123,
-        });
-      if (method === 'sqlite.probe')
-        return Promise.resolve({
-          databasePath: 'probe.sqlite',
-          sqliteVersion: '3.50.0',
-          journalMode: 'wal',
-          writeVerified: true,
-        });
-      if (method === 'project.current') return Promise.resolve(project);
-      if (method === 'project.recent') return Promise.resolve([]);
-      if (method === 'document.list') return Promise.resolve([character]);
-      if (method === 'document.get') return Promise.resolve(character);
-      if (method === 'document.versions') return Promise.resolve([]);
-      if (method === 'scene.list')
-        return Promise.resolve([
-          {
-            id: 'bound-scene',
-            projectId: 'project',
-            title: '第1场 · 灯塔',
-            position: 0,
+        currentVersionId: 'v-1',
+      };
+      const imageAdapter: AdapterDescriptor = {
+        key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        capability: 'TEXT_TO_IMAGE' as const,
+        capabilityLabel: '文生图',
+        provider: 'vidu',
+        providerLabel: 'Vidu',
+        model: 'viduq2',
+        modelLabel: 'Vidu Q2',
+        apiVersion: 'v2',
+        schemaVersion: 1,
+        endpoint: 'https://api.vidu.com/ent/v2/text2image',
+        documentationUrl: 'https://platform.vidu.com/docs',
+        credentialProvider: 'vidu',
+        parameterSchema: {
+          $schema: 'https://json-schema.org/draft/2020-12/schema' as const,
+          type: 'object' as const,
+          additionalProperties: false,
+          required: ['prompt'],
+          properties: {
+            prompt: { type: 'string', title: '画面提示词', minLength: 1 },
+          },
+        },
+        uiSchema: {
+          fields: [
+            { key: 'prompt', control: 'textarea' as const, group: 'basic' as const, order: 10 },
+          ],
+        },
+      };
+      const profile = {
+        id: '11111111-1111-4111-8111-111111111111',
+        name: 'Vidu',
+        category: 'image' as const,
+        providerType: 'vidu' as const,
+        accessType: 'official' as const,
+        protocol: 'vidu-v2',
+        baseUrl: 'https://api.vidu.cn',
+        enabled: true,
+        connectionStatus: 'ready' as const,
+        createdAt: 'now',
+        updatedAt: 'now',
+      };
+      const model = {
+        id: '21111111-1111-4111-8111-111111111111',
+        providerProfileId: profile.id,
+        remoteModelId: 'viduq2',
+        displayName: 'Vidu Q2',
+        capabilities: {
+          text: false,
+          vision: false,
+          streaming: false,
+          reasoning: false,
+          tools: false,
+          structuredOutput: false,
+          embeddings: false,
+          imageGeneration: true,
+          videoGeneration: false,
+        },
+        source: 'built-in' as const,
+        enabled: true,
+        createdAt: 'now',
+        updatedAt: 'now',
+      };
+      vi.mocked(callWorker).mockImplementation((method: string) => {
+        if (method === 'conversation.promptTemplate.get')
+          return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
+        if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
+          return Promise.resolve([]);
+        if (method === 'health')
+          return Promise.resolve({
+            protocolVersion: 1,
+            workerVersion: '0.1.0',
+            nodeVersion: 'v22.0.0',
+            platform: 'win32',
+            arch: 'x64',
+            pid: 123,
+          });
+        if (method === 'sqlite.probe')
+          return Promise.resolve({
+            databasePath: 'probe.sqlite',
+            sqliteVersion: '3.50.0',
+            journalMode: 'wal',
+            writeVerified: true,
+          });
+        if (method === 'project.current') return Promise.resolve(project);
+        if (method === 'project.recent') return Promise.resolve([]);
+        if (method === 'document.list') return Promise.resolve([character]);
+        if (method === 'document.get') return Promise.resolve(character);
+        if (method === 'document.versions') return Promise.resolve([]);
+        if (method === 'scene.list')
+          return Promise.resolve([
+            {
+              id: 'bound-scene',
+              projectId: 'project',
+              title: '第1场 · 灯塔',
+              position: 0,
+              rowVersion: 1,
+              createdAt: 'now',
+              updatedAt: 'now',
+              characterBindings: [{ characterDocumentId: character.id }],
+            },
+            {
+              id: 'unbound-scene',
+              projectId: 'project',
+              title: '未关联的场次',
+              position: 1,
+              rowVersion: 1,
+              createdAt: 'now',
+              updatedAt: 'now',
+              characterBindings: [{ characterDocumentId: 'same-name-other-id' }],
+            },
+          ]);
+        if (method === 'asset.list' || method === 'shot.list') return Promise.resolve([]);
+        if (method === 'constraint.list')
+          return Promise.resolve([
+            {
+              id: 'c-1',
+              projectId: 'project',
+              scopeType: 'project',
+              kind: 'production',
+              content: '所有镜头保持冷色调',
+              createdAt: 'now',
+              updatedAt: 'now',
+            },
+          ]);
+        if (method === 'llm.status')
+          return Promise.resolve({
+            provider: 'OpenAI',
+            model: 'test',
+            configured: false,
+            configurationSource: 'none',
+          });
+        if (method === 'adapter.catalog')
+          return Promise.resolve({
+            capabilities: [{ key: 'TEXT_TO_IMAGE' as const, label: '文生图' }],
+            providers: [{ key: 'vidu', label: 'Vidu' }],
+            adapters: [imageAdapter],
+          });
+        if (method === 'adapter.resolve') return Promise.resolve(imageAdapter);
+        if (method === 'characterVoice.list') return Promise.resolve([]);
+        if (method === 'provider.profile.list') return Promise.resolve([profile]);
+        if (method === 'provider.model.list') return Promise.resolve([model]);
+        if (method === 'video.generate.list') return Promise.resolve([]);
+        if (method === 'agent.changeSet.list') return Promise.resolve([]);
+        if (method === 'novel.chapter.list') return Promise.resolve([]);
+        if (method === 'production.compile' || method === 'production.read')
+          return Promise.resolve({
+            target: { kind: 'scene' as const, id: 'legacy' },
             rowVersion: 1,
-            createdAt: 'now',
-            updatedAt: 'now',
-            characterBindings: [{ characterDocumentId: character.id }],
-          },
-          {
-            id: 'unbound-scene',
-            projectId: 'project',
-            title: '未关联的场次',
-            position: 1,
-            rowVersion: 1,
-            createdAt: 'now',
-            updatedAt: 'now',
-            characterBindings: [{ characterDocumentId: 'same-name-other-id' }],
-          },
-        ]);
-      if (method === 'asset.list' || method === 'shot.list') return Promise.resolve([]);
-      if (method === 'constraint.list')
-        return Promise.resolve([
-          {
-            id: 'c-1',
-            projectId: 'project',
-            scopeType: 'project',
-            kind: 'production',
-            content: '所有镜头保持冷色调',
-            createdAt: 'now',
-            updatedAt: 'now',
-          },
-        ]);
-      if (method === 'llm.status')
-        return Promise.resolve({
-          provider: 'OpenAI',
-          model: 'test',
-          configured: false,
-          configurationSource: 'none',
-        });
-      if (method === 'adapter.catalog')
-        return Promise.resolve({
-          capabilities: [{ key: 'TEXT_TO_IMAGE' as const, label: '文生图' }],
-          providers: [{ key: 'vidu', label: 'Vidu' }],
-          adapters: [imageAdapter],
-        });
-      if (method === 'adapter.resolve') return Promise.resolve(imageAdapter);
-      if (method === 'characterVoice.list') return Promise.resolve([]);
-      if (method === 'provider.profile.list') return Promise.resolve([profile]);
-      if (method === 'provider.model.list') return Promise.resolve([model]);
-      if (method === 'video.generate.list') return Promise.resolve([]);
-      if (method === 'agent.changeSet.list') return Promise.resolve([]);
-      if (method === 'novel.chapter.list') return Promise.resolve([]);
-      if (method === 'production.compile' || method === 'production.read')
-        return Promise.resolve({
-          target: { kind: 'scene' as const, id: 'legacy' },
-          rowVersion: 1,
-          parameters: {},
-          issues: [],
-        });
-      if (method === 'characterVoiceReference.list' || method === 'audio.list')
-        return Promise.resolve([]);
-      throw new Error('Unexpected method ' + method);
-    });
-    const { container } = render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
-    fireEvent.click(await screen.findByText('角色设定'));
-    expect(await screen.findByRole('heading', { name: '角色生图提示词' })).toBeInTheDocument();
-    const sceneBindings = screen.getByRole('region', { name: '场次绑定' });
-    expect(within(sceneBindings).getByRole('button', { name: '第1场 · 灯塔' })).toBeInTheDocument();
-    expect(
-      within(sceneBindings).queryByRole('button', { name: '未关联的场次' }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '已生成图片' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '生成角色图' })).toBeInTheDocument();
-    expect(screen.queryByText('约束条件')).not.toBeInTheDocument();
+            parameters: {},
+            issues: [],
+          });
+        if (method === 'characterVoiceReference.list' || method === 'audio.list')
+          return Promise.resolve([]);
+        throw new Error('Unexpected method ' + method);
+      });
+      const { container } = render(<App />);
+      fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
+      fireEvent.click(await screen.findByText('角色设定'));
+      expect(
+        await screen.findByRole('heading', {
+          name:
+            kind === 'prop' ? '道具资料' : kind === 'scene' ? '场景生图提示词' : '角色生图提示词',
+        }),
+      ).toBeInTheDocument();
+      if (kind === 'character') {
+        const sceneBindings = screen.getByRole('region', { name: '场次绑定' });
+        expect(
+          within(sceneBindings).getByRole('button', { name: '第1场 · 灯塔' }),
+        ).toBeInTheDocument();
+        expect(
+          within(sceneBindings).queryByRole('button', { name: '未关联的场次' }),
+        ).not.toBeInTheDocument();
+      } else {
+        expect(screen.queryByText('角色声音')).not.toBeInTheDocument();
+      }
+      expect(screen.getByRole('heading', { name: '已生成图片' })).toBeInTheDocument();
+      const generateLabel =
+        kind === 'prop' ? '生成道具图' : kind === 'scene' ? '生成场景图' : '生成角色图';
+      expect(screen.getByRole('button', { name: generateLabel })).toBeInTheDocument();
+      expect(screen.queryByText('约束条件')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '生成角色图' }));
-    await waitFor(() =>
-      expect(container.querySelector('.app-shell')).toHaveAttribute(
-        'data-navigation-mode',
-        'production',
-      ),
-    );
-    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('林澈，灯塔守望员');
-    expect(screen.getByLabelText('保存为')).toHaveValue('character');
-  });
+      fireEvent.click(screen.getByRole('button', { name: generateLabel }));
+      await waitFor(() =>
+        expect(container.querySelector('.app-shell')).toHaveAttribute(
+          'data-navigation-mode',
+          'production',
+        ),
+      );
+      const imagePrompt = await screen.findByLabelText(/画面提示词/);
+      if (kind === 'character') {
+        expect((imagePrompt as HTMLTextAreaElement).value).toContain('林澈，灯塔守望员');
+        expect((imagePrompt as HTMLTextAreaElement).value).toContain('全身五视图');
+        expect((imagePrompt as HTMLTextAreaElement).value).toContain('头部六角度');
+      } else {
+        expect(imagePrompt).toHaveValue('林澈，灯塔守望员');
+      }
+      expect(screen.getByLabelText('保存为')).toHaveValue(kind);
+      expect(callWorker).toHaveBeenCalledWith(
+        'asset.list',
+        expect.objectContaining({ sourceDocumentId: character.id }),
+      );
+    },
+  );
 
   it('shows and saves the shot storyboard document in the shot workspace', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
@@ -3932,6 +4179,7 @@ describe('App', () => {
           capability: 'image' as const,
           job: imageJob,
         });
+      if (method === 'media.review.list') return Promise.resolve([]);
       if (method === 'media.generation.requestSubmission')
         return Promise.resolve({
           kind: 'image' as const,

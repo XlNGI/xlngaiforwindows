@@ -15,6 +15,7 @@ import {
   DETACHED_PANEL_ACTION_EVENT,
   DETACHED_PANEL_READY_EVENT,
   DETACHED_PANEL_SNAPSHOT_EVENT,
+  DETACHED_QUESTION_RESULT_EVENT,
   type DetachedConversationSnapshot,
   type DetachedDocumentSnapshot,
   type DetachedPanelAction,
@@ -73,7 +74,7 @@ export function DetachedPanelApp({ config }: { config: DetachedPanelConfig }) {
     };
   }, [config]);
 
-  const sendAction = (action: DetachedPanelAction) => {
+  const sendAction = async (action: DetachedPanelAction) => {
     if (action.type === 'document-title') {
       setSnapshot((current) =>
         current?.panelId === 'document' ? { ...current, title: action.value } : current,
@@ -97,17 +98,52 @@ export function DetachedPanelApp({ config }: { config: DetachedPanelConfig }) {
         current?.panelId === 'conversation' ? { ...current, researchMode: action.mode } : current,
       );
     }
-    void emitTo('main', DETACHED_PANEL_ACTION_EVENT, {
+    const envelope = {
       label: config.label,
       projectId: config.projectId,
       entityId: config.entityId,
       sequence: ++actionSequence.current,
       payload: action,
+    };
+    if (action.type !== 'conversation-answer-questions') {
+      await emitTo('main', DETACHED_PANEL_ACTION_EVENT, envelope);
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      let stop: (() => void) | undefined;
+      let settled = false;
+      const finish = (error?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        stop?.();
+        if (error) reject(new Error(error));
+        else resolve();
+      };
+      const timer = setTimeout(
+        () => finish('回答已保存，但未收到主窗口确认。请回到原会话重试。'),
+        30000,
+      );
+      void listen<{ requestId: string; error?: string }>(
+        DETACHED_QUESTION_RESULT_EVENT,
+        (event) => {
+          if (event.payload.requestId === action.requestId) finish(event.payload.error);
+        },
+      )
+        .then(async (unlisten) => {
+          stop = unlisten;
+          if (settled) {
+            stop();
+            return;
+          }
+          await emitTo('main', DETACHED_PANEL_ACTION_EVENT, envelope);
+        })
+        .catch((reason: Error) => finish(reason.message));
     });
   };
 
   const attach = () => {
-    sendAction({ panelId: config.panelId, type: 'attach' });
+    void sendAction({ panelId: config.panelId, type: 'attach' });
     void getCurrentWindow().close();
   };
 
@@ -136,7 +172,12 @@ export function DetachedPanelApp({ config }: { config: DetachedPanelConfig }) {
         </button>
       </header>
       {snapshot.panelId === 'document' ? (
-        <DetachedDocumentPanel snapshot={snapshot} onAction={sendAction} />
+        <DetachedDocumentPanel
+          snapshot={snapshot}
+          onAction={(action) => {
+            void sendAction(action);
+          }}
+        />
       ) : (
         <DetachedConversationPanel snapshot={snapshot} onAction={sendAction} />
       )}
@@ -283,54 +324,65 @@ function DetachedConversationPanel({
   onAction,
 }: {
   snapshot: DetachedConversationSnapshot;
-  onAction: (action: DetachedPanelAction) => void;
+  onAction: (action: DetachedPanelAction) => void | Promise<void>;
 }) {
+  const dispatch = (action: DetachedPanelAction) => {
+    void onAction(action);
+  };
   return (
     <ChatPanel
       {...snapshot}
       onClose={() => void getCurrentWindow().close()}
       showHeading={false}
       onSelectConversation={(conversation) =>
-        onAction({
+        dispatch({
           panelId: 'conversation',
           type: 'conversation-select',
           conversationId: conversation.id,
         })
       }
       onCreateConversation={() =>
-        onAction({ panelId: 'conversation', type: 'conversation-create' })
+        dispatch({ panelId: 'conversation', type: 'conversation-create' })
       }
       onRetryGeneration={(messageId) =>
-        onAction({ panelId: 'conversation', type: 'conversation-retry', messageId })
+        dispatch({ panelId: 'conversation', type: 'conversation-retry', messageId })
       }
       onLlmProfileChange={(profileId) =>
-        onAction({ panelId: 'conversation', type: 'conversation-profile', profileId })
+        dispatch({ panelId: 'conversation', type: 'conversation-profile', profileId })
       }
       onLlmModelChange={(modelId) =>
-        onAction({ panelId: 'conversation', type: 'conversation-model', modelId })
+        dispatch({ panelId: 'conversation', type: 'conversation-model', modelId })
       }
       onResearchModeChange={(mode) =>
-        onAction({ panelId: 'conversation', type: 'conversation-research-mode', mode })
+        dispatch({ panelId: 'conversation', type: 'conversation-research-mode', mode })
       }
       onOpenProviderSettings={() =>
-        onAction({ panelId: 'conversation', type: 'conversation-open-settings' })
+        dispatch({ panelId: 'conversation', type: 'conversation-open-settings' })
       }
       onComposerChange={(value) =>
-        onAction({ panelId: 'conversation', type: 'conversation-composer', value })
+        dispatch({ panelId: 'conversation', type: 'conversation-composer', value })
       }
       onPromptTemplateChange={(value) =>
-        onAction({ panelId: 'conversation', type: 'conversation-prompt-template', value })
+        dispatch({ panelId: 'conversation', type: 'conversation-prompt-template', value })
       }
       onSavePromptTemplate={() =>
-        onAction({ panelId: 'conversation', type: 'conversation-prompt-template-save' })
+        dispatch({ panelId: 'conversation', type: 'conversation-prompt-template-save' })
       }
       onReloadPromptTemplate={() =>
-        onAction({ panelId: 'conversation', type: 'conversation-prompt-template-reload' })
+        dispatch({ panelId: 'conversation', type: 'conversation-prompt-template-reload' })
       }
-      onCancelGeneration={() => onAction({ panelId: 'conversation', type: 'conversation-cancel' })}
+      onCancelGeneration={() => dispatch({ panelId: 'conversation', type: 'conversation-cancel' })}
       onSendMessage={() =>
-        onAction({ panelId: 'conversation', type: 'conversation-send', value: snapshot.composer })
+        dispatch({ panelId: 'conversation', type: 'conversation-send', value: snapshot.composer })
       }
+      onAnswerQuestions={async (result) => {
+        await onAction({
+          panelId: 'conversation',
+          type: 'conversation-answer-questions',
+          requestId: crypto.randomUUID(),
+          result,
+        });
+      }}
     />
   );
 }

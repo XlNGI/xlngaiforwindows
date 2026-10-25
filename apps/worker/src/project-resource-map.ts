@@ -11,7 +11,7 @@ type Workspace = ProjectStructureResource['locator']['workspace'];
 const WORKSPACES: Array<[Workspace, string]> = [
   ['novel', '小说（章节、小说大纲与设定资料）'],
   ['documents', '剧本（短剧大纲、计划与笔记）'],
-  ['characters', '角色与场景（制作提示词）'],
+  ['characters', '角色、场景与道具（制作资料）'],
   ['shots', '场次与镜头'],
   ['assets', '素材库'],
   ['tasks', '任务日志'],
@@ -28,7 +28,7 @@ export function workspaceResource(workspace: Workspace): ProjectStructureResourc
       ? {
           writeTool: 'scene.submit_structure',
           contentModel:
-            'LLM 按 ProductionInstruction 结构创作场次共享内容与镜头专属内容，返回真实场景文档 ID（sceneDocumentId）和全部出场角色 ID（characterDocumentIds）；系统校验 ID，不解析姓名。已有场次正文和关系按需用 scene.read 读取；修改需 sceneId、expectedRowVersion 和 shots:[]，新场次包含镜头。提交后自动保存为可编辑草稿并进入目录，无需用户确认，后期可修改提示词和绑定；独立 Markdown 文档不会创建场次或镜头。',
+            'Agent 按任务需要选择资料与工具，并自行组织场次、镜头提示词和开放 authoringIR.data；references 只使用真实角色、场景资料、道具文档 ID。系统校验 IR、项目范围和引用类型，不选择语义字段或重写提示词。成功提交后自动保存为可编辑草稿，无需用户确认。已有场次和镜头可按需读取，场次修改需 sceneId 与 expectedRowVersion；已有镜头正文使用 scene.update_shot_prompts（shotId 与 expectedRowVersion），仅时长修改使用 scene.update_shot_timings。用户要求必须写入最终 prompt，data 只作补充。',
         }
       : {}),
     locator: { workspace, resourceId: id },
@@ -58,7 +58,7 @@ export function documentWorkspace(
   row: Pick<DocumentRow, 'chapter_id' | 'domain_scope' | 'kind'>,
 ): Workspace {
   if (row.chapter_id || row.domain_scope === 'novel') return 'novel';
-  if (row.kind === 'character' || row.kind === 'scene') return 'characters';
+  if (row.kind === 'character' || row.kind === 'scene' || row.kind === 'prop') return 'characters';
   if (row.kind === 'storyboard') return 'shots';
   return 'documents';
 }
@@ -125,6 +125,19 @@ export function compileProjectResourceMap(
   project: OpenProject,
   includeArchived = false,
 ): ProjectStructureResult {
+  const readDocumentIds = (value: string | null | undefined): string[] | undefined => {
+    if (!value) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!Array.isArray(parsed)) return undefined;
+      const ids = parsed.filter(
+        (item): item is string => typeof item === 'string' && Boolean(item.trim()),
+      );
+      return ids.length === parsed.length ? [...new Set(ids)] : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const resources = WORKSPACES.map(([workspace]) => workspaceResource(workspace));
   const rows = database
     .prepare(
@@ -143,12 +156,18 @@ export function compileProjectResourceMap(
     [
       'scene',
       'shots',
-      'SELECT id, title, scene_document_id AS sceneDocumentId, row_version AS rowVersion FROM scenes WHERE project_id = ? ORDER BY position, id',
+      `SELECT id, title, scene_document_id AS sceneDocumentId, row_version AS rowVersion,
+        json_extract(authoring_ir_json,'$.references.sceneDocumentIds') AS sceneDocumentIdsJson
+       FROM scenes WHERE project_id = ? ORDER BY position, id`,
     ],
     [
       'shot',
       'shots',
-      'SELECT shots.id, shots.title, shots.scene_id AS sceneId, scenes.scene_document_id AS sceneDocumentId, shots.row_version AS rowVersion FROM shots JOIN scenes ON scenes.id = shots.scene_id WHERE scenes.project_id = ? ORDER BY scenes.position, shots.position, shots.id',
+      `SELECT shots.id, shots.title, shots.scene_id AS sceneId,
+        scenes.scene_document_id AS sceneDocumentId, shots.row_version AS rowVersion,
+        json_extract(scenes.authoring_ir_json,'$.references.sceneDocumentIds') AS sceneDocumentIdsJson
+       FROM shots JOIN scenes ON scenes.id = shots.scene_id
+       WHERE scenes.project_id = ? ORDER BY scenes.position, shots.position, shots.id`,
     ],
     [
       'asset',
@@ -168,6 +187,7 @@ export function compileProjectResourceMap(
       rowVersion?: number;
       sceneId?: string;
       sceneDocumentId?: string;
+      sceneDocumentIdsJson?: string | null;
     }>;
     truncated ||= entries.length > 20;
     resources.push(
@@ -179,12 +199,18 @@ export function compileProjectResourceMap(
           title: entry.title,
           parentId: entry.sceneId ? `scene:${entry.sceneId}` : `workspace:${workspace}`,
           ...(entry.rowVersion !== undefined ? { rowVersion: entry.rowVersion } : {}),
+          ...(readDocumentIds(entry.sceneDocumentIdsJson)
+            ? { sceneDocumentIds: readDocumentIds(entry.sceneDocumentIdsJson) }
+            : {}),
           locator: {
             workspace,
             resourceId: id,
             ...(kind === 'scene' ? { sceneId: entry.id } : {}),
             ...(kind === 'shot' ? { shotId: entry.id, sceneId: entry.sceneId } : {}),
             ...(entry.sceneDocumentId ? { sceneDocumentId: entry.sceneDocumentId } : {}),
+            ...(readDocumentIds(entry.sceneDocumentIdsJson)
+              ? { sceneDocumentIds: readDocumentIds(entry.sceneDocumentIdsJson) }
+              : {}),
           },
         };
       }),

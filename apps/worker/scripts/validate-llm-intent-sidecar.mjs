@@ -6,37 +6,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
-import { renderProductionInstruction } from '../../../packages/contracts/dist/index.js';
-
-function productionInstruction(summary, shot = false) {
+function productionIR(prompt, shot = false) {
   return {
-    version: 2,
-    summary,
-    narrative: { purpose: '展示信件线索' },
-    storyTime: { timeOfDay: '清晨' },
-    location: { description: summary },
-    visual: { style: '写实' },
-    subjects: [],
-    camera: { framing: '中景' },
-    ...(shot
-      ? {
-          stillFrame: summary,
-          timing: { estimatedDurationSeconds: 4, rationale: '停顿后发现线索' },
-        }
-      : {}),
-    beats: shot
-      ? [{ id: 'beat-1', action: '发现线索', dialogue: [], characterDocumentIds: [] }]
-      : [],
-    audio: { mode: 'silent' },
-    generation: {},
-    resources: [],
-    continuity: {
-      predecessors: [],
-      before: [],
-      after: [{ key: 'letter', value: 'visible' }],
-      locked: [],
-      constraints: [],
-    },
+    schemaVersion: 1,
+    kind: shot ? 'shot' : 'scene',
+    prompt,
+    ...(shot ? { timing: { estimatedDurationSeconds: 4, rationale: 'action and pause' } } : {}),
   };
 }
 
@@ -342,18 +317,18 @@ try {
               title: '庭院',
               sceneDocumentId: courtyardSetting.documentId,
               characterDocumentIds: [],
-              instruction: productionInstruction('庭院'),
+              authoringIR: productionIR('庭院'),
               shots: [
-                { title: '远景', instruction: productionInstruction('清晨的庭院', true) },
-                { title: '近景', instruction: productionInstruction('门上的霜', true) },
+                { title: '远景', authoringIR: productionIR('清晨的庭院', true) },
+                { title: '近景', authoringIR: productionIR('门上的霜', true) },
               ],
             },
             {
               title: '书房',
               sceneDocumentId: studySetting.documentId,
               characterDocumentIds: [],
-              instruction: productionInstruction('书房'),
-              shots: [{ title: '信件特写', instruction: productionInstruction('桌上的信', true) }],
+              authoringIR: productionIR('书房'),
+              shots: [{ title: '信件特写', authoringIR: productionIR('桌上的信', true) }],
             },
           ],
         };
@@ -413,9 +388,7 @@ try {
           const shots = await request('shot.list', { sceneId: parentScene.id });
           assert.deepEqual(
             shots.map((item) => item.prompt),
-            prompts.map((prompt) =>
-              renderProductionInstruction(productionInstruction(prompt, true)),
-            ),
+            prompts,
           );
         }
         const sceneTarget = appliedScenes.find((item) => item.title === '庭院');
@@ -427,28 +400,23 @@ try {
         assert.ok(compact.shots.every((shot) => shot.prompt === undefined));
         const target = { kind: 'shot', id: compact.shots[0].id };
         const authored = await execute('production.read', { target });
-        assert.equal(authored.instruction.summary, '清晨的庭院');
+        assert.equal(authored.authoring.prompt, '清晨的庭院');
         assert.equal(authored.source, undefined);
-        const operations = [
-          {
-            action: 'set_prompt',
-            target,
-            expectedRowVersion: authored.rowVersion,
-            instruction: authored.instruction,
-          },
-        ];
-        const noOp = await execute('production.execute', { operations });
-        assert.equal(noOp.status, 'applied');
+        const args = {
+          shots: [
+            {
+              shotId: target.id,
+              expectedRowVersion: authored.rowVersion,
+              authoringIR: authored.authoring,
+            },
+          ],
+        };
+        const noOp = await execute('scene.update_shot_prompts', args);
+        assert.equal(noOp.status, 'shot_prompts_saved');
         assert.equal(noOp.changedCount, 0);
         assert.equal(noOp.unchangedCount, 1);
-        assert.equal(noOp.operations[0].rowVersion, authored.rowVersion);
-        assert.equal(noOp.operations[0].revision, authored.revision);
-        const otherKey = await execute('production.execute', {
-          executionKey: 'same-content-other-key',
-          operations,
-        });
-        assert.equal(otherKey.changedCount, 0);
-        assert.equal(otherKey.operations[0].instructionId, noOp.operations[0].instructionId);
+        assert.equal(noOp.shots[0].rowVersion, authored.rowVersion);
+        assert.deepEqual(await execute('scene.update_shot_prompts', args), noOp);
         assert.equal(
           (await execute('production.read', { target, ifVersion: authored.version })).status,
           'unchanged',

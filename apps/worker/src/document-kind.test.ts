@@ -6,9 +6,10 @@ import {
 } from './document-kind.js';
 
 describe('inferDocumentKindFromDraft', () => {
-  it('maps character and scene prompt titles onto workspace kinds', () => {
+  it('maps character, scene and prop prompt titles onto workspace kinds', () => {
     expect(inferDocumentKindFromDraft('前三章人物提示词')).toBe('character');
     expect(inferDocumentKindFromDraft('白家三房场景设定')).toBe('scene');
+    expect(inferDocumentKindFromDraft('祖传断剑道具设定')).toBe('prop');
   });
 
   it('maps episode overviews to plan before generic outlines', () => {

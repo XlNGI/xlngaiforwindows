@@ -6,8 +6,8 @@ import type {
   AgentGenerationExecuteToolsResult,
   AgentProviderStepCompleteParams,
   LlmGenerationIdentity,
-  LlmToolDefinition,
   NormalizedLlmUsage,
+  LlmToolDefinition,
   AgentToolConfirmationRequest,
   AgentGenerationSelectMediaParams,
   MediaModelSelectionDecision,
@@ -19,9 +19,9 @@ import { validateToolArguments } from '@earendil-works/pi-ai';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { loadedToolGuidance } from './agent-workflow-guidance.js';
 import { RepeatedReadResults } from './repeated-read-results.js';
-import { normalizeProductionAuthoringArguments } from '@ai-video/contracts';
 
 const CORE_TOOLS = [
+  'conversation.ask',
   'conversation.task.route',
   'project.structure.get',
   'library.search',
@@ -43,6 +43,12 @@ export interface AgentProviderToolExecutor {
     argumentBytes: number,
     reason: string,
   ): void;
+  reserveTurn?(identity: LlmGenerationIdentity): void;
+  recordProviderUsage?(
+    identity: LlmGenerationIdentity,
+    requestId: string,
+    usage: NormalizedLlmUsage,
+  ): void;
   refreshTools?(identity: LlmGenerationIdentity): LlmToolDefinition[];
   advanceTextTurn?(params: AgentProviderStepCompleteParams): LlmToolDefinition[];
   executeTools(
@@ -52,7 +58,7 @@ export interface AgentProviderToolExecutor {
   confirmMediaSubmission?(
     params: AgentGenerationConfirmMediaSubmissionParams,
   ): Promise<AgentGenerationExecuteToolsResult>;
-  selectMedia(params: AgentGenerationSelectMediaParams): AgentGenerationExecuteToolsResult;
+  selectMedia(params: AgentGenerationSelectMediaParams): Promise<AgentGenerationExecuteToolsResult>;
   startProviderStep(identity: LlmGenerationIdentity): void;
   completeProviderStep(params: AgentProviderStepCompleteParams): void;
   terminateGeneration(
@@ -95,6 +101,7 @@ export class AgentProviderToolGateway {
   };
   private activeReads = 0;
   private validationFailures = 0;
+  private sceneShotBatchLimit = 4;
   private completionError?: string;
   private readonly selectedTools = new Set<string>();
   private catalog: string;
@@ -102,6 +109,10 @@ export class AgentProviderToolGateway {
   private readonly repeatedResults = new RepeatedReadResults();
   private readonly deliveredGuidance = new Set<string>();
   private readonly readWaiters: Array<() => void> = [];
+  // A durable review boundary closes the current Worker step. Pi still calls
+  // prepareNextTurnWithContext after finalizing tool results, so remember the
+  // termination and avoid trying to advance that already-closed step.
+  private terminated = false;
 
   constructor(
     private readonly executor: AgentProviderToolExecutor,
@@ -144,9 +155,9 @@ export class AgentProviderToolGateway {
           isLibraryRetrievalOperation(definition.name)) &&
         this.isLoaded(definition.name),
     );
-    if (!this.lazyTools) return cloneDefinitions(available);
+    if (!this.lazyTools) return this.withRecoveryLimits(available);
     const byName = new Map(available.map((definition) => [definition.name, definition]));
-    return [
+    return this.withRecoveryLimits([
       ...CORE_TOOLS.flatMap((name) =>
         byName.has(name) ? [structuredClone(byName.get(name)!)] : [],
       ),
@@ -154,20 +165,23 @@ export class AgentProviderToolGateway {
       ...[...this.selectedTools]
         .filter((name) => !CORE_TOOLS.includes(name))
         .flatMap((name) => (byName.has(name) ? [structuredClone(byName.get(name)!)] : [])),
-    ];
+    ]);
+  }
+
+  private withRecoveryLimits(definitions: LlmToolDefinition[]): LlmToolDefinition[] {
+    const tools = cloneDefinitions(definitions);
+    if (this.sceneShotBatchLimit === 4) return tools;
+    const stage = tools.find((tool) => tool.name === 'scene.structure.stage');
+    if (stage) {
+      const shots = (stage.parameters.properties as Record<string, Record<string, unknown>>)?.shots;
+      if (shots) shots.maxItems = this.sceneShotBatchLimit;
+      stage.description += ` Recovery limit: put_shots accepts at most ${this.sceneShotBatchLimit} ordered shots per call. Preserve every planned shot using successive shotOffset values.`;
+    }
+    return tools;
   }
 
   private isLoaded(name: string): boolean {
-    return (
-      !this.lazyTools ||
-      this.selectedTools.has(name) ||
-      [
-        'conversation.task.route',
-        'project.structure.get',
-        'library.search',
-        'library.read',
-      ].includes(name)
-    );
+    return !this.lazyTools || this.selectedTools.has(name) || CORE_TOOLS.includes(name);
   }
 
   private loaderDefinition(): LlmToolDefinition {
@@ -268,6 +282,20 @@ export class AgentProviderToolGateway {
     return true;
   }
 
+  recoverSceneAuthoring(): string | undefined {
+    if (!this.preferStagedSceneAuthoring()) return undefined;
+    this.sceneShotBatchLimit = Math.max(1, Math.floor(this.sceneShotBatchLimit / 2));
+    return (
+      `For NEW scene/shot content use scene.structure.stage with at most ${this.sceneShotBatchLimit} ordered shots per put_shots call, one write call per response. ` +
+      'Resume the matching stage using get and its latest stageId, rowVersion and missingShots; do not repeat saved scenes or shots. ' +
+      'Only when no matching stage exists, begin with a stable executionKey and the full sceneShotCounts manifest, then put_scene and put_shots in order. ' +
+      'Preserve the full manifest and prompt content across successive shotOffset batches; budget remaining writes using this smaller limit and missingShots. ' +
+      'Each new shot is {"title":"...","authoringIR":{"schemaVersion":1,"kind":"shot","prompt":"..."}}; put optional creative fields in authoringIR.data and real document IDs in authoringIR.references. ' +
+      'Use complete JSON with escaped quotes/newlines inside strings. Put final generation text in authoringIR.prompt. ' +
+      'For EXISTING scene revisions keep sceneId and expectedRowVersion through scene.read/scene.submit_structure; never create replacements.'
+    );
+  }
+
   freezeProviderResponse(calls: Array<{ id: string; name: string }>): void {
     if (calls.some((call) => call.name === 'tools.load')) return;
     const key = calls.map((call) => call.id).join(':');
@@ -288,6 +316,11 @@ export class AgentProviderToolGateway {
   }
 
   finishProviderResponse(): void {
+    if (this.terminated) {
+      this.batch = undefined;
+      this.readBatchContext = undefined;
+      return;
+    }
     const batch = this.batch;
     if (!batch) return;
     if (this.executor.advanceTextTurn && this.readBatchContext)
@@ -343,6 +376,7 @@ export class AgentProviderToolGateway {
   }
 
   startProviderStep(): void {
+    if (this.terminated) return;
     this.executor.startProviderStep(this.identity);
   }
 
@@ -390,7 +424,6 @@ export class AgentProviderToolGateway {
   private prepareArguments(definition: LlmToolDefinition, args: unknown): unknown {
     try {
       this.assertRepairBudget();
-      args = normalizeProductionAuthoringArguments(definition.name, args);
       const validated: unknown = validateToolArguments(definition, {
         type: 'toolCall',
         id: 'validation',
@@ -400,15 +433,17 @@ export class AgentProviderToolGateway {
       return validated;
     } catch (error) {
       this.validationFailures += 1;
-      if (isNewSceneAuthoring(definition.name, args)) this.preferStagedSceneAuthoring();
-      const reason = boundedValidationError(error);
+      const recovery = isNewSceneAuthoring(definition.name, args)
+        ? this.recoverSceneAuthoring()
+        : undefined;
+      const reason = boundedValidationError(error, definition, args);
       this.executor.recordValidationFailure?.(
         this.identity,
         definition.name,
         Buffer.byteLength(JSON.stringify(args) ?? '', 'utf8'),
         reason,
       );
-      throw new Error(reason);
+      throw new Error([reason, recovery].filter(Boolean).join('\n'));
     }
   }
 
@@ -459,7 +494,7 @@ export class AgentProviderToolGateway {
       }
       if (execution.mediaSelection) {
         const selection = await this.requestMediaSelection(execution.mediaSelection);
-        execution = this.executor.selectMedia({
+        execution = await this.executor.selectMedia({
           ...this.identity,
           selectionToken: execution.mediaSelection.selectionToken,
           selection,
@@ -497,10 +532,13 @@ export class AgentProviderToolGateway {
       };
       if (result?.status === 'rejected') {
         if (result.error?.code === 'AGENT_TOOL_ARGUMENTS_INVALID') this.validationFailures += 1;
-        if (isNewSceneAuthoring(name, args)) this.preferStagedSceneAuthoring();
-        throw new Error(boundedValidationError(new Error(output)));
+        const recovery = isNewSceneAuthoring(name, args) ? this.recoverSceneAuthoring() : undefined;
+        throw new Error(
+          [boundedValidationError(new Error(output)), recovery].filter(Boolean).join('\n'),
+        );
       }
       this.validationFailures = 0;
+      if (execution.terminate) this.terminated = true;
       if (stepId && !this.planHooks!.succeed(stepId, definition.name, output)) {
         throw new Error(`Planned operation ${definition.name} did not succeed.`);
       }
@@ -509,6 +547,7 @@ export class AgentProviderToolGateway {
           { type: 'text', text: readonly ? this.repeatedResults.use(toolCallId, output) : output },
         ],
         details: { status: 'completed', toolName: definition.name },
+        ...(execution.terminate ? { terminate: true } : {}),
       };
     } catch (error) {
       if (error instanceof Error && /AGENT_TOOL_QUOTA_EXHAUSTED/.test(error.message))
@@ -525,14 +564,53 @@ export class AgentProviderToolGateway {
   }
 }
 
-export function boundedValidationError(error: unknown): string {
+export function boundedValidationError(
+  error: unknown,
+  definition?: LlmToolDefinition,
+  args?: unknown,
+): string {
   const message = error instanceof Error ? error.message : 'Invalid tool arguments.';
-  return message.split('Received arguments:')[0]!.trim().slice(0, 1600);
+  const paths = definition ? unsupportedArgumentPaths(definition.parameters, args) : [];
+  return [
+    ...(paths.length ? [`Unsupported fields: ${paths.join(', ')}.`] : []),
+    message.split('Received arguments:')[0]!.trim(),
+  ]
+    .join('\n')
+    .slice(0, 1600);
+}
+
+// Diagnostics only: the schema validator remains authoritative. Never include
+// argument values or interpret open authoringIR.data as envelope fields.
+function unsupportedArgumentPaths(schema: unknown, args: unknown): string[] {
+  const paths: string[] = [];
+  let visited = 0;
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  const visit = (shape: unknown, value: unknown, path: string, depth: number): void => {
+    if (!record(shape) || paths.length >= 6 || ++visited > 8000 || depth > 24) return;
+    if (Array.isArray(value)) {
+      for (const [index, item] of value.entries()) {
+        visit(shape.items, item, `${path}[${index}]`, depth + 1);
+        if (paths.length >= 6 || visited > 8000) break;
+      }
+    } else if (record(value)) {
+      const properties = record(shape.properties) ? shape.properties : {};
+      for (const [key, item] of Object.entries(value)) {
+        const nextPath = path ? `${path}.${key}` : key;
+        if (!Object.hasOwn(properties, key) && shape.additionalProperties === false)
+          paths.push(JSON.stringify(nextPath.slice(0, 160)));
+        else if (Object.hasOwn(properties, key)) visit(properties[key], item, nextPath, depth + 1);
+        if (paths.length >= 6 || visited > 8000) break;
+      }
+    }
+  };
+  visit(schema, args, '', 0);
+  return paths;
 }
 
 function isNewSceneAuthoring(name: string, args: unknown): boolean {
   if (name === 'scene.structure.stage') return true;
-  if (name !== 'scene.submit_structure') return false;
+  if (!['scene.submit_structure', 'novel.episode.submit_structure'].includes(name)) return false;
   const scenes = (args as { scenes?: Array<{ sceneId?: string }> } | undefined)?.scenes;
   return !Array.isArray(scenes) || scenes.some((scene) => !scene?.sceneId);
 }

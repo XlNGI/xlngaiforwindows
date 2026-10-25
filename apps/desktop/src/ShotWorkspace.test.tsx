@@ -113,71 +113,101 @@ describe('shot reference storage', () => {
 });
 
 describe('ShotWorkspace', () => {
-  it.each(['scoped', 'stale', 'empty'] as const)(
-    'keeps shared cast cards but scopes automatically inherited images (%s)',
-    async (state) => {
-      const otherDoc = { ...characterDoc, id: 'absent', title: '烛阴' };
-      const otherImage = {
-        ...characterAsset,
-        id: 'absent-image',
-        relativePath: 'assets/absent.png',
-      };
-      const scene = {
-        id: 'scene',
-        projectId: 'project',
-        title: '铁匠铺',
-        position: 0,
-        rowVersion: 1,
-        createdAt: 'now',
-        updatedAt: 'now',
-        characterBindings: [
-          { characterDocumentId: characterDoc.id },
-          { characterDocumentId: otherDoc.id },
-        ],
-      };
-      vi.mocked(callWorker).mockImplementation(((method: string, params: { assetId?: string }) => {
-        if (method === 'production.read')
-          return Promise.resolve({
-            instruction: {
-              version: 2,
-              subjects: state === 'empty' ? [] : [{ documentId: characterDoc.id }],
-              beats: [],
-            },
-            issues: state === 'stale' ? [{ code: 'STALE_INSTRUCTION' }] : [],
-          });
-        if (method === 'scene.media.resolve')
-          return Promise.resolve({
-            characters: [
-              { characterDocumentId: characterDoc.id, defaultImage: characterAsset },
-              { characterDocumentId: otherDoc.id, defaultImage: otherImage },
-            ],
-            voices: [],
-            assets: [characterAsset, otherImage],
-          });
-        if (method === 'asset.mediaSource')
-          return Promise.resolve({
-            assetId: params.assetId,
-            path: 'D:/ref.png',
-            contentType: 'image/png',
-          });
-        return Promise.resolve([]);
-      }) as typeof callWorker);
-      const { onGenerateImage } = renderWorkspace({ scene, documents: [characterDoc, otherDoc] });
-      await screen.findByLabelText('烛阴角色参考图');
-      fireEvent.click(screen.getByRole('button', { name: '生成本镜画面' }));
-      const expected =
-        state === 'stale'
-          ? [characterAsset.id, otherImage.id]
-          : state === 'empty'
-            ? []
-            : [characterAsset.id];
-      await waitFor(() =>
-        expect(onGenerateImage).toHaveBeenCalledWith({ characterAssetIds: expected }),
-      );
+  it.each(
+    (['scoped', 'all-visible', 'inherited', 'missing', 'empty'] as const).flatMap((state) =>
+      (['image', 'video'] as const).map((mode) => ({ state, mode })),
+    ),
+  )('scopes automatic references for $mode production ($state)', async ({ state, mode }) => {
+    const otherDoc = { ...characterDoc, id: 'absent', title: '顾清影' };
+    const otherImage = {
+      ...characterAsset,
+      id: 'absent-image',
+      relativePath: 'assets/absent.png',
+    };
+    const scene = {
+      id: 'scene',
+      projectId: 'project',
+      title: '铁匠铺',
+      position: 0,
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+      characterBindings: [
+        { characterDocumentId: characterDoc.id },
+        { characterDocumentId: otherDoc.id },
+      ],
+    };
+    vi.mocked(callWorker).mockImplementation(((method: string, params: { assetId?: string }) => {
+      if (method === 'production.read')
+        return Promise.resolve({
+          authoringIR:
+            state === 'missing'
+              ? undefined
+              : {
+                  schemaVersion: 1,
+                  kind: 'shot',
+                  prompt: state === 'all-visible' ? '收尾顾清影出现在二楼栏边。' : '当前镜头',
+                  ...(state === 'inherited'
+                    ? {}
+                    : {
+                        references: {
+                          characterDocumentIds:
+                            state === 'empty'
+                              ? []
+                              : state === 'all-visible'
+                                ? [characterDoc.id, otherDoc.id]
+                                : [characterDoc.id],
+                        },
+                      }),
+                },
+          issues: [],
+        });
+      if (method === 'scene.media.resolve')
+        return Promise.resolve({
+          characters: [
+            { characterDocumentId: characterDoc.id, defaultImage: characterAsset },
+            { characterDocumentId: otherDoc.id, defaultImage: otherImage },
+          ],
+          voices: [],
+          assets: [characterAsset, otherImage],
+        });
+      if (method === 'asset.mediaSource')
+        return Promise.resolve({
+          assetId: params.assetId,
+          path: 'D:/ref.png',
+          contentType: 'image/png',
+        });
+      return Promise.resolve([]);
+    }) as typeof callWorker);
+    const { onGenerateImage, onGenerateVideo } = renderWorkspace({
+      scene,
+      documents: [characterDoc, otherDoc],
+    });
+    await screen.findByLabelText('顾清影角色参考图');
+    const generate = screen.getByRole('button', {
+      name: mode === 'image' ? '生成本镜画面' : '用参考图生成视频',
+    });
+    fireEvent.click(generate);
+    if (mode === 'video' && state === 'empty') {
+      await screen.findByText('请先生成或选择参考图。');
+      expect(onGenerateVideo).not.toHaveBeenCalled();
       expect(loadShotReferences('project', 'shot')).toEqual({});
-      expect(screen.getByLabelText('烛阴角色参考图')).toBeInTheDocument();
-    },
-  );
+      return;
+    }
+    const expected =
+      state === 'inherited' || state === 'missing' || state === 'all-visible'
+        ? [characterAsset.id, otherImage.id]
+        : state === 'empty'
+          ? []
+          : [characterAsset.id];
+    await waitFor(() =>
+      expect(mode === 'image' ? onGenerateImage : onGenerateVideo).toHaveBeenCalledWith({
+        characterAssetIds: expected,
+      }),
+    );
+    expect(loadShotReferences('project', 'shot')).toEqual({});
+    expect(screen.getByLabelText('顾清影角色参考图')).toBeInTheDocument();
+  });
 
   it('keeps confirmed continuity frames when opening image production from the ordinary shot action', async () => {
     vi.mocked(callWorker).mockImplementation((method) =>

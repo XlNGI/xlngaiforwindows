@@ -210,7 +210,7 @@ export function SceneCastEditor({
               : inherited?.defaultImage;
           const candidates = [
             ...new Map(
-              [...(inherited?.images ?? []), ...(image ? [image] : []), ...images].map((asset) => [
+              [...(inherited?.images ?? []), ...(image ? [image] : [])].map((asset) => [
                 asset.id,
                 asset,
               ]),
@@ -257,7 +257,7 @@ export function SceneCastEditor({
                   {character.imageAssetId && !image && (
                     <option value={character.imageAssetId}>原参考图不可用</option>
                   )}
-                  {(candidates.length ? candidates : images).map((asset) => (
+                  {candidates.map((asset) => (
                     <option key={asset.id} value={asset.id}>
                       {asset.alias || asset.relativePath.split(/[\\/]/).pop()}
                     </option>

@@ -628,7 +628,13 @@ export class AppSettingsService {
           binding.remoteModelId === record.remoteModelId,
       );
       if (officialBinding || resolveModelBinding(profile.providerType, record.remoteModelId)) {
-        const existing = toModelInfo(record).capabilities;
+        const existing = normalizeSyncedCapabilities(
+          record.capabilitiesJson,
+          profile.providerType,
+          record.remoteModelId,
+          record.contractId,
+          record.contractRevision,
+        );
         const official = inferContractCapabilities(profile.providerType, record.remoteModelId);
         const capabilities = hasAnyModelCapability(existing)
           ? Object.fromEntries(
@@ -1148,7 +1154,13 @@ export class AppSettingsService {
         displayName: remote.displayName ?? existing?.displayName ?? remote.id,
         capabilitiesJson: JSON.stringify(
           existing?.capabilitiesJson
-            ? normalizeSyncedCapabilities(existing.capabilitiesJson, providerType, remote.id)
+            ? normalizeSyncedCapabilities(
+                existing.capabilitiesJson,
+                providerType,
+                remote.id,
+                existing.contractId,
+                existing.contractRevision,
+              )
             : inferContractCapabilities(providerType, remote.id),
         ),
         source:
@@ -1436,10 +1448,31 @@ function normalizeSyncedCapabilities(
   capabilitiesJson: string,
   providerType: string,
   remoteModelId: string,
+  previousContractId?: string,
+  previousContractRevision?: number,
 ): ProviderModelCapabilities {
   const existing = normalizeModelCapabilities(
     JSON.parse(capabilitiesJson) as ProviderModelCapabilities,
   );
+  const resolved = resolveModelBinding(providerType, remoteModelId);
+  if (
+    resolved &&
+    previousContractId === resolved.contract.contractId &&
+    previousContractRevision !== undefined &&
+    previousContractRevision < resolved.contract.contractRevision
+  ) {
+    const previous = listStaticModelContracts().find(
+      (contract) =>
+        contract.contractId === previousContractId &&
+        contract.contractRevision === previousContractRevision,
+    );
+    // Expose a newly added contract capability once; later user choices stay authoritative.
+    if (
+      previous?.capabilities.imageEditing === false &&
+      resolved.contract.capabilities.imageEditing
+    )
+      existing.imageEditing = true;
+  }
   if (hasAnyModelCapability(existing)) return existing;
   return inferContractCapabilities(providerType, remoteModelId);
 }

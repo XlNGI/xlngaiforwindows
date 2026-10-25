@@ -9,6 +9,7 @@ import type {
   NovelChapterArchiveParams,
   NovelChapterInfo,
   NovelChapterListParams,
+  NovelChapterMetadataUpdateParams,
   NovelChapterRestoreParams,
   NovelChapterSaveParams,
   NovelImportParams,
@@ -312,11 +313,63 @@ export class NovelService {
         if (!repositories.novelChapters.save(record, params.expectedRowVersion)) {
           conflict('Novel chapter was updated elsewhere.');
         }
+        rebuildLibraryChunksForDocument(database, project.id, documentId, now);
       })();
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.chapterInfo(repositories.novelChapters.get(record.id)!, database);
     });
+  }
+
+  updateChapterMetadata(params: NovelChapterMetadataUpdateParams): NovelChapterInfo {
+    if (params.title === undefined && params.displayLabel === undefined) {
+      throw new NovelServiceError('INVALID_PARAMETERS', 'Provide title or displayLabel.');
+    }
+    for (const version of [params.expectedChapterRowVersion, params.expectedDocumentRowVersion]) {
+      if (!Number.isSafeInteger(version) || version < 0) {
+        throw new NovelServiceError('INVALID_PARAMETERS', 'Expected row versions are required.');
+      }
+    }
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const repositories = createRepositories(database);
+        const chapter = repositories.novelChapters.get(params.chapterId);
+        if (!chapter || chapter.projectId !== project.id) {
+          throw new NovelServiceError('NOT_FOUND', 'Novel chapter was not found.');
+        }
+        const document = repositories.documents.get(chapter.documentId);
+        if (!document || document.projectId !== project.id) {
+          throw new NovelServiceError('INVALID_STATE', 'Chapter document is missing.');
+        }
+        if (chapter.lifecycleStatus !== 'active' || document.lifecycleStatus !== 'active') {
+          throw new NovelServiceError(
+            'INVALID_STATE',
+            'Only active chapter metadata can be edited.',
+          );
+        }
+        if (chapter.rowVersion !== params.expectedChapterRowVersion) {
+          conflict('Novel chapter was updated elsewhere.');
+        }
+        if (document.rowVersion !== params.expectedDocumentRowVersion) {
+          conflict('Chapter document was updated elsewhere.');
+        }
+        const title =
+          params.title === undefined ? document.title : required(params.title, 'Chapter title');
+        const displayLabel =
+          params.displayLabel === undefined
+            ? chapter.displayLabel
+            : required(params.displayLabel, 'Chapter display label', 80);
+        if (title === document.title && displayLabel === chapter.displayLabel) {
+          return this.chapterInfo(chapter, database);
+        }
+        return this.saveChapter({
+          chapterId: chapter.id,
+          expectedRowVersion: chapter.rowVersion,
+          title,
+          displayLabel,
+        });
+      })(),
+    );
   }
 
   async importNovelAsync(

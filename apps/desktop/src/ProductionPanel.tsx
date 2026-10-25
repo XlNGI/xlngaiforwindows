@@ -1,7 +1,13 @@
+import { PromptReferenceEditor } from './PromptReferenceEditor';
+import {
+  canonicalPromptParameters,
+  promptReferences,
+  remapPromptReferences,
+  type PromptReference,
+} from './prompt-references';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { imageAssetId, ParameterImagePreview } from './ParameterImagePreview';
-import { useProductionInstructions } from './use-production-instructions';
-import { productionInstructionUpdateRequest } from './production-instruction-update';
+import { useProductionAuthoring } from './use-production-authoring';
 import { ProjectProductionDefaults } from './ProjectProductionDefaults';
 import { ParameterHelp } from './ParameterHelp';
 import type { ProductionSegment } from '@ai-video/contracts';
@@ -57,6 +63,7 @@ import {
   adapterBindsCatalogModel,
   isWanMediaAdapter,
   productionAudioSupport,
+  productionImageSelectionsFromBindings,
   seedProductionInputs,
 } from '@ai-video/contracts';
 import {
@@ -76,7 +83,6 @@ import {
 } from './local-image-input';
 
 interface ProductionPanelProps {
-  onUpdateProductionInstructions?: (request: string) => void;
   onRequestSubmissionApproval?: (
     confirmation: MediaSubmissionConfirmationRequest,
   ) => Promise<boolean>;
@@ -127,15 +133,7 @@ function readStoredParameters(adapterKey: string): AdapterParameters {
     return Object.fromEntries(
       Object.entries(entry as Record<string, unknown>).filter(
         ([, value]) =>
-          typeof value === 'string' ||
-          typeof value === 'number' ||
-          typeof value === 'boolean' ||
-          (Array.isArray(value) &&
-            value.every(
-              (item) =>
-                typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean',
-            ) &&
-            !value.some(isLocalImageDataUrl)),
+          value !== null && !hasLocalImageParameters({ value: value as AdapterParameters[string] }),
       ),
     ) as AdapterParameters;
   } catch {
@@ -151,10 +149,7 @@ function writeStoredParameters(adapterKey: string, parameters: AdapterParameters
     >;
     const persisted = Object.fromEntries(
       Object.entries(parameters).filter(
-        ([, value]) =>
-          value !== undefined &&
-          !isLocalImageDataUrl(value) &&
-          !(Array.isArray(value) && value.some(isLocalImageDataUrl)),
+        ([, value]) => value !== undefined && !hasLocalImageParameters({ value }),
       ),
     );
     stored[adapterKey] = persisted;
@@ -279,9 +274,14 @@ export function ProductionPanel({
   onOpenProviderSettings,
   providerSettingsRevision = 0,
   onRequestSubmissionApproval,
-  onUpdateProductionInstructions,
 }: ProductionPanelProps) {
   const callWorker = projectWorker();
+  // Bindings are the saved reference source; normalize them once so the form,
+  // compiler and final submission all receive the same ordered image list.
+  const effectiveSeedImageBindings = useMemo(
+    () => seedImageBindings ?? productionImageSelectionsFromBindings(seedReferenceBindings),
+    [seedImageBindings, seedReferenceBindings],
+  );
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState('');
@@ -295,7 +295,7 @@ export function ProductionPanel({
   const [segmentShotIds, setSegmentShotIds] = useState<string[]>();
   const [sceneSegments, setSceneSegments] = useState<ProductionSegment[]>([]);
   const [completeScenePrompt, setCompleteScenePrompt] = useState('');
-  const productionInstructions = useProductionInstructions({
+  const productionAuthoring = useProductionAuthoring({
     projectId,
     target:
       sourceDocumentId && (preferredAssetKind === 'character' || preferredAssetKind === 'scene')
@@ -312,9 +312,12 @@ export function ProductionPanel({
     providerKey: `${selectedProfileId}:${catalogModelId}`,
     ready: formReady && adapter?.key === adapterKey,
     setParameters,
-    initialOverrides: draftOverrides,
+    initialOverrides:
+      sourceDocumentId && preferredAssetKind === 'character' && seedPrompt
+        ? { ...draftOverrides, prompt: seedPrompt }
+        : draftOverrides,
     shotIds: segmentShotIds,
-    inputImages: seedImageBindings,
+    inputImages: effectiveSeedImageBindings,
   });
   useEffect(() => {
     setSegmentShotIds(undefined);
@@ -322,7 +325,7 @@ export function ProductionPanel({
     setCompleteScenePrompt('');
   }, [projectId, sceneId, adapterKey, selectedProfileId]);
   useEffect(() => {
-    const result = productionInstructions.result;
+    const result = productionAuthoring.result;
     if (
       sceneId &&
       result?.target.id === sceneId &&
@@ -332,7 +335,7 @@ export function ProductionPanel({
       setSceneSegments(result.segments ?? []);
       setCompleteScenePrompt(result.compiledPrompt ?? '');
     }
-  }, [sceneId, productionInstructions.result]);
+  }, [sceneId, productionAuthoring.result]);
   const [errors, setErrors] = useState<AdapterValidationError[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -358,6 +361,19 @@ export function ProductionPanel({
   const [generationStatus, setGenerationStatus] = useState('');
   const [voiceReferences, setVoiceReferences] = useState<CharacterVoiceReferenceInfo[]>([]);
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<string[]>([]);
+  const restoredVoiceIds =
+    adapter && draftOverrides
+      ? promptReferences(adapter, draftOverrides).flatMap((reference) =>
+          reference.kind === 'audio' && reference.url.startsWith('character-voice://')
+            ? [reference.url.slice('character-voice://'.length).split('/')[0]!]
+            : [],
+        )
+      : undefined;
+  const restoredVoiceIdsRef = useRef(restoredVoiceIds);
+  restoredVoiceIdsRef.current = restoredVoiceIds;
+  useEffect(() => {
+    if (restoredVoiceIdsRef.current) setSelectedVoiceIds(restoredVoiceIdsRef.current);
+  }, [draftOverrides, adapter]);
   const [dialogueAudio, setDialogueAudio] = useState<AudioFileInfo>();
   const [rawBoundScene, setBoundScene] = useState<SceneInfo>();
   const boundScene = rawBoundScene
@@ -375,22 +391,15 @@ export function ProductionPanel({
     : undefined;
   const [sceneInputsLoading, setSceneInputsLoading] = useState(false);
   const [sceneInputsError, setSceneInputsError] = useState('');
-  const compiledSceneInputs = productionInstructions.result?.sceneInputs;
-  const promptReviewNotices = (productionInstructions.result?.notices ?? []).filter(
+  const compiledSceneInputs = productionAuthoring.result?.sceneInputs;
+  const promptReviewNotices = (productionAuthoring.result?.notices ?? []).filter(
     (notice) => notice.code.endsWith('_REVIEW') || notice.code === 'AUTHORING_REVIEW_NOTE',
   );
-  const adaptationNotices = (productionInstructions.result?.notices ?? []).filter(
+  const adaptationNotices = (productionAuthoring.result?.notices ?? []).filter(
     (notice) => !promptReviewNotices.includes(notice),
   );
-  const productionInstruction = productionInstructions.result?.instruction;
-  const needsVoiceInput =
-    !productionInstruction ||
-    productionInstruction.audio.mode === 'voice-reference' ||
-    productionInstruction.resources.some((r) => r.required && r.kind === 'voice-reference');
-  const needsDialogueInput =
-    !productionInstruction ||
-    productionInstruction.audio.mode === 'dialogue-driven' ||
-    productionInstruction.resources.some((r) => r.required && r.kind === 'dialogue-audio');
+  const needsVoiceInput = true;
+  const needsDialogueInput = true;
   const compiledSceneInputsRef = useRef(compiledSceneInputs);
   compiledSceneInputsRef.current = compiledSceneInputs;
   const compiledReferenceBindings = useMemo<SceneMaterialBindingInfo[] | undefined>(() => {
@@ -427,15 +436,16 @@ export function ProductionPanel({
     setBoundScene(latest);
     setVoiceReferences(media.voices);
     setSelectedVoiceIds(
-      (needsVoiceInput ? (latest.characterBindings ?? []) : [])
-        .filter(
-          (binding) =>
-            !binding.voiceDisabled &&
-            (binding.voiceReferenceVersionId ||
-              media.characters.find((c) => c.characterDocumentId === binding.characterDocumentId)
-                ?.voice),
-        )
-        .map((binding) => binding.characterDocumentId),
+      restoredVoiceIdsRef.current ??
+        (needsVoiceInput ? (latest.characterBindings ?? []) : [])
+          .filter(
+            (binding) =>
+              !binding.voiceDisabled &&
+              (binding.voiceReferenceVersionId ||
+                media.characters.find((c) => c.characterDocumentId === binding.characterDocumentId)
+                  ?.voice),
+          )
+          .map((binding) => binding.characterDocumentId),
     );
     setDialogueAudio(undefined);
     if (needsDialogueInput && latest.dialogueAudioId) {
@@ -494,18 +504,19 @@ export function ProductionPanel({
                 setBoundScene(currentScene);
                 setDialogueAudio(audio ?? undefined);
                 setSelectedVoiceIds(
-                  adapter && productionAudioSupport(adapter).dialogueDriven
-                    ? []
-                    : (currentScene.characterBindings ?? [])
-                        .filter(
-                          (binding) =>
-                            !binding.voiceDisabled &&
-                            (binding.voiceReferenceVersionId ||
-                              values?.some(
-                                (v) => v.characterDocumentId === binding.characterDocumentId,
-                              )),
-                        )
-                        .map((binding) => binding.characterDocumentId),
+                  restoredVoiceIdsRef.current ??
+                    (adapter && productionAudioSupport(adapter).dialogueDriven
+                      ? []
+                      : (currentScene.characterBindings ?? [])
+                          .filter(
+                            (binding) =>
+                              !binding.voiceDisabled &&
+                              (binding.voiceReferenceVersionId ||
+                                values?.some(
+                                  (v) => v.characterDocumentId === binding.characterDocumentId,
+                                )),
+                          )
+                          .map((binding) => binding.characterDocumentId)),
                 );
               }
             }
@@ -575,9 +586,9 @@ export function ProductionPanel({
 
   useEffect(() => {
     if (!seedPrompt && seedImages === undefined) return;
-    if (seedImageBindings) return;
+    if (effectiveSeedImageBindings) return;
     setParameters((current) =>
-      productionInstructions.preserveEdits(
+      productionAuthoring.preserveEdits(
         usesStructuredVideoParameters(adapter)
           ? seedOfficialVideoParameters(
               adapter!,
@@ -596,10 +607,10 @@ export function ProductionPanel({
   }, [
     seedPrompt,
     seedImages,
-    seedImageBindings,
+    effectiveSeedImageBindings,
     sourceDocumentId,
     adapter,
-    productionInstructions.preserveEdits,
+    productionAuthoring.preserveEdits,
   ]);
 
   useEffect(() => {
@@ -713,13 +724,13 @@ export function ProductionPanel({
         setMessage('');
         const defaults = defaultParameters(resolved);
         const withSeed = (params: AdapterParameters): AdapterParameters => {
-          if (seedImageBindings) {
+          if (effectiveSeedImageBindings) {
             try {
               return seedProductionInputs(
                 resolved,
                 params,
                 seedPromptRef.current,
-                seedImageBindings.map((image) => ({
+                effectiveSeedImageBindings.map((image) => ({
                   ...image,
                   url: 'project-asset://' + image.assetId,
                 })),
@@ -809,7 +820,7 @@ export function ProductionPanel({
     shotId,
     sceneId,
     sourceDocumentId,
-    seedImageBindings,
+    effectiveSeedImageBindings,
   ]);
 
   const capabilityAdapters = useMemo(
@@ -877,14 +888,16 @@ export function ProductionPanel({
   };
 
   const updateParameter = (key: string, value: AdapterParameters[string] | undefined) => {
-    productionInstructions.changed(key, value);
+    productionAuthoring.changed(key, value);
     setParameters((current) => {
-      const next = { ...current };
-      if (value === undefined || value === '') {
-        delete next[key];
-      } else {
-        next[key] = value;
-      }
+      const updated = { ...current };
+      if (value === undefined || value === '') delete updated[key];
+      else updated[key] = value;
+      const next = ['images', 'media', 'content', 'video'].includes(key)
+        ? remapPromptReferences(referenceInputs(current), referenceInputs(updated), updated)
+        : updated;
+      for (const field of ['prompt', 'content'])
+        if (next[field] !== current[field]) productionAuthoring.changed(field, next[field]);
       if (adapterKey) writeStoredParameters(adapterKey, next);
       return next;
     });
@@ -923,7 +936,7 @@ export function ProductionPanel({
     }
     if (hasLocalImageParameters(parameters)) {
       const localField = Object.entries(parameters).find(([, value]) =>
-        Array.isArray(value) ? value.some(isLocalImageDataUrl) : isLocalImageDataUrl(value),
+        hasLocalImageParameters({ value }),
       )?.[0];
       setErrors(
         localField
@@ -936,9 +949,14 @@ export function ProductionPanel({
     const isCurrent = beginSubmission();
     setMessage('');
     try {
+      const projectedParameters = projectSelectedInputs(parameters);
+      const draftParameters = canonicalPromptParameters(
+        projectedParameters,
+        promptReferences(adapter, projectedParameters),
+      );
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
-        parameters,
+        parameters: draftParameters,
       });
       if (!isCurrent()) return;
       setErrors(validation.errors);
@@ -951,7 +969,7 @@ export function ProductionPanel({
         adapterKey: adapter.key,
         providerProfileId: selectedProfile.id,
         modelId: selectedModel.remoteModelId,
-        parameters,
+        parameters: draftParameters,
       });
       if (!isCurrent()) return;
       setMessage(`草稿已保存 · ${new Date(saved.updatedAt).toLocaleTimeString()}`);
@@ -970,9 +988,12 @@ export function ProductionPanel({
     const isCurrent = beginSubmission();
     setGenerationStatus('');
     try {
-      const productionSource = await productionInstructions.beforeSubmit();
+      const productionSource = await productionAuthoring.beforeSubmit();
       if (!isCurrent()) return;
-      const submissionParameters = parameters;
+      const submissionParameters = canonicalPromptParameters(
+        parameters,
+        promptReferences(adapter, parameters),
+      );
       if (!isCurrent()) return;
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
@@ -988,6 +1009,7 @@ export function ProductionPanel({
         ...(productionSource ? { productionSource } : {}),
         shotId,
         sourceDocumentId,
+        assetKind,
         adapterKey: adapter.key,
         parameters: submissionParameters,
         providerProfileId: selectedProfile.id,
@@ -1055,7 +1077,7 @@ export function ProductionPanel({
     const isCurrent = beginSubmission();
     setGenerationStatus('');
     try {
-      const productionSource = await productionInstructions.beforeSubmit();
+      const productionSource = await productionAuthoring.beforeSubmit();
       if (!isCurrent()) return;
       if (sceneInputsLoading || sceneInputsError)
         throw new Error(sceneInputsError || '正在读取场次绑定，请稍后提交。');
@@ -1103,19 +1125,23 @@ export function ProductionPanel({
           throw new Error('场次绑定的声音样本已变化或不可用，请回场次重新选择并保存。');
         return voice;
       });
-      const submissionParameters = isOfficialVoiceVideo(adapter)
+      const projectedParameters = isOfficialVoiceVideo(adapter)
         ? addOfficialRoleVoices(
             adapter,
             parameters,
             selectedVoices,
             needsDialogueInput ? dialogueAudio?.id : undefined,
-            productionInstructions.overriddenFields.some((field) =>
+            productionAuthoring.overriddenFields.some((field) =>
               ['prompt', 'content'].includes(field),
             )
               ? []
               : (compiledReferenceBindings ?? seedReferenceBindings),
           )
         : parameters;
+      const submissionParameters = canonicalPromptParameters(
+        projectedParameters,
+        promptReferences(adapter, projectedParameters),
+      );
       if (!isCurrent()) return;
       const validation = await callWorker('adapter.validate', {
         adapterKey: adapter.key,
@@ -1277,6 +1303,37 @@ export function ProductionPanel({
     }
   };
 
+  const projectSelectedInputs = (
+    current: AdapterParameters,
+    voiceIds = selectedVoiceIds,
+  ): AdapterParameters => {
+    if (!adapter || !isOfficialVoiceVideo(adapter)) return current;
+    const voices = voiceIds.map((id) => {
+      const binding = boundScene?.characterBindings?.find(
+        (item) => item.characterDocumentId === id,
+      );
+      const voice = voiceReferences.find(
+        (item) =>
+          item.characterDocumentId === id &&
+          (!binding?.voiceReferenceVersionId || item.versionId === binding.voiceReferenceVersionId),
+      );
+      if (!voice) throw new Error('场次绑定的声音样本已变化或不可用，请回场次重新选择并保存。');
+      return voice;
+    });
+    return addOfficialRoleVoices(adapter, current, voices, dialogueAudio?.id);
+  };
+  const referenceInputs = (
+    current: AdapterParameters,
+    voiceIds = selectedVoiceIds,
+  ): PromptReference[] => {
+    if (!adapter) return [];
+    try {
+      return promptReferences(adapter, projectSelectedInputs(current, voiceIds));
+    } catch {
+      return promptReferences(adapter, current);
+    }
+  };
+  const references = referenceInputs(parameters);
   const fields = adapter ? schemaDerivedFields(adapter) : [];
   const basicFields = fields.filter((field) => field.group === 'basic');
   const contentControls = new Set<AdapterUiField['control']>([
@@ -1297,6 +1354,7 @@ export function ProductionPanel({
       error={errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message}
       onChange={(value) => updateParameter(field.key, value)}
       projectId={projectId}
+      references={references}
     />
   );
 
@@ -1435,13 +1493,13 @@ export function ProductionPanel({
               <>
                 <div className="parameter-fields production-content-fields">
                   {contentFields.map(renderParameter)}
-                  {(productionInstructions.result?.source || productionInstructions.error) && (
+                  {(productionAuthoring.result?.source || productionAuthoring.error) && (
                     <details
                       className="production-adaptation"
                       aria-label="制作内容适配"
                       open={Boolean(
-                        productionInstructions.error ||
-                        productionInstructions.result?.issues.length ||
+                        productionAuthoring.error ||
+                        productionAuthoring.result?.issues.length ||
                         promptReviewNotices.length,
                       )}
                     >
@@ -1473,7 +1531,7 @@ export function ProductionPanel({
                           <label className="parameter-field">
                             本次制作范围
                             <select
-                              disabled={busy || productionInstructions.loading}
+                              disabled={busy || productionAuthoring.loading}
                               value={
                                 segmentShotIds
                                   ? String(
@@ -1513,22 +1571,21 @@ export function ProductionPanel({
                             </pre>
                           </details>
                         )}
-                        {productionInstructions.result?.estimatedDurationSeconds !== undefined && (
+                        {productionAuthoring.result?.estimatedDurationSeconds !== undefined && (
                           <p>
-                            剧情预计 {productionInstructions.result.estimatedDurationSeconds} 秒
-                            {productionInstructions.result.requestedDurationSeconds !== undefined
-                              ? ` · 模型请求 ${productionInstructions.result.requestedDurationSeconds} 秒`
+                            剧情预计 {productionAuthoring.result.estimatedDurationSeconds} 秒
+                            {productionAuthoring.result.requestedDurationSeconds !== undefined
+                              ? ` · 模型请求 ${productionAuthoring.result.requestedDurationSeconds} 秒`
                               : ''}
                           </p>
                         )}
-                        {Boolean(productionInstructions.result?.timeline?.length) && (
+                        {Boolean(productionAuthoring.result?.timeline?.length) && (
                           <details>
                             <summary>
-                              场次分镜时间轴（{productionInstructions.result!.timeline!.length}{' '}
-                              镜头）
+                              场次分镜时间轴（{productionAuthoring.result!.timeline!.length} 镜头）
                             </summary>
                             <ol>
-                              {productionInstructions.result!.timeline!.map((entry) => (
+                              {productionAuthoring.result!.timeline!.map((entry) => (
                                 <li key={entry.shotId}>
                                   {entry.title}：
                                   {entry.startSeconds === undefined ||
@@ -1540,19 +1597,19 @@ export function ProductionPanel({
                             </ol>
                           </details>
                         )}
-                        {productionInstructions.result?.issues.some(
+                        {productionAuthoring.result?.issues.some(
                           (issue) => issue.code === 'SCENE_REQUIRES_SEGMENTS',
                         ) && (
                           <section aria-label="场次分段制作建议">
                             <p>完整场次已保留。以下按现有镜头边界分段；请逐段制作后合成。</p>
                             <ol>
-                              {productionInstructions.result.segments?.map((segment, index) => (
+                              {productionAuthoring.result.segments?.map((segment, index) => (
                                 <li key={index}>
                                   第 {index + 1} 段：
                                   {segment.shotIds
                                     .map(
                                       (id) =>
-                                        productionInstructions.result?.timeline?.find(
+                                        productionAuthoring.result?.timeline?.find(
                                           (entry) => entry.shotId === id,
                                         )?.title ?? id,
                                     )
@@ -1566,49 +1623,30 @@ export function ProductionPanel({
                             </ol>
                           </section>
                         )}
-                        {productionInstructions.overriddenFields.length > 0 && (
+                        {productionAuthoring.overriddenFields.length > 0 && (
                           <p>已保留修改或保存的参数；重新填入将覆盖这些值。</p>
                         )}
                         <p>制作说明仅供参考，可自由修改表单；生成时以当前表单为准。</p>
                         <div className="production-adaptation-actions">
                           <p role="status">
-                            {productionInstructions.error ||
-                              productionInstructions.result?.issues
+                            {productionAuthoring.error ||
+                              productionAuthoring.result?.issues
                                 .map((issue) =>
                                   issue.targetTitle
                                     ? `「${issue.targetTitle}」：${issue.message}`
                                     : issue.message,
                                 )
                                 .join('；') ||
-                              `已填入制作内容 · 版本 ${productionInstructions.result?.source?.revision}`}
+                              '已填入制作内容'}
                           </p>
-                          {productionInstructions.result?.issues.some(
-                            (issue) => issue.code === 'STALE_INSTRUCTION',
-                          ) ? (
-                            <button
-                              type="button"
-                              className="button secondary"
-                              disabled={busy || !writable || !onUpdateProductionInstructions}
-                              onClick={() =>
-                                onUpdateProductionInstructions?.(
-                                  productionInstructionUpdateRequest(
-                                    productionInstructions.result!,
-                                  ),
-                                )
-                              }
-                            >
-                              到会话更新制作指令
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="button secondary"
-                              disabled={busy || productionInstructions.loading}
-                              onClick={productionInstructions.refill}
-                            >
-                              重新填入制作内容
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            className="button secondary"
+                            disabled={busy || productionAuthoring.loading}
+                            onClick={productionAuthoring.refill}
+                          >
+                            重新填入制作内容
+                          </button>
                         </div>
                       </div>
                     </details>
@@ -1648,6 +1686,7 @@ export function ProductionPanel({
                             }
                             onChange={(value) => updateParameter(field.key, value)}
                             projectId={projectId}
+                            references={references}
                           />
                         ))}
                       </div>
@@ -1657,7 +1696,7 @@ export function ProductionPanel({
                     <ProjectProductionDefaults
                       key={`${projectId}:${projectSessionId}`}
                       writable={writable}
-                      onSaved={productionInstructions.refreshKeepingEdits}
+                      onSaved={productionAuthoring.refreshKeepingEdits}
                     />
                   )}
                   {adapter.provider === 'unicompapi' && isWanMediaAdapter(adapter) && (
@@ -1713,13 +1752,51 @@ export function ProductionPanel({
                                   type="checkbox"
                                   disabled={!writable || busy}
                                   checked={selectedVoiceIds.includes(voice.characterDocumentId)}
-                                  onChange={(event) =>
-                                    setSelectedVoiceIds((current) =>
-                                      event.target.checked
-                                        ? [...current, voice.characterDocumentId]
-                                        : current.filter((id) => id !== voice.characterDocumentId),
-                                    )
-                                  }
+                                  onChange={(event) => {
+                                    const nextIds = event.target.checked
+                                      ? [...selectedVoiceIds, voice.characterDocumentId]
+                                      : selectedVoiceIds.filter(
+                                          (id) => id !== voice.characterDocumentId,
+                                        );
+                                    const withoutSavedVoices = { ...parameters };
+                                    for (const key of ['media', 'content']) {
+                                      const value = parameters[key];
+                                      if (Array.isArray(value))
+                                        withoutSavedVoices[key] = value.filter((item) => {
+                                          if (
+                                            !item ||
+                                            typeof item !== 'object' ||
+                                            Array.isArray(item)
+                                          )
+                                            return true;
+                                          const url =
+                                            item.type === 'reference_audio'
+                                              ? item.url
+                                              : item.type === 'audio_url' &&
+                                                  item.audio_url &&
+                                                  typeof item.audio_url === 'object' &&
+                                                  !Array.isArray(item.audio_url)
+                                                ? item.audio_url.url
+                                                : undefined;
+                                          return (
+                                            typeof url !== 'string' ||
+                                            !url.startsWith('character-voice://')
+                                          );
+                                        });
+                                    }
+                                    const next = remapPromptReferences(
+                                      referenceInputs(parameters),
+                                      referenceInputs(withoutSavedVoices, nextIds),
+                                      withoutSavedVoices,
+                                    );
+                                    for (const field of ['prompt', 'content'])
+                                      if (next[field] !== parameters[field])
+                                        productionAuthoring.changed(field, next[field]);
+                                    setParameters(next);
+                                    productionAuthoring.changed('media', next.media);
+                                    productionAuthoring.changed('content', next.content);
+                                    setSelectedVoiceIds(nextIds);
+                                  }}
                                 />
                                 {voice.characterName} · 声音版本 {voice.revision} ·{' '}
                                 {(voice.durationMs / 1000).toFixed(1)} 秒
@@ -1752,7 +1829,7 @@ export function ProductionPanel({
                           !writable ||
                           busy ||
                           !formReady ||
-                          productionInstructions.loading ||
+                          productionAuthoring.loading ||
                           !selectedProfile ||
                           !selectedModel
                         }
@@ -1769,7 +1846,7 @@ export function ProductionPanel({
                           !writable ||
                           busy ||
                           !formReady ||
-                          productionInstructions.loading ||
+                          productionAuthoring.loading ||
                           !selectedProfile ||
                           !selectedModel
                         }
@@ -1822,6 +1899,7 @@ export function ProductionPanel({
                             <option value="generated-image">普通素材</option>
                             <option value="character">角色</option>
                             <option value="scene">场景</option>
+                            <option value="prop">道具</option>
                             <option value="first-frame">首帧</option>
                             <option value="last-frame">尾帧</option>
                           </select>
@@ -1860,6 +1938,11 @@ export function ProductionPanel({
                             <small className="video-task-guidance">
                               {videoProgressGuidance(job)}
                             </small>
+                            {job.status === 'polling' && job.metadata.lastPollError && (
+                              <small className="error-copy">
+                                最近一次查询异常（正在重试）：{job.metadata.lastPollError}
+                              </small>
+                            )}
                             {job.error && (
                               <small className="error-copy">
                                 {job.mediaState === 'submission_unknown'
@@ -1957,6 +2040,7 @@ interface ParameterFieldProps {
   error?: string;
   onChange: (value: AdapterParameters[string] | undefined) => void;
   projectId?: string;
+  references: PromptReference[];
 }
 
 function ParameterField({
@@ -1967,6 +2051,7 @@ function ParameterField({
   error,
   onChange,
   projectId,
+  references,
 }: ParameterFieldProps) {
   const callWorker = projectWorker();
   const inputId = `parameter-${field.key}`;
@@ -1990,6 +2075,7 @@ function ParameterField({
           label={property.title}
           path={inputId}
           projectId={projectId}
+          references={references}
         />
         {description}
         {error && <small className="parameter-error">{error}</small>}
@@ -2252,12 +2338,24 @@ function ParameterField({
           ))}
         </select>
       ) : field.control === 'textarea' ? (
-        <textarea
-          id={inputId}
-          value={typeof value === 'string' ? value : ''}
-          maxLength={property.maxLength}
-          onChange={(event) => onChange(event.target.value)}
-        />
+        references.length && field.key === 'prompt' ? (
+          <PromptReferenceEditor
+            id={inputId}
+            label={property.title}
+            value={typeof value === 'string' ? value : ''}
+            references={references}
+            projectId={projectId}
+            maxLength={property.maxLength}
+            onChange={onChange}
+          />
+        ) : (
+          <textarea
+            id={inputId}
+            value={typeof value === 'string' ? value : ''}
+            maxLength={property.maxLength}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        )
       ) : (
         <input
           id={inputId}

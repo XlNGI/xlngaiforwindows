@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AgentInputService } from './agent-input-service.js';
 import type Database from 'better-sqlite3';
 import type {
   AgentProtectedUiHandoff,
@@ -14,6 +15,7 @@ import type {
   NovelChapterArchiveParams,
   NovelChapterInfo,
   NovelChapterListParams,
+  NovelChapterMetadataUpdateParams,
   NovelChapterRestoreParams,
   ProviderModelInfo,
   ProviderProfileInfo,
@@ -34,8 +36,13 @@ import { SceneStructureSubmissionService } from './scene-structure-submission-se
 import { splitConversationRequest } from './conversation-request.js';
 import { ProductionService } from './production-service.js';
 import { AgentProductionQueryService } from './agent-production-query-service.js';
+import { ShotTimingService } from './shot-timing-service.js';
+import { ShotPromptService } from './shot-prompt-service.js';
+import { describeProductionAsset, readAssetProvenance } from './production-media-view.js';
 import type { ProductionTarget } from '@ai-video/contracts';
 import type { NovelBatchService } from './novel-batch-service.js';
+import { readProductionSkill } from './production-skill-service.js';
+import type { MediaReviewService } from './media-review-service.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -66,6 +73,7 @@ export interface AgentMediaTaskService {
 
 export interface AgentNovelToolService {
   listChapters(params?: NovelChapterListParams): NovelChapterInfo[];
+  updateChapterMetadata(params: NovelChapterMetadataUpdateParams): NovelChapterInfo;
   archiveChapter(params: NovelChapterArchiveParams): NovelChapterInfo;
   restoreChapter(params: NovelChapterRestoreParams): NovelChapterInfo;
 }
@@ -108,6 +116,7 @@ export class AgentSystemToolService {
     private readonly structureCompiler?: ProjectStructureCompiler,
     private readonly novels?: AgentNovelToolService,
     private readonly batches?: Pick<NovelBatchService, 'submit' | 'get' | 'readSource'>,
+    private readonly mediaReviews?: MediaReviewService,
   ) {
     this.productionQueries = new AgentProductionQueryService(new ProductionService(projects));
   }
@@ -115,11 +124,14 @@ export class AgentSystemToolService {
   availableOperations(): SystemAgentToolOperation[] {
     return SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation).filter(
       (name) => {
+        if (name.startsWith('media.review.') || name === 'media.audio.read')
+          return Boolean(this.mediaReviews);
         if (name.startsWith('novel.chapter.batch.')) return Boolean(this.batches);
         if (name === 'project.structure.get' || name === 'novel.structure.get')
           return !!this.structureCompiler;
         if (
           name === 'novel.chapter.list' ||
+          name === 'novel.chapter.update_metadata' ||
           name === 'novel.chapter.archive' ||
           name === 'novel.chapter.restore'
         )
@@ -145,6 +157,50 @@ export class AgentSystemToolService {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
     switch (operation) {
+      case 'conversation.ask': {
+        const form = new AgentInputService(this.projects).prepare(args, identity);
+        return {
+          formId: form.id,
+          title: form.title,
+          status: form.status,
+          questionCount: form.questions.length,
+          presentation: 'conversation-form',
+          awaitingUserAnswer: form.status === 'pending',
+        };
+      }
+      case 'media.review.prepare': {
+        if (!this.mediaReviews) throw unavailable('Media review');
+        const form = this.mediaReviews.prepare(args, identity);
+        return { form: this.reviewSummary(form) };
+      }
+      case 'media.review.list':
+        rejectUnknown(args, ['offset', 'limit']);
+        if (!this.mediaReviews) throw unavailable('Media review');
+        {
+          const forms = this.mediaReviews.list(identity.conversationId);
+          const offset = optionalInteger(args.offset, 'offset', 0, 1_000_000) ?? 0;
+          const limit = optionalInteger(args.limit, 'limit', 1, 50) ?? 20;
+          const nextOffset = offset + limit < forms.length ? offset + limit : undefined;
+          return {
+            forms: forms.slice(offset, offset + limit).map((form) => this.reviewSummary(form)),
+            total: forms.length,
+            nextOffset,
+            truncated: nextOffset !== undefined,
+          };
+        }
+      case 'media.review.read': {
+        rejectUnknown(args, ['formId']);
+        if (!this.mediaReviews) throw unavailable('Media review');
+        const form = this.mediaReviews.get(requiredString(args.formId, 'formId', 200));
+        if (form.conversationId !== identity.conversationId) throw projectScopeError('review form');
+        return { form: { ...this.reviewSummary(form), draft: form.draft } };
+      }
+      case 'media.audio.read':
+        rejectUnknown(args, ['sceneId']);
+        if (!this.mediaReviews) throw unavailable('Media review');
+        return { audio: this.mediaReviews.readAudio(requiredString(args.sceneId, 'sceneId', 200)) };
+      case 'production.skill.read':
+        return readProductionSkill(args);
       case 'conversation.task.route':
         return this.routeConversationTask(args, identity);
       case 'novel.chapter.batch.submit':
@@ -169,25 +225,8 @@ export class AgentSystemToolService {
           args.target as ProductionTarget,
           args,
           identity,
-          'instruction',
+          'authoring',
         );
-      case 'production.execute': {
-        const executing = this.projects.access(false, (db) =>
-          db
-            .prepare(
-              `SELECT 1 FROM agent_tasks t JOIN agent_tool_calls c ON c.task_id=t.id WHERE t.id=? AND t.project_id=? AND t.project_session_id=? AND t.conversation_id=? AND t.status='running' AND t.phase='model_running' AND c.id=? AND c.status='executing' AND c.tool_name='production.execute'`,
-            )
-            .get(
-              identity.taskId,
-              identity.projectId,
-              identity.projectSessionId,
-              identity.conversationId,
-              identity.toolCallId,
-            ),
-        );
-        if (!executing) throw new Error('制作清单需要当前会话中正在执行的工具调用。');
-        return new ProductionService(this.projects).execute(args, identity);
-      }
       case 'scene.read': {
         rejectUnknown(args, ['sceneId', 'view', 'offset', 'limit', 'expectedVersion', 'ifVersion']);
         const sceneId = requiredString(args.sceneId, 'sceneId', 200);
@@ -202,6 +241,10 @@ export class AgentSystemToolService {
       }
       case 'scene.submit_structure':
         return new SceneStructureSubmissionService(this.projects).submit(args, identity);
+      case 'scene.update_shot_timings':
+        return new ShotTimingService(this.projects).update(args, identity);
+      case 'scene.update_shot_prompts':
+        return new ShotPromptService(this.projects).update(args, identity);
       case 'scene.structure.stage':
         return new SceneStructureSubmissionService(this.projects).stage(args, identity);
       case 'document.submit_draft':
@@ -221,6 +264,42 @@ export class AgentSystemToolService {
         return this.novelStructure(args);
       case 'novel.chapter.list':
         return this.listNovelChapters(args);
+      case 'novel.chapter.update_metadata': {
+        rejectUnknown(args, [
+          'chapterId',
+          'expectedChapterRowVersion',
+          'expectedDocumentRowVersion',
+          'title',
+          'displayLabel',
+        ]);
+        if (!this.novels) throw unavailable('Novel chapter metadata');
+        const chapter = this.novels.updateChapterMetadata({
+          chapterId: requiredString(args.chapterId, 'chapterId', 200),
+          expectedChapterRowVersion: requiredInteger(
+            args.expectedChapterRowVersion,
+            'expectedChapterRowVersion',
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          expectedDocumentRowVersion: requiredInteger(
+            args.expectedDocumentRowVersion,
+            'expectedDocumentRowVersion',
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          ...(args.title !== undefined ? { title: requiredString(args.title, 'title', 200) } : {}),
+          ...(args.displayLabel !== undefined
+            ? { displayLabel: requiredString(args.displayLabel, 'displayLabel', 80) }
+            : {}),
+        });
+        return {
+          status: 'chapter_metadata_saved',
+          chapterId: chapter.id,
+          documentId: chapter.documentId,
+          chapter: toNovelChapterSummary(chapter),
+          locator: { workspace: 'novel', chapterId: chapter.id, documentId: chapter.documentId },
+        };
+      }
       case 'project.integrity.check':
         rejectUnknown(args, []);
         return this.projectIntegrity();
@@ -282,6 +361,24 @@ export class AgentSystemToolService {
           `Tool ${operation} must use the Worker confirmation workflow.`,
         );
     }
+  }
+
+  private reviewSummary(form: import('@ai-video/contracts').MediaReviewSummary) {
+    // Provider sees only bounded metadata; UI model catalog and tokens stay local.
+    return {
+      id: form.id,
+      key: form.draft.key,
+      label: form.draft.label,
+      kind: form.draft.kind,
+      status: form.status,
+      rowVersion: form.rowVersion,
+      jobId: form.jobId,
+      blockers: form.blockers,
+      shotId: form.draft.shotId,
+      sceneId: form.draft.sceneId,
+      sourceDocumentId: form.draft.sourceDocumentId,
+      inputReferences: form.draft.inputReferences,
+    };
   }
 
   private routeConversationTask(
@@ -868,11 +965,17 @@ export class AgentSystemToolService {
 
   private getAsset(args: Record<string, unknown>): Record<string, unknown> {
     rejectUnknown(args, ['assetId']);
-    return {
+    const asset = this.requireAsset(requiredString(args.assetId, 'assetId', 200));
+    return this.projects.access(false, (db, project) => ({
       version: 1,
       status: 'succeeded',
-      asset: toAssetSummary(this.requireAsset(requiredString(args.assetId, 'assetId', 200))),
-    };
+      asset: {
+        ...toAssetSummary(asset),
+        availability: describeProductionAsset(db, project.id, project.rootPath, asset.id)
+          .availability,
+        provenance: readAssetProvenance(db, project.id, asset.id),
+      },
+    }));
   }
 
   private updateAssetAlias(args: Record<string, unknown>): Record<string, unknown> {

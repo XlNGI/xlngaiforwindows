@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmProvider } from '@ai-video/llm';
 import { AGENT_TOOL_RESULT_LIMITS, type ProjectStructureResult } from '@ai-video/contracts';
-import type { ProductionInstruction } from '@ai-video/contracts';
+import type { AdapterParameters, ProductionAuthoringIR } from '@ai-video/contracts';
 import {
   AgentProviderLoopService,
   inferNovelReference,
@@ -22,10 +22,14 @@ import { NovelContextService } from './novel-context-service.js';
 import { NovelService } from './novel-service.js';
 import { getAdapter } from '@ai-video/generation-adapters';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
+import { AgentProviderToolGateway } from './agent-provider-tool-gateway.js';
 import { AdapterService } from './adapter-service.js';
 import { AppSettingsService } from './app-settings-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { MediaPreparationService } from './media-preparation-service.js';
+import { MediaOrchestrationService } from './media-orchestration-service.js';
+import { MediaReviewService } from './media-review-service.js';
+import type { NativeProviderBridge } from './native-provider-bridge.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { prepareAgentGeneration } from './agent-generation-preparation.js';
@@ -39,33 +43,16 @@ const projects: ProjectService[] = [];
 const settingsServices: AppSettingsService[] = [];
 
 function productionFixture(
-  summary: string,
+  prompt: string,
   kind: 'scene' | 'shot' = 'scene',
-): ProductionInstruction {
+): ProductionAuthoringIR {
   return {
-    version: 2,
-    summary,
-    narrative: { purpose: summary },
-    storyTime: { timeOfDay: '清晨' },
-    location: { description: '剧情所在地点' },
-    style: { medium: '二维动画' },
-    subjects: [],
-    visual: {},
-    camera: { framing: '中景' },
+    schemaVersion: 1,
+    kind,
+    prompt,
     ...(kind === 'shot'
-      ? {
-          timing: { estimatedDurationSeconds: 3, rationale: '依据本镜动作与自然停顿' },
-          stillFrame: summary,
-        }
+      ? { timing: { estimatedDurationSeconds: 3, rationale: '动作与停顿' } }
       : {}),
-    beats:
-      kind === 'shot'
-        ? [{ id: 'action', action: summary, characterDocumentIds: [], dialogue: [] }]
-        : [],
-    audio: { mode: 'silent' },
-    generation: {},
-    resources: [],
-    continuity: { predecessors: [], before: [], after: [], locked: [], constraints: [] },
   };
 }
 
@@ -117,6 +104,7 @@ async function setup(
 async function setupMedia(
   ready = true,
   protocol: 'openai-responses' | 'openai-chat-completions' = 'openai-responses',
+  kind: 'image' | 'video' = 'video',
 ) {
   const base = await setup(protocol);
   const directory = await mkdtemp(join(tmpdir(), 'agent-provider-media-settings-'));
@@ -135,16 +123,21 @@ async function setupMedia(
     settings.completeConnectionTest({
       profileId: profile.id,
       status: 'ready',
-      models: [{ id: 'vendor-hosted-video-model' }],
+      models: [{ id: kind === 'image' ? 'qwen-image-3.0' : 'vendor-hosted-video-model' }],
     });
     for (const model of settings.listModels(profile.id)) {
       settings.updateModel({
         profileId: profile.id,
         modelId: model.id,
         displayName: model.displayName,
-        capabilities: { ...model.capabilities, videoGeneration: true },
+        capabilities: {
+          ...model.capabilities,
+          imageGeneration: kind === 'image',
+          videoGeneration: kind === 'video',
+        },
         enabled: true,
-        parameterTemplateKey: 'openai-compatible-video',
+        parameterTemplateKey:
+          kind === 'image' ? model.parameterTemplateKey : 'openai-compatible-video',
       });
     }
   }
@@ -158,12 +151,22 @@ async function setupMedia(
     videos,
     (identity) => base.generations.runtime(identity).attachments ?? [],
   );
+  const nativeRequest = vi.fn<NativeProviderBridge['request']>().mockResolvedValue({
+    status: 200,
+    taskId: 'provider-task-private',
+  });
+  const mediaSubmission = new MediaOrchestrationService(base.project, settings, images, videos, {
+    request: nativeRequest,
+  } as unknown as NativeProviderBridge);
   return {
     ...base,
     profile,
     images,
     videos,
     media,
+    settings,
+    nativeRequest,
+    mediaSubmission,
     loop: new AgentProviderLoopService(
       base.project,
       base.workflow,
@@ -173,7 +176,47 @@ async function setupMedia(
       undefined,
       undefined,
       media,
+      mediaSubmission,
     ),
+  };
+}
+
+async function stageMediaForm(
+  base: Awaited<ReturnType<typeof setupMedia>>,
+  kind: 'image' | 'video' = 'video',
+) {
+  const prompt = 'Reviewed media prompt';
+  const prepared = base.generations.prepare({
+    conversationId: base.conversation.id,
+    prompt,
+    providerProfileId: 'agent-profile',
+    modelId: 'agent-model',
+  });
+  const name = kind === 'image' ? 'media.image.prepare' : 'media.video.prepare';
+  const tool = base.loop.prepare(prepared.stream, prompt).tools.find((tool) => tool.name === name)!;
+  base.loop.startProviderStep(prepared.stream);
+  const paused = await base.loop.executeTools({
+    ...prepared.stream,
+    providerResponseId: 'review-provider-response',
+    calls: [
+      {
+        id: 'review-provider-call',
+        name,
+        authorizationHandle: tool.authorizationHandle,
+        argumentsJson: JSON.stringify({ prompt }),
+      },
+    ],
+  });
+  const candidate = paused.mediaSelection!.candidates[0]!;
+  return {
+    ...prepared.stream,
+    selectionToken: paused.mediaSelection!.selectionToken,
+    selection: {
+      providerProfileId: candidate.providerProfileId,
+      modelId: candidate.modelId,
+      adapterKey: candidate.adapters[0]!.key,
+      parameters: { prompt: 'User edited prompt' },
+    },
   };
 }
 
@@ -182,6 +225,7 @@ function createSystemLoop(
   workflow: DocumentWorkflowService,
   novels?: NovelService,
   media?: MediaPreparationService,
+  reviews?: MediaReviewService,
 ) {
   return new AgentProviderLoopService(
     project,
@@ -225,11 +269,13 @@ function createSystemLoop(
         },
       },
       { listProfiles: () => [], listModels: () => [] },
-      undefined,
+      media,
       workflow,
       undefined,
       new ProjectStructureCompiler(),
       novels,
+      undefined,
+      reviews,
     ),
     media,
   );
@@ -245,6 +291,438 @@ function taskSnapshot(project: ProjectService, taskId: string): Record<string, u
 }
 
 describe('AgentProviderLoopService', () => {
+  it('exposes question forms immediately and executes them through the ordinary authorized tool loop', async () => {
+    const { conversation, generations, project, workflow } = await setup();
+    const loop = createSystemLoop(project, workflow);
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '帮我设计短剧',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, '帮我设计短剧', undefined, {
+      operation: 'document.list',
+    });
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    const gateway = new AgentProviderToolGateway(
+      loop,
+      prepared.stream,
+      agent.tools,
+      vi.fn(),
+      vi.fn(),
+    );
+    expect(gateway.currentDefinitions().map((tool) => tool.name)).toContain('conversation.ask');
+    loop.startProviderStep(prepared.stream);
+    const result = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'questions-response',
+      calls: [
+        {
+          id: 'questions-call',
+          name: 'conversation.ask',
+          authorizationHandle: agent.tools.find((tool) => tool.name === 'conversation.ask')!
+            .authorizationHandle,
+          argumentsJson: JSON.stringify({
+            key: 'direction',
+            title: '确认方向',
+            questions: [{ id: 'style', type: 'text', prompt: '希望采用什么画风？' }],
+          }),
+        },
+      ],
+    });
+    const receipt = JSON.parse(result.continuation!.outputs[0]!.output) as {
+      formId: string;
+      status: string;
+      presentation: string;
+    };
+    expect(receipt).toMatchObject({ status: 'pending', presentation: 'conversation-form' });
+    const form = workflow
+      .getTask({ taskId: agent.taskId })
+      .events.find((event) => event.userInput)?.userInput;
+    expect(form).toMatchObject({
+      id: receipt.formId,
+      conversationId: conversation.id,
+      status: 'pending',
+    });
+    expect(result.confirmation).toBeUndefined();
+  });
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'preserves the optional next-step form after saving a chapter through %s',
+    async (protocol) => {
+      const { conversation, generations, project, workflow, novels } = await setup(protocol);
+      const loop = createSystemLoop(project, workflow, novels);
+      const prompt = '继续第三章';
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, prompt, undefined, {
+        operation: 'document.list',
+      });
+      generations.configureAgentTools(prepared.stream, agent.tools);
+      const nextStep = {
+        key: 'chapter-three-next',
+        title: '下一步',
+        questions: [
+          {
+            id: 'next',
+            prompt: '接下来希望怎么做？',
+            type: 'single',
+            options: [
+              { id: 'continue', label: '继续第四章' },
+              { id: 'revise', label: '审阅/调整第三章' },
+            ],
+          },
+        ],
+      };
+      const summary = '第三章《剑意一现》草稿已保存。\n\n内容概览：主角初悟剑意。';
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'tools.load',
+              { names: ['novel.chapter.write_draft'] },
+              { id: 'load-chapter-write' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-response' },
+        ),
+        fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'novel.chapter.write_draft',
+              {
+                resourceId: 'workspace:novel',
+                action: 'create_chapter',
+                title: '剑意一现',
+                displayLabel: '第三章',
+                contentMarkdown: '主角在雨夜中初悟剑意。',
+              },
+              { id: 'save-third-chapter' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'save-response' },
+        ),
+        fauxAssistantMessage(
+          [{ type: 'text', text: summary }, fauxToolCall('conversation.ask', nextStep)],
+          { stopReason: 'toolUse', responseId: 'next-step-response' },
+        ),
+        fauxAssistantMessage('请在表单中选择下一步。'),
+      ]);
+      const requests: Array<{ tools: string[]; systemPrompt: string }> = [];
+      const runtime = new PiConversationRuntime({
+        generation: generations,
+        plans: {} as never,
+        providerTools: loop,
+        streamFn: (model, context, options) => {
+          requests.push({
+            tools: (context.tools ?? []).map((tool) => tool.name),
+            systemPrompt: context.systemPrompt ?? '',
+          });
+          return faux.streamSimple(model, context, options);
+        },
+        createGateway: () => {
+          throw new Error('Next-step forms must use the ordinary Agent runtime.');
+        },
+      });
+      await runtime.start({
+        ...prepared.stream,
+        identity: prepared.stream,
+        taskId: agent.taskId,
+        mode: 'document',
+        prompt,
+      });
+      await runtime.wait(prepared.stream.generationId);
+
+      expect(generations.get(prepared.stream.generationId).status).toBe('complete');
+      // Creating the question form is the user-review boundary. The Agent
+      // loop must stop here instead of consuming a synthetic follow-up turn.
+      expect(requests).toHaveLength(3);
+      for (const request of requests) {
+        expect(request.tools).toContain('conversation.ask');
+        expect(request.systemPrompt).toContain('任务完成后的可选下一步也属于用户选择');
+      }
+      expect(novels.listChapters()).toHaveLength(1);
+      expect(novels.listChapters()[0]?.displayLabel).toBe('第三章');
+      const restored = new DocumentWorkflowService(project).getTask({ taskId: agent.taskId });
+      expect(restored.task.status).toBe('waiting_review');
+      expect(restored.documents).toHaveLength(1);
+      const formEvents = restored.events.filter((event) => event.userInput);
+      expect(formEvents).toHaveLength(1);
+      expect(formEvents[0]?.userInput).toMatchObject({
+        ...nextStep,
+        conversationId: conversation.id,
+        status: 'pending',
+      });
+      expect(restored.events.some((event) => event.eventType === 'agent.user_input.answered')).toBe(
+        false,
+      );
+      expect(
+        new ContentService(project)
+          .listMessages({ conversationId: conversation.id })
+          .items.find((message) => message.id === prepared.generation.assistantMessage.id)?.content,
+      ).toContain(summary);
+    },
+  );
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'loads and edits chapter directory metadata without rewriting its body through %s',
+    async (protocol) => {
+      const { conversation, generations, project, workflow, novels } = await setup(protocol);
+      const chapter = novels.importNovel({
+        chapters: [
+          {
+            title: '第二章 深夜剑冢',
+            displayLabel: '第二章 深夜剑冢',
+            contentMarkdown: '# 第二章 深夜剑冢\n\n完整原文。',
+          },
+        ],
+      }).chapters[0]!;
+      const before = workflow.getDocument(chapter.documentId);
+      const loop = createSystemLoop(project, workflow, novels);
+      const prompt = '把第二章目录标签改为第 2 章，正文不变。';
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt,
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const agent = loop.prepare(prepared.stream, prompt, undefined, {
+        operation: 'document.list',
+      });
+      generations.configureAgentTools(prepared.stream, agent.tools);
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall('tools.load', {
+              names: ['novel.chapter.list', 'novel.chapter.update_metadata'],
+            }),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-metadata' },
+        ),
+        fauxAssistantMessage([fauxToolCall('novel.chapter.list', {})], {
+          stopReason: 'toolUse',
+          responseId: 'list-chapters',
+        }),
+        fauxAssistantMessage(
+          [
+            fauxToolCall('novel.chapter.update_metadata', {
+              chapterId: chapter.id,
+              expectedChapterRowVersion: chapter.rowVersion,
+              expectedDocumentRowVersion: chapter.documentRowVersion,
+              displayLabel: '第 2 章',
+            }),
+          ],
+          { stopReason: 'toolUse', responseId: 'edit-label' },
+        ),
+        fauxAssistantMessage('第二章目录标签已更新，正文保持不变。'),
+      ]);
+      const requestedTools: string[][] = [];
+      const runtime = new PiConversationRuntime({
+        generation: generations,
+        plans: {} as never,
+        providerTools: loop,
+        streamFn: (model, context, options) => {
+          requestedTools.push((context.tools ?? []).map((tool) => tool.name));
+          return faux.streamSimple(model, context, options);
+        },
+        createGateway: () => {
+          throw new Error('Metadata edits use the ordinary Agent runtime.');
+        },
+      });
+      await runtime.start({
+        ...prepared.stream,
+        identity: prepared.stream,
+        taskId: agent.taskId,
+        mode: 'document',
+        prompt,
+      });
+      await runtime.wait(prepared.stream.generationId);
+
+      expect(generations.get(prepared.stream.generationId).status).toBe('complete');
+      expect(requestedTools).toHaveLength(4);
+      expect(requestedTools[0]).not.toContain('novel.chapter.update_metadata');
+      expect(requestedTools[1]).toContain('novel.chapter.update_metadata');
+      expect(requestedTools.flat()).not.toContain('novel.chapter.write_draft');
+      expect(novels.listChapters()).toEqual([
+        expect.objectContaining({
+          id: chapter.id,
+          title: chapter.title,
+          displayLabel: '第 2 章',
+          position: chapter.position,
+        }),
+      ]);
+      const after = workflow.getDocument(chapter.documentId);
+      expect(after.currentVersion).toEqual(before.currentVersion);
+      expect(after.publishedVersionId).toBe(before.publishedVersionId);
+      expect(workflow.getTask({ taskId: agent.taskId }).documents).toHaveLength(0);
+      expect(workflow.getTask({ taskId: agent.taskId }).novelMetadataUpdated).toBe(true);
+      expect(workflow.getTask({ taskId: agent.taskId }).task.outcome).not.toBe('read-only');
+      expect(
+        project.access(false, (db) =>
+          db
+            .prepare(
+              'SELECT tool_name, status FROM agent_tool_calls WHERE task_id = ? ORDER BY created_at, id',
+            )
+            .all(agent.taskId),
+        ),
+      ).toEqual([
+        { tool_name: 'novel.chapter.list', status: 'succeeded' },
+        { tool_name: 'novel.chapter.update_metadata', status: 'succeeded' },
+      ]);
+    },
+  );
+
+  it('persists assistant stage boundaries between tool batches and restores them without duplicating text', async () => {
+    const { conversation, generations, loop, project, workflow } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '查看项目已有资料',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, '查看项目已有资料', undefined, {
+      operation: 'document.list',
+    });
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    loop.startProviderStep(prepared.stream);
+    const first = '我先查看项目里已有的文档。';
+    generations.observe({ ...prepared.stream, content: first });
+    generations.observe({ ...prepared.stream, content: first + '稍等。' });
+    const firstText = first + '稍等。';
+    await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'response-one',
+      calls: [
+        {
+          id: 'call-one',
+          name: 'document.list',
+          argumentsJson: '{}',
+          authorizationHandle: agent.tools.find((t) => t.name === 'document.list')!
+            .authorizationHandle,
+        },
+      ],
+    });
+    const final = firstText + '\n\n项目中还没有文档，可以开始设计。';
+    generations.observe({ ...prepared.stream, content: final });
+    generations.observe({ ...prepared.stream, content: firstText });
+    loop.completeProviderStep({
+      ...prepared.stream,
+      providerResponseId: 'response-two',
+      finishReason: 'stop',
+    });
+    generations.complete({ ...prepared.stream, content: final, finishReason: 'stop' });
+    const detail = workflow.getTask({ taskId: agent.taskId });
+    const boundaries = detail.events.filter((event) => event.messageBoundary);
+    expect(boundaries.map((event) => event.messageBoundary)).toEqual([
+      { messageId: prepared.generation.assistantMessage.id, startOffset: 0 },
+      { messageId: prepared.generation.assistantMessage.id, startOffset: firstText.length },
+    ]);
+    const toolStart = detail.events.find((event) => event.eventType === 'agent.tool.started')!;
+    expect(boundaries[0]!.sequence).toBeLessThan(toolStart.sequence);
+    expect(boundaries[1]!.sequence).toBeGreaterThan(toolStart.sequence);
+    const restored = new DocumentWorkflowService(project).getTask({ taskId: agent.taskId });
+    expect(restored.events).toEqual(detail.events);
+    expect(
+      new ContentService(project)
+        .listMessages({ conversationId: conversation.id })
+        .items.find((message) => message.id === prepared.generation.assistantMessage.id)?.content,
+    ).toBe(final);
+    expect(JSON.stringify(boundaries)).not.toContain(first);
+  });
+
+  it('carries open scene/shot IR through resumable scene-structure staging', async () => {
+    const { conversation, generations, project, workflow, novels } = await setup();
+    const loop = createSystemLoop(project, workflow, novels);
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '保存一个简短场次',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, '保存一个简短场次', undefined, {
+      operation: 'document.list',
+    });
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    let tools = agent.tools;
+    let ordinal = 0;
+    const invoke = async (args: Record<string, unknown>) => {
+      loop.startProviderStep(prepared.stream);
+      const result = await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: `ir-stage-${ordinal}`,
+        calls: [
+          {
+            id: `ir-stage-call-${ordinal++}`,
+            name: 'scene.structure.stage',
+            argumentsJson: JSON.stringify(args),
+            authorizationHandle: tools.find((tool) => tool.name === 'scene.structure.stage')!
+              .authorizationHandle,
+          },
+        ],
+      });
+      tools = result.tools!;
+      return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
+    };
+    const prop = new ContentService(project).saveDocument({
+      kind: 'prop',
+      title: '酒葫芦',
+      contentMarkdown: '# 酒葫芦',
+    });
+    const sceneIR = {
+      schemaVersion: 1,
+      kind: 'scene',
+      prompt: '山村铁匠铺内，炉火映红墙面。',
+      references: { propDocumentIds: [prop.id] },
+      data: { location: '村庄边缘', lighting: '炉火' },
+    };
+    const shotIR = {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: '老者用木杖探地，跛行走向门外。',
+      timing: { estimatedDurationSeconds: 6.5, rationale: '探地、迈步和停顿' },
+      references: { propDocumentIds: [prop.id] },
+      data: { gait: ['杖尖点地', '左脚探步', '右足拖行'] },
+    };
+
+    const begun = await invoke({
+      operation: 'begin',
+      resourceId: 'workspace:shots',
+      executionKey: 'ir-stage-sequence',
+      episodeTitle: '雾中离去',
+      sceneShotCounts: [1],
+    });
+    const sceneStaged = await invoke({
+      operation: 'put_scene',
+      resourceId: 'workspace:shots',
+      stageId: begun.stageId,
+      expectedRowVersion: begun.rowVersion,
+      sceneIndex: 0,
+      scene: { title: '离去', authoringIR: sceneIR },
+    });
+    const saved = await invoke({
+      operation: 'put_shots',
+      resourceId: 'workspace:shots',
+      stageId: begun.stageId,
+      expectedRowVersion: sceneStaged.rowVersion,
+      sceneIndex: 0,
+      shotOffset: 0,
+      shots: [{ title: '探路', authoringIR: shotIR }],
+    });
+
+    expect(saved).toMatchObject({ status: 'scene_structure_saved', applied: true, complete: true });
+    const content = new ContentService(project);
+    const scene = content.listScenes()[0]!;
+    const shot = content.listShots(scene.id)[0]!;
+    expect(scene.authoringIR).toEqual(sceneIR);
+    expect(shot.authoringIR).toEqual(shotIR);
+  });
+
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'resolves page IDs before saving and rejects incomplete or mismatched locators through %s',
     async (protocol) => {
@@ -591,6 +1069,17 @@ describe('AgentProviderLoopService', () => {
         title: '书房',
         contentMarkdown: '# 书房\n木桌和信件',
       });
+      const walkingStick = await invoke('document.submit_draft', {
+        resourceId: 'workspace:characters',
+        documentKind: 'prop',
+        title: '铁木杖道具设定',
+        contentMarkdown: '# 铁木杖\n杖尖包有铁箍。',
+        contentIR: {
+          schemaVersion: 1,
+          kind: 'prop',
+          data: { material: '铁木', tip: '铁箍' },
+        },
+      });
       const driver = await invoke('document.submit_draft', {
         resourceId: 'workspace:characters',
         documentKind: 'character',
@@ -611,29 +1100,48 @@ describe('AgentProviderLoopService', () => {
       const scenes = [
         {
           title: '庭院',
-          instruction: productionFixture('他走过院落。'),
+          authoringIR: {
+            schemaVersion: 1,
+            kind: 'scene',
+            prompt: '他走过院落。',
+            references: {
+              characterDocumentIds: [driver.documentId, colleague.documentId],
+              sceneDocumentIds: [courtyard.documentId],
+              propDocumentIds: [walkingStick.documentId],
+            },
+            data: { blocking: '门外的身影由近至远' },
+          },
           characterDocumentIds: [driver.documentId, colleague.documentId],
           sceneDocumentId: courtyard.documentId,
           shots: [
             {
               title: '远景',
-              instruction: productionFixture('清晨的庭院', 'shot'),
+              authoringIR: {
+                schemaVersion: 1,
+                kind: 'shot',
+                prompt: '清晨的庭院，人物从门外走入。',
+                references: {
+                  characterDocumentIds: [driver.documentId],
+                  propDocumentIds: [walkingStick.documentId],
+                },
+                data: { camera: '固定中远景' },
+              },
             },
             {
               title: '近景',
-              instruction: productionFixture('门上的霜', 'shot'),
+              authoringIR: productionFixture('门上的霜', 'shot'),
             },
           ],
         },
         {
           title: '书房',
-          instruction: productionFixture('书桌上的信。'),
+          authoringIR: productionFixture('书桌上的信。'),
           characterDocumentIds: [],
           sceneDocumentId: study.documentId,
           shots: [
             {
               title: '特写',
-              instruction: productionFixture('桌上的信', 'shot'),
+              authoringIR: productionFixture('桌上的信', 'shot'),
             },
           ],
         },
@@ -647,7 +1155,12 @@ describe('AgentProviderLoopService', () => {
           resourceId: 'workspace:shots',
           resolution: 'resolved',
           episodeTitle: '缺少详细结构',
-          scenes: [{ ...scenes[0], instruction: undefined }],
+          scenes: [
+            {
+              ...scenes[0],
+              authoringIR: undefined,
+            },
+          ],
         }),
       ).toMatchObject({ status: 'rejected' });
       for (const args of [
@@ -675,7 +1188,14 @@ describe('AgentProviderLoopService', () => {
           contentMarkdown: '# 场次\n## 镜头',
         }),
       ).toMatchObject({ status: 'rejected' });
-      expect(workflow.listDocuments()).toHaveLength(4);
+      expect(workflow.listDocuments()).toHaveLength(5);
+      expect(
+        workflow.getDocument(walkingStick.documentId as string).currentVersion?.contentIR,
+      ).toEqual({
+        schemaVersion: 1,
+        kind: 'prop',
+        data: { material: '铁木', tip: '铁箍' },
+      });
       const clarified = await invoke('scene.submit_structure', {
         resourceId: 'workspace:shots',
         resolution: 'needs_clarification',
@@ -719,7 +1239,11 @@ describe('AgentProviderLoopService', () => {
       const production = await invoke('production.read', {
         target: { kind: 'scene', id: courtyardScene.id },
       });
-      expect(production.instruction).toMatchObject({ summary: '他走过院落。' });
+      expect(production.authoring).toMatchObject({
+        schemaVersion: 1,
+        kind: 'scene',
+        prompt: '他走过院落。',
+      });
       expect(production.source).toBeUndefined();
       expect(courtyardScene.videoPrompt).toContain('他走过院落。');
       expect(courtyardScene.characterBindings).toEqual([
@@ -737,7 +1261,7 @@ describe('AgentProviderLoopService', () => {
         content
           .listShots(parents.find((item) => item.title === '庭院')!.id)
           .map((item) => item.prompt?.split('\n')[0]),
-      ).toEqual(['清晨的庭院', '门上的霜']);
+      ).toEqual(['清晨的庭院，人物从门外走入。', '门上的霜']);
       expect(
         content
           .listShots(parents.find((item) => item.title === '书房')!.id)
@@ -752,7 +1276,7 @@ describe('AgentProviderLoopService', () => {
             sceneId: courtyardScene.id,
             expectedRowVersion: courtyardScene.rowVersion,
             title: courtyardScene.title,
-            instruction: productionFixture('前同事独自留下。'),
+            authoringIR: productionFixture('前同事独自留下。'),
             sceneDocumentId: study.documentId,
             characterDocumentIds: [colleague.documentId],
             shots: [],
@@ -1098,18 +1622,31 @@ describe('AgentProviderLoopService', () => {
         );
         versions.push(...read.map((entry) => entry.rowVersion as number));
       }
-      const saved = await invoke('production.execute', [
+      const sceneResult = await invoke('scene.submit_structure', [
         {
-          executionKey: 'revise-existing',
-          operations: targets.map((target, i) => ({
-            action: 'set_prompt',
-            target,
+          resourceId: 'workspace:shots',
+          resolution: 'resolved',
+          episodeTitle: '修订',
+          scenes: scenes.map((scene, i) => ({
+            sceneId: scene.id,
+            title: scene.title,
             expectedRowVersion: versions[i],
-            instruction: productionFixture('保持已有剧情与对白', target.kind),
+            authoringIR: productionFixture('保持已有剧情与对白'),
+            shots: [],
           })),
         },
       ]);
-      expect(saved[0]).toMatchObject({ status: 'applied' });
+      expect(sceneResult[0]).toMatchObject({ status: 'scene_structure_saved' });
+      const saved = await invoke('scene.update_shot_prompts', [
+        {
+          shots: shots.map((shot, i) => ({
+            shotId: shot.id,
+            expectedRowVersion: versions[i + scenes.length],
+            authoringIR: productionFixture('保持已有剧情与对白', 'shot'),
+          })),
+        },
+      ]);
+      expect(saved[0]).toMatchObject({ status: 'shot_prompts_saved', changedCount: 12 });
       expect(content.listScenes()).toHaveLength(3);
       expect(content.listScenes().flatMap((scene) => content.listShots(scene.id))).toHaveLength(12);
       project.access(false, (db) => {
@@ -1119,10 +1656,10 @@ describe('AgentProviderLoopService', () => {
               "SELECT tool_call_count,tool_call_limit FROM agent_tasks WHERE status='running'",
             )
             .get(),
-        ).toEqual({ tool_call_count: 19, tool_call_limit: 32 });
+        ).toEqual({ tool_call_count: 20, tool_call_limit: 32 });
         expect(
-          db.prepare('SELECT COUNT(*) AS n FROM production_instruction_versions').get(),
-        ).toEqual({ n: 15 });
+          db.prepare('SELECT COUNT(*) AS n FROM shots WHERE authoring_ir_json IS NOT NULL').get(),
+        ).toEqual({ n: 12 });
         expect(
           db
             .prepare(
@@ -1130,6 +1667,128 @@ describe('AgentProviderLoopService', () => {
             )
             .get(),
         ).toEqual({ n: 0 });
+      });
+    },
+  );
+
+  it.each(
+    (['openai-responses', 'openai-chat-completions'] as const).flatMap((protocol) =>
+      (['scene.update_shot_timings', 'scene.update_shot_prompts'] as const).map((operation) => ({
+        protocol,
+        operation,
+      })),
+    ),
+  )(
+    'patches 15 existing shots with CAS, failure recovery and a refresh event ($protocol, $operation)',
+    async ({ protocol, operation }) => {
+      const { conversation, generations, project, workflow } = await setup(protocol);
+      const content = new ContentService(project);
+      const scenes = Array.from({ length: 4 }, (_, i) => content.saveScene({ title: `场次${i}` }));
+      const shots = scenes.flatMap((scene, i) =>
+        Array.from({ length: i === 3 ? 3 : 4 }, (_, j) =>
+          content.saveShot({
+            sceneId: scene.id,
+            title: `镜头${i}-${j}`,
+            authoringIR: {
+              schemaVersion: 1,
+              kind: 'shot',
+              prompt: `人物动作${i}-${j}`,
+              data: { custom: '保留内容' },
+            },
+          }),
+        ),
+      );
+      const loop = createSystemLoop(project, workflow);
+      const prepared = generations.prepare({
+        conversationId: conversation.id,
+        prompt: '每个镜头应该设置时间',
+        providerProfileId: 'profile',
+        modelId: 'model',
+      });
+      const task = loop.prepare(prepared.stream, '每个镜头应该设置时间', undefined, {
+        operation: 'document.list',
+      });
+      let tools = task.tools;
+      let ordinal = 0;
+      const invoke = async (name: string, args: Record<string, unknown>) => {
+        loop.startProviderStep(prepared.stream);
+        const responseId = `timing-response-${ordinal}`;
+        const result = await loop.executeTools({
+          ...prepared.stream,
+          providerResponseId: responseId,
+          calls: [
+            {
+              id: `timing-${ordinal++}`,
+              name,
+              argumentsJson: JSON.stringify(args),
+              authorizationHandle: tools.find((tool) => tool.name === name)!.authorizationHandle,
+            },
+          ],
+        });
+        expect(result.confirmation).toBeUndefined();
+        tools =
+          name === 'scene.read'
+            ? loop.advanceTextTurn({
+                ...prepared.stream,
+                providerResponseId: responseId,
+                finishReason: 'tool_calls',
+              })
+            : result.tools!;
+        return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
+      };
+      const versions = new Map<string, number>();
+      for (const scene of scenes) {
+        const structure = await invoke('scene.read', { sceneId: scene.id });
+        expect(structure.complete).toBe(true);
+        for (const shot of structure.shots as Array<{ id: string; rowVersion: number }>)
+          versions.set(shot.id, shot.rowVersion);
+      }
+      const updates = shots.map((shot) => ({
+        shotId: shot.id,
+        expectedRowVersion: versions.get(shot.id),
+        ...(operation === 'scene.update_shot_timings'
+          ? { estimatedDurationSeconds: 5, rationale: '动作及反应停顿' }
+          : {
+              authoringIR: {
+                schemaVersion: 1,
+                kind: 'shot',
+                prompt: `${shot.prompt}，固定机位，无配乐。`,
+              },
+            }),
+      }));
+      const failed = await invoke(operation, {
+        shots: updates.map((shot, i) => (i === 14 ? { ...shot, expectedRowVersion: 999 } : shot)),
+      });
+      expect(failed.status).toBe('rejected');
+      expect(scenes.flatMap((scene) => content.listShots(scene.id))).toEqual(shots);
+      loop.startProviderStep(prepared.stream);
+      expect(() => loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' })).toThrow(
+        'AGENT_SCENE_NOT_SAVED',
+      );
+      const saved = await invoke(operation, { shots: updates });
+      expect(saved).toMatchObject({
+        status:
+          operation === 'scene.update_shot_prompts' ? 'shot_prompts_saved' : 'shot_timings_saved',
+        changedCount: 15,
+      });
+      loop.startProviderStep(prepared.stream);
+      expect(() =>
+        loop.completeProviderStep({ ...prepared.stream, finishReason: 'stop' }),
+      ).not.toThrow();
+      project.access(false, (db) => {
+        expect(
+          db
+            .prepare('SELECT status,outcome,tool_call_count FROM agent_tasks WHERE id=?')
+            .get(task.taskId),
+        ).toEqual({ status: 'completed', outcome: null, tool_call_count: 6 });
+        expect(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM agent_task_events WHERE task_id=? AND event_type='scene.structure.saved'",
+            )
+            .get(task.taskId),
+        ).toEqual({ n: 1 });
+        expect(db.prepare('SELECT COUNT(*) AS n FROM shots').get()).toEqual({ n: 15 });
       });
     },
   );
@@ -1202,6 +1861,68 @@ describe('AgentProviderLoopService', () => {
     expect(workflow.listDocuments()).toHaveLength(1);
     expect(workflow.listTasks()).toHaveLength(2);
   });
+
+  it('persists Agent turn reservations and de-duplicates Provider usage by request', async () => {
+    const { conversation, generations, loop, project } = await setup();
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '保存一份草稿',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const agent = loop.prepare(prepared.stream, '保存一份草稿');
+    const identity = prepared.stream;
+
+    for (let index = 0; index < 24; index += 1) loop.reserveTurn(identity);
+    expect(() => loop.reserveTurn(identity)).toThrow('AGENT_TURN_QUOTA_EXHAUSTED');
+    loop.terminateGeneration(
+      identity.generationId,
+      'failed',
+      'AGENT_TURN_QUOTA_EXHAUSTED: Provider-turn budget exhausted.',
+    );
+
+    const usage = {
+      inputTokens: 12,
+      outputTokens: 5,
+      reasoningTokens: 2,
+      totalTokens: 19,
+      providerReportedCost: { amount: '0.125', currency: 'USD' },
+    };
+    loop.recordProviderUsage(identity, 'request-1', usage);
+    loop.recordProviderUsage(identity, 'request-1', usage);
+    const row = project.access(false, (database) =>
+      database
+        .prepare(
+          `SELECT tasks.turn_count,tasks.input_tokens,tasks.output_tokens,tasks.reasoning_tokens,
+                  tasks.total_tokens,tasks.provider_reported_cost,tasks.quota_state,
+                  tasks.quota_error_code,COUNT(usage.request_id) AS requests
+           FROM agent_tasks tasks LEFT JOIN agent_task_usage usage ON usage.task_id=tasks.id
+           WHERE tasks.id=? GROUP BY tasks.id`,
+        )
+        .get(agent.taskId),
+    ) as {
+      turn_count: number;
+      input_tokens: number;
+      output_tokens: number;
+      reasoning_tokens: number;
+      total_tokens: number;
+      provider_reported_cost: string;
+      quota_state: string;
+      quota_error_code: string;
+      requests: number;
+    };
+    expect(row).toMatchObject({
+      turn_count: 24,
+      input_tokens: 12,
+      output_tokens: 5,
+      reasoning_tokens: 2,
+      total_tokens: 19,
+      provider_reported_cost: '0.125',
+      quota_state: 'paused_budget',
+      quota_error_code: 'AGENT_TURN_QUOTA_EXHAUSTED',
+      requests: 1,
+    });
+  });
   it('classifies novel reference requests separately from screenplay documents', () => {
     expect(inferNovelReference('请生成小说大纲')).toEqual({
       role: 'work-outline',
@@ -1215,8 +1936,8 @@ describe('AgentProviderLoopService', () => {
     expect(inferNovelReference('写一份项目大纲')).toBeUndefined();
   });
 
-  it('pauses a natural-language video request for media selection and resumes with a local draft', async () => {
-    const { conversation, generations, loop, project } = await setupMedia();
+  it('submits a reviewed generation form once with the exact edited parameters', async () => {
+    const { conversation, generations, loop, project, nativeRequest } = await setupMedia();
     const prompt = '帮我生成龙在天空翱翔的视频';
     const prepared = generations.prepare({
       conversationId: conversation.id,
@@ -1267,7 +1988,7 @@ describe('AgentProviderLoopService', () => {
 
     const candidate = paused.mediaSelection!.candidates[0]!;
     const adapter = candidate.adapters[0]!;
-    expect(() =>
+    await expect(
       loop.selectMedia({
         ...prepared.stream,
         projectId: 'another-project',
@@ -1279,51 +2000,64 @@ describe('AgentProviderLoopService', () => {
           parameters: {},
         },
       }),
-    ).toThrow('current project session');
+    ).rejects.toThrow('current project session');
     expect(
       project.access(false, (database) =>
         database.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
       ),
     ).toEqual({ count: 0 });
-    const resumed = loop.selectMedia({
+    const resumed = await loop.selectMedia({
       ...prepared.stream,
       selectionToken: paused.mediaSelection!.selectionToken,
       selection: {
         providerProfileId: candidate.providerProfileId,
         modelId: candidate.modelId,
         adapterKey: adapter.key,
-        parameters: {},
+        parameters: { prompt: '用户审核后修改的电影感龙飞行镜头' },
       },
     });
     const output = resumed.continuation!.outputs[0]!.output;
 
-    expect(JSON.parse(output)).toMatchObject({
-      status: 'prepared',
-      draft: {
-        kind: 'video',
-        status: 'draft',
-        mediaModelSelection: {
-          providerProfileId: candidate.providerProfileId,
-          modelId: candidate.modelId,
-          remoteModelId: candidate.remoteModelId,
-          adapterKey: adapter.key,
-        },
-      },
+    expect(JSON.parse(output)).toEqual({
+      version: 1,
+      status: 'polling',
+      taskId: expect.any(String) as string,
+      resultAssetIds: [],
     });
+    expect(resumed.mediaSubmission).toBeUndefined();
+    expect(nativeRequest).toHaveBeenCalledExactlyOnceWith(
+      'provider.media.submit',
+      expect.objectContaining({
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        remoteModelId: candidate.remoteModelId,
+        adapterKey: adapter.key,
+        parameters: expect.objectContaining({
+          prompt: '用户审核后修改的电影感龙飞行镜头',
+        }) as AdapterParameters,
+      }),
+      10 * 60 * 1000,
+    );
     expect(output).not.toMatch(/data:image|base64|[A-Z]:\\|credential|api[_-]?key/iu);
     expect(
       project.access(false, (database) =>
         database
-          .prepare('SELECT status, provider_task_id, task_snapshot_json FROM generation_jobs')
+          .prepare(
+            'SELECT status, media_state, provider_task_id, task_snapshot_json FROM generation_jobs',
+          )
           .get(),
       ),
-    ).toMatchObject({ status: 'pending', provider_task_id: null });
+    ).toMatchObject({
+      status: 'polling',
+      media_state: 'polling',
+      provider_task_id: 'provider-task-private',
+    });
     expect(
       project.access(false, (database) =>
         database.prepare('SELECT status FROM agent_media_selections').get(),
       ),
     ).toEqual({ status: 'consumed' });
-    expect(() =>
+    await expect(
       loop.selectMedia({
         ...prepared.stream,
         selectionToken: paused.mediaSelection!.selectionToken,
@@ -1334,10 +2068,228 @@ describe('AgentProviderLoopService', () => {
           parameters: {},
         },
       }),
-    ).toThrow('already been resolved');
+    ).rejects.toThrow('already been resolved');
+    expect(nativeRequest).toHaveBeenCalledOnce();
+    const submitTool = resumed.tools!.find((tool) => tool.name === 'media.generation.submit')!;
+    const duplicate = await loop.executeTools({
+      ...prepared.stream,
+      providerResponseId: 'duplicate-submission-response',
+      calls: [
+        {
+          id: 'duplicate-submission-call',
+          name: 'media.generation.submit',
+          authorizationHandle: submitTool.authorizationHandle,
+          argumentsJson: JSON.stringify({
+            taskId: (JSON.parse(output) as { taskId: string }).taskId,
+          }),
+        },
+      ],
+    });
+    expect(duplicate.mediaSubmission).toBeUndefined();
+    expect(JSON.parse(duplicate.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'polling',
+    });
+    expect(nativeRequest).toHaveBeenCalledOnce();
   });
 
-  it('continues the same Provider call after one confirmed media submission', async () => {
+  it('claims the reviewed selection before waiting for the Provider and rejects concurrent replay', async () => {
+    const base = await setupMedia(true, 'openai-chat-completions');
+    const params = await stageMediaForm(base);
+    let release!: (response: unknown) => void;
+    base.nativeRequest.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const running = base.loop.selectMedia(params);
+    await vi.waitFor(() => expect(base.nativeRequest).toHaveBeenCalledOnce());
+    await expect(base.loop.selectMedia(params)).rejects.toThrow('already been resolved');
+    const job = base.project.access(false, (db) =>
+      db
+        .prepare(
+          'SELECT id, media_state, submission_idempotency_key, submission_confirmation_consumed_at FROM generation_jobs',
+        )
+        .get(),
+    ) as {
+      id: string;
+      media_state: string;
+      submission_idempotency_key: string;
+      submission_confirmation_consumed_at: string;
+    };
+    expect(job).toMatchObject({
+      media_state: 'submitting',
+      submission_idempotency_key: `media-submit:${job.id}`,
+      submission_confirmation_consumed_at: expect.any(String) as string,
+    });
+    release({ status: 200, taskId: 'provider-task-private' });
+    const result = await running;
+    expect(result.mediaSubmission).toBeUndefined();
+    expect(result.continuation?.protocol).toBe('openai-chat-completions');
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'polling',
+    });
+    expect(base.nativeRequest).toHaveBeenCalledOnce();
+    expect(
+      base.project.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 1 });
+  });
+
+  it('does not submit or create a job when the user cancels the form', async () => {
+    const base = await setupMedia();
+    const params = await stageMediaForm(base);
+    const result = await base.loop.selectMedia({ ...params, selection: undefined });
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'cancelled',
+    });
+    expect(base.nativeRequest).not.toHaveBeenCalled();
+    expect(
+      base.project.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
+  it('rejects invalid reviewed parameters without submitting or leaving an orphan draft', async () => {
+    const base = await setupMedia();
+    const params = await stageMediaForm(base);
+    const result = await base.loop.selectMedia({
+      ...params,
+      selection: { ...params.selection, parameters: { duration: -100 } },
+    });
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'rejected',
+    });
+    expect(base.nativeRequest).not.toHaveBeenCalled();
+    expect(
+      base.project.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
+  it('rolls back job preparation if the existing submission service refuses admission', async () => {
+    const base = await setupMedia();
+    const params = await stageMediaForm(base);
+    vi.spyOn(base.mediaSubmission, 'requestSubmission').mockImplementation(() => {
+      throw new Error('Submission admission rejected');
+    });
+    const result = await base.loop.selectMedia(params);
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'rejected',
+    });
+    expect(base.nativeRequest).not.toHaveBeenCalled();
+    expect(
+      base.project.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
+  it('returns submission_unknown after a lost response without retrying the reviewed task', async () => {
+    const base = await setupMedia();
+    const params = await stageMediaForm(base);
+    base.nativeRequest.mockRejectedValue(new Error('Connection lost after request'));
+    const result = await base.loop.selectMedia(params);
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'submission_unknown',
+    });
+    expect(result.mediaSubmission).toBeUndefined();
+    await expect(base.loop.selectMedia(params)).rejects.toThrow('already been resolved');
+    expect(base.nativeRequest).toHaveBeenCalledOnce();
+  });
+
+  it('reports a submission exception with the persisted task state and no extra confirmation', async () => {
+    const base = await setupMedia();
+    const params = await stageMediaForm(base);
+    vi.spyOn(base.mediaSubmission, 'confirmSubmission').mockRejectedValue(
+      new Error('Frozen source changed'),
+    );
+    const result = await base.loop.selectMedia(params);
+    expect(JSON.parse(result.continuation!.outputs[0]!.output)).toMatchObject({
+      status: 'awaiting_confirmation',
+      error: { code: 'MEDIA_SUBMISSION_FAILED', message: 'Frozen source changed' },
+    });
+    expect(result.mediaSubmission).toBeUndefined();
+    expect(base.nativeRequest).not.toHaveBeenCalled();
+    await expect(base.loop.selectMedia(params)).rejects.toThrow('already been resolved');
+  });
+
+  it.each([
+    {
+      state: 'failed',
+      response: { status: 400, body: { error: { message: 'Provider rejected image' } } },
+    },
+    {
+      state: 'succeeded',
+      response: { status: 200, body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] } },
+    },
+  ])(
+    'submits a reviewed image and reports $state without another form',
+    async ({ state, response }) => {
+      const base = await setupMedia(true, 'openai-responses', 'image');
+      const params = await stageMediaForm(base, 'image');
+      base.nativeRequest.mockResolvedValue(response);
+      const result = await base.loop.selectMedia(params);
+      const output = JSON.parse(result.continuation!.outputs[0]!.output) as {
+        status: string;
+        resultAssetIds: string[];
+      };
+      expect(output).toMatchObject({ status: state });
+      expect(output.resultAssetIds).toHaveLength(state === 'succeeded' ? 1 : 0);
+      expect(result.mediaSubmission).toBeUndefined();
+      expect(base.nativeRequest).toHaveBeenCalledExactlyOnceWith(
+        'provider.media.submit',
+        expect.objectContaining({
+          kind: 'image',
+          parameters: expect.objectContaining({
+            prompt: 'User edited prompt',
+          }) as AdapterParameters,
+        }),
+        10 * 60 * 1000,
+      );
+    },
+  );
+
+  it.each(['another-project', 'reopened-session'] as const)(
+    'does not continue the old Agent task after $0 during submission',
+    async (change) => {
+      const base = await setupMedia();
+      const params = await stageMediaForm(base);
+      let release!: (response: unknown) => void;
+      base.nativeRequest.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const running = base.loop.selectMedia(params);
+      await vi.waitFor(() => expect(base.nativeRequest).toHaveBeenCalledOnce());
+      if (change === 'another-project') {
+        const otherDirectory = await mkdtemp(join(tmpdir(), 'media-other-project-'));
+        directories.push(otherDirectory);
+        base.project.create(join(otherDirectory, 'project'), 'Another project');
+      } else {
+        base.project.open(base.project.current()!.rootPath);
+      }
+      release({ status: 200, taskId: 'provider-task-private' });
+      await expect(running).rejects.toThrow('Project session changed');
+      expect(
+        base.project.access(false, (db) =>
+          db.prepare('SELECT COUNT(*) AS count FROM generation_jobs').get(),
+        ),
+      ).toEqual({ count: change === 'another-project' ? 0 : 1 });
+      expect(
+        base.project.access(false, (db) =>
+          db.prepare('SELECT COUNT(*) AS count FROM llm_provider_steps').get(),
+        ),
+      ).toEqual({ count: change === 'another-project' ? 0 : 1 });
+    },
+  );
+
+  it('still requires approval when the Agent submits an existing unreviewed draft', async () => {
     const base = await setupMedia();
     const requestSubmission = vi.fn<AgentMediaSubmissionExecutor['requestSubmission']>(
       ({ jobId }) => ({
@@ -1398,36 +2350,21 @@ describe('AgentProviderLoopService', () => {
       modelId: 'agent-model',
     });
     const agent = loop.prepare(prepared.stream, prompt);
-    const prepareTool = agent.tools.find((tool) => tool.name === 'media.video.prepare')!;
-    loop.startProviderStep(prepared.stream);
-    const selectionPending = await loop.executeTools({
-      ...prepared.stream,
-      providerResponseId: 'prepare-provider-response',
-      calls: [
-        {
-          id: 'prepare-provider-call',
-          name: 'media.video.prepare',
-          authorizationHandle: prepareTool.authorizationHandle,
-          argumentsJson: JSON.stringify({ prompt }),
-        },
-      ],
-    });
-    const candidate = selectionPending.mediaSelection!.candidates[0]!;
+    const context = base.media.selectionContext('video', { prompt }, prepared.stream);
+    const candidate = context.candidates[0]!;
     const adapter = candidate.adapters[0]!;
-    const selected = loop.selectMedia({
-      ...prepared.stream,
-      selectionToken: selectionPending.mediaSelection!.selectionToken,
-      selection: {
+    const draft = base.media.prepareSelected(
+      context,
+      {
         providerProfileId: candidate.providerProfileId,
         modelId: candidate.modelId,
         adapterKey: adapter.key,
         parameters: {},
       },
-    });
-    const preparedOutput = JSON.parse(selected.continuation!.outputs[0]!.output) as {
-      draft: { draftId: string };
-    };
-    const submitTool = selected.tools!.find((tool) => tool.name === 'media.generation.submit')!;
+      prepared.stream,
+    );
+    const submitTool = agent.tools.find((tool) => tool.name === 'media.generation.submit')!;
+    loop.startProviderStep(prepared.stream);
     const storedSubmitAuthorization = base.project.access(false, (database) =>
       database
         .prepare(
@@ -1452,7 +2389,7 @@ describe('AgentProviderLoopService', () => {
           id: 'submit-provider-call',
           name: 'media.generation.submit',
           authorizationHandle: submitTool.authorizationHandle,
-          argumentsJson: JSON.stringify({ taskId: preparedOutput.draft.draftId }),
+          argumentsJson: JSON.stringify({ taskId: draft.draftId }),
         },
       ],
     });
@@ -1476,7 +2413,7 @@ describe('AgentProviderLoopService', () => {
 
     const confirmed = await loop.confirmMediaSubmission({
       ...prepared.stream,
-      jobId: preparedOutput.draft.draftId,
+      jobId: draft.draftId,
       confirmationToken: 'media-confirmation-token',
       approved: true,
     });
@@ -1493,7 +2430,7 @@ describe('AgentProviderLoopService', () => {
     expect(output).toEqual({
       version: 1,
       status: 'polling',
-      taskId: preparedOutput.draft.draftId,
+      taskId: draft.draftId,
       resultAssetIds: [],
     });
     expect(JSON.stringify(output)).not.toContain('provider-task-private');
@@ -1513,7 +2450,7 @@ describe('AgentProviderLoopService', () => {
     await expect(
       loop.confirmMediaSubmission({
         ...prepared.stream,
-        jobId: preparedOutput.draft.draftId,
+        jobId: draft.draftId,
         confirmationToken: 'media-confirmation-token',
         approved: true,
       }),
@@ -1529,7 +2466,7 @@ describe('AgentProviderLoopService', () => {
           id: 'cancel-provider-call',
           name: 'media.task.cancel',
           authorizationHandle: cancelTool.authorizationHandle,
-          argumentsJson: JSON.stringify({ taskId: preparedOutput.draft.draftId }),
+          argumentsJson: JSON.stringify({ taskId: draft.draftId }),
         },
       ],
     });
@@ -1541,7 +2478,7 @@ describe('AgentProviderLoopService', () => {
     expect(JSON.parse(cancelled.continuation!.outputs[0]!.output)).toEqual({
       version: 1,
       status: 'cancelled',
-      taskId: preparedOutput.draft.draftId,
+      taskId: draft.draftId,
       resultAssetIds: [],
       cancellation: {
         localCancelled: true,
@@ -1592,14 +2529,14 @@ describe('AgentProviderLoopService', () => {
       scopeType: 'project',
     });
 
-    expect(() =>
+    await expect(
       loop.selectMedia({
         ...prepared.stream,
         conversationId: anotherConversation.id,
         selectionToken: paused.mediaSelection!.selectionToken,
         selection: undefined,
       }),
-    ).toThrow('current project session');
+    ).rejects.toThrow('current project session');
     expect(
       project.access(false, (database) =>
         database.prepare('SELECT status FROM agent_media_selections').get(),
@@ -1641,13 +2578,13 @@ describe('AgentProviderLoopService', () => {
         .run(),
     );
 
-    expect(() =>
+    await expect(
       loop.selectMedia({
         ...prepared.stream,
         selectionToken: paused.mediaSelection!.selectionToken,
         selection: undefined,
       }),
-    ).toThrow('expired');
+    ).rejects.toThrow('expired');
     expect(
       project.access(false, (database) =>
         database.prepare('SELECT status FROM agent_media_selections').get(),
@@ -4382,12 +5319,12 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '旧码头 · 台风前夜',
                 sceneDocumentId: sceneDoc.id,
-                instruction: productionFixture('林澈站在旧码头。'),
+                authoringIR: productionFixture('林澈站在旧码头。'),
                 characterDocumentIds: [character.id],
                 shots: [
                   {
                     title: '海雾中的码头',
-                    instruction: productionFixture(
+                    authoringIR: productionFixture(
                       '[场景:旧码头] 全景，[角色:林澈] 站在码头上。',
                       'shot',
                     ),
@@ -4397,24 +5334,24 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '街道',
                 sceneDocumentId: sceneDoc.id,
-                instruction: productionFixture('雨中的街道。'),
+                authoringIR: productionFixture('雨中的街道。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '雨中街道',
-                    instruction: productionFixture('街道上的雨。', 'shot'),
+                    authoringIR: productionFixture('街道上的雨。', 'shot'),
                   },
                 ],
               },
               {
                 title: '房间',
                 sceneDocumentId: sceneDoc.id,
-                instruction: productionFixture('房间内的信件。'),
+                authoringIR: productionFixture('房间内的信件。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '信件特写',
-                    instruction: productionFixture('桌上的信件。', 'shot'),
+                    authoringIR: productionFixture('桌上的信件。', 'shot'),
                   },
                 ],
               },
@@ -4486,12 +5423,12 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '场次 01',
                 sceneDocumentId: 'missing-scene-id',
-                instruction: productionFixture('他转身。'),
+                authoringIR: productionFixture('他转身。'),
                 characterDocumentIds: ['missing-character-id'],
                 shots: [
                   {
                     title: '镜头 01',
-                    instruction: productionFixture('[角色:不存在的人物] 出现在画面中。', 'shot'),
+                    authoringIR: productionFixture('[角色:不存在的人物] 出现在画面中。', 'shot'),
                   },
                 ],
               },
@@ -4698,12 +5635,12 @@ describe('AgentProviderLoopService', () => {
               {
                 title: '白家三房 · 午后',
                 sceneDocumentId: scenePrompt.id,
-                instruction: productionFixture('午后的白家三房。'),
+                authoringIR: productionFixture('午后的白家三房。'),
                 characterDocumentIds: [],
                 shots: [
                   {
                     title: '屋檐下全景',
-                    instruction: productionFixture(
+                    authoringIR: productionFixture(
                       '[场景:白家三房] 屋檐下全景，白小弟在学医。',
                       'shot',
                     ),
@@ -5078,6 +6015,69 @@ describe('AgentProviderLoopService', () => {
     },
   );
 
+  it('dispatches production skills and deferred review forms through the authorized Agent loop without paid jobs', async () => {
+    const base = await setupMedia();
+    const reviews = new MediaReviewService(base.project, base.media, base.mediaSubmission, {
+      scene: vi.fn(() => ({ sceneId: 'unused', voices: [], cues: [], audioFiles: [], jobs: [] })),
+      listVoices: vi.fn(() => []),
+      saveCue: vi.fn(),
+      generateTake: vi.fn(),
+    });
+    const loop = createSystemLoop(base.project, base.workflow, base.novels, base.media, reviews);
+    const prompt = '根据剧本准备所有媒体审核表单，不提交生成';
+    const prepared = base.generations.prepare({
+      conversationId: base.conversation.id,
+      prompt,
+      providerProfileId: 'agent-profile',
+      modelId: 'agent-model',
+    });
+    const agent = loop.prepare(prepared.stream, prompt);
+    let tools = agent.tools;
+    const execute = async (name: string, args: Record<string, unknown>, id: string) => {
+      const tool = tools.find((item) => item.name === name)!;
+      expect(tool).toBeDefined();
+      loop.startProviderStep(prepared.stream);
+      const result = await loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: `response-${id}`,
+        calls: [
+          {
+            id,
+            name,
+            authorizationHandle: tool.authorizationHandle,
+            argumentsJson: JSON.stringify(args),
+          },
+        ],
+      });
+      tools = result.tools ?? tools;
+      return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
+    };
+    expect(
+      await execute('production.skill.read', { skillId: 'script-to-media' }, 'skill'),
+    ).toMatchObject({
+      skillId: 'script-to-media',
+    });
+    const draft = { key: 'scene', label: '场景图', kind: 'image', prompt: '雨夜客栈，无人场景图' };
+    const first = await execute('media.review.prepare', draft, 'prepare');
+    expect(first).toMatchObject({ form: { status: 'pending', key: 'scene' } });
+    expect(JSON.stringify(first)).not.toMatch(/selectionToken|reviewToken|baseUrl|relativePath/u);
+    await execute('media.review.prepare', { ...draft, key: 'scene-2' }, 'prepare-2');
+    const page = await execute('media.review.list', { limit: 1 }, 'list');
+    expect(page).toMatchObject({ total: 2, nextOffset: 1, truncated: true });
+    expect(page.forms).toHaveLength(1);
+    expect(await execute('media.review.list', { offset: 1, limit: 1 }, 'list-2')).toMatchObject({
+      total: 2,
+      truncated: false,
+    });
+    expect(reviews.list(base.conversation.id)).toHaveLength(2);
+    expect(base.nativeRequest).not.toHaveBeenCalled();
+    expect(
+      base.project.access(false, (db) =>
+        db.prepare('SELECT count(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 0 });
+  });
+
   it('exposes available system tools and lets the model choose a reversible write', async () => {
     const { conversation, generations, project, workflow } = await setup();
     const loop = createSystemLoop(project, workflow);
@@ -5119,6 +6119,102 @@ describe('AgentProviderLoopService', () => {
       conversation: { id: conversation.id, title: '项目讨论' },
     });
   });
+
+  it.each(['current', 'foreign', 'missing'] as const)(
+    'loads and authorizes media task inspection through the lazy tool catalog (%s task)',
+    async (scope) => {
+      const base = await setupMedia();
+      const owner = scope === 'foreign' ? await setupMedia() : base;
+      const prompt = '只查询已有视频任务，不重新生成';
+      const prepared = base.generations.prepare({
+        conversationId: base.conversation.id,
+        prompt,
+        providerProfileId: 'agent-profile',
+        modelId: 'agent-model',
+      });
+      const ownerIdentity =
+        scope === 'foreign'
+          ? owner.generations.prepare({
+              conversationId: owner.conversation.id,
+              prompt,
+              providerProfileId: 'agent-profile',
+              modelId: 'agent-model',
+            }).stream
+          : prepared.stream;
+      const context = owner.media.selectionContext(
+        'video',
+        { prompt: '已审核的视频正文' },
+        ownerIdentity,
+      );
+      const candidate = context.candidates[0]!;
+      const draft = owner.media.prepareSelected(
+        context,
+        {
+          providerProfileId: candidate.providerProfileId,
+          modelId: candidate.modelId,
+          adapterKey: candidate.adapters[0]!.key,
+          parameters: {},
+        },
+        ownerIdentity,
+      );
+      owner.project.access(true, (db) =>
+        db
+          .prepare('UPDATE generation_jobs SET media_state = ? WHERE id = ?')
+          .run('polling', draft.draftId),
+      );
+      const taskId = scope === 'missing' ? 'missing-media-task' : draft.draftId;
+      const before = base.project.access(false, (db) =>
+        db.prepare('SELECT * FROM generation_jobs ORDER BY id').all(),
+      );
+      const loop = createSystemLoop(base.project, base.workflow, base.novels, base.media);
+      const agent = loop.prepare(prepared.stream, prompt);
+      base.generations.configureAgentTools(prepared.stream, agent.tools);
+      const confirmation = vi.fn().mockResolvedValue(false);
+      const selection = vi.fn().mockResolvedValue(undefined);
+      const gateway = new AgentProviderToolGateway(
+        loop,
+        prepared.stream,
+        agent.tools,
+        confirmation,
+        selection,
+        undefined,
+        undefined,
+        true,
+      );
+      const loader = gateway.tools().find((tool) => tool.name === 'tools.load')!;
+      expect(loader.description).toContain('media.task.get');
+      const args = loader.prepareArguments!({ names: ['media.task.get'] });
+      await loader.execute('load-media-task', args);
+      const query = gateway.tools().find((tool) => tool.name === 'media.task.get')!;
+      expect(query.executionMode).toBe('parallel');
+      gateway.startProviderStep();
+      gateway.captureProviderCall('inspect-media-task', 'media-inspection-response');
+      const read = query.execute('inspect-media-task', query.prepareArguments!({ taskId }));
+      if (scope === 'current') {
+        const result = await read;
+        expect(JSON.parse(result.content.find((item) => item.type === 'text')!.text)).toMatchObject(
+          {
+            status: 'succeeded',
+            task: { taskId, kind: 'video', state: 'polling', resultAssetIds: [] },
+          },
+        );
+        expect(JSON.stringify(result)).not.toMatch(
+          /rootPath|relativePath|requestJson|taskSnapshotJson/u,
+        );
+      } else {
+        await expect(read).rejects.toThrow('AGENT_TOOL_PROJECT_SCOPE');
+      }
+      expect(confirmation).not.toHaveBeenCalled();
+      expect(selection).not.toHaveBeenCalled();
+      expect(base.nativeRequest).not.toHaveBeenCalled();
+      expect(owner.nativeRequest).not.toHaveBeenCalled();
+      expect(
+        base.project.access(false, (db) =>
+          db.prepare('SELECT * FROM generation_jobs ORDER BY id').all(),
+        ),
+      ).toEqual(before);
+    },
+  );
 
   it('lists and confirms novel chapter archive with a current row version', async () => {
     const { conversation, generations, project, workflow, novels } = await setup();

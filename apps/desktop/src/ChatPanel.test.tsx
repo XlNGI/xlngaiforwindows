@@ -266,6 +266,13 @@ describe('ChatPanel attempt metadata', () => {
     fireEvent.click(screen.getByText('本会话要求约束'));
     const textarea = screen.getByLabelText('本会话要求约束');
     expect(textarea).toHaveValue('固定时间和风格');
+    fireEvent.click(screen.getByText('查看最新版分镜制作模板（可与上方当前约束对照）'));
+    const latest = screen.getByLabelText('最新版分镜制作模板');
+    expect(latest).toHaveAttribute('readonly');
+    expect(textarea).toHaveValue('固定时间和风格');
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '载入分镜制作模板' }));
+    expect(onChange).toHaveBeenCalledWith((latest as HTMLTextAreaElement).value);
     fireEvent.change(textarea, { target: { value: '更新后的风格约束' } });
     expect(onChange).toHaveBeenCalledWith('更新后的风格约束');
     fireEvent.click(screen.getByRole('button', { name: '保存会话约束' }));
@@ -1150,13 +1157,20 @@ describe('ChatPanel attempt metadata', () => {
     fireEvent.click(screen.getByRole('button', { name: /视频模型 V1/ }));
     expect(screen.getByDisplayValue('龙在天空翱翔')).toBeInTheDocument();
     expect(screen.getByDisplayValue('5')).toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue('龙在天空翱翔'), {
+      target: { value: '用户审核后修改的龙飞行提示词' },
+    });
     fireEvent.click(screen.getByRole('button', { name: '提交生成' }));
     expect(onSelectMedia).toHaveBeenCalledWith({
       providerProfileId: 'media-profile',
       modelId: 'media-model',
       adapterKey: 'video-adapter',
-      parameters: { prompt: '龙在天空翱翔', duration: 5 },
+      parameters: { prompt: '用户审核后修改的龙飞行提示词', duration: 5 },
     });
+    const submitting = screen.getByRole('button', { name: '正在提交…' });
+    expect(submitting).toBeDisabled();
+    fireEvent.click(submitting);
+    expect(onSelectMedia).toHaveBeenCalledOnce();
     expect(onSelectAgent).not.toHaveBeenCalled();
   });
 

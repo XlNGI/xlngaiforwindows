@@ -52,6 +52,7 @@ const concurrentReadMethods = new Set<WorkerMethod>([
   'shot.continuity.get',
   'production.compile',
   'shot.list',
+  'shot.references.get',
   'conversation.list',
   'conversation.promptTemplate.get',
   'chat.message.list',

@@ -272,20 +272,41 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
     expect(request[0].prompt).toContain('人物双脚保持原位');
     expect(request[0].prompt).toContain('脚不移动');
     expect(request[0].attachments[0]?.dataUrl).toMatch(/^data:image\/jpeg;base64,/u);
-    f.service.savePrompt(f.shot.id, 1, 'video', '保持站位，轻轻转头。');
+    const saved = f.service.savePrompt(f.shot.id, 1, 'video', '  保持站位，轻轻转头。\n');
+    expect(saved.stale).toBe(false);
+    expect(saved.binding?.targetRowVersion).toBe(f.shot.rowVersion + 1);
     expect(() => f.service.savePrompt(f.shot.id, 1, 'video', '旧窗口文本')).toThrow('确认');
     expect(f.content.listShots(f.shot.sceneId).find((shot) => shot.id === f.shot.id)?.prompt).toBe(
-      f.shot.prompt,
+      '  保持站位，轻轻转头。\n',
+    );
+    const production = new ProductionService(f.projects);
+    expect(production.read({ kind: 'shot', id: f.shot.id }).authoringIR?.prompt).toBe(
+      saved.binding?.videoPrompt,
     );
     f.content.saveShot({
       shotId: f.shot.id,
       sceneId: f.shot.sceneId,
       title: f.shot.title,
       prompt: '人物走下桥。',
-      expectedRowVersion: f.shot.rowVersion,
+      expectedRowVersion: saved.binding!.targetRowVersion,
     });
     expect(f.service.get(f.shot.id).stale).toBe(true);
     expect(() => f.service.savePrompt(f.shot.id, 2, 'video', '迟到输出')).toThrow('重新确认');
+  });
+
+  it('rolls back the shot IR when saving its continuity CAS fails', async () => {
+    const f = await fixture();
+    await f.confirm();
+    const before = f.content.listShots(f.shot.sceneId);
+    f.projects.access(true, (db) =>
+      db.exec(`CREATE TRIGGER fail_continuity_prompt BEFORE UPDATE ON shot_continuity
+      BEGIN SELECT RAISE(ABORT, 'continuity write failed'); END`),
+    );
+    expect(() => f.service.savePrompt(f.shot.id, 1, 'video', '不应保存')).toThrow(
+      'continuity write failed',
+    );
+    expect(f.content.listShots(f.shot.sceneId)).toEqual(before);
+    expect(f.service.get(f.shot.id).rowVersion).toBe(1);
   });
 
   it('keeps reframing separate from final first-frame adoption and invalidates prior production on a changed selection', async () => {

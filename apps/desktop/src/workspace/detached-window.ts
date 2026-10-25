@@ -20,6 +20,7 @@ export type DetachedPanelId = Exclude<WorkspacePanelId, 'assets'>;
 export const DETACHED_PANEL_READY_EVENT = 'workspace-panel-ready';
 export const DETACHED_PANEL_SNAPSHOT_EVENT = 'workspace-panel-snapshot';
 export const DETACHED_PANEL_ACTION_EVENT = 'workspace-panel-action';
+export const DETACHED_QUESTION_RESULT_EVENT = 'workspace-question-result';
 
 export interface DetachedPanelConfig {
   panelId: DetachedPanelId;
@@ -109,7 +110,13 @@ export type DetachedPanelAction =
   | { panelId: 'conversation'; type: 'conversation-prompt-template-save' }
   | { panelId: 'conversation'; type: 'conversation-prompt-template-reload' }
   | { panelId: 'conversation'; type: 'conversation-cancel' }
-  | { panelId: 'conversation'; type: 'conversation-send'; value: string };
+  | { panelId: 'conversation'; type: 'conversation-send'; value: string }
+  | {
+      panelId: 'conversation';
+      type: 'conversation-answer-questions';
+      requestId: string;
+      result: import('@ai-video/contracts').AgentInputSubmitResult;
+    };
 
 export interface DetachedPanelEnvelope<T> {
   label: string;

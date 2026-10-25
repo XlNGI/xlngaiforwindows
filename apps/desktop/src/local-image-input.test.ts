@@ -24,6 +24,19 @@ describe('local image input', () => {
       PNG_BYTES.length,
     );
     expect(hasLocalImageParameters({ images: [selected.dataUrl] })).toBe(true);
+    expect(
+      hasLocalImageParameters({ media: [{ type: 'reference_image', url: selected.dataUrl }] }),
+    ).toBe(true);
+    expect(
+      hasLocalImageParameters({
+        content: [{ type: 'image_url', image_url: { url: selected.dataUrl } }],
+      }),
+    ).toBe(true);
+    expect(
+      hasLocalImageParameters({
+        content: [{ type: 'image_url', image_url: { url: 'asset://a' } }],
+      }),
+    ).toBe(false);
   });
 
   it('rejects unsupported, spoofed, empty, and oversized files before submission', async () => {

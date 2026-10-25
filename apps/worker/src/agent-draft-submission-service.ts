@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import type { DocumentBindingRole, DocumentKind, NovelWritingAction } from '@ai-video/contracts';
+import type {
+  DocumentBindingRole,
+  DocumentKind,
+  NovelWritingAction,
+  ProjectContentIR,
+} from '@ai-video/contracts';
 import { rebuildLibraryChunksForDocument } from '@ai-video/persistence';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -18,6 +23,7 @@ const KINDS = new Set<DocumentKind>([
   'plan',
   'character',
   'scene',
+  'prop',
   'storyboard',
   'note',
 ]);
@@ -60,6 +66,7 @@ export class AgentDraftSubmissionService {
         const resource = resolveWriteResource(database, project, args)!;
         const title = text(args.title, 'title', 200);
         const contentMarkdown = text(args.contentMarkdown, 'contentMarkdown', 1_000_000);
+        const contentIR = args.contentIR as ProjectContentIR | undefined;
         const requestHash = createHash('sha256')
           .update(JSON.stringify({ operation, args }))
           .digest('hex');
@@ -115,7 +122,9 @@ export class AgentDraftSubmissionService {
               throw new Error('New chapters cannot specify an existing target or CAS.');
           } else {
             if (args.volumeId !== undefined || args.displayLabel !== undefined)
-              throw new Error('Existing chapter submissions cannot move or relabel chapters.');
+              throw new Error(
+                'Existing chapter submissions cannot move or relabel chapters. Use novel.chapter.update_metadata for title/displayLabel changes without rewriting the body.',
+              );
             chapterId = text(args.chapterId, 'chapterId', 200);
             const chapter = database
               .prepare(
@@ -197,6 +206,7 @@ export class AgentDraftSubmissionService {
             ...RESOURCE_ARGUMENT_KEYS,
             'title',
             'contentMarkdown',
+            'contentIR',
             'documentKind',
             'documentId',
             'expectedDocumentRowVersion',
@@ -296,6 +306,7 @@ export class AgentDraftSubmissionService {
           taskId,
           title,
           contentMarkdown,
+          contentIR,
           kind,
           scopeType: parent.scope_type,
           scopeId: parent.scope_id ?? undefined,

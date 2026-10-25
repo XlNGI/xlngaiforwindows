@@ -84,6 +84,135 @@ describe('NovelService', () => {
     expect(novel.listChapters().map((chapter) => chapter.id)).toEqual([first.id, second.id]);
   });
 
+  it('edits chapter metadata through the existing save path without rewriting versions or bodies', async () => {
+    const { novel, project } = await setup();
+    const [chapter] = novel.importNovel({
+      volumeTitle: '第一卷',
+      chapters: [
+        {
+          title: '第二章 深夜剑冢',
+          displayLabel: '第二章 深夜剑冢',
+          contentMarkdown: '# 第二章 深夜剑冢\n\n原文保持不变。',
+        },
+        { title: '剑意一现', contentMarkdown: '下一章正文。' },
+      ],
+    }).chapters;
+    const readContent = () =>
+      project.access(false, (db) => ({
+        versions: db.prepare('SELECT * FROM document_versions ORDER BY id').all(),
+        chunks: db.prepare('SELECT * FROM novel_rag_chunks ORDER BY id').all(),
+        pointers: db
+          .prepare('SELECT id, current_version_id, published_version_id FROM documents ORDER BY id')
+          .all(),
+        order: db.prepare('SELECT id, volume_id, position FROM novel_chapters ORDER BY id').all(),
+      }));
+    const before = readContent();
+    const updated = novel.updateChapterMetadata({
+      chapterId: chapter!.id,
+      expectedChapterRowVersion: chapter!.rowVersion,
+      expectedDocumentRowVersion: chapter!.documentRowVersion,
+      displayLabel: '第 2 章',
+    });
+    expect(updated).toMatchObject({
+      title: chapter!.title,
+      displayLabel: '第 2 章',
+      rowVersion: chapter!.rowVersion + 1,
+    });
+    expect(readContent()).toEqual(before);
+    expect(
+      project.access(false, (db) =>
+        db
+          .prepare('SELECT title FROM project_library_chunks WHERE document_id = ?')
+          .all(chapter!.documentId),
+      ),
+    ).toEqual([expect.objectContaining({ title: '第 2 章 第二章 深夜剑冢' })]);
+    const renamed = novel.updateChapterMetadata({
+      chapterId: updated.id,
+      expectedChapterRowVersion: updated.rowVersion,
+      expectedDocumentRowVersion: updated.documentRowVersion,
+      title: '夜探剑冢',
+    });
+    expect(renamed).toMatchObject({ title: '夜探剑冢', displayLabel: '第 2 章' });
+    expect(readContent()).toEqual(before);
+    const noOp = novel.updateChapterMetadata({
+      chapterId: renamed.id,
+      expectedChapterRowVersion: renamed.rowVersion,
+      expectedDocumentRowVersion: renamed.documentRowVersion,
+      title: renamed.title,
+      displayLabel: renamed.displayLabel,
+    });
+    expect(noOp).toEqual(renamed);
+  });
+
+  it('rejects stale chapter/document metadata edits, foreign chapters and archived chapters', async () => {
+    const { novel, project } = await setup();
+    const chapter = novel.saveChapter({ title: '原题' });
+    const params = {
+      chapterId: chapter.id,
+      expectedChapterRowVersion: chapter.rowVersion,
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+      displayLabel: '第 2 章',
+    };
+    expect(() => novel.updateChapterMetadata({ ...params, expectedChapterRowVersion: 9 })).toThrow(
+      'updated elsewhere',
+    );
+    expect(() => novel.updateChapterMetadata({ ...params, expectedDocumentRowVersion: 9 })).toThrow(
+      'updated elsewhere',
+    );
+    const { novel: other } = await setup();
+    expect(() => other.updateChapterMetadata(params)).toThrow('not found');
+    expect(novel.listChapters()[0]).toEqual(chapter);
+    const workflow = new DocumentWorkflowService(project);
+    workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: '用户刚刚改过正文。',
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    expect(() => novel.updateChapterMetadata(params)).toThrow('updated elsewhere');
+    const archived = novel.archiveChapter({
+      chapterId: chapter.id,
+      expectedRowVersion: chapter.rowVersion,
+    });
+    expect(() =>
+      novel.updateChapterMetadata({
+        ...params,
+        expectedChapterRowVersion: archived.rowVersion,
+        expectedDocumentRowVersion: archived.documentRowVersion,
+      }),
+    ).toThrow('Only active');
+  });
+
+  it('rolls back metadata and index changes together if reindexing fails', async () => {
+    const { novel, project } = await setup();
+    const chapter = novel.importNovel({
+      chapters: [{ title: '旧标题', contentMarkdown: '保留原文。' }],
+    }).chapters[0]!;
+    const before = project.access(false, (db) =>
+      db.prepare('SELECT * FROM project_library_chunks ORDER BY id').all(),
+    );
+    project.access(true, (db) =>
+      db.exec(
+        "CREATE TRIGGER fail_metadata_index BEFORE INSERT ON project_library_chunks BEGIN SELECT RAISE(ABORT, 'index failure'); END",
+      ),
+    );
+    expect(() =>
+      novel.updateChapterMetadata({
+        chapterId: chapter.id,
+        expectedChapterRowVersion: chapter.rowVersion,
+        expectedDocumentRowVersion: chapter.documentRowVersion,
+        title: '新标题',
+        displayLabel: '新标签',
+      }),
+    ).toThrow('index failure');
+    expect(novel.listChapters()[0]).toEqual(chapter);
+    expect(
+      project.access(false, (db) =>
+        db.prepare('SELECT * FROM project_library_chunks ORDER BY id').all(),
+      ),
+    ).toEqual(before);
+  });
+
   it('allows a non-chapter document to receive one validated novel binding', async () => {
     const { novel, content } = await setup();
     const document = content.saveDocument({
@@ -147,6 +276,25 @@ describe('NovelService', () => {
       snapshot_origin: 'native',
     });
     expect(snapshot.structure_hash).toMatch(/^[a-f0-9]{64}$/);
+    const current = novel.listChapters()[0]!;
+    novel.updateChapterMetadata({
+      chapterId: current.id,
+      expectedChapterRowVersion: current.rowVersion,
+      expectedDocumentRowVersion: current.documentRowVersion,
+      title: '新章名',
+      displayLabel: '序章',
+    });
+    expect(
+      project.access(false, (db) =>
+        db
+          .prepare(
+            `SELECT chapter_id, document_version_id, work_title_snapshot, display_label_snapshot,
+              chapter_title_snapshot, snapshot_origin, structure_hash
+       FROM novel_chapter_publication_snapshots WHERE publication_id = ?`,
+          )
+          .get(published.publication.id),
+      ),
+    ).toEqual(snapshot);
   });
 
   it('imports chapters with draft versions, a profile, and an optional volume', async () => {

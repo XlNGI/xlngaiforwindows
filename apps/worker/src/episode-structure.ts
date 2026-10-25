@@ -1,10 +1,9 @@
 import type Database from 'better-sqlite3';
 import {
-  renderProductionInstruction,
-  normalizeProductionAuthoringInstruction,
-  type ProductionInstruction,
+  validateProductionAuthoringIR,
+  type ProductionSceneAuthoringIR,
+  type ProductionShotAuthoringIR,
 } from '@ai-video/contracts';
-import { inspectProductionTargetInstruction } from '@ai-video/generation-adapters';
 import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
 
@@ -15,17 +14,19 @@ export interface EpisodeStructure {
     sceneDocumentId?: string | null;
     sceneId?: string;
     expectedRowVersion?: number;
+    /** Prompt projection populated from authoringIR or an existing scene during a binding edit. */
     videoPrompt?: string;
     characterDocumentIds?: string[];
-    instruction?: ProductionInstruction;
-    shots: Array<{ title: string; prompt: string; instruction?: ProductionInstruction }>;
+    authoringIR?: ProductionSceneAuthoringIR;
+    shots: Array<{
+      title: string;
+      prompt: string;
+      authoringIR: ProductionShotAuthoringIR;
+    }>;
   }>;
 }
 
-export function parseEpisodeStructureArguments(
-  value: string,
-  requireDetailed = false,
-): EpisodeStructure {
+export function parseEpisodeStructureArguments(value: string): EpisodeStructure {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -44,6 +45,7 @@ export function parseEpisodeStructureArguments(
   if (!Array.isArray(record.scenes) || record.scenes.length < 1 || record.scenes.length > 20) {
     throw new Error('Episode structure scenes must contain between one and 20 items.');
   }
+
   const scenes: EpisodeStructure['scenes'] = [];
   for (const [sceneIndex, rawScene] of record.scenes.entries()) {
     if (!rawScene || typeof rawScene !== 'object' || Array.isArray(rawScene)) {
@@ -58,37 +60,20 @@ export function parseEpisodeStructureArguments(
           'shots',
           'sceneId',
           'expectedRowVersion',
-          'videoPrompt',
           'characterDocumentIds',
-          'instruction',
+          'authoringIR',
         ].includes(key),
     );
     if (sceneUnknown)
       throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
     const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
-    if (requireDetailed && scene.videoPrompt !== undefined && (!scene.sceneId || scene.instruction))
-      throw new Error(
-        `scenes[${sceneIndex}].videoPrompt conflicts with authoring input; submit instruction only.`,
-      );
-    const sceneInstruction = parseInstruction(scene.instruction, 'scene');
-    if (requireDetailed && !scene.sceneId && sceneInstruction?.version !== 2)
-      throw new Error(
-        '新场次制作方案必须提供v2结构化指令：故事时间、地点、风格、叙事目的及每镜剧情预计时长。',
-      );
-    if (scene.videoPrompt === undefined && sceneInstruction)
-      scene.videoPrompt = renderProductionInstruction(sceneInstruction);
-    if (
-      sceneInstruction &&
-      typeof scene.videoPrompt === 'string' &&
-      !renderProductionInstruction(sceneInstruction).includes(scene.videoPrompt.trim())
-    )
-      throw new Error(
-        `scenes[${sceneIndex}].videoPrompt conflicts with instruction; submit instruction only or preserve text in a binding-only update.`,
-      );
-    if (sceneInstruction && renderProductionInstruction(sceneInstruction).length > 20000)
-      throw new Error(
-        `scenes[${sceneIndex}].instruction renders beyond 20000 characters; split the shared setup and shots.`,
-      );
+    const sceneAuthoringIR =
+      scene.authoringIR === undefined
+        ? undefined
+        : (validateProductionAuthoringIR(scene.authoringIR, 'scene') as ProductionSceneAuthoringIR);
+    if (scene.sceneId === undefined && !sceneAuthoringIR)
+      throw new Error(`scenes[${sceneIndex}] requires authoringIR when creating a scene.`);
+
     if (
       scene.sceneDocumentId !== undefined &&
       scene.sceneDocumentId !== null &&
@@ -109,13 +94,6 @@ export function parseEpisodeStructureArguments(
     if (scene.sceneId === undefined && scene.expectedRowVersion !== undefined)
       throw new Error('New scenes cannot include expectedRowVersion.');
     if (
-      scene.videoPrompt !== undefined &&
-      (typeof scene.videoPrompt !== 'string' ||
-        !scene.videoPrompt.trim() ||
-        scene.videoPrompt.length > 20000)
-    )
-      throw new Error('Invalid scene videoPrompt.');
-    if (
       scene.characterDocumentIds !== undefined &&
       (!Array.isArray(scene.characterDocumentIds) ||
         scene.characterDocumentIds.length > 30 ||
@@ -125,66 +103,45 @@ export function parseEpisodeStructureArguments(
         ))
     )
       throw new Error('Invalid scene characterDocumentIds.');
+
     if (
       !Array.isArray(scene.shots) ||
       scene.shots.length < (scene.sceneId ? 0 : 1) ||
       scene.shots.length > 30 ||
       (scene.sceneId && scene.shots.length > 0)
     ) {
-      throw new Error(`Episode scene ${sceneIndex} shots must contain between one and 30 items.`);
+      throw new Error(
+        scene.sceneId
+          ? `Existing scene ${sceneIndex} must use shots: []; revise existing shots with scene.update_shot_prompts or scene.update_shot_timings.`
+          : `Episode scene ${sceneIndex} shots must contain between one and 30 items.`,
+      );
     }
+
     const shots: EpisodeStructure['scenes'][number]['shots'] = [];
     for (const [shotIndex, rawShot] of scene.shots.entries()) {
       if (!rawShot || typeof rawShot !== 'object' || Array.isArray(rawShot)) {
         throw new Error(`Episode shot ${sceneIndex}:${shotIndex} must be an object.`);
       }
       const shot = rawShot as Record<string, unknown>;
-      const shotUnknown = Object.keys(shot).find(
-        (key) => !['title', 'prompt', 'instruction'].includes(key),
-      );
+      const shotUnknown = Object.keys(shot).find((key) => !['title', 'authoringIR'].includes(key));
       if (shotUnknown)
         throw new Error(
           `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
         );
       const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
-      if (requireDetailed && shot.prompt !== undefined)
-        throw new Error(
-          `scenes[${sceneIndex}].shots[${shotIndex}].prompt conflicts with authoring input; submit instruction only.`,
-        );
-      const shotInstruction = parseInstruction(shot.instruction, 'shot');
-      if (requireDetailed && shotInstruction?.version !== 2)
-        throw new Error('每个新分镜必须提供v2结构化指令和依据剧情推导的预计时长。');
-      if (sceneInstruction?.version === 2 && !shotInstruction)
-        throw new Error('详细场次的每个分镜都必须提供结构化指令和剧情预计时长。');
-      if (shot.prompt === undefined && shotInstruction)
-        shot.prompt = renderProductionInstruction(shotInstruction);
-      if (
-        shotInstruction &&
-        typeof shot.prompt === 'string' &&
-        !renderProductionInstruction(shotInstruction).includes(shot.prompt.trim())
-      )
-        throw new Error(
-          `scenes[${sceneIndex}].shots[${shotIndex}].prompt conflicts with instruction; submit instruction only.`,
-        );
-      if (shotInstruction && renderProductionInstruction(shotInstruction).length > 20000)
-        throw new Error(
-          `scenes[${sceneIndex}].shots[${shotIndex}].instruction renders beyond 20000 characters; split the shot.`,
-        );
-      if (typeof shot.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 20000) {
-        throw new Error(
-          `Episode shot ${sceneIndex}:${shotIndex} prompt must be between 1 and 20000 characters.`,
-        );
-      }
-      shots.push({
-        title: shotTitle,
-        prompt: shot.prompt.trim(),
-        ...(shotInstruction ? { instruction: shotInstruction } : {}),
-      });
+      const authoringIR = validateProductionAuthoringIR(
+        shot.authoringIR,
+        'shot',
+      ) as ProductionShotAuthoringIR;
+      shots.push({ title: shotTitle, prompt: authoringIR.prompt, authoringIR });
     }
+
     scenes.push({
       title: sceneTitle,
       shots,
-      ...(sceneInstruction ? { instruction: sceneInstruction } : {}),
+      ...(sceneAuthoringIR
+        ? { authoringIR: sceneAuthoringIR, videoPrompt: sceneAuthoringIR.prompt }
+        : {}),
       ...(scene.sceneDocumentId !== undefined ? { sceneDocumentId: scene.sceneDocumentId } : {}),
       ...(scene.sceneId
         ? {
@@ -192,7 +149,6 @@ export function parseEpisodeStructureArguments(
             expectedRowVersion: scene.expectedRowVersion as number,
           }
         : {}),
-      ...(scene.videoPrompt !== undefined ? { videoPrompt: scene.videoPrompt } : {}),
       ...(scene.characterDocumentIds !== undefined
         ? { characterDocumentIds: scene.characterDocumentIds as string[] }
         : {}),
@@ -205,38 +161,34 @@ export function parseEpisodeStructureArguments(
   return { episodeTitle, scenes };
 }
 
-function parseInstruction(value: unknown, kind: string): ProductionInstruction | undefined {
-  if (value === undefined) return undefined;
-  const instruction = normalizeProductionAuthoringInstruction(value) as ProductionInstruction;
-  const issues = inspectProductionTargetInstruction(instruction, kind);
-  if (issues.length) throw new Error(issues.map((issue) => issue.message).join('\n'));
-  return instruction;
-}
-
 export function validateEpisodeReferences(
   database: Database.Database,
   projectId: string,
   structure: EpisodeStructure,
 ): void {
   for (const scene of structure.scenes) {
-    if (scene.sceneId && scene.videoPrompt === undefined && !scene.instruction) {
+    if (scene.sceneId && !scene.authoringIR) {
       const current = database
-        .prepare('SELECT video_prompt,row_version FROM scenes WHERE id=? AND project_id=?')
+        .prepare(
+          'SELECT video_prompt,authoring_ir_json,row_version FROM scenes WHERE id=? AND project_id=?',
+        )
         .get(scene.sceneId, projectId) as
-        { video_prompt: string | null; row_version: number } | undefined;
+        | { video_prompt: string | null; authoring_ir_json: string | null; row_version: number }
+        | undefined;
       if (!current || current.row_version !== scene.expectedRowVersion)
         throw new Error('SCENE_ROW_VERSION_CONFLICT');
-      scene.videoPrompt = current.video_prompt ?? '';
+      if (current.authoring_ir_json) {
+        scene.authoringIR = validateProductionAuthoringIR(
+          JSON.parse(current.authoring_ir_json),
+          'scene',
+        ) as ProductionSceneAuthoringIR;
+        scene.videoPrompt = scene.authoringIR.prompt;
+      } else if (current.video_prompt !== null) {
+        scene.videoPrompt = current.video_prompt;
+      }
     }
-    if (
-      scene.sceneDocumentId === undefined ||
-      (!scene.sceneId && !scene.sceneDocumentId) ||
-      scene.videoPrompt === undefined ||
-      scene.characterDocumentIds === undefined
-    )
-      throw new Error(
-        'Scene submission requires explicit sceneDocumentId, videoPrompt and complete characterDocumentIds.',
-      );
+    if (scene.sceneId === undefined && !scene.authoringIR)
+      throw new Error('New scenes require authoringIR.');
     if (scene.sceneDocumentId)
       requireProductionSceneDocument(database, projectId, scene.sceneDocumentId);
     if (scene.characterDocumentIds !== undefined)

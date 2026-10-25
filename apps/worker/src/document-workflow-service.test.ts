@@ -42,6 +42,56 @@ async function setup() {
 }
 
 describe('DocumentWorkflowService', () => {
+  it('stores open prop IR with immutable versions, restores it, and clears it when prose is edited alone', async () => {
+    const { workflow } = await setup();
+    const originalIR = {
+      schemaVersion: 1 as const,
+      kind: 'prop' as const,
+      data: { material: '旧铁', shape: '断刃', history: ['祖传', '缺口'] },
+    };
+    const created = workflow.saveDraft({
+      kind: 'prop',
+      title: '断剑',
+      contentMarkdown: '# 断剑\n刃口有缺损。',
+      contentIR: originalIR,
+    });
+    expect(created.kind).toBe('prop');
+    expect(created.currentVersion?.contentIR).toEqual(originalIR);
+
+    const revised = workflow.saveDraft({
+      documentId: created.id,
+      title: created.title,
+      contentMarkdown: '# 断剑\n剑格刻有旧纹。',
+      contentIR: { schemaVersion: 1, kind: 'prop', data: { mark: '旧纹' } },
+      expectedDocumentRowVersion: created.rowVersion,
+    });
+    expect(revised.currentVersion?.contentIR).toEqual({
+      schemaVersion: 1,
+      kind: 'prop',
+      data: { mark: '旧纹' },
+    });
+
+    const restored = workflow.restoreDocument({
+      documentId: revised.id,
+      versionId: created.currentVersion!.id,
+    });
+    expect(restored.currentVersion?.contentIR).toEqual(originalIR);
+
+    const proseOnlyEdit = workflow.saveDraft({
+      documentId: restored.id,
+      title: restored.title,
+      contentMarkdown: '# 断剑\n新增文字但未更新结构化资料。',
+      expectedDocumentRowVersion: restored.rowVersion,
+    });
+    expect(proseOnlyEdit.currentVersion?.contentIR).toBeUndefined();
+    expect(workflow.listVersions(created.id).map((version) => version.contentIR)).toEqual([
+      undefined,
+      originalIR,
+      { schemaVersion: 1, kind: 'prop', data: { mark: '旧纹' } },
+      originalIR,
+    ]);
+  });
+
   it('keeps saved chapter documents out of the general document list', async () => {
     const { projects, workflow, conversation } = await setup();
     const orchestration = new AgentOrchestrationService(projects);

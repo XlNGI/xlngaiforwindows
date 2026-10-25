@@ -84,23 +84,41 @@ function SceneWorkspaceContent({
   const [audioLoaded, setAudioLoaded] = useState(false);
   const [message, setMessage] = useState('');
   const revision = useMemo(() => ({ mediaRevision, assets }), [mediaRevision, assets]);
-  const setting = useSceneSettingImages(projectId, scene.sceneDocumentId, documents, revision);
-  const sceneBinding = localBindings.find((b) => b.role === 'scene');
+  const sceneDocumentIds = Array.from(
+    new Set(
+      scene.sceneDocumentIds?.length
+        ? scene.sceneDocumentIds
+        : scene.sceneDocumentId
+          ? [scene.sceneDocumentId]
+          : [],
+    ),
+  );
+  const primarySceneDocumentId = scene.sceneDocumentId ?? sceneDocumentIds[0];
+  const setting = useSceneSettingImages(projectId, sceneDocumentIds, documents, revision);
+  const sceneBindings = localBindings.filter((b) => b.role === 'scene');
+  const sceneBinding = sceneBindings[0];
   const defaultSceneImage = setting.assets[0];
-  const effectiveBindings =
-    sceneBinding || !defaultSceneImage
-      ? localBindings
-      : [
-          ...localBindings,
-          {
-            id: `scene:${scene.id}`,
-            role: 'scene' as const,
-            label: documents.find((d) => d.id === scene.sceneDocumentId)?.title ?? '场景',
-            assetId: defaultSceneImage.id,
-            sourceDocumentId: scene.sceneDocumentId,
-            source: 'auto' as const,
-          },
-        ];
+  const selectedSceneDocuments = new Set(
+    sceneBindings.flatMap((binding) =>
+      binding.sourceDocumentId ? [binding.sourceDocumentId] : [],
+    ),
+  );
+  const defaultSceneBindings = sceneDocumentIds.flatMap((sourceDocumentId) => {
+    if (selectedSceneDocuments.has(sourceDocumentId)) return [];
+    const asset = setting.assetsByDocument[sourceDocumentId]?.[0];
+    if (!asset) return [];
+    return [
+      {
+        id: `scene:${sourceDocumentId}`,
+        role: 'scene' as const,
+        label: documents.find((d) => d.id === sourceDocumentId)?.title ?? '场景',
+        assetId: asset.id,
+        sourceDocumentId,
+        source: 'auto' as const,
+      },
+    ];
+  });
+  const effectiveBindings = [...localBindings, ...defaultSceneBindings];
   const params = sceneMediaParams(
     characters,
     localBindings.map((b) => b.assetId),
@@ -123,11 +141,11 @@ function SceneWorkspaceContent({
           !(
             item.role === 'scene' &&
             item.source === 'auto' &&
-            item.sourceDocumentId !== scene.sceneDocumentId
+            !sceneDocumentIds.includes(item.sourceDocumentId ?? '')
           ),
       ),
     );
-  }, [savedMaterials]);
+  }, [savedMaterials, sceneDocumentIds.join('|')]);
   useEffect(() => {
     setLocalBindings((current) =>
       current.filter(
@@ -135,11 +153,11 @@ function SceneWorkspaceContent({
           !(
             b.role === 'scene' &&
             b.source === 'auto' &&
-            b.sourceDocumentId !== scene.sceneDocumentId
+            !sceneDocumentIds.includes(b.sourceDocumentId ?? '')
           ),
       ),
     );
-  }, [scene.sceneDocumentId]);
+  }, [sceneDocumentIds.join('|')]);
   useEffect(() => {
     setCharacters(scene.characterBindings ?? []);
   }, [savedCharacters]);
@@ -261,8 +279,10 @@ function SceneWorkspaceContent({
           defaults={media.value?.characters ?? []}
           mediaLoading={media.loading}
           sceneLabel={
-            scene.sceneDocumentId
-              ? (documents.find((item) => item.id === scene.sceneDocumentId)?.title ?? '资料不可用')
+            sceneDocumentIds.length
+              ? `${sceneDocumentIds
+                  .map((id) => documents.find((item) => item.id === id)?.title ?? '资料不可用')
+                  .join('、')}`
               : undefined
           }
           audios={audios}
@@ -303,7 +323,8 @@ function SceneWorkspaceContent({
         >
           <SceneSettingCard
             projectId={projectId}
-            documentId={scene.sceneDocumentId}
+            documentId={primarySceneDocumentId}
+            documentIds={sceneDocumentIds}
             documents={documents}
             asset={
               sceneBinding
@@ -311,7 +332,7 @@ function SceneWorkspaceContent({
                 : defaultSceneImage
             }
             images={setting.assets}
-            candidates={mediaAssets.filter(isImage)}
+            candidates={setting.assets}
             writable={writable}
             busy={sceneBindingBusy}
             message={sceneBindingMessage || setting.error}
@@ -328,7 +349,7 @@ function SceneWorkspaceContent({
                         role: 'scene' as const,
                         label: '场景参考',
                         assetId: id,
-                        sourceDocumentId: scene.sceneDocumentId,
+                        sourceDocumentId: primarySceneDocumentId,
                         source: 'manual' as const,
                       },
                     ]
@@ -343,13 +364,13 @@ function SceneWorkspaceContent({
                   role: 'scene',
                   label: '场景参考',
                   assetId: asset.id,
-                  sourceDocumentId: scene.sceneDocumentId,
+                  sourceDocumentId: primarySceneDocumentId,
                   source: 'manual',
                 },
               ])
             }
             onRestore={
-              sceneBinding && scene.sceneDocumentId
+              sceneBinding && sceneDocumentIds.length
                 ? () =>
                     setLocalBindings((current) => current.filter((b) => b.id !== sceneBinding?.id))
                 : undefined

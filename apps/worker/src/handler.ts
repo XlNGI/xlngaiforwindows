@@ -1,4 +1,5 @@
 import { tmpdir } from 'node:os';
+import { AgentInputService } from './agent-input-service.js';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
 import { resolveSceneMedia } from './scene-media-service.js';
 import { ProductionService } from './production-service.js';
@@ -172,6 +173,7 @@ import type { DubbingWorkerMethodMap } from '@ai-video/contracts';
 import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { prepareAgentGeneration } from './agent-generation-preparation.js';
+import { MediaReviewService } from './media-review-service.js';
 import {
   adapterBindsCatalogModel,
   getAdapter,
@@ -531,6 +533,10 @@ function toModelSchemaInfo(
   };
 }
 const methods = new Set<WorkerMethod>([
+  'media.review.list',
+  'media.review.get',
+  'media.review.submit',
+  'media.review.cancel',
   'characterVoice.list',
   'characterVoice.save',
   'characterVoiceReference.list',
@@ -648,6 +654,8 @@ const methods = new Set<WorkerMethod>([
   'agent.task.list',
   'agent.task.get',
   'agent.task.events',
+  'agent.input.get',
+  'agent.input.submit',
   'agent.generation.prepare',
   'agent.run',
   'model.catalog.list',
@@ -694,6 +702,8 @@ const methods = new Set<WorkerMethod>([
   'scene.save',
   'shot.list',
   'shot.save',
+  'shot.references.get',
+  'shot.references.save',
   'shot.storyboard.save',
   'constraint.list',
   'conversation.list',
@@ -926,6 +936,12 @@ function createProjectRuntimeServices() {
       },
     },
   });
+  const mediaReviewService = new MediaReviewService(
+    projectService,
+    mediaPreparationService,
+    mediaOrchestrationService,
+    dubbingService,
+  );
   const agentSystemToolService: AgentSystemToolService = new AgentSystemToolService(
     projectService,
     contentService,
@@ -941,6 +957,7 @@ function createProjectRuntimeServices() {
       get: (...args) => novelBatchService.get(...args),
       readSource: (...args) => novelBatchService.readSource(...args),
     },
+    mediaReviewService,
   );
   const agentProviderLoopService: AgentProviderLoopService = new AgentProviderLoopService(
     projectService,
@@ -1073,6 +1090,7 @@ function createProjectRuntimeServices() {
     projectTaskRuntime,
     dubbingService,
     agentSystemToolService,
+    mediaReviewService,
     agentProviderLoopService,
     get piConversationRuntime() {
       return piConversationRuntime;
@@ -1321,6 +1339,7 @@ function optionalNumber(params: Record<string, unknown>, key: string): number | 
 const imageAssetKinds = new Set<ImageAssetKind>([
   'character',
   'scene',
+  'prop',
   'first-frame',
   'last-frame',
   'generated-image',
@@ -1488,6 +1507,7 @@ async function handleRequestCore(
   services: RuntimeServices,
 ): Promise<WorkerResponse> {
   const {
+    mediaReviewService,
     projectService,
     contentService,
     documentWorkflowService,
@@ -1580,6 +1600,26 @@ async function handleRequestCore(
       result = infrastructure.result;
     } else {
       switch (request.method) {
+        case 'media.review.list':
+          result = mediaReviewService.list(
+            typeof params.conversationId === 'string' ? params.conversationId : undefined,
+          );
+          break;
+        case 'media.review.get':
+          result = mediaReviewService.get(requireString(params, 'formId'));
+          break;
+        case 'media.review.cancel':
+          result = mediaReviewService.cancel(
+            requireString(params, 'formId'),
+            requireNumber(params, 'expectedRowVersion'),
+          );
+          break;
+        case 'media.review.submit':
+          result = await mediaReviewService.submit(
+            params as unknown as import('@ai-video/contracts').MediaReviewSubmitParams,
+          );
+          projectTaskRuntime.kick();
+          break;
         case 'production.defaults.get':
           result = new ProductionService(projectService).getDefaults();
           break;
@@ -1900,6 +1940,17 @@ async function handleRequestCore(
           break;
         case 'agent.task.get':
           result = documentWorkflowService.getTask(params as unknown as AgentTaskGetParams);
+          break;
+        case 'agent.input.get':
+          result = new AgentInputService(projectService).get(
+            requireString(params, 'taskId'),
+            requireString(params, 'formId'),
+          );
+          break;
+        case 'agent.input.submit':
+          result = new AgentInputService(projectService).submit(
+            params as unknown as import('@ai-video/contracts').AgentInputSubmitParams,
+          );
           break;
         case 'agent.task.events':
           result = documentWorkflowService.getTaskEvents(
@@ -2378,7 +2429,7 @@ async function handleRequestCore(
         }
         case 'agent.generation.selectMedia': {
           const selectionParams = params as unknown as AgentGenerationSelectMediaParams;
-          const execution = agentProviderLoopService.selectMedia(selectionParams);
+          const execution = await agentProviderLoopService.selectMedia(selectionParams);
           generationService.configureAgentTools(
             selectionParams,
             execution.tools ?? [],
@@ -2431,6 +2482,14 @@ async function handleRequestCore(
           break;
         case 'shot.save':
           result = contentService.saveShot(params as unknown as ShotSaveParams);
+          break;
+        case 'shot.references.get':
+          result = contentService.getShotReferenceBindings(requireString(params, 'shotId'));
+          break;
+        case 'shot.references.save':
+          result = contentService.saveShotReferenceBindings(
+            params as unknown as import('@ai-video/contracts').ShotReferenceBindingSaveParams,
+          );
           break;
         case 'shot.storyboard.save':
           result = contentService.saveShotStoryboard(params as unknown as ShotStoryboardSaveParams);

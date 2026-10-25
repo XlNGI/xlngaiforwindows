@@ -1,5 +1,7 @@
 # 单 Agent 连续创作设计计划
 
+> 状态：其中 ProductionInstruction v2 作为新场镜 Agent 输入、Worker 负责最终提示词渲染的职责划分已被[项目内容 IR 统一中间层计划](./PROJECT-CONTENT-IR-IMPLEMENTATION-PLAN.md)取代。本文保留历史顺序执行／断点续写设计；新的创作输入应由 Agent 撰写 ProductionAuthoringIR，Worker 只校验、保存和调度。旧版 ProductionInstruction 仍用于兼容读取。
+
 日期：2026-10-21。依据本会话的只读审计及用户确认。状态：设计已确定，实施进度见[实施计划](./AGENT-SEQUENTIAL-AUTHORING-IMPLEMENTATION-PLAN.md)。
 
 ## 1. 目标与范围

@@ -835,37 +835,82 @@ describe('ImageGenerationService', () => {
     ).toThrow('Document was not found.');
   });
 
-  it('stores sourceDocumentId and lists completed assets by it', async () => {
-    const { project, service } = await setup();
-    const document = new ContentService(project).saveDocument({
-      kind: 'character',
-      title: '林澈',
-      contentMarkdown: '灯塔守望员',
-    });
-    const job = service.prepare({
-      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
-      parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
-      sourceDocumentId: document.id,
-    });
-    project.access(false, (database) => {
-      const row = database
-        .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id = ?')
-        .get(job.id) as { task_snapshot_json: string };
-      expect(JSON.parse(row.task_snapshot_json)).toMatchObject({
-        sourceDocumentId: document.id,
+  it.each(['character', 'prop'] as const)(
+    'stores the %s sourceDocumentId and lists completed assets by it',
+    async (kind) => {
+      const { project, service } = await setup();
+      const document = new ContentService(project).saveDocument({
+        kind,
+        title: '林澈',
+        contentMarkdown: '灯塔守望员',
       });
-    });
+      const job = service.prepare({
+        adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+        parameters: { prompt: 'frame', aspect_ratio: '16:9', resolution: '1080p' },
+        sourceDocumentId: document.id,
+        assetKind: kind,
+      });
+      project.access(false, (database) => {
+        const row = database
+          .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id = ?')
+          .get(job.id) as { task_snapshot_json: string };
+        expect(JSON.parse(row.task_snapshot_json)).toMatchObject({
+          sourceDocumentId: document.id,
+          assetKind: kind,
+        });
+      });
 
-    const result = await service.complete({
-      jobId: job.id,
-      providerStatus: 200,
-      providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+      const result = await service.complete({
+        jobId: job.id,
+        providerStatus: 200,
+        providerBody: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+        assetKind: kind,
+      });
+      expect(result.status).toBe('succeeded');
+      expect(result.results[0]?.asset?.kind).toBe(kind);
+      expect(service.listAssets({ sourceDocumentId: document.id }).map((item) => item.id)).toEqual([
+        result.results[0]?.asset?.id,
+      ]);
+      expect(service.listAssets({ sourceDocumentId: document.id + '-other' })).toHaveLength(0);
+    },
+  );
+
+  it('rejects props from another project, archived props and mismatched production sources', async () => {
+    const { project, service } = await setup();
+    const content = new ContentService(project);
+    const prop = content.saveDocument({
+      kind: 'prop',
+      title: '铁木杖',
+      contentMarkdown: '铁箍杖尖',
     });
-    expect(result.status).toBe('succeeded');
-    expect(service.listAssets({ sourceDocumentId: document.id }).map((item) => item.id)).toEqual([
-      result.results[0]?.asset?.id,
-    ]);
-    expect(service.listAssets({ sourceDocumentId: document.id + '-other' })).toHaveLength(0);
+    const params = {
+      adapterKey: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
+      parameters: { prompt: '铁木杖', aspect_ratio: '16:9', resolution: '1080p' },
+      sourceDocumentId: prop.id,
+    };
+    expect(() =>
+      service.prepare({
+        ...params,
+        productionSource: {
+          mode: 'form',
+          token: 'forged',
+          target: { kind: 'setting', id: prop.id },
+        },
+      }),
+    ).toThrow('道具生图不能使用角色、场景或镜头制作来源。');
+    const scene = content.saveScene({ title: '庭院' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '镜头' });
+    expect(() => service.prepare({ ...params, shotId: shot.id })).toThrow(
+      '道具生图不能使用角色、场景或镜头制作来源。',
+    );
+    project.access(true, (db) => {
+      db.prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?").run(prop.id);
+    });
+    expect(() => service.prepare(params)).toThrow('目标不是有效的制作道具。');
+    const other = await setup();
+    expect(() => other.service.prepare(params)).toThrow('Document was not found.');
+    expect(service.list()).toHaveLength(0);
+    expect(other.service.list()).toHaveLength(0);
   });
 
   it('lists completed assets by shotId', async () => {

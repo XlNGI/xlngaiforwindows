@@ -11,7 +11,7 @@ describe('detailed production migration', () => {
     const db = openProjectDatabase(join(directory, 'project.sqlite'));
     try {
       migrateDatabase(db);
-      db.exec(`DROP TABLE production_change_set_instructions; DROP TABLE production_defaults;
+      db.exec(`DROP TABLE production_change_set_instructions_archive; DROP TABLE production_defaults;
         DELETE FROM schema_migrations WHERE version>=54;
         INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','旧项目','now','now');
         INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at) VALUES('s','p','场次',0,'旧场次提示词','now','now');
@@ -35,7 +35,7 @@ describe('detailed production migration', () => {
       ).toThrow();
       expect(() =>
         db
-          .prepare('INSERT INTO production_change_set_instructions VALUES(?,?,?)')
+          .prepare('INSERT INTO production_change_set_instructions_archive VALUES(?,?,?)')
           .run('missing', 'p', '{}'),
       ).toThrow();
     } finally {

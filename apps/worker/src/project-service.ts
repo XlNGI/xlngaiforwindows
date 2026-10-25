@@ -25,6 +25,7 @@ import {
   openProjectDatabase,
 } from '@ai-video/persistence';
 import { exportProjectSnapshot } from './project-export.js';
+import { repairIRSceneBindings } from './production-ir-bindings.js';
 
 const PROJECT_DIRECTORIES = [
   'assets/images',
@@ -278,6 +279,7 @@ export class ProjectService {
           database.exec(`VACUUM INTO '${migrationBackup.replaceAll("'", "''")}'`);
         }
         schemaVersion = migrateDatabase(database);
+        repairIRSceneBindings(database);
       }
       const metadata = createRepositories(database).projects.get();
       this.session = {

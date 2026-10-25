@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { newerAgentTaskDetail } from './conversation-timeline';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { listen } from '@tauri-apps/api/event';
+import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   Aperture,
@@ -65,7 +66,12 @@ import type {
   VideoGenerationJobInfo,
   ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
-import { inferUnifiedAgentCapabilityHint } from '@ai-video/contracts';
+import {
+  inferUnifiedAgentCapabilityHint,
+  productionImageSelectionsFromBindings,
+  productionSkillPrompt,
+  type ProductionSkillId,
+} from '@ai-video/contracts';
 import {
   projectWorker,
   workerScope,
@@ -84,6 +90,7 @@ import { TaskConfirmationDialog } from './TaskConfirmationDialog';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
+import { composeCharacterImagePrompt } from './character-image-prompt';
 import { SceneWorkspace } from './SceneWorkspace';
 import { sceneReferenceBindings } from './scene-reference-bindings';
 import { effectiveSceneCast, readSceneMedia, sceneMediaParams } from './scene-media';
@@ -113,6 +120,7 @@ import {
 import {
   DETACHED_PANEL_ACTION_EVENT,
   DETACHED_PANEL_READY_EVENT,
+  DETACHED_QUESTION_RESULT_EVENT,
   closeDetachedPanelWindow,
   focusDetachedPanelWindow,
   openDetachedPanelWindow,
@@ -435,7 +443,11 @@ function upsertAgentTaskDetail(
   current: import('@ai-video/contracts').AgentTaskDetail[],
   detail: import('@ai-video/contracts').AgentTaskDetail,
 ): import('@ai-video/contracts').AgentTaskDetail[] {
-  return [...current.filter((item) => item.task.id !== detail.task.id), detail].sort(
+  const latest = newerAgentTaskDetail(
+    current.find((item) => item.task.id === detail.task.id),
+    detail,
+  );
+  return [...current.filter((item) => item.task.id !== detail.task.id), latest].sort(
     (left, right) => right.task.updatedAt.localeCompare(left.task.updatedAt),
   );
 }
@@ -471,12 +483,13 @@ const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
   plan: '计划',
   character: '角色',
   scene: '场景',
+  prop: '道具',
   storyboard: '分镜',
   note: '笔记',
 };
 
 const SCRIPT_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan'];
-const CHARACTER_DOCUMENT_KINDS: DocumentKind[] = ['character', 'scene'];
+const CHARACTER_DOCUMENT_KINDS: DocumentKind[] = ['character', 'scene', 'prop'];
 const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = [
   ...SCRIPT_DOCUMENT_KINDS,
   ...CHARACTER_DOCUMENT_KINDS,
@@ -729,6 +742,8 @@ export function App() {
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [chatMessage, setChatMessage] = useState('');
+  const [productionSkillBusy, setProductionSkillBusy] = useState(false);
+  const productionSkillPending = useRef(false);
   const [agentModelSelection, setAgentModelSelection] = useState<
     UnifiedAgentModelSelectionRequest & {
       composerPrompt?: string;
@@ -1152,7 +1167,7 @@ export function App() {
     shotId?: string;
     sceneId?: string;
     prompt: string;
-    assetKind?: 'character' | 'scene' | 'first-frame';
+    assetKind?: 'character' | 'scene' | 'prop' | 'first-frame';
     images?: string[];
     referenceBindings?: import('@ai-video/contracts').SceneMaterialBindingInfo[];
     inputImages?: import('@ai-video/contracts').ProductionImageSelection[];
@@ -1406,6 +1421,10 @@ export function App() {
           if (activeProjectIdRef.current && activeProjectIdRef.current !== projectId) return;
           if (detail) {
             rememberAgentTask(detail);
+            if (detail.novelMetadataUpdated)
+              window.dispatchEvent(
+                new CustomEvent('novel-metadata-updated', { detail: { projectId } }),
+              );
             if (detail.productionUpdated)
               window.dispatchEvent(
                 new CustomEvent('production-source-updated', { detail: { agent: true } }),
@@ -2283,7 +2302,8 @@ export function App() {
   useEffect(() => {
     let active = true;
     const refresh = (event: Event) => {
-      if (!(event as CustomEvent<{ agent?: boolean }>).detail?.agent || !project?.id) return;
+      const detail = (event as CustomEvent<{ agent?: boolean; authoring?: boolean }>).detail;
+      if ((!detail?.agent && !detail?.authoring) || !project?.id) return;
       void Promise.all([
         callWorker('scene.list', {}),
         scene?.id ? callWorker('shot.list', { sceneId: scene.id }) : Promise.resolve([]),
@@ -2329,7 +2349,7 @@ export function App() {
         sceneId: scene.id,
         title: scene.title,
         expectedRowVersion: scene.rowVersion,
-        sceneDocumentId: sceneDocumentId || null,
+        sceneDocumentIds: sceneDocumentId ? [sceneDocumentId] : [],
       });
       if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
         return;
@@ -2436,7 +2456,9 @@ export function App() {
       const updated = await callWorker('scene.save', {
         sceneId: scene.id,
         title: scene.title,
-        sceneDocumentId: scene.sceneDocumentId ?? null,
+        sceneDocumentIds:
+          scene.sceneDocumentIds ??
+          (scene.sceneDocumentId ? [scene.sceneDocumentId] : []),
         videoPrompt: nextPrompt,
         materialBindings,
         characterBindings,
@@ -2501,6 +2523,7 @@ export function App() {
       prompt: production?.compiledPrompt ?? sceneVideoPrompt.trim(),
       images: references.map((item) => `asset://${item.assetId}`),
       referenceBindings: references,
+      inputImages: productionImageSelectionsFromBindings(references),
     });
     setProductionCapability(references.length > 0 ? 'REFERENCE_TO_VIDEO' : 'TEXT_TO_VIDEO');
   };
@@ -2572,6 +2595,7 @@ export function App() {
       ...new Set([
         ...(refs.characterAssetIds ?? []),
         refs.characterAssetId,
+        ...(refs.sceneAssetIds ?? []),
         refs.sceneAssetId,
         refs.firstFrameAssetId,
         ...(refs.continuityReferenceAssetIds ?? []),
@@ -2592,6 +2616,9 @@ export function App() {
         ...(refs.characterAssetId ? [refs.characterAssetId] : []),
       ].map((assetId) => ({ assetId, role: 'character' as const })),
       ...(refs.sceneAssetId ? [{ assetId: refs.sceneAssetId, role: 'scene' as const }] : []),
+      ...(refs.sceneAssetIds ?? [])
+        .filter((assetId) => assetId !== refs.sceneAssetId)
+        .map((assetId) => ({ assetId, role: 'scene' as const })),
       ...(refs.continuityReferenceAssetIds ?? []).map((assetId) => ({
         assetId,
         role: 'reference' as const,
@@ -2613,6 +2640,27 @@ export function App() {
     } else {
       setProductionCapability(refs.firstFrameAssetId ? 'IMAGE_TO_VIDEO' : 'REFERENCE_TO_VIDEO');
     }
+  };
+
+  const saveShotReferenceBindings = async (
+    bindings: import('@ai-video/contracts').ShotReferenceBindingInfo | null,
+  ) => {
+    if (!shot) return undefined;
+    const result = await callWorker('shot.references.save', {
+      shotId: shot.id,
+      referenceBindings: bindings,
+    });
+    setShot((current) =>
+      current?.id === result.shotId
+        ? { ...current, referenceBindings: result.referenceBindings }
+        : current,
+    );
+    setShots((rows) =>
+      rows.map((row) =>
+        row.id === result.shotId ? { ...row, referenceBindings: result.referenceBindings } : row,
+      ),
+    );
+    return result;
   };
 
   const saveShotPrompt = async () => {
@@ -2645,10 +2693,13 @@ export function App() {
     messageConversation = conversation,
     includeAttachments = true,
     taskExecution?: 'ordered' | 'parallel' | 'supplement',
+    continuation?: { idempotencyKey: string },
   ) => {
     const conversation = messageConversation;
     const messageAttachments = includeAttachments ? chatAttachments : [];
     if ((!composerValue.trim() && messageAttachments.length === 0) || !conversation) return;
+    if (continuation && activeProjectIdRef.current !== conversation.projectId)
+      throw new Error('项目已切换，请回到原会话继续。');
     const activeRun = [...nativeRuns.current.values()].find(
       (entry) => entry.run.identity.conversationId === conversation.id,
     )?.run;
@@ -2695,6 +2746,8 @@ export function App() {
       // Wait for this conversation's template and persist the exact draft that
       // will be submitted. A failed load/save keeps the message available to retry.
       const template = await conversationPromptTemplate.saveForSubmission(conversation);
+      if (continuation && activeProjectIdRef.current !== conversation.projectId)
+        throw new Error('项目已切换，请回到原会话继续。');
       const promptForAgent = composeConversationPrompt(`${prompt}${attachmentContext}`, template);
       if (
         (selectedLlmProfile || llmProfiles.length > 0) &&
@@ -2729,7 +2782,8 @@ export function App() {
           const agentAttachments = modelSelection?.parameters
             ? undefined
             : buildAgentAttachments(messageAttachments);
-          const idempotencyKey = `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
+          const idempotencyKey =
+            continuation?.idempotencyKey ?? `desktop-run:${conversation.id}:${crypto.randomUUID()}`;
           const runParams: UnifiedAgentRunParams = {
             ...(taskExecution === 'parallel' ? { taskExecution } : {}),
             conversationId: conversation.id,
@@ -2760,6 +2814,7 @@ export function App() {
             }).catch(() => undefined);
           }
           if (unified.status === 'needs_model_selection') {
+            if (continuation) throw new Error('请先在会话中选择可用的文字模型，再点击继续处理。');
             setChatMessage('');
             setAgentModelSelection({
               prompt: agentPrompt || '请分析我提供的附件。',
@@ -2858,12 +2913,15 @@ export function App() {
           }
           void launchPreparedGeneration(unified, includeAttachments);
           clearAcceptedComposer();
+          return true;
         } catch (reason) {
           setChatMessage(readableFailure(reason, '生成启动失败'));
           void loadLlmCatalog();
+          if (continuation) throw reason;
         }
         return;
       }
+      if (continuation) throw new Error('请先配置并选择可用的文字模型，再点击继续处理。');
       if (selectedLlmProfile && selectedLlmModel) {
         try {
           const idempotencyKey = `desktop-prepare:${conversation.id}:${crypto.randomUUID()}`;
@@ -2913,8 +2971,82 @@ export function App() {
     } catch (reason) {
       if (generationPollOwner.current.conversationId === conversation.id)
         setChatMessage(readableFailure(reason, '会话约束未保存，请重试后发送'));
+      if (continuation) throw reason;
     } finally {
       pendingMessageRequestsRef.current.delete(requestKey);
+    }
+  };
+
+  const continueQuestionForm = async (
+    result: import('@ai-video/contracts').AgentInputSubmitResult,
+  ) => {
+    if (!conversation || result.form.conversationId !== conversation.id || !writable)
+      throw new Error('请回到问答表单所属的可编辑会话继续。');
+    // Reload the saved receipt instead of trusting text supplied by a detached window.
+    const worker = projectWorker(workerScope(conversation.projectId));
+    const saved = await worker('agent.input.submit', {
+      taskId: result.form.taskId,
+      formId: result.form.id,
+      answers: result.form.answers!,
+    });
+    if (saved.form.continuationGenerationId) return;
+    const accepted = await sendMessage(
+      saved.prompt,
+      undefined,
+      '',
+      conversation,
+      false,
+      undefined,
+      { idempotencyKey: saved.idempotencyKey },
+    );
+    if (!accepted) throw new Error('回答已保存，本次未启动后续任务，请稍后点击继续处理。');
+  };
+
+  const runProductionSkill = async (
+    skillId: ProductionSkillId,
+    targets: Array<{ id: string; documentId: string }>,
+  ) => {
+    if (
+      !project ||
+      !writable ||
+      productionSkillPending.current ||
+      (generation && isGenerationActive(generation))
+    )
+      return;
+    productionSkillPending.current = true;
+    setProductionSkillBusy(true);
+    const projectId = project.id;
+    const scopedWorker = projectWorker(workerScope(projectId));
+    try {
+      if (targets.length === 0 || targets.length > 50)
+        throw new Error('请选择 1–50 个已保存的源对象。');
+      if (llmProfiles.length === 0) throw new Error('请先配置支持工具调用的 LLM 连接。');
+      const sources = await Promise.all(
+        targets.map(async (target) => {
+          const source = await scopedWorker('document.get', { documentId: target.documentId });
+          if (!source.currentVersion || source.lifecycleStatus !== 'active')
+            throw new Error('源文档没有可用的已保存版本，请先保存。');
+          return {
+            ...target,
+            versionId: source.currentVersion.id,
+            state: source.currentVersion.state,
+          };
+        }),
+      );
+      if (activeProjectIdRef.current !== projectId) return;
+      const targetConversation = conversation ?? (await createConversation());
+      if (!targetConversation || activeProjectIdRef.current !== projectId) return;
+      workspaceDispatch({ type: 'open', panelId: 'conversation' });
+      const prompt = productionSkillPrompt(skillId, sources);
+      // Use the exact same Agent entry, model picker, task log and cancellation path.
+      // Keep unrelated composer text and attachments untouched.
+      await sendMessage(prompt, undefined, '', targetConversation, false);
+    } catch (reason) {
+      if (activeProjectIdRef.current === projectId)
+        setChatMessage(readableFailure(reason, '制作任务准备失败'));
+    } finally {
+      productionSkillPending.current = false;
+      setProductionSkillBusy(false);
     }
   };
 
@@ -3458,8 +3590,14 @@ export function App() {
     if (
       registration.config.entityId !== conversation?.id ||
       registration.config.projectId !== project?.id
-    )
+    ) {
+      if (action.type === 'conversation-answer-questions')
+        void emitTo(label, DETACHED_QUESTION_RESULT_EVENT, {
+          requestId: action.requestId,
+          error: '会话已切换，请回到原会话继续。',
+        });
       return;
+    }
     if (action.type === 'conversation-select') {
       const selected = conversations.find((item) => item.id === action.conversationId);
       if (selected) void selectConversation(selected);
@@ -3493,6 +3631,17 @@ export function App() {
     } else if (action.type === 'conversation-send') {
       setComposer(action.value);
       void sendMessage(action.value);
+    } else if (action.type === 'conversation-answer-questions') {
+      void continueQuestionForm(action.result).then(
+        () => emitTo(label, DETACHED_QUESTION_RESULT_EVENT, { requestId: action.requestId }),
+        (reason: Error) => {
+          setChatMessage(reason.message);
+          return emitTo(label, DETACHED_QUESTION_RESULT_EVENT, {
+            requestId: action.requestId,
+            error: reason.message,
+          });
+        },
+      );
     }
   };
 
@@ -3656,6 +3805,7 @@ export function App() {
         setComposer(prompt);
         if (conversation) void sendMessage(prompt);
       }}
+      onAnswerQuestions={continueQuestionForm}
       onClose={() => workspaceDispatch({ type: 'close', panelId: 'conversation' })}
       showCloseAction={false}
       showHeading={false}
@@ -3765,12 +3915,6 @@ export function App() {
       projectId={project?.id}
       projectSessionId={workerScope(project?.id)?.projectSessionId}
       onRequestSubmissionApproval={requestMediaSubmissionApproval}
-      onUpdateProductionInstructions={(request) => {
-        setComposer((current) => (current.trim() ? `${current}\n\n${request}` : request));
-        setChatMessage('更新请求已填入会话，发送后按最新资料修订制作指令。');
-        workspaceDispatch({ type: 'open', panelId: 'conversation' });
-        if (detachedPanels.conversation) void focusDetachedPanelWindow(detachedPanels.conversation);
-      }}
       projectViewEpoch={project}
       shotId={
         productionSeed?.documentId || productionSeed?.sceneId
@@ -3806,13 +3950,12 @@ export function App() {
       : !CHARACTER_DOCUMENT_KINDS.includes(documentKind));
   const hasForeignDocument =
     !documentMatchesWorkspace && Boolean(document || documentTitle || documentContent);
-  // Selected documents may bypass a kind filter, but never the page boundary.
   const workspaceKinds = view === 'characters' ? CHARACTER_DOCUMENT_KINDS : SCRIPT_DOCUMENT_KINDS;
   const visibleDocuments = documents.filter(
     (item) =>
       item.domainScope !== 'novel' &&
-      ((workspaceKinds.includes(item.kind) && matchesDocumentFilter(item, documentKindFilter)) ||
-        (documentMatchesWorkspace && item.id === document?.id)),
+      workspaceKinds.includes(item.kind) &&
+      matchesDocumentFilter(item, documentKindFilter),
   );
 
   /**
@@ -3976,8 +4119,12 @@ export function App() {
     }
     setProductionSeed({
       documentId,
-      prompt: documentContent.trim(),
-      assetKind: documentKind === 'scene' ? 'scene' : 'character',
+      prompt:
+        documentKind === 'character'
+          ? composeCharacterImagePrompt(documentContent)
+          : documentContent.trim(),
+      assetKind:
+        documentKind === 'prop' ? 'prop' : documentKind === 'scene' ? 'scene' : 'character',
     });
     setProductionCapability('TEXT_TO_IMAGE');
   };
@@ -3990,7 +4137,7 @@ export function App() {
         projectId={project?.id}
         documentId={document?.id}
         title={documentTitle}
-        kind={documentKind === 'scene' ? 'scene' : 'character'}
+        kind={CHARACTER_DOCUMENT_KINDS.includes(documentKind) ? documentKind : 'character'}
         content={documentContent}
         stateLabel={documentStateLabel(document?.currentVersion?.state ?? 'new')}
         stateKey={document?.currentVersion?.state ?? 'new'}
@@ -4002,7 +4149,8 @@ export function App() {
         boundScenes={scenes.filter((item) =>
           documentKind === 'scene'
             ? item.sceneDocumentId === document?.id && Boolean(document?.id)
-            : item.characterBindings?.some(
+            : documentKind === 'character' &&
+              item.characterBindings?.some(
                 (binding) => binding.characterDocumentId === document?.id,
               ),
         )}
@@ -4033,6 +4181,19 @@ export function App() {
         versions={versions}
         currentVersionId={document?.currentVersionId}
         message={contentMessage}
+        onPrepareMedia={() => {
+          if (document)
+            void runProductionSkill('script-to-media', [
+              { id: document.id, documentId: document.id },
+            ]);
+        }}
+        preparationDisabled={
+          productionSkillBusy ||
+          (generation != null && isGenerationActive(generation)) ||
+          !document?.currentVersionId ||
+          documentContent !== (document?.currentVersion?.contentMarkdown ?? '') ||
+          documentTitle !== document?.title
+        }
         onTitleChange={setDocumentTitle}
         onKindChange={setDocumentKind}
         onContentChange={setDocumentContent}
@@ -4608,6 +4769,15 @@ export function App() {
               <NovelWorkspace
                 projectId={project?.id}
                 writable={writable}
+                productionBusy={
+                  productionSkillBusy || (generation != null && isGenerationActive(generation))
+                }
+                onGenerateScript={(chapters) =>
+                  runProductionSkill(
+                    'chapters-to-script',
+                    chapters.map(({ id, documentId }) => ({ id, documentId })),
+                  )
+                }
                 focusChapterId={novelFocusChapterId}
                 focusReferenceId={novelFocusReferenceId}
                 refreshToken={novelRefreshRevision || undefined}
@@ -4656,6 +4826,7 @@ export function App() {
                               { id: 'all' as const, label: '全部' },
                               { id: 'character' as const, label: '角色' },
                               { id: 'scene' as const, label: '场景' },
+                              { id: 'prop' as const, label: '道具' },
                             ]
                           : [
                               { id: 'all' as const, label: '全部' },
@@ -4827,6 +4998,8 @@ export function App() {
                           sceneBindingBusy={sceneBindingBusy}
                           sceneBindingMessage={sceneBindingMessage}
                           sceneDocumentId={scene?.sceneDocumentId}
+                          referenceBindings={shot.referenceBindings}
+                          onSaveReferenceBindings={saveShotReferenceBindings}
                           shotTitle={shot.title}
                           shotStatus={shot.status}
                           shotPosition={shot.position}

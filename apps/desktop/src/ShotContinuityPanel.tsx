@@ -197,7 +197,11 @@ export function ShotContinuityPanel(props: {
       });
       if (!alive.current) return;
       adopt(next);
-      window.dispatchEvent(new CustomEvent('production-source-updated'));
+      window.dispatchEvent(
+        new CustomEvent('production-source-updated', {
+          detail: { authoring: kind === 'video' },
+        }),
+      );
       props.onGenerate(kind, next);
     });
   const bindFirstFrame = (assetId: string) =>

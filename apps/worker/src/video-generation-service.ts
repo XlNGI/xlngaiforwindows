@@ -431,6 +431,60 @@ export class VideoGenerationService {
     return downloading;
   }
 
+  /** Persist a transient polling failure without turning an active remote task into a failure. */
+  recordPollFailure(params: {
+    jobId: string;
+    providerTaskId: string;
+    message: string;
+    projectSessionId?: string;
+  }): VideoGenerationJobInfo {
+    const providerTaskId = requireProviderTaskId(params.providerTaskId);
+    const projectSessionId = params.projectSessionId ?? this.projects.currentSessionId();
+    this.assertProjectSession(projectSessionId);
+    return this.projects.access(true, (database, project) => {
+      const repositories = createRepositories(database);
+      const job = repositories.jobs.get(params.jobId);
+      this.requireVideoJob(job, project.id);
+      if (job.status !== 'polling') return this.infoFromRepositories(job);
+      if (job.providerTaskId !== providerTaskId) {
+        throw new Error('Provider task does not belong to the generation job.');
+      }
+      const now = new Date().toISOString();
+      const metadata = this.metadata(job);
+      const message = sanitizeError(params.message || 'Native Provider polling failed.');
+      const updatedMetadata: VideoJobMetadata = {
+        ...metadata,
+        lastPollError: message,
+        lastPollErrorAt: now,
+        pollFailureCount: (metadata.pollFailureCount ?? 0) + 1,
+      };
+      const updated = {
+        ...job,
+        metadataJson: JSON.stringify(updatedMetadata),
+        updatedAt: now,
+      };
+      repositories.jobs.save(updated);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: updated.id,
+        projectId: project.id,
+        phase: 'poll',
+        status: updated.status,
+        summary: 'Provider video polling failed; retry scheduled.',
+        detailsJson: JSON.stringify({
+          providerTaskId,
+          error: message,
+          pollFailureCount: updatedMetadata.pollFailureCount,
+          retryable: true,
+        }),
+        createdAt: now,
+      });
+      repositories.projects.touch(now);
+      project.updatedAt = now;
+      return this.infoFromRepositories(updated);
+    });
+  }
+
   fail(params: VideoGenerationFailParams): VideoGenerationJobInfo {
     return this.transitionFailure(
       params.jobId,
@@ -962,6 +1016,13 @@ export class VideoGenerationService {
           : 0,
       providerState: parsed.providerState,
       lastPolledAt: parsed.lastPolledAt,
+      lastPollError:
+        typeof parsed.lastPollError === 'string' ? sanitizeError(parsed.lastPollError) : undefined,
+      lastPollErrorAt: parsed.lastPollErrorAt,
+      pollFailureCount:
+        typeof parsed.pollFailureCount === 'number' && Number.isFinite(parsed.pollFailureCount)
+          ? Math.max(0, Math.floor(parsed.pollFailureCount))
+          : undefined,
       pollDeadlineAt: parsed.pollDeadlineAt,
       failureKind: parsed.failureKind,
       cost: parsed.cost,
@@ -1021,6 +1082,9 @@ export class VideoGenerationService {
         providerState: metadata.providerState,
         pollAttempts: metadata.pollAttempts,
         lastPolledAt: metadata.lastPolledAt,
+        lastPollError: metadata.lastPollError,
+        lastPollErrorAt: metadata.lastPollErrorAt,
+        pollFailureCount: metadata.pollFailureCount,
         pollDeadlineAt: metadata.pollDeadlineAt,
         failureKind: metadata.failureKind,
         cost: metadata.cost,
@@ -1150,6 +1214,8 @@ function observedMetadata(
     ...metadata,
     pollAttempts: metadata.pollAttempts + 1,
     lastPolledAt: new Date().toISOString(),
+    lastPollError: undefined,
+    lastPollErrorAt: undefined,
     cost: priceProviderCost(cost, metadata.pricingSnapshot),
   };
 }

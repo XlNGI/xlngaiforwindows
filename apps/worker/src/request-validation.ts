@@ -11,11 +11,8 @@ import type {
   TaskLogKind,
   WorkerMethod,
 } from '@ai-video/contracts';
-import {
-  inspectProductionTargetInstruction,
-  parseProductionDefaults,
-} from '@ai-video/generation-adapters';
-import type { ProductionInstruction } from '@ai-video/contracts';
+import { parseProductionDefaults } from '@ai-video/generation-adapters';
+import { validateProjectContentIR, validateProductionAuthoringIR } from '@ai-video/contracts';
 
 const MAX_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 200;
@@ -29,11 +26,18 @@ const MAX_FINISH_REASON_LENGTH = 80;
 const MAX_RAW_USAGE_BYTES = 64 * 1024;
 
 const sessionMethods = new Set<WorkerMethod>([
+  'media.review.list',
+  'media.review.get',
+  'media.review.submit',
+  'media.review.cancel',
   'production.read',
   'production.compile',
   'production.defaults.get',
   'production.defaults.save',
   'scene.save',
+  'shot.save',
+  'shot.references.get',
+  'shot.references.save',
   'conversation.list',
   'conversation.create',
   'conversation.update',
@@ -92,6 +96,8 @@ const sessionMethods = new Set<WorkerMethod>([
   'agent.task.list',
   'agent.task.get',
   'agent.task.events',
+  'agent.input.get',
+  'agent.input.submit',
   'task.log.list',
   'generation.job.events.list',
   'context.preview',
@@ -158,7 +164,15 @@ const sessionMethods = new Set<WorkerMethod>([
 const scopes = new Set<ConversationScopeType>(['project', 'scene', 'shot']);
 const roles = new Set<ChatMessageRole>(['system', 'user', 'assistant', 'tool']);
 const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'failed']);
-const documentKinds = new Set(['outline', 'plan', 'character', 'scene', 'storyboard', 'note']);
+const documentKinds = new Set([
+  'outline',
+  'plan',
+  'character',
+  'scene',
+  'prop',
+  'storyboard',
+  'note',
+]);
 const documentAuthors = new Set(['user', 'import']);
 const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video', 'dubbing']);
 const videoFailureKinds = new Set(['transport', 'provider', 'download', 'interrupted', 'timeout']);
@@ -694,6 +708,31 @@ export function validateSessionRequestParams(
     requireId(params, 'assetId');
     return params;
   }
+  if (method.startsWith('media.review.')) {
+    const params = requireObject(input, 'params');
+    if (method === 'media.review.list') {
+      rejectUnknown(params, ['conversationId']);
+      optionalId(params, 'conversationId');
+    } else {
+      rejectUnknown(
+        params,
+        method === 'media.review.submit'
+          ? ['formId', 'expectedRowVersion', 'reviewToken', 'selection', 'audio']
+          : method === 'media.review.cancel'
+            ? ['formId', 'expectedRowVersion']
+            : ['formId'],
+      );
+      requireId(params, 'formId');
+      if (method !== 'media.review.get')
+        requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      if (method === 'media.review.submit') {
+        requireString(params, 'reviewToken', 128);
+        validateMediaSelection(params.selection);
+        if (params.audio !== undefined) validateDubbingRequest('dubbing.cue.save', params.audio);
+      }
+    }
+    return params;
+  }
   if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
   if (method === 'characterVoiceReference.list' || method === 'characterVoiceReference.save') {
     const params = requireObject(input, 'params');
@@ -985,10 +1024,24 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['taskId']);
       requireId(params, 'taskId');
       break;
+    case 'agent.input.get':
+    case 'agent.input.submit':
+      rejectUnknown(
+        params,
+        method === 'agent.input.submit' ? ['taskId', 'formId', 'answers'] : ['taskId', 'formId'],
+      );
+      requireId(params, 'taskId');
+      requireId(params, 'formId');
+      if (
+        method === 'agent.input.submit' &&
+        (!Array.isArray(params.answers) || params.answers.length < 1 || params.answers.length > 8)
+      )
+        throw new Error('Provide answers for 1–8 questions.');
+      break;
     case 'agent.task.events':
       rejectUnknown(params, ['taskId', 'afterSequence', 'limit']);
       requireId(params, 'taskId');
-      optionalInteger(params, 'afterSequence', 0, Number.MAX_SAFE_INTEGER);
+      optionalInteger(params, 'afterSequence', -1, Number.MAX_SAFE_INTEGER);
       optionalInteger(params, 'limit', 1, 100);
       break;
     case 'agent.changeSet.create':
@@ -1190,7 +1243,9 @@ export function validateSessionRequestParams(
         'sceneId',
         'title',
         'sceneDocumentId',
+        'sceneDocumentIds',
         'videoPrompt',
+        'authoringIR',
         'materialBindings',
         'characterBindings',
         'dialogueAudioId',
@@ -1199,6 +1254,18 @@ export function validateSessionRequestParams(
       optionalId(params, 'sceneId');
       requireString(params, 'title', MAX_TITLE_LENGTH);
       if (params.sceneDocumentId !== null) optionalId(params, 'sceneDocumentId');
+      if (params.sceneDocumentIds !== undefined) {
+        if (
+          params.sceneDocumentIds !== null &&
+          (!Array.isArray(params.sceneDocumentIds) ||
+            params.sceneDocumentIds.length > 100 ||
+            new Set(params.sceneDocumentIds).size !== params.sceneDocumentIds.length ||
+            params.sceneDocumentIds.some(
+              (id) => typeof id !== 'string' || !id.trim() || id.length > 200,
+            ))
+        )
+          throw new RequestValidationError('sceneDocumentIds must contain unique document IDs.');
+      }
       if (params.dialogueAudioId !== null) optionalId(params, 'dialogueAudioId');
       if (params.characterBindings !== undefined) {
         if (!Array.isArray(params.characterBindings) || params.characterBindings.length > 30)
@@ -1227,6 +1294,8 @@ export function validateSessionRequestParams(
         });
       }
       if (params.videoPrompt !== undefined) requireString(params, 'videoPrompt', 20_000, true);
+      if (params.authoringIR !== undefined && params.authoringIR !== null)
+        validateProductionAuthoringIR(params.authoringIR, 'scene');
       if (params.materialBindings !== undefined) {
         if (!Array.isArray(params.materialBindings) || params.materialBindings.length > 30) {
           throw new RequestValidationError('materialBindings must contain at most 30 items.');
@@ -1241,6 +1310,124 @@ export function validateSessionRequestParams(
           optionalId(binding, 'sourceDocumentId');
           requireEnum(binding, 'source', new Set(['auto', 'manual']));
         });
+      }
+      optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'shot.references.get':
+      rejectUnknown(params, ['shotId']);
+      requireId(params, 'shotId');
+      break;
+    case 'shot.references.save':
+      rejectUnknown(params, ['shotId', 'referenceBindings']);
+      requireId(params, 'shotId');
+      if (params.referenceBindings !== undefined && params.referenceBindings !== null) {
+        const bindings = requireObject(params.referenceBindings, 'referenceBindings');
+        rejectUnknown(bindings, [
+          'characterBindings',
+          'sceneBindings',
+          'characterAssetId',
+          'characterAssetIds',
+          'sceneAssetId',
+          'sceneAssetIds',
+          'firstFrameAssetId',
+          'ignoreSceneBinding',
+        ]);
+        for (const field of ['characterBindings', 'sceneBindings']) {
+          if (bindings[field] === undefined) continue;
+          if (!Array.isArray(bindings[field]) || bindings[field].length > 7)
+            throw new RequestValidationError(`${field} must contain at most 7 items.`);
+          const seen = new Set<string>();
+          bindings[field].forEach((raw: unknown, index: number) => {
+            const entry = requireObject(raw, `${field}[${index}]`);
+            const documentField = field === 'characterBindings' ? 'characterDocumentId' : 'sourceDocumentId';
+            rejectUnknown(entry, [documentField, 'assetId']);
+            requireId(entry, documentField);
+            requireId(entry, 'assetId');
+            const key = String(entry[documentField]);
+            if (seen.has(key)) throw new RequestValidationError(`${field} must contain unique documents.`);
+            seen.add(key);
+          });
+        }
+        for (const field of ['characterAssetId', 'sceneAssetId', 'firstFrameAssetId'])
+          optionalId(bindings, field);
+        for (const field of ['characterAssetIds', 'sceneAssetIds']) {
+          if (bindings[field] === undefined) continue;
+          if (
+            !Array.isArray(bindings[field]) ||
+            bindings[field].length > 7 ||
+            new Set(bindings[field]).size !== bindings[field].length ||
+            bindings[field].some((id) => typeof id !== 'string' || !id.trim() || id.length > 200)
+          )
+            throw new RequestValidationError(`${field} must contain unique image IDs.`);
+        }
+        optionalBoolean(bindings, 'ignoreSceneBinding');
+      }
+      break;
+    case 'shot.save':
+      rejectUnknown(params, [
+        'shotId',
+        'sceneId',
+        'title',
+        'status',
+        'documentId',
+        'prompt',
+        'authoringIR',
+        'referenceBindings',
+        'expectedRowVersion',
+      ]);
+      optionalId(params, 'shotId');
+      requireId(params, 'sceneId');
+      requireString(params, 'title', MAX_TITLE_LENGTH);
+      optionalString(params, 'status', 80);
+      optionalId(params, 'documentId');
+      if (params.prompt !== undefined) requireString(params, 'prompt', 20_000, true);
+      if (params.authoringIR !== undefined && params.authoringIR !== null)
+        validateProductionAuthoringIR(params.authoringIR, 'shot');
+      if (params.referenceBindings !== undefined && params.referenceBindings !== null) {
+        const bindings = requireObject(params.referenceBindings, 'referenceBindings');
+        rejectUnknown(bindings, [
+          'characterBindings',
+          'sceneBindings',
+          'characterAssetId',
+          'characterAssetIds',
+          'sceneAssetId',
+          'sceneAssetIds',
+          'firstFrameAssetId',
+          'ignoreSceneBinding',
+        ]);
+        for (const field of ['characterBindings', 'sceneBindings']) {
+          if (bindings[field] === undefined) continue;
+          if (!Array.isArray(bindings[field]) || bindings[field].length > 7)
+            throw new RequestValidationError(`${field} must contain at most 7 items.`);
+          const seen = new Set<string>();
+          bindings[field].forEach((raw: unknown, index: number) => {
+            const entry = requireObject(raw, `${field}[${index}]`);
+            const documentField = field === 'characterBindings' ? 'characterDocumentId' : 'sourceDocumentId';
+            rejectUnknown(entry, [documentField, 'assetId']);
+            requireId(entry, documentField);
+            requireId(entry, 'assetId');
+            const key = String(entry[documentField]);
+            if (seen.has(key)) throw new RequestValidationError(`${field} must contain unique documents.`);
+            seen.add(key);
+          });
+        }
+        for (const field of [
+          'characterAssetId',
+          'sceneAssetId',
+          'firstFrameAssetId',
+        ])
+          optionalId(bindings, field);
+        for (const field of ['characterAssetIds', 'sceneAssetIds']) {
+          if (bindings[field] === undefined) continue;
+          if (
+            !Array.isArray(bindings[field]) ||
+            bindings[field].length > 7 ||
+            new Set(bindings[field]).size !== bindings[field].length ||
+            bindings[field].some((id) => typeof id !== 'string' || !id.trim() || id.length > 200)
+          )
+            throw new RequestValidationError(`${field} must contain unique image IDs.`);
+        }
+        optionalBoolean(bindings, 'ignoreSceneBinding');
       }
       optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
       break;
@@ -1272,6 +1459,7 @@ export function validateSessionRequestParams(
         'productionSource',
         'shotId',
         'sourceDocumentId',
+        'assetKind',
         'adapterKey',
         'parameters',
         'providerProfileId',
@@ -1282,6 +1470,11 @@ export function validateSessionRequestParams(
       ]);
       optionalId(params, 'shotId');
       optionalId(params, 'sourceDocumentId');
+      optionalEnum(
+        params,
+        'assetKind',
+        new Set(['character', 'scene', 'prop', 'first-frame', 'last-frame', 'generated-image']),
+      );
       requireString(params, 'adapterKey', 200);
       requireObject(params.parameters, 'parameters');
       requireId(params, 'providerProfileId');
@@ -1564,6 +1757,7 @@ export function validateSessionRequestParams(
         new Set([
           'character',
           'scene',
+          'prop',
           'first-frame',
           'last-frame',
           'generated-image',
@@ -2028,6 +2222,7 @@ function validateMediaSelection(input: unknown): void {
     new Set([
       'character',
       'scene',
+      'prop',
       'first-frame',
       'last-frame',
       'generated-image',
@@ -2082,6 +2277,7 @@ function validateDocumentDraft(params: Record<string, unknown>): void {
     'kind',
     'title',
     'contentMarkdown',
+    'contentIR',
     'scopeType',
     'scopeId',
     'expectedDocumentRowVersion',
@@ -2092,6 +2288,7 @@ function validateDocumentDraft(params: Record<string, unknown>): void {
   optionalEnum(params, 'kind', documentKinds);
   requireString(params, 'title', MAX_TITLE_LENGTH);
   requireString(params, 'contentMarkdown', MAX_DOCUMENT_LENGTH, true);
+  if (params.contentIR !== undefined) validateProjectContentIR(params.contentIR);
   const scope = optionalScope(params, 'scopeType');
   const scopeId = optionalId(params, 'scopeId');
   if (scope === 'project' && scopeId !== undefined) {
@@ -2384,7 +2581,7 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'shotStatus',
       'videoPrompt',
       'characterDocumentIds',
-      'instruction',
+      'authoringIR',
       'prompt',
       'documentKind',
       'contentMarkdown',
@@ -2394,17 +2591,10 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'expectedCurrentVersionId',
     ]);
     requireEnum(item, 'entityType', new Set(['scene', 'shot', 'document']));
-    if (item.instruction !== undefined) {
+    if (item.authoringIR !== undefined) {
       if (item.entityType === 'document')
-        throw new RequestValidationError(
-          'Only scene and shot proposals accept production instructions.',
-        );
-      const issues = inspectProductionTargetInstruction(
-        item.instruction as ProductionInstruction,
-        String(item.entityType),
-      );
-      if (issues.length)
-        throw new RequestValidationError(issues.map((issue) => issue.message).join('\n'));
+        throw new RequestValidationError('Authoring IR is only valid for scene/shot items.');
+      validateProductionAuthoringIR(item.authoringIR, item.entityType as 'scene' | 'shot');
     }
     requireEnum(item, 'action', new Set(['create', 'update']));
     optionalId(item, 'targetId');
@@ -2415,7 +2605,11 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
     optionalInteger(item, 'parentItemOrdinal', 0, items.length - 1);
     requireString(item, 'title', MAX_TITLE_LENGTH);
     optionalString(item, 'shotStatus', 80);
-    if (item.videoPrompt !== undefined || item.characterDocumentIds !== undefined) {
+    if (
+      (!item.authoringIR && item.videoPrompt !== undefined) ||
+      item.characterDocumentIds !== undefined ||
+      item.sceneDocumentId !== undefined
+    ) {
       if (item.entityType !== 'scene' || item.sceneDocumentId === undefined)
         throw new RequestValidationError(
           'Scene bindings require a scene item and explicit sceneDocumentId.',
@@ -2455,16 +2649,10 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
 function validateProductionSource(params: Record<string, unknown>): void {
   if (params.productionSource === undefined) return;
   const source = requireObject(params.productionSource, 'productionSource');
-  rejectUnknown(source, [
-    'mode',
-    'target',
-    'instructionId',
-    'revision',
-    'token',
-    'shotIds',
-    'inputImages',
-  ]);
-  optionalEnum(source, 'mode', new Set(['instruction', 'form']));
+  rejectUnknown(source, ['mode', 'target', 'token', 'shotIds', 'inputImages']);
+  requireEnum(source, 'mode', new Set(['form']));
+  if (typeof source.token !== 'string' || !/^[a-f0-9]{64}$/u.test(source.token))
+    throw new RequestValidationError('制作来源 token 无效。');
   validateProductionImages(source);
   if (
     source.shotIds !== undefined &&
@@ -2479,18 +2667,6 @@ function validateProductionSource(params: Record<string, unknown>): void {
   rejectUnknown(target, ['kind', 'id']);
   requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
   requireId(target, 'id');
-  if (source.mode === 'form') {
-    optionalId(source, 'instructionId');
-    if (source.revision !== undefined)
-      requireInteger(source, 'revision', 1, Number.MAX_SAFE_INTEGER);
-    if (source.token === undefined) return;
-  } else {
-    requireId(source, 'instructionId');
-    requireInteger(source, 'revision', 1, Number.MAX_SAFE_INTEGER);
-  }
-  requireString(source, 'token', 64);
-  if (typeof source.token !== 'string' || !/^[a-f0-9]{64}$/u.test(source.token))
-    throw new RequestValidationError('制作来源标识无效。');
 }
 
 function validateProductionImages(params: Record<string, unknown>): void {

@@ -60,6 +60,12 @@ import { MIGRATION_V56 } from './migration-v56.js';
 import { widenLibraryReadAuthorizationLimit } from './migration-v57.js';
 import { MIGRATION_V58 } from './migration-v58.js';
 import { MIGRATION_V59 } from './migration-v59.js';
+import { applyMigrationV60 } from './migration-v60.js';
+import { applyMigrationV61 } from './migration-v61.js';
+import { applyMigrationV62 } from './migration-v62.js';
+import { MIGRATION_V63 } from './migration-v63.js';
+import { applyMigrationV64 } from './migration-v64.js';
+import { applyMigrationV65 } from './migration-v65.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -638,6 +644,54 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(59, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 60) {
+    database.transaction(() => {
+      applyMigrationV60(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(60, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 61) {
+    database.transaction(() => {
+      applyMigrationV61(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(61, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 62) {
+    database.transaction(() => {
+      applyMigrationV62(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(62, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 63) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V63);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(63, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 64) {
+    database.transaction(() => {
+      applyMigrationV64(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(64, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 65) {
+    database.transaction(() => {
+      applyMigrationV65(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(65, now);
     })();
   }
   return getSchemaVersion(database);

@@ -23,6 +23,76 @@ async function setup() {
 }
 
 describe('ContentService', () => {
+  it('persists scene and shot authoring IR with real typed references and updates the same IR after prompt edits', async () => {
+    const { content } = await setup();
+    const character = content.saveDocument({
+      kind: 'character',
+      title: '江晚',
+      contentMarkdown: '# 江晚',
+    });
+    const setting = content.saveDocument({
+      kind: 'scene',
+      title: '铁匠铺',
+      contentMarkdown: '# 铁匠铺',
+    });
+    const prop = content.saveDocument({
+      kind: 'prop',
+      title: '铁木杖',
+      contentMarkdown: '# 铁木杖',
+    });
+    const sceneIR = {
+      schemaVersion: 1 as const,
+      kind: 'scene' as const,
+      prompt: '炉火照亮铁砧，门外雾气渐浓。',
+      references: { characterDocumentIds: [character.id], sceneDocumentIds: [setting.id] },
+      data: { blocking: '江晚在炉旁，老者在门口' },
+    };
+    const scene = content.saveScene({ title: '拒绝', authoringIR: sceneIR });
+    expect(scene).toMatchObject({ videoPrompt: sceneIR.prompt, authoringIR: sceneIR });
+    expect(scene.sceneDocumentId).toBe(setting.id);
+    expect(scene.characterBindings).toEqual([{ characterDocumentId: character.id }]);
+
+    const shotIR = {
+      schemaVersion: 1 as const,
+      kind: 'shot' as const,
+      prompt: '老者以铁木杖点地，循声缓慢走入雾中。',
+      references: { characterDocumentIds: [character.id], propDocumentIds: [prop.id] },
+      data: { movement: '左脚先探地，再迈右脚' },
+    };
+    const shot = content.saveShot({ sceneId: scene.id, title: '离去', authoringIR: shotIR });
+    expect(shot).toMatchObject({ prompt: shotIR.prompt, authoringIR: shotIR });
+    expect(content.listShots(scene.id)[0]?.authoringIR).toEqual(shotIR);
+
+    const editedScene = content.saveScene({
+      sceneId: scene.id,
+      title: scene.title,
+      videoPrompt: '用户改写后的场次文字。',
+      expectedRowVersion: scene.rowVersion,
+    });
+    const editedShot = content.saveShot({
+      shotId: shot.id,
+      sceneId: scene.id,
+      title: shot.title,
+      prompt: '用户改写后的镜头文字。',
+      expectedRowVersion: shot.rowVersion,
+    });
+    expect(editedScene.authoringIR).toEqual({ ...sceneIR, prompt: editedScene.videoPrompt });
+    expect(editedShot.authoringIR).toEqual({ ...shotIR, prompt: editedShot.prompt });
+
+    expect(() =>
+      content.saveShot({
+        sceneId: scene.id,
+        title: '错误引用',
+        authoringIR: {
+          schemaVersion: 1,
+          kind: 'shot',
+          prompt: '不可保存',
+          references: { propDocumentIds: ['missing-prop'] },
+        },
+      }),
+    ).toThrow(/not an active prop document in this project/);
+  });
+
   it('saves independent cast bindings with CAS, preserves omitted values and rolls back invalid media', async () => {
     const { projects, content } = await setup();
     const character = content.saveDocument({

@@ -193,6 +193,10 @@ describe('ProjectTaskRuntime', () => {
     expect(videos.get(job.id)).toMatchObject({
       status: 'polling',
       providerTaskId: job.providerTaskId,
+      metadata: {
+        lastPollError: 'PROVIDER_CIRCUIT_OPEN: 服务暂不可用，本次查询尚未发送。',
+        pollFailureCount: 1,
+      },
     });
     await vi.advanceTimersByTimeAsync(1_999);
     expect(request).toHaveBeenCalledOnce();

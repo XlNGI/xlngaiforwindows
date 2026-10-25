@@ -3,6 +3,7 @@ import type {
   AdapterParameters,
   AdapterParameterValue,
   CharacterVoiceReferenceInfo,
+  ProductionImageSelection,
   ProductionInputImage,
   SceneMaterialBindingInfo,
 } from './index.js';
@@ -19,6 +20,23 @@ const records = (
     : [];
 const tag = (value: AdapterParameterValue | undefined) => (typeof value === 'string' ? value : '');
 const canonical = (url: string) => url.replace(/^asset:\/\//u, 'project-asset://');
+
+/**
+ * Convert saved scene bindings into the ordered image selections consumed by
+ * the production form and compiler. `prop`/`other` are generic references;
+ * character and scene bindings retain their semantic roles for models that
+ * support strict frame inputs.
+ */
+export function productionImageSelectionsFromBindings(
+  bindings: SceneMaterialBindingInfo[] | undefined,
+): ProductionImageSelection[] | undefined {
+  if (!bindings) return undefined;
+  return bindings.map(({ assetId, label, role }) => ({
+    assetId,
+    ...(role === 'character' || role === 'scene' ? { role } : { role: 'reference' as const }),
+    ...(label ? { label } : {}),
+  }));
+}
 
 export function productionImagesFromParameters(
   adapter: AdapterDescriptor,
@@ -66,7 +84,7 @@ export function seedProductionInputs(
   prompt?: string,
   images?: ProductionInputImage[],
 ): AdapterParameters {
-  const next = structuredClone(parameters);
+  const next = { ...parameters };
   const properties = adapter.parameterSchema.properties;
   const known = images?.map((image) => ({ ...image, url: canonical(image.url) }));
   let chosen = known;
@@ -171,15 +189,23 @@ export function addProductionRoleVoices(
       )
     )
       throw new Error('严格首尾帧与声音参考不能混用，请切换为参考图片模式。');
-    if (
-      media.some((item) => item.type === 'reference_audio') ||
-      content.some((item) => item.type === 'audio_url')
-    )
+    const selectedUrls = voices.map(
+      (voice) => `character-voice://${voice.characterDocumentId}/${voice.versionId}`,
+    );
+    const existingUrls = adapter.parameterSchema.properties.media
+      ? media.filter((item) => item.type === 'reference_audio').map((item) => item.url)
+      : content
+          .filter((item) => item.type === 'audio_url')
+          .map((item) => (item.audio_url as Record<string, AdapterParameterValue>)?.url);
+    const alreadyProjected =
+      existingUrls.length === selectedUrls.length &&
+      existingUrls.every((url, index) => url === selectedUrls[index]);
+    if (existingUrls.length && !alreadyProjected)
       throw new Error('请使用角色声音选择或手动参考音频其中一种，避免音频编号不明确。');
     lines.push(
       ...voices.map((voice, index) => `角色「${voice.characterName}」使用音频${index + 1}的音色。`),
     );
-    if (adapter.parameterSchema.properties.media)
+    if (!alreadyProjected && adapter.parameterSchema.properties.media)
       next.media = [
         ...records(next.media),
         ...voices.map((voice) => ({
@@ -187,7 +213,7 @@ export function addProductionRoleVoices(
           url: `character-voice://${voice.characterDocumentId}/${voice.versionId}`,
         })),
       ];
-    else
+    else if (!alreadyProjected)
       next.content = [
         ...content,
         ...voices.map((voice) => ({
